@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
+from google.api_core.exceptions import GoogleAPIError
 from google.cloud import storage
 
 if TYPE_CHECKING:
@@ -99,7 +100,7 @@ def main() -> int:
             LOGGER.exception("API request failed")
         except json.JSONDecodeError:
             LOGGER.exception("API returned malformed JSON")
-        except ValueError:
+        except TypeError, ValueError:
             LOGGER.exception("API returned invalid payload")
 
         _flush_closed_hours(bucket, config, buffers, current_hour)
@@ -215,10 +216,16 @@ def _flush_closed_hours(
 ) -> None:
     closed_hours = sorted(buffer_hour for buffer_hour in buffers if buffer_hour < current_hour)
     for buffer_hour in closed_hours:
-        rows = buffers.pop(buffer_hour)
+        rows = buffers[buffer_hour]
         if not rows:
+            buffers.pop(buffer_hour)
             continue
-        _upload_hour(bucket, config, buffer_hour, rows)
+        try:
+            _upload_hour(bucket, config, buffer_hour, rows)
+        except GoogleAPIError, OSError, pa.ArrowException:
+            LOGGER.exception("failed to upload hourly parquet", extra={"hour": buffer_hour.isoformat()})
+            continue
+        buffers.pop(buffer_hour)
 
 
 def _upload_hour(
