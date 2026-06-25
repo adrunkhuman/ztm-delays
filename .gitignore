@@ -16,6 +16,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# dbt
+dbt/logs/
+dbt/target/
+dbt/dbt_packages/
+dbt/.user.yml
+
 # Tooling and OS noise
 .idea/
 .vscode/

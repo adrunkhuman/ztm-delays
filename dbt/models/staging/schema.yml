@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: stg_gps_pings
+    description: Cleaned, deduplicated GPS pings for one processing date.
+    columns:
+      - name: line
+        tests:
+          - not_null
+      - name: brigade
+        tests:
+          - not_null
+      - name: lat
+        tests:
+          - not_null
+      - name: lon
+        tests:
+          - not_null
+      - name: gps_time
+        tests:
+          - not_null
+      - name: vehicle_number
+        tests:
+          - not_null
+      - name: vehicle_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2]
+      - name: ingested_at
+        tests:
+          - not_null
+      - name: gps_date
+        tests:
+          - not_null
