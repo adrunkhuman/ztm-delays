@@ -32,6 +32,12 @@ uv sync
 VEHICLE_TYPE=bus uv run python poller.py
 ```
 
+Safe live API smoke test, with no GCS client initialization and no upload:
+
+```bash
+VEHICLE_TYPE=bus uv run python poller.py --once --no-upload
+```
+
 ## Docker
 
 ```bash

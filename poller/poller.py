@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import time
+from argparse import ArgumentParser, Namespace
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -60,6 +61,8 @@ class Config:
     gcs_prefix: str
     poll_interval_seconds: float
     api_timeout_seconds: float
+    run_once: bool
+    no_upload: bool
 
 
 class GpsRow(TypedDict):
@@ -77,14 +80,16 @@ class GpsRow(TypedDict):
 def main() -> int:
     """Run the GPS poller daemon."""
     _configure_logging()
-    config = _load_config()
+    config = _load_config(_parse_args())
     stop_requested = _build_signal_handler()
 
-    LOGGER.info("starting GPS poller", extra={"vehicle_type": config.vehicle_type_name})
+    LOGGER.info(
+        "starting GPS poller",
+        extra={"vehicle_type": config.vehicle_type_name, "run_once": config.run_once, "no_upload": config.no_upload},
+    )
 
     session = requests.Session()
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(config.gcs_bucket)
+    bucket = None if config.no_upload else storage.Client().bucket(config.gcs_bucket)
     buffers: dict[datetime, list[GpsRow]] = defaultdict(list)
 
     while not stop_requested():
@@ -103,10 +108,19 @@ def main() -> int:
         except TypeError, ValueError:
             LOGGER.exception("API returned invalid payload")
 
-        _flush_closed_hours(bucket, config, buffers, current_hour)
+        if config.no_upload:
+            buffered_rows = sum(len(rows) for rows in buffers.values())
+            LOGGER.info("upload disabled", extra={"buffered_rows": buffered_rows})
+        else:
+            _flush_closed_hours(cast("storage.Bucket", bucket), config, buffers, current_hour)
+
+        if config.run_once:
+            break
+
         _sleep_remaining(config.poll_interval_seconds, loop_started, stop_requested)
 
-    _flush_closed_hours(bucket, config, buffers, _hour_key(datetime.now(WARSAW_TZ)))
+    if not config.no_upload:
+        _flush_closed_hours(cast("storage.Bucket", bucket), config, buffers, _hour_key(datetime.now(WARSAW_TZ)))
     LOGGER.info("poller stopped")
     return 0
 
@@ -119,7 +133,14 @@ def _configure_logging() -> None:
     )
 
 
-def _load_config() -> Config:
+def _parse_args() -> Namespace:
+    parser = ArgumentParser(description="Poll Warsaw ZTM GPS data and write hourly Parquet files to GCS.")
+    parser.add_argument("--once", action="store_true", help="poll once and exit")
+    parser.add_argument("--no-upload", action="store_true", help="do not initialize GCS or upload files")
+    return parser.parse_args()
+
+
+def _load_config(args: Namespace) -> Config:
     vehicle_type = os.environ.get("VEHICLE_TYPE", "").strip().lower()
     if vehicle_type not in VEHICLE_TYPES:
         raise RuntimeError("VEHICLE_TYPE must be one of: bus, tram, 1, 2")
@@ -137,6 +158,8 @@ def _load_config() -> Config:
         gcs_prefix=os.getenv("GCS_PREFIX", "raw/gps").strip("/"),
         poll_interval_seconds=float(os.getenv("POLL_INTERVAL_SECONDS", "10")),
         api_timeout_seconds=float(os.getenv("API_TIMEOUT_SECONDS", "5")),
+        run_once=args.once,
+        no_upload=args.no_upload,
     )
 
 

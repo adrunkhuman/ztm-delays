@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -84,6 +85,17 @@ def test_flush_closed_hours_keeps_buffer_after_upload_failure(monkeypatch: pytes
     assert buffers == {closed_hour: [_gps_row()]}
 
 
+def test_load_config_uses_cli_smoke_mode_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WARSAW_API_TOKEN", "token")
+    monkeypatch.setenv("VEHICLE_TYPE", "bus")
+
+    config = poller._load_config(Namespace(once=True, no_upload=True))
+
+    assert config.run_once is True
+    assert config.no_upload is True
+    assert config.vehicle_type_id == 1
+
+
 def _config() -> poller.Config:
     return poller.Config(
         api_token="token",
@@ -93,6 +105,8 @@ def _config() -> poller.Config:
         gcs_prefix="raw/gps",
         poll_interval_seconds=10,
         api_timeout_seconds=5,
+        run_once=False,
+        no_upload=False,
     )
 
 
