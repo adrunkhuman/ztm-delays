@@ -19,9 +19,11 @@ One container polls one Warsaw ZTM vehicle type every 10 seconds and writes clos
 ## Output
 
 ```text
-gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=YYYY-MM-DD/hour=HH.parquet
-gs://ztm-analytics-bucket/raw/gps/vehicle_type=tram/date=YYYY-MM-DD/hour=HH.parquet
+gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=YYYY-MM-DD/hour=HH/part-YYYYMMDDTHHMMSSffffffZ.parquet
+gs://ztm-analytics-bucket/raw/gps/vehicle_type=tram/date=YYYY-MM-DD/hour=HH/part-YYYYMMDDTHHMMSSffffffZ.parquet
 ```
+
+Multiple part files per hour are expected. This avoids overwriting an already-uploaded hour if the API later returns stale pings for that hour.
 
 `Time` is parsed as Europe/Warsaw local time and written as UTC Parquet timestamp because the raw BigQuery schema declares it as `TIMESTAMP`.
 
@@ -29,12 +31,14 @@ gs://ztm-analytics-bucket/raw/gps/vehicle_type=tram/date=YYYY-MM-DD/hour=HH.parq
 
 ```bash
 uv sync
+export ZTM_API_TOKEN=...
 VEHICLE_TYPE=bus uv run python poller.py
 ```
 
 Safe live API smoke test, with no GCS client initialization and no upload:
 
 ```bash
+export ZTM_API_TOKEN=...
 VEHICLE_TYPE=bus uv run python poller.py --once --no-upload
 ```
 

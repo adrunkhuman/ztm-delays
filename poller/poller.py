@@ -114,7 +114,7 @@ def main() -> int:
             buffered_rows = sum(len(rows) for rows in buffers.values())
             LOGGER.info("upload disabled buffered_rows=%d", buffered_rows)
         else:
-            _flush_closed_hours(cast("storage.Bucket", bucket), config, buffers, current_hour)
+            _flush_hours(cast("storage.Bucket", bucket), config, buffers, current_hour)
 
         if config.run_once:
             break
@@ -122,7 +122,9 @@ def main() -> int:
         _sleep_remaining(config.poll_interval_seconds, loop_started, stop_requested)
 
     if not config.no_upload:
-        _flush_closed_hours(cast("storage.Bucket", bucket), config, buffers, _hour_key(datetime.now(WARSAW_TZ)))
+        _flush_hours(
+            cast("storage.Bucket", bucket), config, buffers, _hour_key(datetime.now(WARSAW_TZ)), flush_current=True
+        )
     LOGGER.info("poller stopped")
     return 0
 
@@ -152,17 +154,31 @@ def _load_config(args: Namespace) -> Config:
         raise RuntimeError("ZTM_API_TOKEN is required")
 
     vehicle_type_id, vehicle_type_name = VEHICLE_TYPES[vehicle_type]
+    poll_interval_seconds = _positive_float_env("POLL_INTERVAL_SECONDS", "10")
+    api_timeout_seconds = _positive_float_env("API_TIMEOUT_SECONDS", "5")
+
     return Config(
         api_token=api_token,
         vehicle_type_id=vehicle_type_id,
         vehicle_type_name=vehicle_type_name,
         gcs_bucket=os.getenv("GCS_BUCKET", "ztm-analytics-bucket"),
         gcs_prefix=os.getenv("GCS_PREFIX", "raw/gps").strip("/"),
-        poll_interval_seconds=float(os.getenv("POLL_INTERVAL_SECONDS", "10")),
-        api_timeout_seconds=float(os.getenv("API_TIMEOUT_SECONDS", "5")),
+        poll_interval_seconds=poll_interval_seconds,
+        api_timeout_seconds=api_timeout_seconds,
         run_once=args.once,
         no_upload=args.no_upload,
     )
+
+
+def _positive_float_env(name: str, default: str) -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive number") from exc
+
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive number")
+    return value
 
 
 def _build_signal_handler() -> Callable[[], bool]:
@@ -233,14 +249,20 @@ def _hour_key(value: datetime) -> datetime:
     return value.astimezone(WARSAW_TZ).replace(minute=0, second=0, microsecond=0)
 
 
-def _flush_closed_hours(
+def _flush_hours(
     bucket: storage.Bucket,
     config: Config,
     buffers: dict[datetime, list[GpsRow]],
     current_hour: datetime,
+    *,
+    flush_current: bool = False,
 ) -> None:
-    closed_hours = sorted(buffer_hour for buffer_hour in buffers if buffer_hour < current_hour)
-    for buffer_hour in closed_hours:
+    hours_to_flush = sorted(
+        buffer_hour
+        for buffer_hour in buffers
+        if buffer_hour < current_hour or (flush_current and buffer_hour <= current_hour)
+    )
+    for buffer_hour in hours_to_flush:
         rows = buffers[buffer_hour]
         if not rows:
             buffers.pop(buffer_hour)
@@ -269,7 +291,8 @@ def _upload_hour(
 
     path = (
         f"{config.gcs_prefix}/vehicle_type={config.vehicle_type_name}/"
-        f"date={buffer_hour:%Y-%m-%d}/hour={buffer_hour:%H}.parquet"
+        f"date={buffer_hour:%Y-%m-%d}/hour={buffer_hour:%H}/"
+        f"part-{ingested_at:%Y%m%dT%H%M%S%fZ}.parquet"
     )
     bucket.blob(path).upload_from_file(parquet_buffer, content_type="application/octet-stream")
     LOGGER.info("uploaded hourly parquet gcs_path=gs://%s/%s rows=%d", config.gcs_bucket, path, len(rows))
