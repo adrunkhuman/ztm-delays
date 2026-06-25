@@ -1,6 +1,7 @@
 {{
     config(
         materialized='incremental',
+        incremental_strategy='insert_overwrite',
         partition_by={"field": "gps_date", "data_type": "date"},
         cluster_by=["line"],
     )
@@ -16,9 +17,10 @@ with source as (
         cast(VehicleNumber as string) as vehicle_number,
         cast(vehicle_type as int64) as vehicle_type,
         cast(ingested_at as timestamp) as ingested_at,
-        date(cast(Time as timestamp)) as gps_date
+        date(cast(Time as timestamp), 'Europe/Warsaw') as gps_date
     from {{ source('raw', 'raw_gps_pings') }}
-    where date(cast(Time as timestamp)) = date('{{ var("processing_date") }}')
+    where cast(Time as timestamp) >= timestamp(date('{{ var("processing_date") }}'), 'Europe/Warsaw')
+      and cast(Time as timestamp) < timestamp(date_add(date('{{ var("processing_date") }}'), interval 1 day), 'Europe/Warsaw')
       and regexp_contains(cast(Brigade as string), r'^\d+$')
       and regexp_contains(cast(VehicleNumber as string), r'^\d+$')
 ),

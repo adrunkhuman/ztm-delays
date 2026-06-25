@@ -7,6 +7,15 @@ sources:
     tables:
       - name: raw_gps_pings
         description: Raw GPS pings loaded from poller Parquet files.
+        config:
+          loaded_at_field: ingested_at
+          freshness:
+            warn_after:
+              count: 20
+              period: minute
+            error_after:
+              count: 40
+              period: minute
         columns:
           - name: Lines
             tests:

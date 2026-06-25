@@ -9,3 +9,5 @@ dbt run --select stg_gps_pings --vars '{"processing_date": "YYYY-MM-DD"}'
 ```
 
 The local `profiles.yml` uses environment variables for BigQuery connection settings and credentials.
+
+In Airflow, `GOOGLE_APPLICATION_CREDENTIALS` defaults to `/opt/airflow/gcp-key.json` if the environment variable is not set explicitly.
