@@ -1,0 +1,33 @@
+[project]
+name = "ztm-gps-poller"
+version = "0.1.0"
+description = "Warsaw ZTM GPS poller that writes hourly Parquet files to GCS."
+requires-python = ">=3.14"
+dependencies = [
+    "google-cloud-storage>=3.6.0",
+    "pyarrow>=22.0.0",
+    "requests>=2.32.5",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.0",
+    "ty>=0.0.15",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "D203", "D213", "D100", "D104", "COM812", "ISC001", "E501",
+  "EM101", "EM102", "TRY003", "G004", "T201", "FBT", "TD", "FIX", "ERA001", "CPY001"
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ty.environment]
+python-version = "3.14"
