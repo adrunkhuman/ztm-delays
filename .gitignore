@@ -1,0 +1,23 @@
+# Local configuration and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*-key.json
+*credentials*.json
+*service-account*.json
+.secrets/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Tooling and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
