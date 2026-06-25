@@ -1,0 +1,85 @@
+version: 2
+
+models:
+  - name: stg_gps_pings
+    description: Cleaned, deduplicated GPS pings for one processing date.
+    columns:
+      - name: line
+        tests:
+          - not_null
+      - name: brigade
+        tests:
+          - not_null
+      - name: lat
+        tests:
+          - not_null
+      - name: lon
+        tests:
+          - not_null
+      - name: gps_time
+        tests:
+          - not_null
+      - name: vehicle_number
+        tests:
+          - not_null
+      - name: vehicle_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2]
+      - name: ingested_at
+        tests:
+          - not_null
+      - name: gps_date
+        tests:
+          - not_null
+
+unit_tests:
+  - name: stg_gps_pings_filters_normalizes_and_deduplicates
+    model: stg_gps_pings
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gps_pings')
+        format: sql
+        rows: |
+          select '187' as Lines, '0012' as Brigade, 52.2297 as Lat, 21.0122 as Lon, timestamp('2026-01-15 11:00:00+00:00') as Time, '1234' as VehicleNumber, 1 as vehicle_type, timestamp('2026-01-15 11:01:00+00:00') as ingested_at
+          union all select '187', '0012', 52.2297, 21.0122, timestamp('2026-01-15 11:00:00+00:00'), '1234', 1, timestamp('2026-01-15 11:02:00+00:00')
+          union all select '187', 'D21', 52.2297, 21.0122, timestamp('2026-01-15 11:03:00+00:00'), '1235', 1, timestamp('2026-01-15 11:04:00+00:00')
+          union all select '187', '0013', 52.2297, 21.0122, timestamp('2026-01-15 11:05:00+00:00'), 'd. 35154', 1, timestamp('2026-01-15 11:06:00+00:00')
+    expect:
+      rows:
+        - line: '187'
+          brigade: '12'
+          lat: 52.2297
+          lon: 21.0122
+          gps_time: '2026-01-15 11:00:00+00:00'
+          vehicle_number: '1234'
+          vehicle_type: 1
+          ingested_at: '2026-01-15 11:02:00+00:00'
+          gps_date: '2026-01-15'
+
+  - name: stg_gps_pings_uses_warsaw_local_processing_date
+    model: stg_gps_pings
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gps_pings')
+        format: sql
+        rows: |
+          select '517' as Lines, '0007' as Brigade, 52.2297 as Lat, 21.0122 as Lon, timestamp('2026-01-14 23:30:00+00:00') as Time, '4321' as VehicleNumber, 1 as vehicle_type, timestamp('2026-01-14 23:31:00+00:00') as ingested_at
+          union all select '517', '0008', 52.2297, 21.0122, timestamp('2026-01-15 23:30:00+00:00'), '4322', 1, timestamp('2026-01-15 23:31:00+00:00')
+    expect:
+      rows:
+        - line: '517'
+          brigade: '7'
+          lat: 52.2297
+          lon: 21.0122
+          gps_time: '2026-01-14 23:30:00+00:00'
+          vehicle_number: '4321'
+          vehicle_type: 1
+          ingested_at: '2026-01-14 23:31:00+00:00'
+          gps_date: '2026-01-15'

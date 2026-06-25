@@ -1,0 +1,43 @@
+version: 2
+
+sources:
+  - name: raw
+    database: "{{ env_var('DBT_BIGQUERY_PROJECT', 'ztm-data') }}"
+    schema: "{{ env_var('DBT_BIGQUERY_DATASET', 'ztm_bq') }}"
+    tables:
+      - name: raw_gps_pings
+        description: Raw GPS pings loaded from poller Parquet files.
+        config:
+          loaded_at_field: ingested_at
+          freshness:
+            warn_after:
+              count: 20
+              period: minute
+            error_after:
+              count: 40
+              period: minute
+        columns:
+          - name: Lines
+            tests:
+              - not_null
+          - name: Brigade
+            tests:
+              - not_null
+          - name: Lat
+            tests:
+              - not_null
+          - name: Lon
+            tests:
+              - not_null
+          - name: Time
+            tests:
+              - not_null
+          - name: VehicleNumber
+            tests:
+              - not_null
+          - name: vehicle_type
+            tests:
+              - not_null
+          - name: ingested_at
+            tests:
+              - not_null

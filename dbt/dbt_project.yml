@@ -1,0 +1,13 @@
+name: ztm_pipeline
+version: 1.0.0
+config-version: 2
+
+profile: ztm_pipeline
+
+model-paths: ["models"]
+test-paths: ["tests"]
+
+models:
+  ztm_pipeline:
+    staging:
+      +materialized: view
