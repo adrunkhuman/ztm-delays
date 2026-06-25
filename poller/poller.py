@@ -84,8 +84,10 @@ def main() -> int:
     stop_requested = _build_signal_handler()
 
     LOGGER.info(
-        "starting GPS poller",
-        extra={"vehicle_type": config.vehicle_type_name, "run_once": config.run_once, "no_upload": config.no_upload},
+        "starting GPS poller vehicle_type=%s run_once=%s no_upload=%s",
+        config.vehicle_type_name,
+        config.run_once,
+        config.no_upload,
     )
 
     session = requests.Session()
@@ -100,7 +102,7 @@ def main() -> int:
             rows = _poll_api(session, config)
             for row in rows:
                 buffers[_hour_key(row["Time"].astimezone(WARSAW_TZ))].append(row)
-            LOGGER.info("poll succeeded", extra={"rows": len(rows), "vehicle_type": config.vehicle_type_name})
+            LOGGER.info("poll succeeded vehicle_type=%s rows=%d", config.vehicle_type_name, len(rows))
         except requests.RequestException:
             LOGGER.exception("API request failed")
         except json.JSONDecodeError:
@@ -110,7 +112,7 @@ def main() -> int:
 
         if config.no_upload:
             buffered_rows = sum(len(rows) for rows in buffers.values())
-            LOGGER.info("upload disabled", extra={"buffered_rows": buffered_rows})
+            LOGGER.info("upload disabled buffered_rows=%d", buffered_rows)
         else:
             _flush_closed_hours(cast("storage.Bucket", bucket), config, buffers, current_hour)
 
@@ -145,9 +147,9 @@ def _load_config(args: Namespace) -> Config:
     if vehicle_type not in VEHICLE_TYPES:
         raise RuntimeError("VEHICLE_TYPE must be one of: bus, tram, 1, 2")
 
-    api_token = os.environ.get("WARSAW_API_TOKEN", "").strip()
+    api_token = os.environ.get("ZTM_API_TOKEN", os.environ.get("WARSAW_API_TOKEN", "")).strip()
     if not api_token:
-        raise RuntimeError("WARSAW_API_TOKEN is required")
+        raise RuntimeError("ZTM_API_TOKEN is required")
 
     vehicle_type_id, vehicle_type_name = VEHICLE_TYPES[vehicle_type]
     return Config(
@@ -187,7 +189,7 @@ def _poll_api(session: requests.Session, config: Config) -> list[GpsRow]:
     payload: object = response.json()
     records = _extract_records(payload)
     if not records:
-        LOGGER.warning("API returned no records", extra={"vehicle_type": config.vehicle_type_name})
+        LOGGER.warning("API returned no records vehicle_type=%s", config.vehicle_type_name)
         return []
 
     parsed_rows = []
@@ -218,7 +220,7 @@ def _parse_record(record: dict[str, object], vehicle_type_id: int) -> GpsRow | N
             "vehicle_type": vehicle_type_id,
         }
     except KeyError, TypeError, ValueError:
-        LOGGER.warning("skipping invalid record", extra={"record_keys": sorted(record)})
+        LOGGER.warning("skipping invalid record record_keys=%s", sorted(record))
         return None
 
 
@@ -246,7 +248,7 @@ def _flush_closed_hours(
         try:
             _upload_hour(bucket, config, buffer_hour, rows)
         except GoogleAPIError, OSError, pa.ArrowException:
-            LOGGER.exception("failed to upload hourly parquet", extra={"hour": buffer_hour.isoformat()})
+            LOGGER.exception("failed to upload hourly parquet hour=%s", buffer_hour.isoformat())
             continue
         buffers.pop(buffer_hour)
 
@@ -270,7 +272,7 @@ def _upload_hour(
         f"date={buffer_hour:%Y-%m-%d}/hour={buffer_hour:%H}.parquet"
     )
     bucket.blob(path).upload_from_file(parquet_buffer, content_type="application/octet-stream")
-    LOGGER.info("uploaded hourly parquet", extra={"gcs_path": f"gs://{config.gcs_bucket}/{path}", "rows": len(rows)})
+    LOGGER.info("uploaded hourly parquet gcs_path=gs://%s/%s rows=%d", config.gcs_bucket, path, len(rows))
 
 
 def _sleep_remaining(interval_seconds: float, loop_started: float, stop_requested: Callable[[], bool]) -> None:

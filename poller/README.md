@@ -4,7 +4,7 @@ One container polls one Warsaw ZTM vehicle type every 10 seconds and writes clos
 
 ## Required Environment
 
-- `WARSAW_API_TOKEN`: city API token used as the `Authorization` header.
+- `ZTM_API_TOKEN`: city API token used as the `Authorization` header.
 - `VEHICLE_TYPE`: `bus` or `tram` (`1` and `2` also accepted).
 - `GOOGLE_APPLICATION_CREDENTIALS`: path to the mounted GCP service account key.
 
@@ -43,7 +43,7 @@ VEHICLE_TYPE=bus uv run python poller.py --once --no-upload
 ```bash
 docker build -t ztm-gps-poller ./poller
 docker run --rm \
-  -e WARSAW_API_TOKEN \
+  -e ZTM_API_TOKEN \
   -e VEHICLE_TYPE=bus \
   -e GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-key.json \
   -v /secure/path/service-account-key.json:/run/secrets/gcp-key.json:ro \

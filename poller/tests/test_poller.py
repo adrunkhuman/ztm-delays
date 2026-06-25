@@ -86,7 +86,7 @@ def test_flush_closed_hours_keeps_buffer_after_upload_failure(monkeypatch: pytes
 
 
 def test_load_config_uses_cli_smoke_mode_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("WARSAW_API_TOKEN", "token")
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
     monkeypatch.setenv("VEHICLE_TYPE", "bus")
 
     config = poller._load_config(Namespace(once=True, no_upload=True))
