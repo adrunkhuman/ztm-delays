@@ -2,7 +2,6 @@
 set -eu
 
 : "${TS_AUTHKEY:?TS_AUTHKEY is required}"
-: "${VEHICLE_TYPE:?VEHICLE_TYPE is required}"
 
 TS_SOCKS_ADDR="${TS_SOCKS_ADDR:-127.0.0.1:1055}"
 TS_EXIT_NODE="${TS_EXIT_NODE:-100.103.142.113}"
@@ -11,7 +10,7 @@ STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-300}"
 STARTED_AT=$(date +%s)
 
 if [ -z "${TS_HOSTNAME:-}" ]; then
-  TS_HOSTNAME="ztm-poller-${VEHICLE_TYPE}"
+  TS_HOSTNAME="ztm-poller"
 fi
 
 mkdir -p /var/run/tailscale "${TS_STATE_DIR}"
