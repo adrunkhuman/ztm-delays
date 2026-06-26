@@ -3,6 +3,7 @@
         materialized='incremental',
         incremental_strategy='insert_overwrite',
         partition_by={"field": "gps_date", "data_type": "date"},
+        partitions=["date('" ~ var("processing_date") ~ "')"],
         cluster_by=["line"],
     )
 }}

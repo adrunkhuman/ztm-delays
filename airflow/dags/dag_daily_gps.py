@@ -23,7 +23,13 @@ VEHICLE_TYPES = ("bus", "tram")
 HOURS_PER_DAY = range(24)
 
 RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gps_pings"
+RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_snapshots"
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
+GTFS_TRIP_MATCHING_STAGING_MODELS = "stg_gtfs_trips stg_gtfs_stop_times stg_gtfs_calendar_dates"
+GPS_DBT_VARS = '{"processing_date": "{{ ds }}"}'
+GPS_TRIP_DBT_VARS = (
+    '{"processing_date": "{{ ds }}", "gtfs_snapshot_id": "{{ ti.xcom_pull(task_ids=\'selected_gtfs_snapshot_id\') }}"}'
+)
 
 
 def _expected_gcs_prefixes(processing_date: str) -> list[str]:
@@ -79,6 +85,24 @@ def _load_raw_gps_pings(processing_date: str) -> None:
     job.result()
 
 
+def _selected_gtfs_snapshot_id(processing_date: str) -> str:
+    client = bigquery.Client(project=GCP_PROJECT)
+    query = f"""
+        select snapshot_id
+        from `{RAW_GTFS_SNAPSHOTS_TABLE}`
+        where date(snapshot_timestamp, 'Europe/Warsaw') < date(@processing_date)
+        order by snapshot_timestamp desc
+        limit 1
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("processing_date", "DATE", processing_date)]
+    )
+    rows = list(client.query(query, job_config=job_config).result())
+    if not rows:
+        raise AirflowException(f"No GTFS snapshot available for GPS processing date {processing_date}")
+    return str(rows[0].snapshot_id)
+
+
 with DAG(
     dag_id="dag_daily_gps",
     description="Load GPS Parquet files to BigQuery and run GPS staging dbt model.",
@@ -99,19 +123,38 @@ with DAG(
         op_kwargs={"processing_date": "{{ ds }}"},
     )
 
+    selected_gtfs_snapshot_id = PythonOperator(
+        task_id="selected_gtfs_snapshot_id",
+        python_callable=_selected_gtfs_snapshot_id,
+        op_kwargs={"processing_date": "{{ ds }}"},
+    )
+
     dbt_run_stg_gps_pings = BashOperator(
         task_id="dbt_run_stg_gps_pings",
+        bash_command=(f"cd {DBT_PROJECT_DIR} && dbt run --select stg_gps_pings --vars '{GPS_DBT_VARS}'"),
+    )
+
+    dbt_run_int_ping_trip = BashOperator(
+        task_id="dbt_run_int_ping_trip",
         bash_command=(
-            f'cd {DBT_PROJECT_DIR} && dbt run --select stg_gps_pings --vars \'{{"processing_date": "{{{{ ds }}}}"}}\''
+            f"cd {DBT_PROJECT_DIR} && "
+            f"dbt run --select {GTFS_TRIP_MATCHING_STAGING_MODELS} int_ping_trip --vars '{GPS_TRIP_DBT_VARS}'"
         ),
     )
 
     dbt_test_stg_gps_pings = BashOperator(
         task_id="dbt_test_stg_gps_pings",
         bash_command=(
-            f"cd {DBT_PROJECT_DIR} && "
-            'dbt test --select source:raw.raw_gps_pings stg_gps_pings --vars \'{"processing_date": "{{ ds }}"}\''
+            f"cd {DBT_PROJECT_DIR} && dbt test --select source:raw.raw_gps_pings stg_gps_pings --vars '{GPS_DBT_VARS}'"
         ),
     )
 
-    check_gps_files >> load_raw_gps_pings >> dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
+    dbt_test_int_ping_trip = BashOperator(
+        task_id="dbt_test_int_ping_trip",
+        bash_command=(f"cd {DBT_PROJECT_DIR} && dbt test --select int_ping_trip --vars '{GPS_TRIP_DBT_VARS}'"),
+    )
+
+    check_gps_files >> load_raw_gps_pings >> dbt_run_stg_gps_pings
+    selected_gtfs_snapshot_id >> dbt_run_int_ping_trip
+    dbt_run_stg_gps_pings >> dbt_run_int_ping_trip >> dbt_test_int_ping_trip
+    dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
