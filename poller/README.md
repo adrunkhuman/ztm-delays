@@ -18,7 +18,7 @@ One container polls one Warsaw ZTM vehicle type every 10 seconds and writes clos
 - `MAX_PING_AGE_SECONDS`: defaults to `300`; older API rows are dropped.
 - `FUTURE_PING_TOLERANCE_SECONDS`: defaults to `60`; farther-future API rows are dropped.
 - `LOG_LEVEL`: defaults to `INFO`.
-- `TS_EXIT_NODE`: defaults to `pl-waw-wg-101`.
+- `TS_EXIT_NODE`: defaults to `100.103.142.113` (`pl-waw-wg-101.mullvad.ts.net`, Warsaw).
 - `TS_HOSTNAME`: defaults to `ztm-poller-${VEHICLE_TYPE}`.
 - `TS_SOCKS_ADDR`: defaults to `127.0.0.1:1055`.
 - `ZTM_API_PROXY`: normally set by `entrypoint.sh`; can be set manually for local proxy smoke tests.
