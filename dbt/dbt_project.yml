@@ -11,3 +11,5 @@ models:
   ztm_pipeline:
     staging:
       +materialized: view
+    intermediate:
+      +materialized: view
