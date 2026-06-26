@@ -16,3 +16,5 @@ convention = "google"
 "tests/**/*.py" = ["S101", "D", "SLF001", "PLR2004", "ARG", "ANN401", "N818", "PYI034"]
 # The GTFS metadata query uses a module-level BigQuery table constant, not user input.
 "dags/dag_gtfs_poll.py" = ["S608"]
+# The GPS daily DAG queries GTFS metadata using module-level BigQuery table constants, not user input.
+"dags/dag_daily_gps.py" = ["S608"]
