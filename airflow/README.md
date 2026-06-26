@@ -26,3 +26,13 @@ gs://ztm-analytics-bucket/raw/gps/vehicle_type={bus|tram}/date={{ ds }}/hour={00
 Schedule: `0 5 * * *`.
 
 This intentionally does not handle GTFS, vehicle snapshots, intermediate models, marts, or frontend outputs.
+
+The GTFS polling DAG is:
+
+```text
+dag_gtfs_poll
+```
+
+It runs hourly, downloads `https://mkuran.pl/gtfs/warsaw.zip`, computes a SHA-256 hash, uploads changed snapshots to `gs://ztm-analytics-bucket/raw/gtfs/`, and records metadata in `ztm_bq.raw_gtfs_snapshots`.
+
+This intentionally does not parse or load GTFS text files into raw GTFS BigQuery tables yet.
