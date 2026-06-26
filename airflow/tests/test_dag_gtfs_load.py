@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import types
 import zipfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +102,11 @@ def test_load_csv_to_bigquery_uses_expected_load_contract(tmp_path: Path) -> Non
     assert client.load_call.job_id == "load_raw_gtfs_trips_snapshot_1"
     assert client.load_call.job_config.source_format == dag.bigquery.SourceFormat.CSV
     assert client.load_call.job_config.skip_leading_rows == 1
+    assert client.load_call.job_config.create_disposition == dag.bigquery.CreateDisposition.CREATE_IF_NEEDED
     assert client.load_call.job_config.write_disposition == dag.bigquery.WriteDisposition.WRITE_APPEND
+    assert [field.name for field in client.load_call.job_config.schema] == [
+        field.name for field in dag.GTFS_TABLES[0].schema
+    ]
     assert client.load_call.job.result_called is True
 
 
@@ -115,6 +120,54 @@ def test_load_csv_to_bigquery_waits_on_existing_job_after_conflict(tmp_path: Pat
 
     assert client.get_job_call == ("load_raw_gtfs_trips_snapshot_1", "ztm-data")
     assert client.existing_job.result_called is True
+
+
+def test_latest_gtfs_snapshot_returns_latest_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient(
+        latest_snapshot={"snapshot_id": "snapshot-1", "gcs_path": "gs://bucket/raw/gtfs/test.zip"}
+    )
+    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
+
+    assert dag._latest_gtfs_snapshot() == {"snapshot_id": "snapshot-1", "gcs_path": "gs://bucket/raw/gtfs/test.zip"}
+
+
+def test_latest_gtfs_snapshot_rejects_missing_metadata_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient(query_raises_not_found=True)
+    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
+
+    with pytest.raises(RuntimeError, match="metadata table"):
+        dag._latest_gtfs_snapshot()
+
+
+def test_latest_gtfs_snapshot_rejects_empty_metadata_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient(latest_snapshot=None)
+    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
+
+    with pytest.raises(RuntimeError, match="metadata rows"):
+        dag._latest_gtfs_snapshot()
+
+
+def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dag = _load_dag_module()
+    zip_bytes = _complete_gtfs_zip()
+    client = FakeBigQueryClient()
+    storage_client = FakeStorageClient(zip_bytes)
+    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
+    monkeypatch.setattr(dag.storage, "Client", lambda project: storage_client)
+
+    dag._load_gtfs_snapshot({"snapshot_id": "snapshot-1", "gcs_path": "gs://ztm-analytics-bucket/raw/gtfs/test.zip"})
+
+    assert storage_client.bucket_name == "ztm-analytics-bucket"
+    assert storage_client.blob_name == "raw/gtfs/test.zip"
+    assert [load.destination for load in client.load_calls] == [spec.table for spec in dag.GTFS_TABLES]
+    assert len(client.load_calls) == len(dag.GTFS_TABLES)
+    assert all(load.job.result_called for load in client.load_calls)
+    assert any("snapshot-1" in load.loaded_text for load in client.load_calls)
 
 
 def _load_dag_module() -> types.ModuleType:
@@ -232,9 +285,18 @@ class FakeJob:
 
 
 class FakeBigQueryClient:
-    def __init__(self, *, raise_conflict: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        raise_conflict: bool = False,
+        latest_snapshot: dict[str, str] | None = None,
+        query_raises_not_found: bool = False,
+    ) -> None:
         self.raise_conflict = raise_conflict
+        self.latest_snapshot = latest_snapshot
+        self.query_raises_not_found = query_raises_not_found
         self.load_call: LoadCall | None = None
+        self.load_calls: list[LoadCall] = []
         self.existing_job = FakeJob()
         self.get_job_call: tuple[str, str] | None = None
 
@@ -242,36 +304,72 @@ class FakeBigQueryClient:
         if self.raise_conflict:
             raise Conflict("job already exists")
         job = FakeJob()
-        self.load_call = LoadCall(destination, job_config, job_id, job)
-        file_obj.read()
+        loaded_text = file_obj.read().decode("utf-8")
+        self.load_call = LoadCall(destination, job_config, job_id, job, loaded_text)
+        self.load_calls.append(self.load_call)
         return job
 
     def get_job(self, job_id: str, *, project: str) -> FakeJob:
         self.get_job_call = (job_id, project)
         return self.existing_job
 
+    def query(self, _query: str) -> FakeQueryJob:
+        if self.query_raises_not_found:
+            raise NotFound("missing table")
+        return FakeQueryJob(self.latest_snapshot)
+
 
 class LoadCall:
-    def __init__(self, destination: str, job_config: Any, job_id: str, job: FakeJob) -> None:
+    def __init__(self, destination: str, job_config: Any, job_id: str, job: FakeJob, loaded_text: str) -> None:
         self.destination = destination
         self.job_config = job_config
         self.job_id = job_id
         self.job = job
+        self.loaded_text = loaded_text
+
+
+class FakeQueryJob:
+    def __init__(self, latest_snapshot: dict[str, str] | None) -> None:
+        self.latest_snapshot = latest_snapshot
+
+    def result(self) -> list[FakeSnapshotRow]:
+        if self.latest_snapshot is None:
+            return []
+        return [FakeSnapshotRow(self.latest_snapshot)]
+
+
+class FakeSnapshotRow:
+    def __init__(self, latest_snapshot: dict[str, str]) -> None:
+        self.snapshot_id = latest_snapshot["snapshot_id"]
+        self.gcs_path = latest_snapshot["gcs_path"]
 
 
 class FakeStorageClient:
+    def __init__(self, data: bytes = b"") -> None:
+        self.data = data
+        self.bucket_name = ""
+        self.blob_name = ""
+
     def bucket(self, _bucket_name: str) -> FakeBucket:
-        return FakeBucket()
+        self.bucket_name = _bucket_name
+        return FakeBucket(self)
 
 
 class FakeBucket:
+    def __init__(self, client: FakeStorageClient) -> None:
+        self.client = client
+
     def blob(self, _blob_name: str) -> FakeBlob:
-        return FakeBlob()
+        self.client.blob_name = _blob_name
+        return FakeBlob(self.client.data)
 
 
 class FakeBlob:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
     def download_as_bytes(self) -> bytes:
-        return b""
+        return self.data
 
 
 class Conflict(Exception):
@@ -280,3 +378,22 @@ class Conflict(Exception):
 
 class NotFound(Exception):
     pass
+
+
+def _complete_gtfs_zip() -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip_file:
+        zip_file.writestr(
+            "trips.txt",
+            "trip_id,route_id,service_id,trip_headsign,direction_id,block_id,block_short_name,shape_id\n"
+            "trip-1,187,svc,Head,1,block,12,shape\n",
+        )
+        zip_file.writestr(
+            "stop_times.txt",
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\ntrip-1,12:00:00,12:00:30,stop-1,1\n",
+        )
+        zip_file.writestr("stops.txt", "stop_id,stop_name,stop_lat,stop_lon\nstop-1,Stop,52.1,21.1\n")
+        zip_file.writestr("shapes.txt", "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\nshape,52.1,21.1,1\n")
+        zip_file.writestr("routes.txt", "route_id,route_short_name,route_type\n187,187,3\n")
+        zip_file.writestr("calendar_dates.txt", "service_id,date,exception_type\nsvc,20260625,1\n")
+    return buffer.getvalue()

@@ -107,12 +107,7 @@ GTFS_TABLES = (
 
 def _latest_gtfs_snapshot() -> dict[str, str]:
     client = bigquery.Client(project=GCP_PROJECT)
-    query = f"""  # noqa: S608 - table name is a module constant, not user input.
-        select snapshot_id, gcs_path
-        from `{RAW_GTFS_SNAPSHOTS_TABLE}`
-        order by snapshot_timestamp desc
-        limit 1
-    """
+    query = f"select snapshot_id, gcs_path from `{RAW_GTFS_SNAPSHOTS_TABLE}` order by snapshot_timestamp desc limit 1"  # noqa: S608
     try:
         rows = list(client.query(query).result())
     except NotFound as exc:

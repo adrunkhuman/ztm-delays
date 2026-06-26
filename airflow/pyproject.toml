@@ -16,4 +16,3 @@ convention = "google"
 "tests/**/*.py" = ["S101", "D", "SLF001", "PLR2004", "ARG", "ANN401", "N818", "PYI034"]
 # The GTFS metadata query uses a module-level BigQuery table constant, not user input.
 "dags/dag_gtfs_poll.py" = ["S608"]
-"dags/dag_gtfs_load.py" = ["S608"]
