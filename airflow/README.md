@@ -37,3 +37,13 @@ dag_gtfs_poll
 It runs hourly, downloads `https://mkuran.pl/gtfs/warsaw.zip`, computes a SHA-256 hash, uploads changed snapshots to `gs://ztm-analytics-bucket/raw/gtfs/`, and records metadata in `ztm_bq.raw_gtfs_snapshots`.
 
 This intentionally does not parse or load GTFS text files into raw GTFS BigQuery tables yet.
+
+The GTFS raw loader DAG is:
+
+```text
+dag_gtfs_load
+```
+
+It loads the latest `raw_gtfs_snapshots` ZIP into raw GTFS BigQuery tables and appends `gtfs_snapshot_id` to each row. It is unscheduled and intended to be triggered after `dag_gtfs_poll` records a changed snapshot.
+
+This intentionally does not add dbt GTFS staging models yet.
