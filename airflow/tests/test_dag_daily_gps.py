@@ -90,7 +90,7 @@ def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.
         dag._selected_gtfs_snapshot_id("2026-06-27")
 
 
-def test_dag_runs_int_ping_trip_after_gps_staging_and_selected_gtfs_snapshot() -> None:
+def test_dag_runs_stop_arrivals_after_trip_matching() -> None:
     dag = _load_dag_module()
 
     assert dag.selected_gtfs_snapshot_id.kwargs == {
@@ -112,10 +112,26 @@ def test_dag_runs_int_ping_trip_after_gps_staging_and_selected_gtfs_snapshot() -
             f"cd {dag.DBT_PROJECT_DIR} && dbt test --select int_ping_trip --vars '{dag.GPS_TRIP_DBT_VARS}'"
         ),
     }
+    assert dag.dbt_run_int_stop_arrivals.kwargs == {
+        "task_id": "dbt_run_int_stop_arrivals",
+        "bash_command": (
+            f"cd {dag.DBT_PROJECT_DIR} && "
+            f"dbt run --select {dag.GTFS_STOP_ARRIVAL_STAGING_MODELS} int_stop_arrivals "
+            f"--vars '{dag.GPS_TRIP_DBT_VARS}'"
+        ),
+    }
+    assert dag.dbt_test_int_stop_arrivals.kwargs == {
+        "task_id": "dbt_test_int_stop_arrivals",
+        "bash_command": (
+            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select int_stop_arrivals --vars '{dag.GPS_TRIP_DBT_VARS}'"
+        ),
+    }
     assert dag.load_raw_gps_pings.downstream == [dag.dbt_run_stg_gps_pings]
     assert dag.dbt_run_stg_gps_pings.downstream == [dag.dbt_run_int_ping_trip, dag.dbt_test_stg_gps_pings]
     assert dag.selected_gtfs_snapshot_id.downstream == [dag.dbt_run_int_ping_trip]
     assert dag.dbt_run_int_ping_trip.downstream == [dag.dbt_test_int_ping_trip]
+    assert dag.dbt_test_int_ping_trip.downstream == [dag.dbt_run_int_stop_arrivals]
+    assert dag.dbt_run_int_stop_arrivals.downstream == [dag.dbt_test_int_stop_arrivals]
 
 
 @dataclass

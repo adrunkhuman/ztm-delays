@@ -47,7 +47,186 @@ models:
         tests:
           - not_null
 
+  - name: int_stop_arrivals
+    description: Realized stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment for the matched trip passes within 50 meters of the scheduled stop point.
+    columns:
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null
+      - name: line
+        tests:
+          - not_null
+      - name: brigade
+        tests:
+          - not_null
+      - name: vehicle_number
+        tests:
+          - not_null
+      - name: vehicle_type
+        tests:
+          - not_null
+      - name: gps_date
+        tests:
+          - not_null
+      - name: service_date
+        tests:
+          - not_null
+      - name: day_type
+        tests:
+          - not_null
+      - name: trip_id
+        tests:
+          - not_null
+      - name: shape_id
+        tests:
+          - not_null
+      - name: service_id
+        tests:
+          - not_null
+      - name: direction_id
+        tests:
+          - not_null
+      - name: stop_id
+        tests:
+          - not_null
+      - name: stop_name
+        tests:
+          - not_null
+      - name: stop_sequence
+        tests:
+          - not_null
+      - name: scheduled_arrival_time
+        tests:
+          - not_null
+      - name: scheduled_departure_time
+        tests:
+          - not_null
+      - name: actual_arrival_time
+        tests:
+          - not_null
+      - name: arrival_delay_seconds
+        tests:
+          - not_null
+      - name: detection_method
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['segment_within_50m']
+      - name: stop_distance_m
+        tests:
+          - not_null
+      - name: prev_ping_distance_m
+        tests:
+          - not_null
+      - name: next_ping_distance_m
+        tests:
+          - not_null
+      - name: segment_start_time
+        tests:
+          - not_null
+      - name: segment_end_time
+        tests:
+          - not_null
+      - name: segment_duration_seconds
+        tests:
+          - not_null
+
 unit_tests:
+  - name: int_stop_arrivals_reconstructs_segment_crossing_time
+    model: int_stop_arrivals
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-1' as trip_id, 'shape-1' as shape_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
+          union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-1', 'shape-1', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
+      - input: ref('stg_gtfs_stop_times')
+        format: sql
+        rows: |
+          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs_stops')
+        format: sql
+        rows: |
+          select 'stop-1' as stop_id, 'Midpoint Stop' as stop_name, 52.0 as stop_lat, 21.00025 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+    expect:
+      rows:
+        - gtfs_snapshot_id: 'snapshot-valid'
+          line: '187'
+          brigade: '12'
+          vehicle_number: '1001'
+          vehicle_type: 1
+          gps_date: '2026-01-15'
+          service_date: '2026-01-15'
+          day_type: 'weekday'
+          trip_id: 'trip-1'
+          shape_id: 'shape-1'
+          service_id: 'svc-weekday'
+          direction_id: 0
+          stop_id: 'stop-1'
+          stop_name: 'Midpoint Stop'
+          stop_sequence: 1
+          scheduled_arrival_time: '2026-01-15 09:00:05+00:00'
+          scheduled_departure_time: '2026-01-15 09:00:05+00:00'
+          actual_arrival_time: '2026-01-15 09:00:05+00:00'
+          arrival_delay_seconds: 0
+          detection_method: 'segment_within_50m'
+          stop_distance_m: 0.0
+          segment_start_time: '2026-01-15 09:00:00+00:00'
+          segment_end_time: '2026-01-15 09:00:10+00:00'
+          segment_duration_seconds: 10
+
+  - name: int_stop_arrivals_interpolates_uneven_segment_crossing_time
+    model: int_stop_arrivals
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-1' as trip_id, 'shape-1' as shape_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
+          union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-1', 'shape-1', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
+      - input: ref('stg_gtfs_stop_times')
+        format: sql
+        rows: |
+          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs_stops')
+        format: sql
+        rows: |
+          select 'stop-1' as stop_id, 'Early Segment Stop' as stop_name, 52.0 as stop_lat, 21.0001 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+    expect:
+      rows:
+        - gtfs_snapshot_id: 'snapshot-valid'
+          line: '187'
+          brigade: '12'
+          vehicle_number: '1001'
+          vehicle_type: 1
+          gps_date: '2026-01-15'
+          service_date: '2026-01-15'
+          day_type: 'weekday'
+          trip_id: 'trip-1'
+          shape_id: 'shape-1'
+          service_id: 'svc-weekday'
+          direction_id: 0
+          stop_id: 'stop-1'
+          stop_name: 'Early Segment Stop'
+          stop_sequence: 1
+          scheduled_arrival_time: '2026-01-15 09:00:00+00:00'
+          scheduled_departure_time: '2026-01-15 09:00:00+00:00'
+          actual_arrival_time: '2026-01-15 09:00:02+00:00'
+          arrival_delay_seconds: 2
+          detection_method: 'segment_within_50m'
+          stop_distance_m: 0.0
+          segment_start_time: '2026-01-15 09:00:00+00:00'
+          segment_end_time: '2026-01-15 09:00:10+00:00'
+          segment_duration_seconds: 10
+
   - name: int_ping_trip_matches_sequential_trips_for_same_brigade
     model: int_ping_trip
     overrides:

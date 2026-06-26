@@ -26,6 +26,7 @@ RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gps_pings"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_snapshots"
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
 GTFS_TRIP_MATCHING_STAGING_MODELS = "stg_gtfs_trips stg_gtfs_stop_times stg_gtfs_calendar_dates"
+GTFS_STOP_ARRIVAL_STAGING_MODELS = "stg_gtfs_stop_times stg_gtfs_stops"
 GPS_DBT_VARS = '{"processing_date": "{{ ds }}"}'
 GPS_TRIP_DBT_VARS = (
     '{"processing_date": "{{ ds }}", "gtfs_snapshot_id": "{{ ti.xcom_pull(task_ids=\'selected_gtfs_snapshot_id\') }}"}'
@@ -105,7 +106,7 @@ def _selected_gtfs_snapshot_id(processing_date: str) -> str:
 
 with DAG(
     dag_id="dag_daily_gps",
-    description="Load GPS Parquet files to BigQuery and run GPS staging dbt model.",
+    description="Load daily GPS, select the GTFS snapshot, and build GPS staging, trip matching, and stop arrivals.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule="0 5 * * *",
     catchup=False,
@@ -154,7 +155,21 @@ with DAG(
         bash_command=(f"cd {DBT_PROJECT_DIR} && dbt test --select int_ping_trip --vars '{GPS_TRIP_DBT_VARS}'"),
     )
 
+    dbt_run_int_stop_arrivals = BashOperator(
+        task_id="dbt_run_int_stop_arrivals",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} && "
+            f"dbt run --select {GTFS_STOP_ARRIVAL_STAGING_MODELS} int_stop_arrivals --vars '{GPS_TRIP_DBT_VARS}'"
+        ),
+    )
+
+    dbt_test_int_stop_arrivals = BashOperator(
+        task_id="dbt_test_int_stop_arrivals",
+        bash_command=(f"cd {DBT_PROJECT_DIR} && dbt test --select int_stop_arrivals --vars '{GPS_TRIP_DBT_VARS}'"),
+    )
+
     check_gps_files >> load_raw_gps_pings >> dbt_run_stg_gps_pings
     selected_gtfs_snapshot_id >> dbt_run_int_ping_trip
-    dbt_run_stg_gps_pings >> dbt_run_int_ping_trip >> dbt_test_int_ping_trip
+    dbt_run_stg_gps_pings >> dbt_run_int_ping_trip >> dbt_test_int_ping_trip >> dbt_run_int_stop_arrivals
+    dbt_run_int_stop_arrivals >> dbt_test_int_stop_arrivals
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
