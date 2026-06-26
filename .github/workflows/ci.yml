@@ -95,22 +95,21 @@ jobs:
           test -n "$GCP_SERVICE_ACCOUNT_JSON"
           printf '%s' "$GCP_SERVICE_ACCOUNT_JSON" > "$GOOGLE_APPLICATION_CREDENTIALS"
 
-      - name: Parse dbt project
-        run: uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt parse --profiles-dir .
-        working-directory: dbt
+      - name: Install dbt
+        run: |
+          uv venv
+          uv pip install dbt-core dbt-bigquery
 
       - name: Compile GTFS staging models
         run: >-
-          uvx --python 3.13 --from dbt-core --with dbt-bigquery
-          dbt compile --profiles-dir .
+          uv run dbt compile --profiles-dir .
           --select stg_gtfs_trips stg_gtfs_stop_times stg_gtfs_stops stg_gtfs_shapes stg_gtfs_routes stg_gtfs_calendar_dates
           --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
         working-directory: dbt
 
       - name: Run dbt unit tests
         run: >-
-          uvx --python 3.13 --from dbt-core --with dbt-bigquery
-          dbt test --profiles-dir .
+          uv run dbt test --profiles-dir .
           --select test_type:unit
           --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
         working-directory: dbt
