@@ -124,30 +124,32 @@ def test_load_csv_to_bigquery_waits_on_existing_job_after_conflict(tmp_path: Pat
 
 def test_latest_gtfs_snapshot_returns_latest_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
-    client = FakeBigQueryClient(
-        latest_snapshot={"snapshot_id": "snapshot-1", "gcs_path": "gs://bucket/raw/gtfs/test.zip"}
+    dag_run = FakeDagRun(
+        {
+            "snapshot_id": "snapshot-1",
+            "gcs_path": "gs://bucket/raw/gtfs/test.zip",
+            "processing_date": "2026-06-26",
+        }
     )
-    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
-    assert dag._latest_gtfs_snapshot() == {"snapshot_id": "snapshot-1", "gcs_path": "gs://bucket/raw/gtfs/test.zip"}
+    assert dag._selected_gtfs_snapshot(dag_run) == {
+        "snapshot_id": "snapshot-1",
+        "gcs_path": "gs://bucket/raw/gtfs/test.zip",
+    }
 
 
 def test_latest_gtfs_snapshot_rejects_missing_metadata_table(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
-    client = FakeBigQueryClient(query_raises_not_found=True)
-    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
-    with pytest.raises(RuntimeError, match="metadata table"):
-        dag._latest_gtfs_snapshot()
+    with pytest.raises(TypeError, match=r"dag_run\.conf"):
+        dag._selected_gtfs_snapshot(object())
 
 
 def test_latest_gtfs_snapshot_rejects_empty_metadata_table(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
-    client = FakeBigQueryClient(latest_snapshot=None)
-    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
-    with pytest.raises(RuntimeError, match="metadata rows"):
-        dag._latest_gtfs_snapshot()
+    with pytest.raises(RuntimeError, match="snapshot_id, gcs_path, and processing_date"):
+        dag._selected_gtfs_snapshot(FakeDagRun({"snapshot_id": "snapshot-1"}))
 
 
 def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables(
@@ -170,6 +172,23 @@ def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables
     assert any("snapshot-1" in load.loaded_text for load in client.load_calls)
 
 
+def test_dag_runs_and_tests_gtfs_staging_after_raw_load() -> None:
+    dag = _load_dag_module()
+
+    assert dag.dbt_run_gtfs_staging.task_id == "dbt_run_gtfs_staging"
+    assert dag.dbt_test_gtfs_staging.task_id == "dbt_test_gtfs_staging"
+    assert dag.dbt_run_gtfs_staging.bash_command == (
+        f"cd {dag.DBT_PROJECT_DIR} && dbt run --select {dag.GTFS_STAGING_MODELS} "
+        '--vars \'{"processing_date": "{{ dag_run.conf[\'processing_date\'] }}", '
+        '"gtfs_snapshot_id": "{{ dag_run.conf[\'snapshot_id\'] }}"}\''
+    )
+    assert dag.dbt_test_gtfs_staging.bash_command == (
+        f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.GTFS_RAW_SOURCES} {dag.GTFS_STAGING_MODELS} "
+        '--vars \'{"processing_date": "{{ dag_run.conf[\'processing_date\'] }}", '
+        '"gtfs_snapshot_id": "{{ dag_run.conf[\'snapshot_id\'] }}"}\''
+    )
+
+
 def _load_dag_module() -> types.ModuleType:
     _install_airflow_stubs()
     _install_google_stubs()
@@ -190,14 +209,32 @@ def _install_airflow_stubs() -> None:
     airflow_module = types.ModuleType("airflow")
     airflow_sdk_module = types.ModuleType("airflow.sdk")
     airflow_decorators_module = types.ModuleType("airflow.decorators")
+    airflow_operators_python_module = types.ModuleType("airflow.operators.python")
+    airflow_providers_module = types.ModuleType("airflow.providers")
+    airflow_providers_standard_module = types.ModuleType("airflow.providers.standard")
+    airflow_providers_standard_operators_module = types.ModuleType("airflow.providers.standard.operators")
+    airflow_providers_standard_bash_module = types.ModuleType("airflow.providers.standard.operators.bash")
+    airflow_operators_module = types.ModuleType("airflow.operators")
+    airflow_operators_bash_module = types.ModuleType("airflow.operators.bash")
 
     airflow_sdk_module.DAG = FakeDAG
     airflow_sdk_module.task = FakeTaskDecorator()
     airflow_decorators_module.task = FakeTaskDecorator()
+    airflow_providers_standard_bash_module.BashOperator = FakeBashOperator
+    airflow_operators_bash_module.BashOperator = FakeBashOperator
+    airflow_sdk_module.get_current_context = lambda: {"dag_run": FakeDagRun({})}
+    airflow_operators_python_module.get_current_context = lambda: {"dag_run": FakeDagRun({})}
 
     sys.modules["airflow"] = airflow_module
     sys.modules["airflow.sdk"] = airflow_sdk_module
     sys.modules["airflow.decorators"] = airflow_decorators_module
+    sys.modules["airflow.providers"] = airflow_providers_module
+    sys.modules["airflow.providers.standard"] = airflow_providers_standard_module
+    sys.modules["airflow.providers.standard.operators"] = airflow_providers_standard_operators_module
+    sys.modules["airflow.providers.standard.operators.bash"] = airflow_providers_standard_bash_module
+    sys.modules["airflow.operators"] = airflow_operators_module
+    sys.modules["airflow.operators.bash"] = airflow_operators_bash_module
+    sys.modules["airflow.operators.python"] = airflow_operators_python_module
 
 
 def _install_google_stubs() -> None:
@@ -236,9 +273,25 @@ class FakeTaskDecorator:
 class FakeTask:
     def __init__(self, function: Any) -> None:
         self.function = function
+        self.downstream: list[object] = []
 
     def __call__(self, *_args: object, **_kwargs: object) -> FakeTask:
         return self
+
+    def __rshift__(self, downstream: object) -> object:
+        self.downstream.append(downstream)
+        return downstream
+
+
+class FakeBashOperator:
+    def __init__(self, *, task_id: str, bash_command: str) -> None:
+        self.task_id = task_id
+        self.bash_command = bash_command
+        self.downstream: list[object] = []
+
+    def __rshift__(self, downstream: object) -> object:
+        self.downstream.append(downstream)
+        return downstream
 
 
 class FakeDAG:
@@ -250,6 +303,11 @@ class FakeDAG:
 
     def __exit__(self, *_args: object) -> None:
         return None
+
+
+class FakeDagRun:
+    def __init__(self, conf: dict[str, str]) -> None:
+        self.conf = conf
 
 
 class FakeSchemaField:

@@ -1,9 +1,7 @@
 with valid_snapshot as (
     select snapshot_id
     from {{ source('raw', 'raw_gtfs_snapshots') }}
-    where snapshot_timestamp <= timestamp(date('{{ var("processing_date") }}'), 'Europe/Warsaw')
-    order by snapshot_timestamp desc, snapshot_id desc
-    limit 1
+    where snapshot_id = '{{ var("gtfs_snapshot_id") }}'
 )
 
 select
