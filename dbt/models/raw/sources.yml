@@ -167,6 +167,7 @@ sources:
               - accepted_values:
                   arguments:
                     values: [1, 2]
+                    quote: false
           - name: gtfs_snapshot_id
             tests:
               - not_null
