@@ -11,7 +11,7 @@ Runtime contract:
 - Service account can write `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/query/insert `ztm-data.ztm_bq.raw_gtfs_snapshots`.
 - Service account can read `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/load/append GTFS raw tables in `ztm-data.ztm_bq`.
 
-The first production DAG is GPS-only:
+The GPS daily DAG is:
 
 ```text
 dag_daily_gps
@@ -27,7 +27,7 @@ gs://ztm-analytics-bucket/raw/gps/vehicle_type={bus|tram}/date={{ ds }}/hour={00
 
 Schedule: `0 5 * * *`.
 
-This intentionally does not handle GTFS, vehicle snapshots, intermediate models, marts, or frontend outputs.
+This intentionally does not handle vehicle snapshots, intermediate models, marts, or frontend outputs.
 
 The GTFS polling DAG is:
 
@@ -35,9 +35,7 @@ The GTFS polling DAG is:
 dag_gtfs_poll
 ```
 
-It runs hourly, downloads `https://mkuran.pl/gtfs/warsaw.zip`, computes a SHA-256 hash, uploads changed snapshots to `gs://ztm-analytics-bucket/raw/gtfs/`, and records metadata in `ztm_bq.raw_gtfs_snapshots`.
-
-This intentionally does not parse or load GTFS text files into raw GTFS BigQuery tables yet.
+It runs hourly, downloads `https://mkuran.pl/gtfs/warsaw.zip`, computes a SHA-256 hash, uploads changed snapshots to `gs://ztm-analytics-bucket/raw/gtfs/`, records metadata in `ztm_bq.raw_gtfs_snapshots`, and triggers `dag_gtfs_load` when the snapshot changed.
 
 The GTFS raw loader DAG is:
 
@@ -45,7 +43,7 @@ The GTFS raw loader DAG is:
 dag_gtfs_load
 ```
 
-It loads the latest `raw_gtfs_snapshots` ZIP into raw GTFS BigQuery tables and appends `gtfs_snapshot_id` to each row. It is unscheduled and intended to be triggered after `dag_gtfs_poll` records a changed snapshot.
+It loads the triggered GTFS snapshot ZIP into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, then runs and tests GTFS staging models. It is unscheduled and triggered by `dag_gtfs_poll` with immutable `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`.
 
 Required ZIP members:
 
@@ -58,4 +56,15 @@ routes.txt
 calendar_dates.txt
 ```
 
-This intentionally does not add dbt GTFS staging models yet.
+dbt staging models run after raw loading:
+
+```text
+stg_gtfs_trips
+stg_gtfs_stop_times
+stg_gtfs_stops
+stg_gtfs_shapes
+stg_gtfs_routes
+stg_gtfs_calendar_dates
+```
+
+GTFS staging filters by the exact triggered `gtfs_snapshot_id` to avoid races with newer snapshot metadata.
