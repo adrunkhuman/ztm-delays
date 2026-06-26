@@ -107,7 +107,7 @@ def main() -> int:
             LOGGER.exception("API request failed")
         except json.JSONDecodeError:
             LOGGER.exception("API returned malformed JSON")
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             LOGGER.exception("API returned invalid payload")
 
         if config.no_upload:
@@ -235,7 +235,7 @@ def _parse_record(record: dict[str, object], vehicle_type_id: int) -> GpsRow | N
             "VehicleNumber": str(record["VehicleNumber"]),
             "vehicle_type": vehicle_type_id,
         }
-    except KeyError, TypeError, ValueError:
+    except (KeyError, TypeError, ValueError):
         LOGGER.warning("skipping invalid record record_keys=%s", sorted(record))
         return None
 
@@ -269,7 +269,7 @@ def _flush_hours(
             continue
         try:
             _upload_hour(bucket, config, buffer_hour, rows)
-        except GoogleAPIError, OSError, pa.ArrowException:
+        except (GoogleAPIError, OSError, pa.ArrowException):
             LOGGER.exception("failed to upload hourly parquet hour=%s", buffer_hour.isoformat())
             continue
         buffers.pop(buffer_hour)
