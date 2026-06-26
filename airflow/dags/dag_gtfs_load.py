@@ -8,19 +8,38 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from google.api_core.exceptions import Conflict, NotFound
+from google.api_core.exceptions import Conflict
 from google.cloud import bigquery, storage
 
 try:
-    from airflow.sdk import DAG, task
+    from airflow.providers.standard.operators.bash import BashOperator
+    from airflow.sdk import DAG, get_current_context, task
 except ImportError:  # Airflow 2 compatibility for local parser checks and older images.
     from airflow import DAG
     from airflow.decorators import task
+    from airflow.operators.bash import BashOperator
+    from airflow.operators.python import get_current_context
 
 GCP_PROJECT = "ztm-data"
 BIGQUERY_DATASET = "ztm_bq"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_snapshots"
 GTFS_DATE_LENGTH = 8
+DBT_PROJECT_DIR = "/opt/airflow/dbt"
+GTFS_STAGING_MODELS = (
+    "stg_gtfs_trips stg_gtfs_stop_times stg_gtfs_stops stg_gtfs_shapes stg_gtfs_routes stg_gtfs_calendar_dates"
+)
+GTFS_RAW_SOURCES = (
+    "source:raw.raw_gtfs_snapshots "
+    "source:raw.raw_gtfs_trips "
+    "source:raw.raw_gtfs_stop_times "
+    "source:raw.raw_gtfs_stops "
+    "source:raw.raw_gtfs_shapes "
+    "source:raw.raw_gtfs_routes "
+    "source:raw.raw_gtfs_calendar_dates"
+)
+GTFS_STAGING_PROCESSING_DATE = "{{ dag_run.conf['processing_date'] }}"
+GTFS_SNAPSHOT_ID = "{{ dag_run.conf['snapshot_id'] }}"
+GTFS_DBT_VARS = f'{{"processing_date": "{GTFS_STAGING_PROCESSING_DATE}", "gtfs_snapshot_id": "{GTFS_SNAPSHOT_ID}"}}'
 
 
 @dataclass(frozen=True)
@@ -105,16 +124,18 @@ GTFS_TABLES = (
 )
 
 
-def _latest_gtfs_snapshot() -> dict[str, str]:
-    client = bigquery.Client(project=GCP_PROJECT)
-    query = f"select snapshot_id, gcs_path from `{RAW_GTFS_SNAPSHOTS_TABLE}` order by snapshot_timestamp desc limit 1"  # noqa: S608
-    try:
-        rows = list(client.query(query).result())
-    except NotFound as exc:
-        raise RuntimeError("No GTFS snapshot metadata table found") from exc
-    if not rows:
-        raise RuntimeError("No GTFS snapshot metadata rows found")
-    return {"snapshot_id": str(rows[0].snapshot_id), "gcs_path": str(rows[0].gcs_path)}
+def _selected_gtfs_snapshot(dag_run: object) -> dict[str, str]:
+    conf = getattr(dag_run, "conf", None)
+    if not isinstance(conf, dict):
+        raise TypeError("dag_gtfs_load requires snapshot metadata in dag_run.conf")
+
+    snapshot_id = conf.get("snapshot_id")
+    gcs_path = conf.get("gcs_path")
+    processing_date = conf.get("processing_date")
+    if not all(isinstance(value, str) and value for value in (snapshot_id, gcs_path, processing_date)):
+        raise RuntimeError("dag_gtfs_load requires snapshot_id, gcs_path, and processing_date in dag_run.conf")
+
+    return {"snapshot_id": snapshot_id, "gcs_path": gcs_path}
 
 
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
@@ -204,13 +225,29 @@ with DAG(
 ) as dag:
 
     @task
-    def latest_gtfs_snapshot() -> dict[str, str]:
-        """Return the latest GTFS snapshot metadata row."""
-        return _latest_gtfs_snapshot()
+    def selected_gtfs_snapshot() -> dict[str, str]:
+        """Return the immutable GTFS snapshot selected by the triggering poll run."""
+        return _selected_gtfs_snapshot(get_current_context()["dag_run"])
 
     @task
     def load_gtfs_snapshot(snapshot: dict[str, str]) -> None:
         """Load selected GTFS text files from one snapshot ZIP into raw BigQuery tables."""
         _load_gtfs_snapshot(snapshot)
 
-    load_gtfs_snapshot(latest_gtfs_snapshot())
+    loaded_gtfs_snapshot = load_gtfs_snapshot(selected_gtfs_snapshot())
+
+    dbt_run_gtfs_staging = BashOperator(
+        task_id="dbt_run_gtfs_staging",
+        bash_command=(f"cd {DBT_PROJECT_DIR} && dbt run --select {GTFS_STAGING_MODELS} --vars '{GTFS_DBT_VARS}'"),
+    )
+
+    dbt_test_gtfs_staging = BashOperator(
+        task_id="dbt_test_gtfs_staging",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} && "
+            f"dbt test --select {GTFS_RAW_SOURCES} {GTFS_STAGING_MODELS} "
+            f"--vars '{GTFS_DBT_VARS}'"
+        ),
+    )
+
+    loaded_gtfs_snapshot >> dbt_run_gtfs_staging >> dbt_test_gtfs_staging

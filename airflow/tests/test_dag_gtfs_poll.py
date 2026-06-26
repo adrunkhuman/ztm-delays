@@ -31,7 +31,7 @@ def test_poll_gtfs_snapshot_skips_unchanged_snapshot(monkeypatch: Any) -> None:
     monkeypatch.setattr(dag, "_upload_gtfs_zip", _fail_if_called)
     monkeypatch.setattr(dag, "_insert_gtfs_snapshot", _fail_if_called)
 
-    assert dag._poll_gtfs_snapshot() == "unchanged"
+    assert dag._poll_gtfs_snapshot() == {"status": "unchanged"}
     assert client.created_table is not None
 
 
@@ -45,16 +45,52 @@ def test_poll_gtfs_snapshot_uploads_changed_snapshot(monkeypatch: Any) -> None:
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
     monkeypatch.setattr(dag.storage, "Client", lambda project: storage_client)
 
-    assert dag._poll_gtfs_snapshot() == "uploaded"
+    poll_result = dag._poll_gtfs_snapshot()
+
+    assert poll_result["status"] == "uploaded"
     assert client.created_table is not None
     assert len(client.inserted_rows) == 1
     inserted_row = client.inserted_rows[0]
+    assert poll_result["snapshot_id"] == inserted_row["snapshot_id"]
+    assert poll_result["gcs_path"] == inserted_row["gcs_path"]
+    assert "processing_date" in poll_result
     assert inserted_row["snapshot_timestamp"].endswith("Z")
     assert inserted_row["file_hash"] == dag._sha256(zip_bytes)
     assert inserted_row["gcs_path"] == f"gs://ztm-analytics-bucket/raw/gtfs/{inserted_row['snapshot_timestamp']}.zip"
     assert storage_client.bucket_obj.uploads == [
         (f"raw/gtfs/{inserted_row['snapshot_timestamp']}.zip", zip_bytes, "application/zip")
     ]
+
+
+def test_gtfs_load_branch_routes_only_changed_snapshots() -> None:
+    dag = _load_dag_module()
+
+    assert dag._gtfs_load_branch({"status": "uploaded"}) == "trigger_gtfs_load"
+    assert dag._gtfs_load_branch({"status": "unchanged"}) == "skip_gtfs_load"
+
+    with pytest.raises(ValueError, match="Unexpected GTFS poll result"):
+        dag._gtfs_load_branch({"status": "bad-result"})
+
+
+def test_gtfs_staging_processing_date_uses_next_warsaw_local_date() -> None:
+    dag = _load_dag_module()
+
+    assert dag._gtfs_staging_processing_date("2026-06-25T20:00:00Z") == "2026-06-26"
+    assert dag._gtfs_staging_processing_date("2026-06-25T23:30:00Z") == "2026-06-27"
+
+
+def test_dag_triggers_gtfs_load_dag_on_changed_snapshot() -> None:
+    dag = _load_dag_module()
+
+    assert dag.trigger_gtfs_load.task_id == "trigger_gtfs_load"
+    assert dag.trigger_gtfs_load.trigger_dag_id == "dag_gtfs_load"
+    assert dag.trigger_gtfs_load.conf == {
+        "snapshot_id": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['snapshot_id'] }}",
+        "gcs_path": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['gcs_path'] }}",
+        "processing_date": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['processing_date'] }}",
+    }
+    assert dag.trigger_gtfs_load.wait_for_completion is False
+    assert dag.skip_gtfs_load.task_id == "skip_gtfs_load"
 
 
 def test_insert_gtfs_snapshot_uses_expected_metadata_row() -> None:
@@ -106,14 +142,34 @@ def _install_airflow_stubs() -> None:
     airflow_module = types.ModuleType("airflow")
     airflow_sdk_module = types.ModuleType("airflow.sdk")
     airflow_decorators_module = types.ModuleType("airflow.decorators")
+    airflow_providers_module = types.ModuleType("airflow.providers")
+    airflow_providers_standard_module = types.ModuleType("airflow.providers.standard")
+    airflow_providers_standard_operators_module = types.ModuleType("airflow.providers.standard.operators")
+    airflow_providers_standard_empty_module = types.ModuleType("airflow.providers.standard.operators.empty")
+    airflow_providers_standard_trigger_module = types.ModuleType("airflow.providers.standard.operators.trigger_dagrun")
+    airflow_operators_module = types.ModuleType("airflow.operators")
+    airflow_operators_empty_module = types.ModuleType("airflow.operators.empty")
+    airflow_operators_trigger_module = types.ModuleType("airflow.operators.trigger_dagrun")
 
     airflow_sdk_module.DAG = FakeDAG
     airflow_sdk_module.task = FakeTaskDecorator()
     airflow_decorators_module.task = FakeTaskDecorator()
+    airflow_providers_standard_empty_module.EmptyOperator = FakeEmptyOperator
+    airflow_providers_standard_trigger_module.TriggerDagRunOperator = FakeTriggerDagRunOperator
+    airflow_operators_empty_module.EmptyOperator = FakeEmptyOperator
+    airflow_operators_trigger_module.TriggerDagRunOperator = FakeTriggerDagRunOperator
 
     sys.modules["airflow"] = airflow_module
     sys.modules["airflow.sdk"] = airflow_sdk_module
     sys.modules["airflow.decorators"] = airflow_decorators_module
+    sys.modules["airflow.providers"] = airflow_providers_module
+    sys.modules["airflow.providers.standard"] = airflow_providers_standard_module
+    sys.modules["airflow.providers.standard.operators"] = airflow_providers_standard_operators_module
+    sys.modules["airflow.providers.standard.operators.empty"] = airflow_providers_standard_empty_module
+    sys.modules["airflow.providers.standard.operators.trigger_dagrun"] = airflow_providers_standard_trigger_module
+    sys.modules["airflow.operators"] = airflow_operators_module
+    sys.modules["airflow.operators.empty"] = airflow_operators_empty_module
+    sys.modules["airflow.operators.trigger_dagrun"] = airflow_operators_trigger_module
 
 
 def _install_google_stubs() -> None:
@@ -147,6 +203,9 @@ def _install_requests_stub() -> None:
 
 
 class FakeTaskDecorator:
+    def __init__(self) -> None:
+        self.branch = self
+
     def __call__(self, function: Any) -> FakeTask:
         return FakeTask(function)
 
@@ -154,9 +213,30 @@ class FakeTaskDecorator:
 class FakeTask:
     def __init__(self, function: Any) -> None:
         self.function = function
+        self.downstream: list[object] = []
 
     def __call__(self, *_args: object, **_kwargs: object) -> FakeTask:
         return self
+
+    def __rshift__(self, downstream: object) -> object:
+        if isinstance(downstream, list):
+            self.downstream.extend(downstream)
+        else:
+            self.downstream.append(downstream)
+        return downstream
+
+
+class FakeEmptyOperator:
+    def __init__(self, *, task_id: str) -> None:
+        self.task_id = task_id
+
+
+class FakeTriggerDagRunOperator:
+    def __init__(self, *, task_id: str, trigger_dag_id: str, conf: dict[str, str], wait_for_completion: bool) -> None:
+        self.task_id = task_id
+        self.trigger_dag_id = trigger_dag_id
+        self.conf = conf
+        self.wait_for_completion = wait_for_completion
 
 
 class FakeDAG:
