@@ -21,6 +21,7 @@ One container polls one Warsaw ZTM vehicle type every 10 seconds and writes clos
 - `TS_EXIT_NODE`: defaults to `100.103.142.113` (`pl-waw-wg-101.mullvad.ts.net`, Warsaw).
 - `TS_HOSTNAME`: defaults to `ztm-poller-${VEHICLE_TYPE}`.
 - `TS_SOCKS_ADDR`: defaults to `127.0.0.1:1055`.
+- `STARTUP_GRACE_SECONDS`: defaults to `300`; keeps the container alive briefly if the poller exits during startup.
 - `ZTM_API_PROXY`: normally set by `entrypoint.sh`; can be set manually for local proxy smoke tests.
 
 ## Output
@@ -54,6 +55,8 @@ VEHICLE_TYPE=bus uv run python poller.py --once --no-upload
 The Docker image runs `tailscaled` in userspace networking mode and exposes a local SOCKS5 proxy. Only ZTM API requests use that proxy; GCS uploads stay on direct container networking.
 
 Userspace mode does not require `NET_ADMIN` or `/dev/net/tun`. If Tailscale auth or exit-node setup fails, the container exits.
+
+If the new container node must be manually approved for Mullvad VPN access, the poller usually stays alive by retrying API failures. `STARTUP_GRACE_SECONDS` also prevents an early poller crash from immediately removing the container before approval can be completed.
 
 ```bash
 docker build -t ztm-gps-poller ./poller

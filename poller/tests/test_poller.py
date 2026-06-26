@@ -243,6 +243,15 @@ def test_entrypoint_fails_before_poller_when_tailscaled_is_not_ready() -> None:
     assert script.index(readiness_check) < script.index(failure) < script.index(poller_start)
 
 
+def test_entrypoint_keeps_container_alive_after_early_poller_failure() -> None:
+    script = ENTRYPOINT.read_text()
+
+    assert 'STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-300}"' in script
+    assert 'if [ "${POLLER_STATUS}" -ne 0 ]; then' in script
+    assert 'if [ "${RUNTIME_SECONDS}" -lt "${STARTUP_GRACE_SECONDS}" ]; then' in script
+    assert 'sleep "${REMAINING_SECONDS}"' in script
+
+
 def _config(api_proxy: str | None = None) -> poller.Config:
     return poller.Config(
         api_token="token",

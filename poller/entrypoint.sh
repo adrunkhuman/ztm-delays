@@ -7,6 +7,8 @@ set -eu
 TS_SOCKS_ADDR="${TS_SOCKS_ADDR:-127.0.0.1:1055}"
 TS_EXIT_NODE="${TS_EXIT_NODE:-100.103.142.113}"
 TS_STATE_DIR="${TS_STATE_DIR:-/var/lib/tailscale}"
+STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-300}"
+STARTED_AT=$(date +%s)
 
 if [ -z "${TS_HOSTNAME:-}" ]; then
   TS_HOSTNAME="ztm-poller-${VEHICLE_TYPE}"
@@ -54,6 +56,16 @@ set +e
 wait "${POLLER_PID}"
 POLLER_STATUS=$?
 set -e
+
+if [ "${POLLER_STATUS}" -ne 0 ]; then
+  NOW=$(date +%s)
+  RUNTIME_SECONDS=$((NOW - STARTED_AT))
+  if [ "${RUNTIME_SECONDS}" -lt "${STARTUP_GRACE_SECONDS}" ]; then
+    REMAINING_SECONDS=$((STARTUP_GRACE_SECONDS - RUNTIME_SECONDS))
+    echo "poller exited during startup grace; keeping container alive for ${REMAINING_SECONDS}s" >&2
+    sleep "${REMAINING_SECONDS}"
+  fi
+fi
 
 terminate
 wait "${TAILSCALED_PID}" 2>/dev/null || true
