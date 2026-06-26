@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  poller:
+    name: Poller
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+          cache-dependency-glob: poller/uv.lock
+
+      - name: Install poller dependencies
+        run: uv sync --locked
+        working-directory: poller
+
+      - name: Lint poller
+        run: uv run ruff check .
+        working-directory: poller
+
+      - name: Test poller
+        run: uv run pytest
+        working-directory: poller
+
+  airflow:
+    name: Airflow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+          cache-dependency-glob: airflow/pyproject.toml
+
+      - name: Compile Airflow DAGs
+        run: python -m py_compile airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py
+
+      - name: Lint Airflow
+        run: uvx ruff check airflow
+
+      - name: Test Airflow DAG boundaries
+        run: uvx --with pytest --with tzdata pytest airflow/tests
+
+  dbt:
+    name: dbt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+          cache-dependency-glob: dbt/dbt_project.yml
+
+      - name: Configure credential path
+        run: echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp-key.json" >> "$GITHUB_ENV"
+
+      - name: Write GCP service account key
+        env:
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+        run: |
+          test -n "$GCP_SERVICE_ACCOUNT_JSON"
+          printf '%s' "$GCP_SERVICE_ACCOUNT_JSON" > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      - name: Parse dbt project
+        run: uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt parse --profiles-dir .
+        working-directory: dbt
+
+      - name: Compile GTFS staging models
+        run: >-
+          uvx --python 3.13 --from dbt-core --with dbt-bigquery
+          dbt compile --profiles-dir .
+          --select stg_gtfs_trips stg_gtfs_stop_times stg_gtfs_stops stg_gtfs_shapes stg_gtfs_routes stg_gtfs_calendar_dates
+          --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
+        working-directory: dbt
+
+      - name: Run dbt unit tests
+        run: >-
+          uvx --python 3.13 --from dbt-core --with dbt-bigquery
+          dbt test --profiles-dir .
+          --select test_type:unit
+          --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
+        working-directory: dbt
