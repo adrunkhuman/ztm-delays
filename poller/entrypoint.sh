@@ -5,7 +5,7 @@ set -eu
 : "${VEHICLE_TYPE:?VEHICLE_TYPE is required}"
 
 TS_SOCKS_ADDR="${TS_SOCKS_ADDR:-127.0.0.1:1055}"
-TS_EXIT_NODE="${TS_EXIT_NODE:-pl-waw-wg-101.mullvad.ts.net}"
+TS_EXIT_NODE="${TS_EXIT_NODE:-pl-waw-wg-101}"
 TS_STATE_DIR="${TS_STATE_DIR:-/var/lib/tailscale}"
 
 if [ -z "${TS_HOSTNAME:-}" ]; then
