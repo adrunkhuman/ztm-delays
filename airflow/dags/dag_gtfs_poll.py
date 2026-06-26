@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import zipfile
 from datetime import UTC, datetime
+from io import BytesIO
 
 import requests
 from google.api_core.exceptions import NotFound
@@ -39,6 +41,8 @@ def _gtfs_gcs_uri(snapshot_timestamp: str) -> str:
 def _download_gtfs_zip() -> bytes:
     response = requests.get(GTFS_URL, timeout=60)
     response.raise_for_status()
+    if not zipfile.is_zipfile(BytesIO(response.content)):
+        raise RuntimeError("GTFS download did not return a valid ZIP file")
     return response.content
 
 
@@ -56,9 +60,9 @@ def _ensure_raw_gtfs_snapshots_table(client: bigquery.Client) -> None:
 
 
 def _latest_gtfs_hash(client: bigquery.Client) -> str | None:
-    query = """
+    query = f"""  # noqa: S608 - table name is a module constant, not user input.
         select file_hash
-        from `ztm-data.ztm_bq.raw_gtfs_snapshots`
+        from `{RAW_GTFS_SNAPSHOTS_TABLE}`
         order by snapshot_timestamp desc
         limit 1
     """
@@ -111,6 +115,7 @@ with DAG(
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule="0 * * * *",
     catchup=False,
+    max_active_runs=1,
     tags=["ztm", "gtfs"],
 ) as dag:
 

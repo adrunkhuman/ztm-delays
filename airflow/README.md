@@ -8,6 +8,7 @@ Runtime contract:
 - Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, and `google-cloud-storage`.
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
 - Service account can list/read `gs://ztm-analytics-bucket/raw/gps/...` and load/query `ztm-data.ztm_bq`.
+- Service account can write `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/query/insert `ztm-data.ztm_bq.raw_gtfs_snapshots`.
 
 The first production DAG is GPS-only:
 

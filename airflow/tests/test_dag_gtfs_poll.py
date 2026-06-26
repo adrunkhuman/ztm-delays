@@ -3,8 +3,12 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 
 def test_gtfs_hash_and_paths_are_stable() -> None:
@@ -18,7 +22,7 @@ def test_gtfs_hash_and_paths_are_stable() -> None:
 
 def test_poll_gtfs_snapshot_skips_unchanged_snapshot(monkeypatch: Any) -> None:
     dag = _load_dag_module()
-    zip_bytes = b"gtfs zip"
+    zip_bytes = _zip_bytes()
     file_hash = dag._sha256(zip_bytes)
     client = FakeBigQueryClient(latest_hash=file_hash)
 
@@ -33,28 +37,24 @@ def test_poll_gtfs_snapshot_skips_unchanged_snapshot(monkeypatch: Any) -> None:
 
 def test_poll_gtfs_snapshot_uploads_changed_snapshot(monkeypatch: Any) -> None:
     dag = _load_dag_module()
-    zip_bytes = b"changed gtfs zip"
+    zip_bytes = _zip_bytes()
     client = FakeBigQueryClient(latest_hash="old-hash")
-    inserted_rows: list[tuple[str, str, str]] = []
+    storage_client = FakeStorageClient()
 
     monkeypatch.setattr(dag, "_download_gtfs_zip", lambda: zip_bytes)
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
-    monkeypatch.setattr(dag, "_upload_gtfs_zip", lambda snapshot_timestamp, data: f"gs://test/{snapshot_timestamp}.zip")
-    monkeypatch.setattr(
-        dag,
-        "_insert_gtfs_snapshot",
-        lambda bq_client, snapshot_timestamp, file_hash, gcs_path: inserted_rows.append(
-            (snapshot_timestamp, file_hash, gcs_path)
-        ),
-    )
+    monkeypatch.setattr(dag.storage, "Client", lambda project: storage_client)
 
     assert dag._poll_gtfs_snapshot() == "uploaded"
     assert client.created_table is not None
-    assert len(inserted_rows) == 1
-    snapshot_timestamp, file_hash, gcs_path = inserted_rows[0]
-    assert snapshot_timestamp.endswith("Z")
-    assert file_hash == dag._sha256(zip_bytes)
-    assert gcs_path == f"gs://test/{snapshot_timestamp}.zip"
+    assert len(client.inserted_rows) == 1
+    inserted_row = client.inserted_rows[0]
+    assert inserted_row["snapshot_timestamp"].endswith("Z")
+    assert inserted_row["file_hash"] == dag._sha256(zip_bytes)
+    assert inserted_row["gcs_path"] == f"gs://ztm-analytics-bucket/raw/gtfs/{inserted_row['snapshot_timestamp']}.zip"
+    assert storage_client.bucket_obj.uploads == [
+        (f"raw/gtfs/{inserted_row['snapshot_timestamp']}.zip", zip_bytes, "application/zip")
+    ]
 
 
 def test_insert_gtfs_snapshot_uses_expected_metadata_row() -> None:
@@ -72,6 +72,17 @@ def test_insert_gtfs_snapshot_uses_expected_metadata_row() -> None:
             "gcs_path": "gs://bucket/raw/gtfs/test.zip",
         }
     ]
+
+
+def test_download_gtfs_zip_rejects_non_zip_response(monkeypatch: Any) -> None:
+    dag = _load_dag_module()
+    response = FakeResponse(b"not a zip")
+    monkeypatch.setattr(dag.requests, "get", lambda url, timeout: response)
+
+    with pytest.raises(RuntimeError, match="valid ZIP"):
+        dag._download_gtfs_zip()
+
+    assert response.raise_for_status_called is True
 
 
 def _load_dag_module() -> types.ModuleType:
@@ -208,9 +219,12 @@ class FakeRow:
 
 
 class FakeStorageClient:
+    def __init__(self) -> None:
+        self.bucket_obj = FakeBucket()
+
     def bucket(self, bucket_name: str) -> FakeBucket:
         assert bucket_name == "ztm-analytics-bucket"
-        return FakeBucket()
+        return self.bucket_obj
 
 
 class FakeBucket:
@@ -236,3 +250,19 @@ class NotFound(Exception):
 
 def _fail_if_called(*_args: object, **_kwargs: object) -> None:
     raise AssertionError("function should not be called")
+
+
+class FakeResponse:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.raise_for_status_called = False
+
+    def raise_for_status(self) -> None:
+        self.raise_for_status_called = True
+
+
+def _zip_bytes() -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip_file:
+        zip_file.writestr("trips.txt", "trip_id,route_id\n")
+    return buffer.getvalue()
