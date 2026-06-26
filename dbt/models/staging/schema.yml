@@ -34,6 +34,137 @@ models:
       - name: gps_date
         tests:
           - not_null
+  - name: stg_gtfs_trips
+    description: GTFS trips from the snapshot valid for the processing date.
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+      - name: line
+        tests:
+          - not_null
+      - name: service_id
+        tests:
+          - not_null
+      - name: direction_id
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: brigade
+        tests:
+          - not_null
+      - name: shape_id
+        tests:
+          - not_null
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null
+
+  - name: stg_gtfs_stop_times
+    description: GTFS stop times with schedule times converted to seconds since midnight.
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+      - name: stop_id
+        tests:
+          - not_null
+      - name: stop_sequence
+        tests:
+          - not_null
+      - name: arrival_time_seconds
+        tests:
+          - not_null
+      - name: departure_time_seconds
+        tests:
+          - not_null
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null
+
+  - name: stg_gtfs_stops
+    description: GTFS stops from the snapshot valid for the processing date.
+    columns:
+      - name: stop_id
+        tests:
+          - not_null
+      - name: stop_name
+        tests:
+          - not_null
+      - name: stop_lat
+        tests:
+          - not_null
+      - name: stop_lon
+        tests:
+          - not_null
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null
+
+  - name: stg_gtfs_shapes
+    description: GTFS shape points from the snapshot valid for the processing date.
+    columns:
+      - name: shape_id
+        tests:
+          - not_null
+      - name: shape_pt_lat
+        tests:
+          - not_null
+      - name: shape_pt_lon
+        tests:
+          - not_null
+      - name: shape_pt_sequence
+        tests:
+          - not_null
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null
+
+  - name: stg_gtfs_routes
+    description: GTFS routes from the snapshot valid for the processing date.
+    columns:
+      - name: route_id
+        tests:
+          - not_null
+      - name: route_short_name
+        tests:
+          - not_null
+      - name: route_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1, 2, 3]
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null
+
+  - name: stg_gtfs_calendar_dates
+    description: GTFS service dates with weekday/weekend classification.
+    columns:
+      - name: service_id
+        tests:
+          - not_null
+      - name: service_date
+        tests:
+          - not_null
+      - name: exception_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1]
+      - name: day_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['weekday', 'weekend']
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null
 
 unit_tests:
   - name: stg_gps_pings_filters_normalizes_and_deduplicates
@@ -83,3 +214,169 @@ unit_tests:
           vehicle_type: 1
           ingested_at: '2026-01-14 23:31:00+00:00'
           gps_date: '2026-01-15'
+
+  - name: stg_gtfs_trips_selects_valid_snapshot_and_renames_brigade
+    model: stg_gtfs_trips
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-01-01 00:00:00+00:00') as snapshot_timestamp, 'hash-old' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-valid', timestamp('2026-01-14 12:00:00+00:00'), 'hash-valid', 'gs://bucket/valid.zip'
+          union all select 'snapshot-future', timestamp('2026-01-16 00:00:00+00:00'), 'hash-future', 'gs://bucket/future.zip'
+      - input: source('raw', 'raw_gtfs_trips')
+        format: sql
+        rows: |
+          select 'trip-old' as trip_id, '187' as route_id, 'svc-old' as service_id, 'Old' as trip_headsign, 0 as direction_id, 'block-old' as block_id, '10' as block_short_name, 'shape-old' as shape_id, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'trip-valid', '187', 'svc-valid', 'Valid', 1, 'block-valid', '0012', 'shape-valid', 'snapshot-valid'
+          union all select 'trip-future', '187', 'svc-future', 'Future', 0, 'block-future', '14', 'shape-future', 'snapshot-future'
+    expect:
+      rows:
+        - trip_id: 'trip-valid'
+          line: '187'
+          service_id: 'svc-valid'
+          trip_headsign: 'Valid'
+          direction_id: 1
+          brigade: '12'
+          shape_id: 'shape-valid'
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: stg_gtfs_stop_times_converts_overnight_times_to_seconds
+    model: stg_gtfs_stop_times
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-01-01 00:00:00+00:00') as snapshot_timestamp, 'hash-old' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-valid', timestamp('2026-01-14 12:00:00+00:00'), 'hash-valid', 'gs://bucket/valid.zip'
+          union all select 'snapshot-future', timestamp('2026-01-16 00:00:00+00:00'), 'hash-future', 'gs://bucket/future.zip'
+      - input: source('raw', 'raw_gtfs_stop_times')
+        format: sql
+        rows: |
+          select 'trip-old' as trip_id, '401001' as stop_id, 1 as stop_sequence, '08:00:00' as arrival_time, '08:01:00' as departure_time, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'trip-1', '401002', 7, '25:03:04', '25:04:05', 'snapshot-valid'
+          union all select 'trip-future', '401003', 1, '08:00:00', '08:01:00', 'snapshot-future'
+    expect:
+      rows:
+        - trip_id: 'trip-1'
+          stop_id: '401002'
+          stop_sequence: 7
+          arrival_time_seconds: 90184
+          departure_time_seconds: 90245
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: stg_gtfs_stops_selects_valid_snapshot
+    model: stg_gtfs_stops
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-01-01 00:00:00+00:00') as snapshot_timestamp, 'hash-old' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-valid', timestamp('2026-01-14 12:00:00+00:00'), 'hash-valid', 'gs://bucket/valid.zip'
+          union all select 'snapshot-future', timestamp('2026-01-16 00:00:00+00:00'), 'hash-future', 'gs://bucket/future.zip'
+      - input: source('raw', 'raw_gtfs_stops')
+        format: sql
+        rows: |
+          select '401001' as stop_id, 'Old Stop' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon, 'snapshot-old' as gtfs_snapshot_id
+          union all select '401002', 'Valid Stop', 52.2, 21.2, 'snapshot-valid'
+          union all select '401003', 'Future Stop', 52.3, 21.3, 'snapshot-future'
+    expect:
+      rows:
+        - stop_id: '401002'
+          stop_name: 'Valid Stop'
+          stop_lat: 52.2
+          stop_lon: 21.2
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: stg_gtfs_shapes_selects_valid_snapshot
+    model: stg_gtfs_shapes
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-01-01 00:00:00+00:00') as snapshot_timestamp, 'hash-old' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-valid', timestamp('2026-01-14 12:00:00+00:00'), 'hash-valid', 'gs://bucket/valid.zip'
+          union all select 'snapshot-future', timestamp('2026-01-16 00:00:00+00:00'), 'hash-future', 'gs://bucket/future.zip'
+      - input: source('raw', 'raw_gtfs_shapes')
+        format: sql
+        rows: |
+          select 'shape-old' as shape_id, 52.1 as shape_pt_lat, 21.1 as shape_pt_lon, 1 as shape_pt_sequence, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'shape-valid', 52.2, 21.2, 2, 'snapshot-valid'
+          union all select 'shape-future', 52.3, 21.3, 3, 'snapshot-future'
+    expect:
+      rows:
+        - shape_id: 'shape-valid'
+          shape_pt_lat: 52.2
+          shape_pt_lon: 21.2
+          shape_pt_sequence: 2
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: stg_gtfs_routes_selects_valid_snapshot
+    model: stg_gtfs_routes
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-01-01 00:00:00+00:00') as snapshot_timestamp, 'hash-old' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-valid', timestamp('2026-01-14 12:00:00+00:00'), 'hash-valid', 'gs://bucket/valid.zip'
+          union all select 'snapshot-future', timestamp('2026-01-16 00:00:00+00:00'), 'hash-future', 'gs://bucket/future.zip'
+      - input: source('raw', 'raw_gtfs_routes')
+        format: sql
+        rows: |
+          select 'old' as route_id, 'OLD' as route_short_name, 3 as route_type, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'valid', '187', 3, 'snapshot-valid'
+          union all select 'future', 'FUT', 0, 'snapshot-future'
+    expect:
+      rows:
+        - route_id: 'valid'
+          route_short_name: '187'
+          route_type: 3
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: stg_gtfs_calendar_dates_derives_day_type
+    model: stg_gtfs_calendar_dates
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-01-01 00:00:00+00:00') as snapshot_timestamp, 'hash-old' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-valid', timestamp('2026-01-14 12:00:00+00:00'), 'hash-valid', 'gs://bucket/valid.zip'
+          union all select 'snapshot-future', timestamp('2026-01-16 00:00:00+00:00'), 'hash-future', 'gs://bucket/future.zip'
+      - input: source('raw', 'raw_gtfs_calendar_dates')
+        format: sql
+        rows: |
+          select 'svc-old' as service_id, date '2026-01-17' as `date`, 1 as exception_type, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'svc-weekend', date '2026-01-17', 1, 'snapshot-valid'
+          union all select 'svc-weekday', date '2026-01-19', 1, 'snapshot-valid'
+          union all select 'svc-removed', date '2026-01-20', 2, 'snapshot-valid'
+          union all select 'svc-future', date '2026-01-21', 1, 'snapshot-future'
+    expect:
+      rows:
+        - service_id: 'svc-weekend'
+          service_date: '2026-01-17'
+          exception_type: 1
+          day_type: 'weekend'
+          gtfs_snapshot_id: 'snapshot-valid'
+        - service_id: 'svc-weekday'
+          service_date: '2026-01-19'
+          exception_type: 1
+          day_type: 'weekday'
+          gtfs_snapshot_id: 'snapshot-valid'
