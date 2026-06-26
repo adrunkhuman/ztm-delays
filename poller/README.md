@@ -1,11 +1,10 @@
 # ZTM GPS Poller
 
-One container polls one Warsaw ZTM vehicle type every 10 seconds and writes closed hourly Parquet files to GCS.
+One container polls Warsaw ZTM buses and trams every 10 seconds and writes closed hourly Parquet files to GCS.
 
 ## Required Environment
 
 - `ZTM_API_TOKEN`: city API token used as the `Authorization` header.
-- `VEHICLE_TYPE`: `bus` or `tram` (`1` and `2` also accepted).
 - `GOOGLE_APPLICATION_CREDENTIALS`: path to the mounted GCP service account key.
 - `TS_AUTHKEY`: Tailscale auth key used to join the tailnet non-interactively.
 
@@ -19,7 +18,7 @@ One container polls one Warsaw ZTM vehicle type every 10 seconds and writes clos
 - `FUTURE_PING_TOLERANCE_SECONDS`: defaults to `60`; farther-future API rows are dropped.
 - `LOG_LEVEL`: defaults to `INFO`.
 - `TS_EXIT_NODE`: defaults to `100.103.142.113` (`pl-waw-wg-101.mullvad.ts.net`, Warsaw).
-- `TS_HOSTNAME`: defaults to `ztm-poller-${VEHICLE_TYPE}`.
+- `TS_HOSTNAME`: defaults to `ztm-poller`.
 - `TS_SOCKS_ADDR`: defaults to `127.0.0.1:1055`.
 - `STARTUP_GRACE_SECONDS`: defaults to `300`; keeps the container alive briefly if the poller exits during startup.
 - `ZTM_API_PROXY`: normally set by `entrypoint.sh`; can be set manually for local proxy smoke tests.
@@ -35,19 +34,27 @@ Multiple part files per hour are expected. This avoids overwriting an already-up
 
 `Time` is parsed as Europe/Warsaw local time and written as UTC Parquet timestamp because the raw BigQuery schema declares it as `TIMESTAMP`.
 
+## Operational Semantics
+
+Run exactly one poller instance. Older split deployments must be removed before deploying this version; running both old `poller-bus` and `poller-tram` services after this change duplicates bus and tram raw files.
+
+Rows are buffered in memory until their Warsaw-local hour closes. On graceful shutdown, the current hour is flushed too. If an upload fails, that hour stays buffered and is retried on the next flush attempt. A crash, forced container kill, or host restart loses rows that were buffered but not uploaded; there is no durable local spool.
+
+The city API can return stale or future-dated pings. The poller drops rows outside the configured freshness window before buffering.
+
 ## Local Run
 
 ```bash
 uv sync
 export ZTM_API_TOKEN=...
-VEHICLE_TYPE=bus uv run python poller.py
+uv run python poller.py
 ```
 
 Safe live API smoke test, with no GCS client initialization and no upload:
 
 ```bash
 export ZTM_API_TOKEN=...
-VEHICLE_TYPE=bus uv run python poller.py --once --no-upload
+uv run python poller.py --once --no-upload
 ```
 
 ## Docker
@@ -63,7 +70,6 @@ docker build -t ztm-gps-poller ./poller
 docker run --rm \
   -e ZTM_API_TOKEN \
   -e TS_AUTHKEY \
-  -e VEHICLE_TYPE=bus \
   -e GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-key.json \
   -v /secure/path/service-account-key.json:/run/secrets/gcp-key.json:ro \
   ztm-gps-poller
@@ -75,7 +81,6 @@ Safe container smoke test, with no GCS client initialization and no upload:
 docker run --rm \
   -e ZTM_API_TOKEN \
   -e TS_AUTHKEY \
-  -e VEHICLE_TYPE=bus \
   ztm-gps-poller --once --no-upload
 ```
 
