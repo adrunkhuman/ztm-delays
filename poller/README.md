@@ -7,6 +7,7 @@ One container polls one Warsaw ZTM vehicle type every 10 seconds and writes clos
 - `ZTM_API_TOKEN`: city API token used as the `Authorization` header.
 - `VEHICLE_TYPE`: `bus` or `tram` (`1` and `2` also accepted).
 - `GOOGLE_APPLICATION_CREDENTIALS`: path to the mounted GCP service account key.
+- `TS_AUTHKEY`: Tailscale auth key used to join the tailnet non-interactively.
 
 ## Optional Environment
 
@@ -14,7 +15,14 @@ One container polls one Warsaw ZTM vehicle type every 10 seconds and writes clos
 - `GCS_PREFIX`: defaults to `raw/gps`.
 - `POLL_INTERVAL_SECONDS`: defaults to `10`.
 - `API_TIMEOUT_SECONDS`: defaults to `5`.
+- `MAX_PING_AGE_SECONDS`: defaults to `300`; older API rows are dropped.
+- `FUTURE_PING_TOLERANCE_SECONDS`: defaults to `60`; farther-future API rows are dropped.
 - `LOG_LEVEL`: defaults to `INFO`.
+- `TS_EXIT_NODE`: defaults to `100.103.142.113` (`pl-waw-wg-101.mullvad.ts.net`, Warsaw).
+- `TS_HOSTNAME`: defaults to `ztm-poller-${VEHICLE_TYPE}`.
+- `TS_SOCKS_ADDR`: defaults to `127.0.0.1:1055`.
+- `STARTUP_GRACE_SECONDS`: defaults to `300`; keeps the container alive briefly if the poller exits during startup.
+- `ZTM_API_PROXY`: normally set by `entrypoint.sh`; can be set manually for local proxy smoke tests.
 
 ## Output
 
@@ -44,12 +52,31 @@ VEHICLE_TYPE=bus uv run python poller.py --once --no-upload
 
 ## Docker
 
+The Docker image runs `tailscaled` in userspace networking mode and exposes a local SOCKS5 proxy. Only ZTM API requests use that proxy; GCS uploads stay on direct container networking.
+
+Userspace mode does not require `NET_ADMIN` or `/dev/net/tun`. If Tailscale auth or exit-node setup fails, the container exits.
+
+If the new container node must be manually approved for Mullvad VPN access, the poller usually stays alive by retrying API failures. `STARTUP_GRACE_SECONDS` also prevents an early poller crash from immediately removing the container before approval can be completed.
+
 ```bash
 docker build -t ztm-gps-poller ./poller
 docker run --rm \
   -e ZTM_API_TOKEN \
+  -e TS_AUTHKEY \
   -e VEHICLE_TYPE=bus \
   -e GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-key.json \
   -v /secure/path/service-account-key.json:/run/secrets/gcp-key.json:ro \
   ztm-gps-poller
 ```
+
+Safe container smoke test, with no GCS client initialization and no upload:
+
+```bash
+docker run --rm \
+  -e ZTM_API_TOKEN \
+  -e TS_AUTHKEY \
+  -e VEHICLE_TYPE=bus \
+  ztm-gps-poller --once --no-upload
+```
+
+In Coolify, configure `TS_AUTHKEY` as a runtime environment variable only. Do not pass it as a build argument.

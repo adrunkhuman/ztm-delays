@@ -10,7 +10,7 @@ import time
 from argparse import ArgumentParser, Namespace
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypedDict, cast
 from zoneinfo import ZoneInfo
 
@@ -61,6 +61,9 @@ class Config:
     gcs_prefix: str
     poll_interval_seconds: float
     api_timeout_seconds: float
+    api_proxy: str | None
+    max_ping_age_seconds: float
+    future_ping_tolerance_seconds: float
     run_once: bool
     no_upload: bool
 
@@ -100,9 +103,16 @@ def main() -> int:
 
         try:
             rows = _poll_api(session, config)
+            rows, dropped_stale, dropped_future = _filter_fresh_rows(rows, datetime.now(UTC), config)
             for row in rows:
                 buffers[_hour_key(row["Time"].astimezone(WARSAW_TZ))].append(row)
-            LOGGER.info("poll succeeded vehicle_type=%s rows=%d", config.vehicle_type_name, len(rows))
+            LOGGER.info(
+                "poll succeeded vehicle_type=%s accepted_rows=%d dropped_stale=%d dropped_future=%d",
+                config.vehicle_type_name,
+                len(rows),
+                dropped_stale,
+                dropped_future,
+            )
         except requests.RequestException:
             LOGGER.exception("API request failed")
         except json.JSONDecodeError:
@@ -156,6 +166,9 @@ def _load_config(args: Namespace) -> Config:
     vehicle_type_id, vehicle_type_name = VEHICLE_TYPES[vehicle_type]
     poll_interval_seconds = _positive_float_env("POLL_INTERVAL_SECONDS", "10")
     api_timeout_seconds = _positive_float_env("API_TIMEOUT_SECONDS", "5")
+    max_ping_age_seconds = _positive_float_env("MAX_PING_AGE_SECONDS", "300")
+    future_ping_tolerance_seconds = _positive_float_env("FUTURE_PING_TOLERANCE_SECONDS", "60")
+    api_proxy = os.getenv("ZTM_API_PROXY", "").strip() or None
 
     return Config(
         api_token=api_token,
@@ -165,6 +178,9 @@ def _load_config(args: Namespace) -> Config:
         gcs_prefix=os.getenv("GCS_PREFIX", "raw/gps").strip("/"),
         poll_interval_seconds=poll_interval_seconds,
         api_timeout_seconds=api_timeout_seconds,
+        api_proxy=api_proxy,
+        max_ping_age_seconds=max_ping_age_seconds,
+        future_ping_tolerance_seconds=future_ping_tolerance_seconds,
         run_once=args.once,
         no_upload=args.no_upload,
     )
@@ -194,11 +210,13 @@ def _build_signal_handler() -> Callable[[], bool]:
 
 
 def _poll_api(session: requests.Session, config: Config) -> list[GpsRow]:
+    proxies = {"http": config.api_proxy, "https": config.api_proxy} if config.api_proxy else None
     response = session.post(
         API_URL,
         headers={"Authorization": config.api_token},
         json={"type": config.vehicle_type_id},
         timeout=config.api_timeout_seconds,
+        proxies=proxies,
     )
     response.raise_for_status()
 
@@ -214,6 +232,26 @@ def _poll_api(session: requests.Session, config: Config) -> list[GpsRow]:
         if row is not None:
             parsed_rows.append(row)
     return parsed_rows
+
+
+def _filter_fresh_rows(rows: list[GpsRow], now: datetime, config: Config) -> tuple[list[GpsRow], int, int]:
+    min_time = now - timedelta(seconds=config.max_ping_age_seconds)
+    max_time = now + timedelta(seconds=config.future_ping_tolerance_seconds)
+    fresh_rows = []
+    dropped_stale = 0
+    dropped_future = 0
+
+    for row in rows:
+        ping_time = row["Time"]
+        if ping_time < min_time:
+            dropped_stale += 1
+            continue
+        if ping_time > max_time:
+            dropped_future += 1
+            continue
+        fresh_rows.append(row)
+
+    return fresh_rows, dropped_stale, dropped_future
 
 
 def _extract_records(payload: object) -> list[dict[str, object]]:
