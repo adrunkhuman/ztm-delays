@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from airflow.exceptions import AirflowException
+from google.api_core.exceptions import Conflict
 from google.cloud import bigquery, storage
 
 try:
@@ -10,10 +11,9 @@ try:
     from airflow.providers.standard.operators.python import PythonOperator
     from airflow.sdk import DAG
 except ImportError:  # Airflow 2 compatibility for local parser checks and older images.
+    from airflow import DAG
     from airflow.operators.bash import BashOperator
     from airflow.operators.python import PythonOperator
-
-    from airflow import DAG
 
 GCP_PROJECT = "ztm-data"
 BIGQUERY_DATASET = "ztm_bq"
@@ -66,12 +66,16 @@ def _load_raw_gps_pings(processing_date: str) -> None:
         ),
         clustering_fields=["Lines"],
     )
-    job = client.load_table_from_uri(
-        _expected_gcs_uris(processing_date),
-        RAW_GPS_TABLE,
-        job_config=job_config,
-        job_id=f"load_raw_gps_pings_{processing_date.replace('-', '')}",
-    )
+    job_id = f"load_raw_gps_pings_{processing_date.replace('-', '')}"
+    try:
+        job = client.load_table_from_uri(
+            _expected_gcs_uris(processing_date),
+            RAW_GPS_TABLE,
+            job_config=job_config,
+            job_id=job_id,
+        )
+    except Conflict:
+        job = client.get_job(job_id, project=GCP_PROJECT)
     job.result()
 
 
