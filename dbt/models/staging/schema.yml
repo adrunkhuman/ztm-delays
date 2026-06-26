@@ -28,6 +28,7 @@ models:
           - accepted_values:
               arguments:
                 values: [1, 2]
+                quote: false
       - name: ingested_at
         tests:
           - not_null
@@ -52,6 +53,7 @@ models:
           - accepted_values:
               arguments:
                 values: [0, 1]
+                quote: false
       - name: brigade
         tests:
           - not_null
@@ -137,6 +139,7 @@ models:
           - accepted_values:
               arguments:
                 values: [0, 1, 2, 3]
+                quote: false
       - name: gtfs_snapshot_id
         tests:
           - not_null
@@ -156,6 +159,7 @@ models:
           - accepted_values:
               arguments:
                 values: [1]
+                quote: false
       - name: day_type
         tests:
           - not_null
