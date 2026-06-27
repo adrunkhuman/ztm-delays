@@ -1,6 +1,50 @@
 version: 2
 
 models:
+  - name: int_gps_hourly_completeness
+    description: Hourly processing coverage metadata for staged GPS pings. One Warsaw-local GPS date is rebuilt at a time and emits one row per expected vehicle type and real Warsaw-local hour. Coverage is estimated from distinct 10-second GPS timestamp buckets because each poll returns many vehicle rows, not one explicit poll snapshot row.
+    columns:
+      - name: gps_date
+        tests:
+          - not_null
+      - name: gps_hour
+        description: Timestamp for the real hour boundary in Europe/Warsaw. Timestamp storage disambiguates DST fall-back hours.
+        tests:
+          - not_null
+      - name: vehicle_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2]
+                quote: false
+      - name: first_gps_time
+        description: Earliest GPS timestamp observed in this vehicle/hour bucket. Null when no rows were observed.
+      - name: last_gps_time
+        description: Latest GPS timestamp observed in this vehicle/hour bucket. Null when no rows were observed.
+      - name: row_count
+        tests:
+          - not_null
+      - name: vehicle_count
+        tests:
+          - not_null
+      - name: observed_10s_buckets
+        tests:
+          - not_null
+      - name: expected_10s_buckets
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [360]
+                quote: false
+      - name: coverage_ratio
+        tests:
+          - not_null
+      - name: max_gap_seconds
+        tests:
+          - not_null
+
   - name: int_ping_trip
     description: GPS pings matched to one scheduled GTFS trip per vehicle and GPS timestamp. The model processes one Warsaw-local GPS date at a time, but can match the previous GTFS service date for overnight trips whose GTFS times exceed 24h. When overlapping trip windows match, the trip with the latest start time wins.
     columns:
@@ -133,6 +177,78 @@ models:
           - not_null
 
 unit_tests:
+  - name: int_gps_hourly_completeness_counts_10_second_buckets
+    model: int_gps_hourly_completeness
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: ref('stg_gps_pings')
+        format: sql
+        rows: |
+          select '187' as line, '12' as brigade, 52.1 as lat, 21.1 as lon, timestamp('2026-01-15 09:00:01+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:02+00:00') as ingested_at, date '2026-01-15' as gps_date
+          union all select '187', '12', 52.2, 21.2, timestamp('2026-01-15 09:00:09+00:00'), '1002', 1, timestamp('2026-01-15 09:00:10+00:00'), date '2026-01-15'
+          union all select '187', '12', 52.3, 21.3, timestamp('2026-01-15 09:00:11+00:00'), '1001', 1, timestamp('2026-01-15 09:00:12+00:00'), date '2026-01-15'
+          union all select '9', '1', 52.4, 21.4, timestamp('2026-01-15 10:00:00+00:00'), '2001', 2, timestamp('2026-01-15 10:00:01+00:00'), date '2026-01-15'
+          union all select '9', '1', 52.5, 21.5, timestamp('2026-01-16 09:00:00+00:00'), '2002', 2, timestamp('2026-01-16 09:00:01+00:00'), date '2026-01-16'
+    expect:
+      format: sql
+      rows: |
+        with expected_hours as (
+          select
+            date '2026-01-15' as gps_date,
+            gps_hour,
+            vehicle_type
+          from unnest(generate_timestamp_array(
+            timestamp(date '2026-01-15', 'Europe/Warsaw'),
+            timestamp_sub(timestamp(date_add(date '2026-01-15', interval 1 day), 'Europe/Warsaw'), interval 1 hour),
+            interval 1 hour
+          )) as gps_hour
+          cross join unnest([1, 2]) as vehicle_type
+        )
+        select
+          gps_date,
+          gps_hour,
+          vehicle_type,
+          case
+            when gps_hour = timestamp('2026-01-15 09:00:00+00:00') and vehicle_type = 1
+              then timestamp('2026-01-15 09:00:01+00:00')
+            when gps_hour = timestamp('2026-01-15 10:00:00+00:00') and vehicle_type = 2
+              then timestamp('2026-01-15 10:00:00+00:00')
+          end as first_gps_time,
+          case
+            when gps_hour = timestamp('2026-01-15 09:00:00+00:00') and vehicle_type = 1
+              then timestamp('2026-01-15 09:00:11+00:00')
+            when gps_hour = timestamp('2026-01-15 10:00:00+00:00') and vehicle_type = 2
+              then timestamp('2026-01-15 10:00:00+00:00')
+          end as last_gps_time,
+          case
+            when gps_hour = timestamp('2026-01-15 09:00:00+00:00') and vehicle_type = 1 then 3
+            when gps_hour = timestamp('2026-01-15 10:00:00+00:00') and vehicle_type = 2 then 1
+            else 0
+          end as row_count,
+          case
+            when gps_hour = timestamp('2026-01-15 09:00:00+00:00') and vehicle_type = 1 then 2
+            when gps_hour = timestamp('2026-01-15 10:00:00+00:00') and vehicle_type = 2 then 1
+            else 0
+          end as vehicle_count,
+          case
+            when gps_hour = timestamp('2026-01-15 09:00:00+00:00') and vehicle_type = 1 then 2
+            when gps_hour = timestamp('2026-01-15 10:00:00+00:00') and vehicle_type = 2 then 1
+            else 0
+          end as observed_10s_buckets,
+          360 as expected_10s_buckets,
+          case
+            when gps_hour = timestamp('2026-01-15 09:00:00+00:00') and vehicle_type = 1 then 2 / 360
+            when gps_hour = timestamp('2026-01-15 10:00:00+00:00') and vehicle_type = 2 then 1 / 360
+            else 0
+          end as coverage_ratio,
+          case
+            when gps_hour = timestamp('2026-01-15 09:00:00+00:00') and vehicle_type = 1 then 3589
+            else 3600
+          end as max_gap_seconds
+        from expected_hours
+
   - name: int_stop_arrivals_reconstructs_segment_crossing_time
     model: int_stop_arrivals
     overrides:

@@ -10,57 +10,92 @@ from typing import Any
 import pytest
 
 
-def test_expected_gcs_uris_cover_bus_and_tram_24_hours() -> None:
+def test_available_gps_part_uris_lists_existing_bus_and_tram_parts(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
+    blobs = [
+        "raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet",
+        "raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/not-a-part.txt",
+        "raw/gps/vehicle_type=tram/date=2026-06-25/hour=08/part-b.parquet",
+    ]
+    monkeypatch.setattr(dag.storage, "Client", lambda project: FakeStorageClient(blobs))
 
-    uris = dag._expected_gcs_uris("2026-06-25")
+    uris = dag._available_gps_part_uris("2026-06-25")
 
-    assert len(uris) == 48
-    assert uris[0] == "gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=2026-06-25/hour=00/part-*.parquet"
-    assert uris[23] == "gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=2026-06-25/hour=23/part-*.parquet"
-    assert uris[24] == "gs://ztm-analytics-bucket/raw/gps/vehicle_type=tram/date=2026-06-25/hour=00/part-*.parquet"
-    assert uris[47] == "gs://ztm-analytics-bucket/raw/gps/vehicle_type=tram/date=2026-06-25/hour=23/part-*.parquet"
+    assert uris == [
+        "gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet",
+        "gs://ztm-analytics-bucket/raw/gps/vehicle_type=tram/date=2026-06-25/hour=08/part-b.parquet",
+    ]
 
 
-def test_check_gps_files_raises_with_missing_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_raw_gps_pings_returns_when_no_parts_exist(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
-    existing_prefixes = set(dag._expected_gcs_prefixes("2026-06-25"))
-    missing_prefix = "raw/gps/vehicle_type=tram/date=2026-06-25/hour=23/"
-    existing_prefixes.remove(missing_prefix)
+    client = FakeBigQueryClient()
+    monkeypatch.setattr(dag.storage, "Client", lambda project: FakeStorageClient([]))
+    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
-    monkeypatch.setattr(dag.storage, "Client", lambda project: FakeStorageClient(existing_prefixes))
+    dag._load_raw_gps_pings("2026-06-25")
 
-    with pytest.raises(dag.AirflowException, match=f"gs://ztm-analytics-bucket/{missing_prefix}"):
-        dag._check_gps_files("2026-06-25")
+    assert client.load_calls == []
 
 
 def test_load_raw_gps_pings_uses_expected_bigquery_load_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
     client = FakeBigQueryClient()
+    blobs = [
+        "raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet",
+        "raw/gps/vehicle_type=tram/date=2026-06-25/hour=07/part-b.parquet",
+    ]
+    monkeypatch.setattr(dag.storage, "Client", lambda project: FakeStorageClient(blobs))
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
     dag._load_raw_gps_pings("2026-06-25")
 
-    assert client.load_call is not None
-    assert client.load_call.destination == "ztm-data.ztm_bq.raw_gps_pings"
-    assert len(client.load_call.uris) == 48
-    assert client.load_call.job_id == "load_raw_gps_pings_20260625"
-    assert client.load_call.job_config.source_format == dag.bigquery.SourceFormat.PARQUET
-    assert client.load_call.job_config.create_disposition == dag.bigquery.CreateDisposition.CREATE_IF_NEEDED
-    assert client.load_call.job_config.write_disposition == dag.bigquery.WriteDisposition.WRITE_APPEND
-    assert client.load_call.job_config.time_partitioning.field == "Time"
-    assert client.load_call.job_config.clustering_fields == ["Lines"]
-    assert client.load_call.job.result_called is True
+    assert len(client.load_calls) == 2
+    assert (
+        client.load_calls[0].uri
+        == "gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet"
+    )
+    assert client.load_calls[0].destination == "ztm-data.ztm_bq.raw_gps_pings"
+    assert client.load_calls[0].job_id == dag._load_job_id(client.load_calls[0].uri)
+    assert client.load_calls[0].job_config.source_format == dag.bigquery.SourceFormat.PARQUET
+    assert client.load_calls[0].job_config.create_disposition == dag.bigquery.CreateDisposition.CREATE_IF_NEEDED
+    assert client.load_calls[0].job_config.write_disposition == dag.bigquery.WriteDisposition.WRITE_APPEND
+    assert client.load_calls[0].job_config.time_partitioning.field == "Time"
+    assert client.load_calls[0].job_config.clustering_fields == ["Lines"]
+    assert all(load_call.job.result_called for load_call in client.load_calls)
 
 
 def test_load_raw_gps_pings_waits_on_existing_job_after_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
-    client = FakeBigQueryClient(raise_conflict=True)
+    blobs = ["raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet"]
+    uri = "gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet"
+    client = FakeBigQueryClient(conflict_job_ids={dag._load_job_id(uri)})
+    monkeypatch.setattr(dag.storage, "Client", lambda project: FakeStorageClient(blobs))
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
     dag._load_raw_gps_pings("2026-06-25")
 
-    assert client.get_job_call == ("load_raw_gps_pings_20260625", "ztm-data")
+    assert client.get_job_call == (dag._load_job_id(uri), "ztm-data")
+    assert client.existing_job.result_called is True
+
+
+def test_load_raw_gps_pings_continues_after_one_existing_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    existing_uri = "gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet"
+    new_uri = "gs://ztm-analytics-bucket/raw/gps/vehicle_type=tram/date=2026-06-25/hour=07/part-b.parquet"
+    client = FakeBigQueryClient(conflict_job_ids={dag._load_job_id(existing_uri)})
+    blobs = [
+        "raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet",
+        "raw/gps/vehicle_type=tram/date=2026-06-25/hour=07/part-b.parquet",
+    ]
+    monkeypatch.setattr(dag.storage, "Client", lambda project: FakeStorageClient(blobs))
+    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
+
+    dag._load_raw_gps_pings("2026-06-25")
+
+    assert client.get_job_calls == [(dag._load_job_id(existing_uri), "ztm-data")]
+    assert [load_call.uri for load_call in client.load_calls] == [new_uri]
+    assert client.load_calls[0].job.result_called is True
     assert client.existing_job.result_called is True
 
 
@@ -96,7 +131,7 @@ def test_dag_runs_stop_arrivals_after_trip_matching() -> None:
     assert dag.selected_gtfs_snapshot_id.kwargs == {
         "task_id": "selected_gtfs_snapshot_id",
         "python_callable": dag._selected_gtfs_snapshot_id,
-        "op_kwargs": {"processing_date": "{{ ds }}"},
+        "op_kwargs": {"processing_date": dag.PROCESSING_DATE},
     }
     assert dag.dbt_run_int_ping_trip.kwargs == {
         "task_id": "dbt_run_int_ping_trip",
@@ -110,6 +145,18 @@ def test_dag_runs_stop_arrivals_after_trip_matching() -> None:
         "task_id": "dbt_test_int_ping_trip",
         "bash_command": (
             f"cd {dag.DBT_PROJECT_DIR} && dbt test --select int_ping_trip --vars '{dag.GPS_TRIP_DBT_VARS}'"
+        ),
+    }
+    assert dag.dbt_run_int_gps_hourly_completeness.kwargs == {
+        "task_id": "dbt_run_int_gps_hourly_completeness",
+        "bash_command": (
+            f"cd {dag.DBT_PROJECT_DIR} && dbt run --select {dag.GPS_COMPLETENESS_MODEL} --vars '{dag.GPS_DBT_VARS}'"
+        ),
+    }
+    assert dag.dbt_test_int_gps_hourly_completeness.kwargs == {
+        "task_id": "dbt_test_int_gps_hourly_completeness",
+        "bash_command": (
+            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.GPS_COMPLETENESS_MODEL} --vars '{dag.GPS_DBT_VARS}'"
         ),
     }
     assert dag.dbt_run_int_stop_arrivals.kwargs == {
@@ -127,10 +174,15 @@ def test_dag_runs_stop_arrivals_after_trip_matching() -> None:
         ),
     }
     assert dag.load_raw_gps_pings.downstream == [dag.dbt_run_stg_gps_pings]
-    assert dag.dbt_run_stg_gps_pings.downstream == [dag.dbt_run_int_ping_trip, dag.dbt_test_stg_gps_pings]
+    assert dag.dbt_run_stg_gps_pings.downstream == [
+        dag.dbt_run_int_ping_trip,
+        dag.dbt_run_int_gps_hourly_completeness,
+        dag.dbt_test_stg_gps_pings,
+    ]
     assert dag.selected_gtfs_snapshot_id.downstream == [dag.dbt_run_int_ping_trip]
     assert dag.dbt_run_int_ping_trip.downstream == [dag.dbt_test_int_ping_trip]
     assert dag.dbt_test_int_ping_trip.downstream == [dag.dbt_run_int_stop_arrivals]
+    assert dag.dbt_run_int_gps_hourly_completeness.downstream == [dag.dbt_test_int_gps_hourly_completeness]
     assert dag.dbt_run_int_stop_arrivals.downstream == [dag.dbt_test_int_stop_arrivals]
 
 
@@ -140,28 +192,25 @@ class FakeBlob:
 
 
 class FakeBucket:
-    def __init__(self, existing_prefixes: set[str]) -> None:
-        self.existing_prefixes = existing_prefixes
+    def __init__(self, blob_names: list[str]) -> None:
+        self.blob_names = blob_names
 
-    def list_blobs(self, *, prefix: str, max_results: int) -> list[FakeBlob]:
-        assert max_results == 1
-        if prefix not in self.existing_prefixes:
-            return []
-        return [FakeBlob(f"{prefix}part-test.parquet")]
+    def list_blobs(self, *, prefix: str) -> list[FakeBlob]:
+        return [FakeBlob(blob_name) for blob_name in self.blob_names if blob_name.startswith(prefix)]
 
 
 class FakeStorageClient:
-    def __init__(self, existing_prefixes: set[str]) -> None:
-        self.existing_prefixes = existing_prefixes
+    def __init__(self, blob_names: list[str]) -> None:
+        self.blob_names = blob_names
 
     def bucket(self, bucket_name: str) -> FakeBucket:
         assert bucket_name == "ztm-analytics-bucket"
-        return FakeBucket(self.existing_prefixes)
+        return FakeBucket(self.blob_names)
 
 
 @dataclass
 class LoadCall:
-    uris: list[str]
+    uri: str
     destination: str
     job_config: Any
     job_id: str
@@ -196,23 +245,30 @@ class FakeQueryJob:
 
 
 class FakeBigQueryClient:
-    def __init__(self, *, raise_conflict: bool = False, snapshot_rows: list[FakeRow] | None = None) -> None:
-        self.raise_conflict = raise_conflict
+    def __init__(
+        self,
+        *,
+        conflict_job_ids: set[str] | None = None,
+        snapshot_rows: list[FakeRow] | None = None,
+    ) -> None:
+        self.conflict_job_ids = conflict_job_ids or set()
         self.snapshot_rows = snapshot_rows or []
-        self.load_call: LoadCall | None = None
+        self.load_calls: list[LoadCall] = []
         self.existing_job = FakeJob()
         self.get_job_call: tuple[str, str] | None = None
+        self.get_job_calls: list[tuple[str, str]] = []
         self.query_call: QueryCall | None = None
 
-    def load_table_from_uri(self, uris: list[str], destination: str, *, job_config: Any, job_id: str) -> FakeJob:
-        if self.raise_conflict:
+    def load_table_from_uri(self, uri: str, destination: str, *, job_config: Any, job_id: str) -> FakeJob:
+        if job_id in self.conflict_job_ids:
             raise Conflict("job already exists")
         job = FakeJob()
-        self.load_call = LoadCall(uris, destination, job_config, job_id, job)
+        self.load_calls.append(LoadCall(uri, destination, job_config, job_id, job))
         return job
 
     def get_job(self, job_id: str, *, project: str) -> FakeJob:
         self.get_job_call = (job_id, project)
+        self.get_job_calls.append((job_id, project))
         return self.existing_job
 
     def query(self, query: str, *, job_config: Any) -> FakeQueryJob:
@@ -276,7 +332,7 @@ def _install_google_stubs() -> None:
     bigquery_module.LoadJobConfig = FakeLoadJobConfig
     bigquery_module.QueryJobConfig = FakeQueryJobConfig
     bigquery_module.ScalarQueryParameter = FakeScalarQueryParameter
-    storage_module.Client = lambda project: FakeStorageClient(set())
+    storage_module.Client = lambda project: FakeStorageClient([])
     google_cloud_module.bigquery = bigquery_module
     google_cloud_module.storage = storage_module
 
