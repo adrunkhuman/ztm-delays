@@ -25,6 +25,8 @@ CUSTOM_PARTIAL_FLUSH_SECONDS = 600
 CUSTOM_FLUSH_LAG_SECONDS = 120
 EXPECTED_RETRY_FLUSH_CALLS = 2
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "entrypoint.sh"
+DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
+HEALTHCHECK = Path(__file__).resolve().parents[1] / "healthcheck.sh"
 
 
 def test_extract_records_keeps_only_dict_records() -> None:
@@ -405,11 +407,15 @@ def test_entrypoint_runs_tailscale_userspace_proxy_before_poller() -> None:
     assert '"${TS_AUTHKEY:?TS_AUTHKEY is required}"' not in script
     assert 'TS_HOSTNAME="ztm-poller"' in script
     assert 'TS_STATE_FILE="${TS_STATE_DIR}/tailscaled.state"' in script
+    assert 'TAILSCALED_PID_FILE="${TAILSCALED_PID_FILE:-/tmp/tailscaled.pid}"' in script
+    assert 'POLLER_PID_FILE="${POLLER_PID_FILE:-/tmp/ztm-poller.pid}"' in script
     assert "TS_AUTHKEY is required when ${TS_STATE_FILE} does not exist" in script
     assert "tailscaled" in script
     assert "--tun=userspace-networking" in script
     assert '--socks5-server="${TS_SOCKS_ADDR}"' in script
     assert '--state="${TS_STATE_FILE}"' in script
+    assert 'echo "${TAILSCALED_PID}" >"${TAILSCALED_PID_FILE}"' in script
+    assert 'echo "${POLLER_PID}" >"${POLLER_PID_FILE}"' in script
     assert "tailscale up" in script
     assert '--exit-node="${TS_EXIT_NODE}"' in script
     assert 'export ZTM_API_PROXY="socks5h://${TS_SOCKS_ADDR}"' in script
@@ -432,6 +438,27 @@ def test_entrypoint_keeps_container_alive_after_early_poller_failure() -> None:
     assert 'if [ "${POLLER_STATUS}" -ne 0 ]; then' in script
     assert 'if [ "${RUNTIME_SECONDS}" -lt "${STARTUP_GRACE_SECONDS}" ]; then' in script
     assert 'sleep "${REMAINING_SECONDS}"' in script
+
+
+def test_dockerfile_defines_local_worker_healthcheck() -> None:
+    dockerfile = DOCKERFILE.read_text()
+
+    assert "COPY healthcheck.sh ./" in dockerfile
+    assert "chmod +x entrypoint.sh healthcheck.sh" in dockerfile
+    assert (
+        'HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD ["./healthcheck.sh"]' in dockerfile
+    )
+
+
+def test_healthcheck_uses_local_process_and_tailscale_state_only() -> None:
+    script = HEALTHCHECK.read_text()
+
+    assert 'TAILSCALED_PID_FILE="${TAILSCALED_PID_FILE:-/tmp/tailscaled.pid}"' in script
+    assert 'POLLER_PID_FILE="${POLLER_PID_FILE:-/tmp/ztm-poller.pid}"' in script
+    assert 'TAILSCALE_SOCKET="${TAILSCALE_SOCKET:-/var/run/tailscale/tailscaled.sock}"' in script
+    assert 'kill -0 "${pid}"' in script
+    assert "tailscale status >/dev/null 2>&1" in script
+    assert "dane.um.warszawa.pl" not in script
 
 
 def _config(api_proxy: str | None = None) -> poller.Config:

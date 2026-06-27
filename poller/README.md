@@ -23,6 +23,8 @@ One container polls Warsaw ZTM buses and trams every 10 seconds and writes appen
 - `TS_HOSTNAME`: defaults to `ztm-poller`.
 - `TS_SOCKS_ADDR`: defaults to `127.0.0.1:1055`.
 - `TS_STATE_DIR`: defaults to `/var/lib/tailscale`; mount this path to persist Tailscale device identity.
+- `TAILSCALED_PID_FILE`: defaults to `/tmp/tailscaled.pid`; used by the Docker healthcheck.
+- `POLLER_PID_FILE`: defaults to `/tmp/ztm-poller.pid`; used by the Docker healthcheck.
 - `STARTUP_GRACE_SECONDS`: defaults to `300`; keeps the container alive briefly if the poller exits during startup.
 - `ZTM_API_PROXY`: normally set by `entrypoint.sh`; can be set manually for local proxy smoke tests.
 
@@ -46,6 +48,17 @@ Rows are buffered in memory and uploaded in append-safe `part-*.parquet` files. 
 On graceful shutdown, all currently buffered rows are flushed, including rows newer than the lag window. If an upload fails, those rows stay buffered and are retried on the next flush attempt. A hard crash, forced container kill, or host restart can still lose rows that were not yet successfully uploaded, including rows younger than `FLUSH_LAG_SECONDS`. With defaults and healthy GCS, normal exposure is up to roughly `FLUSH_LAG_SECONDS + PARTIAL_FLUSH_INTERVAL_SECONDS`; there is no durable local spool.
 
 The city API can return stale or future-dated pings. The poller drops rows outside the configured freshness window before buffering.
+
+## Healthcheck
+
+The Docker image defines a local `HEALTHCHECK`. It verifies that:
+
+- `tailscaled` is still running.
+- `poller.py` is still running.
+- the local Tailscale socket exists.
+- `tailscale status` succeeds against the local daemon.
+
+The healthcheck does not call the Warsaw API, so it does not add API traffic or turn short city API outages into container restarts. Coolify should use the Dockerfile healthcheck rather than a HTTP path check for this non-HTTP worker.
 
 ## Local Run
 
