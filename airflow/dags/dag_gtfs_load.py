@@ -22,6 +22,7 @@ except ImportError:  # Airflow 2 compatibility for local parser checks and older
 
 GCP_PROJECT = "ztm-data"
 BIGQUERY_DATASET = "ztm_bq"
+BIGQUERY_LOCATION = "europe-north1"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_snapshots"
 GTFS_DATE_LENGTH = 8
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
@@ -190,9 +191,15 @@ def _load_csv_to_bigquery(client: bigquery.Client, csv_path: Path, spec: GtfsTab
     job_id = f"load_{spec.table.rsplit('.', 1)[-1]}_{_bigquery_job_id_suffix(snapshot_id)}"
     with csv_path.open("rb") as csv_file:
         try:
-            job = client.load_table_from_file(csv_file, spec.table, job_config=job_config, job_id=job_id)
+            job = client.load_table_from_file(
+                csv_file,
+                spec.table,
+                job_config=job_config,
+                job_id=job_id,
+                location=BIGQUERY_LOCATION,
+            )
         except Conflict:
-            job = client.get_job(job_id, project=GCP_PROJECT)
+            job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
     job.result()
 
 

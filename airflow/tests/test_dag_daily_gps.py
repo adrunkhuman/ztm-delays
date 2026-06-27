@@ -57,6 +57,7 @@ def test_load_raw_gps_pings_uses_expected_bigquery_load_contract(monkeypatch: py
     )
     assert client.load_calls[0].destination == "ztm-data.ztm_bq.raw_gps_pings"
     assert client.load_calls[0].job_id == dag._load_job_id(client.load_calls[0].uri)
+    assert client.load_calls[0].location == dag.BIGQUERY_LOCATION
     assert client.load_calls[0].job_config.source_format == dag.bigquery.SourceFormat.PARQUET
     assert client.load_calls[0].job_config.create_disposition == dag.bigquery.CreateDisposition.CREATE_IF_NEEDED
     assert client.load_calls[0].job_config.write_disposition == dag.bigquery.WriteDisposition.WRITE_APPEND
@@ -75,7 +76,7 @@ def test_load_raw_gps_pings_waits_on_existing_job_after_conflict(monkeypatch: py
 
     dag._load_raw_gps_pings("2026-06-25")
 
-    assert client.get_job_call == (dag._load_job_id(uri), "ztm-data")
+    assert client.get_job_call == (dag._load_job_id(uri), "ztm-data", dag.BIGQUERY_LOCATION)
     assert client.existing_job.result_called is True
 
 
@@ -93,7 +94,7 @@ def test_load_raw_gps_pings_continues_after_one_existing_job(monkeypatch: pytest
 
     dag._load_raw_gps_pings("2026-06-25")
 
-    assert client.get_job_calls == [(dag._load_job_id(existing_uri), "ztm-data")]
+    assert client.get_job_calls == [(dag._load_job_id(existing_uri), "ztm-data", dag.BIGQUERY_LOCATION)]
     assert [load_call.uri for load_call in client.load_calls] == [new_uri]
     assert client.load_calls[0].job.result_called is True
     assert client.existing_job.result_called is True
@@ -214,6 +215,7 @@ class LoadCall:
     destination: str
     job_config: Any
     job_id: str
+    location: str
     job: FakeJob
 
 
@@ -255,20 +257,28 @@ class FakeBigQueryClient:
         self.snapshot_rows = snapshot_rows or []
         self.load_calls: list[LoadCall] = []
         self.existing_job = FakeJob()
-        self.get_job_call: tuple[str, str] | None = None
-        self.get_job_calls: list[tuple[str, str]] = []
+        self.get_job_call: tuple[str, str, str] | None = None
+        self.get_job_calls: list[tuple[str, str, str]] = []
         self.query_call: QueryCall | None = None
 
-    def load_table_from_uri(self, uri: str, destination: str, *, job_config: Any, job_id: str) -> FakeJob:
+    def load_table_from_uri(
+        self,
+        uri: str,
+        destination: str,
+        *,
+        job_config: Any,
+        job_id: str,
+        location: str,
+    ) -> FakeJob:
         if job_id in self.conflict_job_ids:
             raise Conflict("job already exists")
         job = FakeJob()
-        self.load_calls.append(LoadCall(uri, destination, job_config, job_id, job))
+        self.load_calls.append(LoadCall(uri, destination, job_config, job_id, location, job))
         return job
 
-    def get_job(self, job_id: str, *, project: str) -> FakeJob:
-        self.get_job_call = (job_id, project)
-        self.get_job_calls.append((job_id, project))
+    def get_job(self, job_id: str, *, project: str, location: str) -> FakeJob:
+        self.get_job_call = (job_id, project, location)
+        self.get_job_calls.append((job_id, project, location))
         return self.existing_job
 
     def query(self, query: str, *, job_config: Any) -> FakeQueryJob:

@@ -18,6 +18,7 @@ except ImportError:  # Airflow 2 compatibility for local parser checks and older
 
 GCP_PROJECT = "ztm-data"
 BIGQUERY_DATASET = "ztm_bq"
+BIGQUERY_LOCATION = "europe-north1"
 GCS_BUCKET = "ztm-analytics-bucket"
 GCS_GPS_PREFIX = "raw/gps"
 VEHICLE_TYPES = ("bus", "tram")
@@ -81,9 +82,10 @@ def _load_raw_gps_pings(processing_date: str) -> None:
                 RAW_GPS_TABLE,
                 job_config=job_config,
                 job_id=job_id,
+                location=BIGQUERY_LOCATION,
             )
         except Conflict:
-            job = client.get_job(job_id, project=GCP_PROJECT)
+            job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
         job.result()
 
 

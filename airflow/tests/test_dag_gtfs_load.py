@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import types
 import zipfile
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,7 @@ def test_load_csv_to_bigquery_uses_expected_load_contract(tmp_path: Path) -> Non
     assert client.load_call is not None
     assert client.load_call.destination == "ztm-data.ztm_bq.raw_gtfs_trips"
     assert client.load_call.job_id == "load_raw_gtfs_trips_snapshot_1"
+    assert client.load_call.location == dag.BIGQUERY_LOCATION
     assert client.load_call.job_config.source_format == dag.bigquery.SourceFormat.CSV
     assert client.load_call.job_config.skip_leading_rows == 1
     assert client.load_call.job_config.create_disposition == dag.bigquery.CreateDisposition.CREATE_IF_NEEDED
@@ -118,7 +120,7 @@ def test_load_csv_to_bigquery_waits_on_existing_job_after_conflict(tmp_path: Pat
 
     dag._load_csv_to_bigquery(client, csv_path, dag.GTFS_TABLES[0], "snapshot-1")
 
-    assert client.get_job_call == ("load_raw_gtfs_trips_snapshot_1", "ztm-data")
+    assert client.get_job_call == ("load_raw_gtfs_trips_snapshot_1", "ztm-data", dag.BIGQUERY_LOCATION)
     assert client.existing_job.result_called is True
 
 
@@ -356,19 +358,27 @@ class FakeBigQueryClient:
         self.load_call: LoadCall | None = None
         self.load_calls: list[LoadCall] = []
         self.existing_job = FakeJob()
-        self.get_job_call: tuple[str, str] | None = None
+        self.get_job_call: tuple[str, str, str] | None = None
 
-    def load_table_from_file(self, file_obj: Any, destination: str, *, job_config: Any, job_id: str) -> FakeJob:
+    def load_table_from_file(
+        self,
+        file_obj: Any,
+        destination: str,
+        *,
+        job_config: Any,
+        job_id: str,
+        location: str,
+    ) -> FakeJob:
         if self.raise_conflict:
             raise Conflict("job already exists")
         job = FakeJob()
         loaded_text = file_obj.read().decode("utf-8")
-        self.load_call = LoadCall(destination, job_config, job_id, job, loaded_text)
+        self.load_call = LoadCall(destination, job_config, job_id, location, job, loaded_text)
         self.load_calls.append(self.load_call)
         return job
 
-    def get_job(self, job_id: str, *, project: str) -> FakeJob:
-        self.get_job_call = (job_id, project)
+    def get_job(self, job_id: str, *, project: str, location: str) -> FakeJob:
+        self.get_job_call = (job_id, project, location)
         return self.existing_job
 
     def query(self, _query: str) -> FakeQueryJob:
@@ -377,13 +387,14 @@ class FakeBigQueryClient:
         return FakeQueryJob(self.latest_snapshot)
 
 
+@dataclass
 class LoadCall:
-    def __init__(self, destination: str, job_config: Any, job_id: str, job: FakeJob, loaded_text: str) -> None:
-        self.destination = destination
-        self.job_config = job_config
-        self.job_id = job_id
-        self.job = job
-        self.loaded_text = loaded_text
+    destination: str
+    job_config: Any
+    job_id: str
+    location: str
+    job: FakeJob
+    loaded_text: str
 
 
 class FakeQueryJob:
