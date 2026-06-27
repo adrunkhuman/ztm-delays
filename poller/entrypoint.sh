@@ -1,11 +1,10 @@
 #!/bin/sh
 set -eu
 
-: "${TS_AUTHKEY:?TS_AUTHKEY is required}"
-
 TS_SOCKS_ADDR="${TS_SOCKS_ADDR:-127.0.0.1:1055}"
 TS_EXIT_NODE="${TS_EXIT_NODE:-100.103.142.113}"
 TS_STATE_DIR="${TS_STATE_DIR:-/var/lib/tailscale}"
+TS_STATE_FILE="${TS_STATE_DIR}/tailscaled.state"
 STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-300}"
 STARTED_AT=$(date +%s)
 
@@ -15,10 +14,15 @@ fi
 
 mkdir -p /var/run/tailscale "${TS_STATE_DIR}"
 
+if [ ! -f "${TS_STATE_FILE}" ] && [ -z "${TS_AUTHKEY:-}" ]; then
+  echo "TS_AUTHKEY is required when ${TS_STATE_FILE} does not exist" >&2
+  exit 1
+fi
+
 tailscaled \
   --tun=userspace-networking \
   --socks5-server="${TS_SOCKS_ADDR}" \
-  --state="${TS_STATE_DIR}/tailscaled.state" &
+  --state="${TS_STATE_FILE}" &
 TAILSCALED_PID=$!
 
 terminate() {
@@ -42,10 +46,16 @@ if [ ! -S /var/run/tailscale/tailscaled.sock ]; then
   exit 1
 fi
 
-tailscale up \
-  --authkey="${TS_AUTHKEY}" \
-  --exit-node="${TS_EXIT_NODE}" \
-  --hostname="${TS_HOSTNAME}"
+if [ -n "${TS_AUTHKEY:-}" ]; then
+  tailscale up \
+    --authkey="${TS_AUTHKEY}" \
+    --exit-node="${TS_EXIT_NODE}" \
+    --hostname="${TS_HOSTNAME}"
+else
+  tailscale up \
+    --exit-node="${TS_EXIT_NODE}" \
+    --hostname="${TS_HOSTNAME}"
+fi
 
 export ZTM_API_PROXY="socks5h://${TS_SOCKS_ADDR}"
 
