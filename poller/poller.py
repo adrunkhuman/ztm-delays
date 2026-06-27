@@ -11,13 +11,14 @@ from argparse import ArgumentParser, Namespace
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import TYPE_CHECKING, TypedDict, cast
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
-from google.api_core.exceptions import GoogleAPIError
+from google.api_core.exceptions import GoogleAPIError, PreconditionFailed
 from google.cloud import storage
 
 if TYPE_CHECKING:
@@ -65,6 +66,8 @@ class Config:
     api_proxy: str | None
     max_ping_age_seconds: float
     future_ping_tolerance_seconds: float
+    partial_flush_interval_seconds: float
+    flush_lag_seconds: float
     run_once: bool
     no_upload: bool
 
@@ -109,10 +112,10 @@ def main() -> int:
     buffers: dict[str, dict[datetime, list[GpsRow]]] = {
         vehicle_type.name: defaultdict(list) for vehicle_type in config.vehicle_types
     }
+    last_partial_flush = 0.0
 
     while not stop_requested():
         loop_started = time.monotonic()
-        current_hour = _hour_key(datetime.now(WARSAW_TZ))
 
         for vehicle_type in config.vehicle_types:
             _poll_vehicle_type(session, config, vehicle_type, buffers[vehicle_type.name])
@@ -121,20 +124,22 @@ def main() -> int:
             buffered_rows = sum(len(rows) for vehicle_buffers in buffers.values() for rows in vehicle_buffers.values())
             LOGGER.info("upload disabled buffered_rows=%d", buffered_rows)
         else:
-            for vehicle_type in config.vehicle_types:
-                upload_context = UploadContext(cast("storage.Bucket", bucket), config, vehicle_type.name)
-                _flush_hours(upload_context, buffers[vehicle_type.name], current_hour)
+            now = datetime.now(WARSAW_TZ)
+            if loop_started - last_partial_flush >= config.partial_flush_interval_seconds:
+                flush_before = now - timedelta(seconds=config.flush_lag_seconds)
+                if _flush_vehicle_buffers(cast("storage.Bucket", bucket), config, buffers, flush_before=flush_before):
+                    last_partial_flush = loop_started
 
         if config.run_once:
             break
 
         _sleep_remaining(config.poll_interval_seconds, loop_started, stop_requested)
 
-    if not config.no_upload:
-        current_hour = _hour_key(datetime.now(WARSAW_TZ))
-        for vehicle_type in config.vehicle_types:
-            upload_context = UploadContext(cast("storage.Bucket", bucket), config, vehicle_type.name)
-            _flush_hours(upload_context, buffers[vehicle_type.name], current_hour, flush_current=True)
+    if not config.no_upload and not _flush_vehicle_buffers(
+        cast("storage.Bucket", bucket), config, buffers, flush_all=True
+    ):
+        LOGGER.error("poller stopped with buffered rows after failed shutdown flush")
+        return 1
     LOGGER.info("poller stopped")
     return 0
 
@@ -163,6 +168,8 @@ def _load_config(args: Namespace) -> Config:
     api_timeout_seconds = _positive_float_env("API_TIMEOUT_SECONDS", "5")
     max_ping_age_seconds = _positive_float_env("MAX_PING_AGE_SECONDS", "300")
     future_ping_tolerance_seconds = _positive_float_env("FUTURE_PING_TOLERANCE_SECONDS", "60")
+    partial_flush_interval_seconds = _positive_float_env("PARTIAL_FLUSH_INTERVAL_SECONDS", "900")
+    flush_lag_seconds = _positive_float_env("FLUSH_LAG_SECONDS", str(max_ping_age_seconds))
     api_proxy = os.getenv("ZTM_API_PROXY", "").strip() or None
 
     return Config(
@@ -175,6 +182,8 @@ def _load_config(args: Namespace) -> Config:
         api_proxy=api_proxy,
         max_ping_age_seconds=max_ping_age_seconds,
         future_ping_tolerance_seconds=future_ping_tolerance_seconds,
+        partial_flush_interval_seconds=partial_flush_interval_seconds,
+        flush_lag_seconds=flush_lag_seconds,
         run_once=args.once,
         no_upload=args.no_upload,
     )
@@ -307,29 +316,67 @@ def _hour_key(value: datetime) -> datetime:
     return value.astimezone(WARSAW_TZ).replace(minute=0, second=0, microsecond=0)
 
 
-def _flush_hours(
+def _flush_vehicle_buffers(
+    bucket: storage.Bucket,
+    config: Config,
+    buffers: dict[str, dict[datetime, list[GpsRow]]],
+    *,
+    flush_before: datetime | None = None,
+    flush_all: bool = False,
+) -> bool:
+    flush_succeeded = True
+    for vehicle_type in config.vehicle_types:
+        upload_context = UploadContext(bucket, config, vehicle_type.name)
+        flush_succeeded = (
+            _flush_buffered_rows(
+                upload_context, buffers[vehicle_type.name], flush_before=flush_before, flush_all=flush_all
+            )
+            and flush_succeeded
+        )
+    return flush_succeeded
+
+
+def _flush_buffered_rows(
     upload_context: UploadContext,
     buffers: dict[datetime, list[GpsRow]],
-    current_hour: datetime,
     *,
-    flush_current: bool = False,
-) -> None:
-    hours_to_flush = sorted(
-        buffer_hour
-        for buffer_hour in buffers
-        if buffer_hour < current_hour or (flush_current and buffer_hour <= current_hour)
-    )
+    flush_before: datetime | None = None,
+    flush_all: bool = False,
+) -> bool:
+    if not flush_all and flush_before is None:
+        raise ValueError("flush_before is required unless flush_all is true")
+    cutoff = flush_before
+
+    flush_succeeded = True
+    hours_to_flush = sorted(buffers)
     for buffer_hour in hours_to_flush:
         rows = buffers[buffer_hour]
         if not rows:
             buffers.pop(buffer_hour)
             continue
+        if flush_all:
+            rows_to_upload = rows
+            remaining_rows: list[GpsRow] = []
+        else:
+            if cutoff is None:
+                raise ValueError("flush_before is required unless flush_all is true")
+            rows_to_upload = [row for row in rows if row["Time"].astimezone(WARSAW_TZ) <= cutoff]
+            remaining_rows = [row for row in rows if row["Time"].astimezone(WARSAW_TZ) > cutoff]
+
+        if not rows_to_upload:
+            continue
+
         try:
-            _upload_hour(upload_context, buffer_hour, rows)
+            _upload_hour(upload_context, buffer_hour, rows_to_upload)
         except (GoogleAPIError, OSError, pa.ArrowException):
             LOGGER.exception("failed to upload hourly parquet hour=%s", buffer_hour.isoformat())
+            flush_succeeded = False
             continue
-        buffers.pop(buffer_hour)
+        if remaining_rows:
+            buffers[buffer_hour] = remaining_rows
+        else:
+            buffers.pop(buffer_hour)
+    return flush_succeeded
 
 
 def _upload_hour(
@@ -349,10 +396,51 @@ def _upload_hour(
     path = (
         f"{config.gcs_prefix}/vehicle_type={upload_context.vehicle_type_name}/"
         f"date={buffer_hour:%Y-%m-%d}/hour={buffer_hour:%H}/"
-        f"part-{ingested_at:%Y%m%dT%H%M%S%fZ}.parquet"
+        f"part-{_rows_digest(rows)}.parquet"
     )
-    upload_context.bucket.blob(path).upload_from_file(parquet_buffer, content_type="application/octet-stream")
+    try:
+        upload_context.bucket.blob(path).upload_from_file(
+            parquet_buffer,
+            content_type="application/octet-stream",
+            if_generation_match=0,
+        )
+    except PreconditionFailed:
+        # Deterministic path + create-only upload makes duplicate retry uploads a success.
+        LOGGER.info("hourly parquet already exists gcs_path=gs://%s/%s rows=%d", config.gcs_bucket, path, len(rows))
+        return
     LOGGER.info("uploaded hourly parquet gcs_path=gs://%s/%s rows=%d", config.gcs_bucket, path, len(rows))
+
+
+def _rows_digest(rows: list[GpsRow]) -> str:
+    """Stable content hash for idempotent part filenames."""
+    digest = sha256()
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            item["VehicleNumber"],
+            item["Time"],
+            item["Lines"],
+            item["Brigade"],
+            item["Lat"],
+            item["Lon"],
+            item["vehicle_type"],
+        ),
+    ):
+        digest.update(row["VehicleNumber"].encode())
+        digest.update(b"\0")
+        digest.update(row["Time"].isoformat().encode())
+        digest.update(b"\0")
+        digest.update(row["Lines"].encode())
+        digest.update(b"\0")
+        digest.update(row["Brigade"].encode())
+        digest.update(b"\0")
+        digest.update(repr(row["Lat"]).encode())
+        digest.update(b"\0")
+        digest.update(repr(row["Lon"]).encode())
+        digest.update(b"\0")
+        digest.update(str(row["vehicle_type"]).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()[:24]
 
 
 def _sleep_remaining(interval_seconds: float, loop_started: float, stop_requested: Callable[[], bool]) -> None:

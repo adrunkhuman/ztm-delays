@@ -16,6 +16,9 @@ RUN uv sync --locked --no-dev
 
 COPY poller.py ./
 COPY entrypoint.sh ./
-RUN chmod +x entrypoint.sh
+COPY healthcheck.sh ./
+RUN chmod +x entrypoint.sh healthcheck.sh
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD ["./healthcheck.sh"]
 
 ENTRYPOINT ["./entrypoint.sh"]
