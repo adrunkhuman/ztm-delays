@@ -13,10 +13,11 @@ Rebuild order:
 2. Rebuild `raw_gtfs_snapshots` deterministically from GCS object names and file hashes. Object names encode `snapshot_timestamp`; `snapshot_id` is `{snapshot_timestamp}_{sha256[:12]}`.
 3. Reload each GTFS ZIP into `ztm_raw.raw_gtfs_*` with deterministic load job IDs.
 4. Run GTFS staging, then rebuild archive-safe dimensions: `dim_line`, `dim_stop_post`, `dim_stop_group`, `dim_date`, and `dim_schedule_date`.
-5. Build `_current` lookup tables only for the selected serving snapshot.
-6. Reload GPS Parquet files into `ztm_raw.raw_gps_pings` with deterministic per-URI load job IDs.
-7. Build dbt models by processing date and governing GTFS snapshot.
-8. Validate backfilled facts before retiring `ztm_bq`.
+5. Rebuild schedule-version models from loaded GTFS history: `int_gtfs_trip_schedule`, `int_schedule_version`, and `dim_schedule_version`.
+6. Build `_current` lookup tables only for the selected serving snapshot.
+7. Reload GPS Parquet files into `ztm_raw.raw_gps_pings` with deterministic per-URI load job IDs.
+8. Build dbt models by processing date and governing GTFS snapshot.
+9. Validate backfilled facts before retiring `ztm_bq`.
 
 Do not drop `ztm_bq` before the v2 datasets are validated.
 
