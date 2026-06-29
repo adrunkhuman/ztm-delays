@@ -321,22 +321,13 @@ class FakeSchemaField:
 
 
 class FakeLoadJobConfig:
-    def __init__(
-        self,
-        *,
-        source_format: str,
-        skip_leading_rows: int,
-        schema: list[FakeSchemaField],
-        create_disposition: str,
-        write_disposition: str,
-        clustering_fields: list[str] | None = None,
-    ) -> None:
-        self.source_format = source_format
-        self.skip_leading_rows = skip_leading_rows
-        self.schema = schema
-        self.create_disposition = create_disposition
-        self.write_disposition = write_disposition
-        self.clustering_fields = clustering_fields
+    def __init__(self, **kwargs: Any) -> None:
+        self.source_format = kwargs["source_format"]
+        self.skip_leading_rows = kwargs["skip_leading_rows"]
+        self.schema = kwargs["schema"]
+        self.create_disposition = kwargs["create_disposition"]
+        self.write_disposition = kwargs["write_disposition"]
+        self.clustering_fields = kwargs.get("clustering_fields")
 
 
 class FakeJob:
