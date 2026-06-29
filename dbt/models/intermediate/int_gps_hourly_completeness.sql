@@ -16,7 +16,7 @@ with pings as (
         gps_time,
         vehicle_number,
         cast(div(unix_seconds(gps_time), 10) as int64) as ten_second_bucket
-    from {{ ref('stg_gps_pings') }}
+    from {{ ref('stg_gps__pings') }}
     where gps_date = date('{{ var("processing_date") }}')
 ),
 

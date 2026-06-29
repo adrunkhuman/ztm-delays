@@ -5,6 +5,7 @@
         partition_by={"field": "gps_date", "data_type": "date"},
         partitions=["date('" ~ var("processing_date") ~ "')"],
         cluster_by=["line", "trip_id"],
+        require_partition_filter=true,
     )
 }}
 
@@ -21,6 +22,7 @@ with pings as (
         gps_date,
         trip_id,
         shape_id,
+        gtfs_snapshot_id,
         service_id,
         direction_id,
         service_date,
@@ -39,7 +41,7 @@ segments as (
         lag(gps_point) over trip_vehicle_window as prev_gps_point
     from pings
     window trip_vehicle_window as (
-        partition by vehicle_number, service_date, trip_id
+        partition by vehicle_number, service_date, gtfs_snapshot_id, trip_id
         order by gps_time
     )
 ),
@@ -64,10 +66,11 @@ scheduled_stops as (
         stop_times.departure_time_seconds,
         stop_times.gtfs_snapshot_id,
         st_geogpoint(stops.stop_lon, stops.stop_lat) as stop_point
-    from {{ ref('stg_gtfs_stop_times') }} as stop_times
-    inner join {{ ref('stg_gtfs_stops') }} as stops
+    from {{ ref('stg_gtfs__stop_times') }} as stop_times
+    inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.stop_id = stops.stop_id
         and stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
+    where stop_times.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
 ),
 
 candidate_crossings as (
@@ -79,6 +82,7 @@ candidate_crossings as (
         valid_segments.gps_date,
         valid_segments.trip_id,
         valid_segments.shape_id,
+        valid_segments.gtfs_snapshot_id,
         valid_segments.service_id,
         valid_segments.direction_id,
         valid_segments.service_date,
@@ -93,7 +97,6 @@ candidate_crossings as (
         scheduled_stops.stop_sequence,
         scheduled_stops.arrival_time_seconds,
         scheduled_stops.departure_time_seconds,
-        scheduled_stops.gtfs_snapshot_id,
         timestamp_add(
             timestamp(valid_segments.service_date, 'Europe/Warsaw'),
             interval scheduled_stops.arrival_time_seconds second
@@ -108,6 +111,7 @@ candidate_crossings as (
     from valid_segments
     inner join scheduled_stops
         on valid_segments.trip_id = scheduled_stops.trip_id
+        and valid_segments.gtfs_snapshot_id = scheduled_stops.gtfs_snapshot_id
     where scheduled_stops.arrival_time_seconds between valid_segments.prev_gps_time_seconds - 1800
         and valid_segments.gps_time_seconds + 1800
       and st_dwithin(valid_segments.gps_segment, scheduled_stops.stop_point, 50)

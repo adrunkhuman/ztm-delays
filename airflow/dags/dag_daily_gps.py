@@ -17,17 +17,17 @@ except ImportError:  # Airflow 2 compatibility for local parser checks and older
     from airflow.operators.python import PythonOperator
 
 GCP_PROJECT = "ztm-data"
-BIGQUERY_DATASET = "ztm_bq"
+BIGQUERY_RAW_DATASET = "ztm_raw"
 BIGQUERY_LOCATION = "europe-north1"
 GCS_BUCKET = "ztm-analytics-bucket"
 GCS_GPS_PREFIX = "raw/gps"
 VEHICLE_TYPES = ("bus", "tram")
 
-RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gps_pings"
-RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_snapshots"
+RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gps_pings"
+RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
-GTFS_TRIP_MATCHING_STAGING_MODELS = "stg_gtfs_trips stg_gtfs_stop_times stg_gtfs_calendar_dates"
-GTFS_STOP_ARRIVAL_STAGING_MODELS = "stg_gtfs_stop_times stg_gtfs_stops"
+GTFS_TRIP_MATCHING_STAGING_MODELS = "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__calendar_dates"
+GTFS_STOP_ARRIVAL_STAGING_MODELS = "stg_gtfs__stop_times stg_gtfs__stops"
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 PROCESSING_DATE = "{{ data_interval_start.in_timezone('Europe/Warsaw').to_date_string() }}"
 GPS_DBT_VARS = '{"processing_date": "' + PROCESSING_DATE + '"}'
@@ -71,6 +71,7 @@ def _load_raw_gps_pings(processing_date: str) -> None:
         time_partitioning=bigquery.TimePartitioning(
             type_=bigquery.TimePartitioningType.DAY,
             field="Time",
+            require_partition_filter=True,
         ),
         clustering_fields=["Lines"],
     )
@@ -129,7 +130,7 @@ with DAG(
 
     dbt_run_stg_gps_pings = BashOperator(
         task_id="dbt_run_stg_gps_pings",
-        bash_command=(f"cd {DBT_PROJECT_DIR} && dbt run --select stg_gps_pings --vars '{GPS_DBT_VARS}'"),
+        bash_command=(f"cd {DBT_PROJECT_DIR} && dbt run --select stg_gps__pings --vars '{GPS_DBT_VARS}'"),
     )
 
     dbt_run_int_ping_trip = BashOperator(
@@ -148,7 +149,7 @@ with DAG(
     dbt_test_stg_gps_pings = BashOperator(
         task_id="dbt_test_stg_gps_pings",
         bash_command=(
-            f"cd {DBT_PROJECT_DIR} && dbt test --select source:raw.raw_gps_pings stg_gps_pings --vars '{GPS_DBT_VARS}'"
+            f"cd {DBT_PROJECT_DIR} && dbt test --select source:raw.raw_gps_pings stg_gps__pings --vars '{GPS_DBT_VARS}'"
         ),
     )
 

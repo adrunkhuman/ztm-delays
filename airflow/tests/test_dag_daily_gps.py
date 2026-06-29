@@ -55,13 +55,14 @@ def test_load_raw_gps_pings_uses_expected_bigquery_load_contract(monkeypatch: py
         client.load_calls[0].uri
         == "gs://ztm-analytics-bucket/raw/gps/vehicle_type=bus/date=2026-06-25/hour=07/part-a.parquet"
     )
-    assert client.load_calls[0].destination == "ztm-data.ztm_bq.raw_gps_pings"
+    assert client.load_calls[0].destination == "ztm-data.ztm_raw.raw_gps_pings"
     assert client.load_calls[0].job_id == dag._load_job_id(client.load_calls[0].uri)
     assert client.load_calls[0].location == dag.BIGQUERY_LOCATION
     assert client.load_calls[0].job_config.source_format == dag.bigquery.SourceFormat.PARQUET
     assert client.load_calls[0].job_config.create_disposition == dag.bigquery.CreateDisposition.CREATE_IF_NEEDED
     assert client.load_calls[0].job_config.write_disposition == dag.bigquery.WriteDisposition.WRITE_APPEND
     assert client.load_calls[0].job_config.time_partitioning.field == "Time"
+    assert client.load_calls[0].job_config.time_partitioning.require_partition_filter is True
     assert client.load_calls[0].job_config.clustering_fields == ["Lines"]
     assert all(load_call.job.result_called for load_call in client.load_calls)
 
@@ -380,9 +381,10 @@ class FakeOperator:
 
 
 class FakeTimePartitioning:
-    def __init__(self, *, type_: str, field: str) -> None:
+    def __init__(self, *, type_: str, field: str, require_partition_filter: bool = False) -> None:
         self.type_ = type_
         self.field = field
+        self.require_partition_filter = require_partition_filter
 
 
 class FakeLoadJobConfig:

@@ -99,13 +99,14 @@ def test_load_csv_to_bigquery_uses_expected_load_contract(tmp_path: Path) -> Non
     dag._load_csv_to_bigquery(client, csv_path, dag.GTFS_TABLES[0], "snapshot-1")
 
     assert client.load_call is not None
-    assert client.load_call.destination == "ztm-data.ztm_bq.raw_gtfs_trips"
+    assert client.load_call.destination == "ztm-data.ztm_raw.raw_gtfs_trips"
     assert client.load_call.job_id == "load_raw_gtfs_trips_snapshot_1"
     assert client.load_call.location == dag.BIGQUERY_LOCATION
     assert client.load_call.job_config.source_format == dag.bigquery.SourceFormat.CSV
     assert client.load_call.job_config.skip_leading_rows == 1
     assert client.load_call.job_config.create_disposition == dag.bigquery.CreateDisposition.CREATE_IF_NEEDED
     assert client.load_call.job_config.write_disposition == dag.bigquery.WriteDisposition.WRITE_APPEND
+    assert client.load_call.job_config.clustering_fields == ["gtfs_snapshot_id"]
     assert [field.name for field in client.load_call.job_config.schema] == [
         field.name for field in dag.GTFS_TABLES[0].schema
     ]
@@ -328,12 +329,14 @@ class FakeLoadJobConfig:
         schema: list[FakeSchemaField],
         create_disposition: str,
         write_disposition: str,
+        clustering_fields: list[str] | None = None,
     ) -> None:
         self.source_format = source_format
         self.skip_leading_rows = skip_leading_rows
         self.schema = schema
         self.create_disposition = create_disposition
         self.write_disposition = write_disposition
+        self.clustering_fields = clustering_fields
 
 
 class FakeJob:

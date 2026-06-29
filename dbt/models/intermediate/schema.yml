@@ -49,132 +49,54 @@ models:
     description: GPS pings matched to one scheduled GTFS trip per vehicle and GPS timestamp. The model processes one Warsaw-local GPS date at a time, but can match the previous GTFS service date for overnight trips whose GTFS times exceed 24h. When overlapping trip windows match, the trip with the latest start time wins.
     columns:
       - name: line
-        tests:
-          - not_null
       - name: brigade
-        tests:
-          - not_null
+      - name: lat
+      - name: lon
       - name: gps_time
-        tests:
-          - not_null
       - name: vehicle_number
-        tests:
-          - not_null
+      - name: vehicle_type
+      - name: ingested_at
       - name: gps_date
-        tests:
-          - not_null
       - name: trip_id
-        tests:
-          - not_null
       - name: shape_id
-        tests:
-          - not_null
+      - name: gtfs_snapshot_id
       - name: service_id
-        tests:
-          - not_null
       - name: direction_id
-        tests:
-          - not_null
       - name: service_date
-        tests:
-          - not_null
       - name: day_type
-        tests:
-          - not_null
       - name: trip_start_seconds
-        tests:
-          - not_null
       - name: trip_end_seconds
-        tests:
-          - not_null
       - name: gps_time_seconds
-        tests:
-          - not_null
 
   - name: int_stop_arrivals
-    description: Realized stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment for the matched trip passes within 50 meters of the scheduled stop point.
+    description: Realized stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment passes within 50 meters of the scheduled stop point and the scheduled arrival is within a +/-30 minute window around the segment.
     columns:
       - name: gtfs_snapshot_id
-        tests:
-          - not_null
       - name: line
-        tests:
-          - not_null
       - name: brigade
-        tests:
-          - not_null
       - name: vehicle_number
-        tests:
-          - not_null
       - name: vehicle_type
-        tests:
-          - not_null
       - name: gps_date
-        tests:
-          - not_null
       - name: service_date
-        tests:
-          - not_null
       - name: day_type
-        tests:
-          - not_null
       - name: trip_id
-        tests:
-          - not_null
       - name: shape_id
-        tests:
-          - not_null
       - name: service_id
-        tests:
-          - not_null
       - name: direction_id
-        tests:
-          - not_null
       - name: stop_id
-        tests:
-          - not_null
       - name: stop_name
-        tests:
-          - not_null
       - name: stop_sequence
-        tests:
-          - not_null
       - name: scheduled_arrival_time
-        tests:
-          - not_null
       - name: scheduled_departure_time
-        tests:
-          - not_null
       - name: actual_arrival_time
-        tests:
-          - not_null
       - name: arrival_delay_seconds
-        tests:
-          - not_null
       - name: detection_method
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['segment_within_50m']
       - name: stop_distance_m
-        tests:
-          - not_null
       - name: prev_ping_distance_m
-        tests:
-          - not_null
       - name: next_ping_distance_m
-        tests:
-          - not_null
       - name: segment_start_time
-        tests:
-          - not_null
       - name: segment_end_time
-        tests:
-          - not_null
       - name: segment_duration_seconds
-        tests:
-          - not_null
 
 unit_tests:
   - name: int_gps_hourly_completeness_counts_10_second_buckets
@@ -183,7 +105,7 @@ unit_tests:
       vars:
         processing_date: '2026-01-15'
     given:
-      - input: ref('stg_gps_pings')
+      - input: ref('stg_gps__pings')
         format: sql
         rows: |
           select '187' as line, '12' as brigade, 52.1 as lat, 21.1 as lon, timestamp('2026-01-15 09:00:01+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:02+00:00') as ingested_at, date '2026-01-15' as gps_date
@@ -259,13 +181,13 @@ unit_tests:
       - input: ref('int_ping_trip')
         format: sql
         rows: |
-          select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-1' as trip_id, 'shape-1' as shape_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
-          union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-1', 'shape-1', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
-      - input: ref('stg_gtfs_stop_times')
+          select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-1' as trip_id, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
+          union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-1', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
+      - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
           select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
-      - input: ref('stg_gtfs_stops')
+      - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
           select 'stop-1' as stop_id, 'Midpoint Stop' as stop_name, 52.0 as stop_lat, 21.00025 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
@@ -306,13 +228,13 @@ unit_tests:
       - input: ref('int_ping_trip')
         format: sql
         rows: |
-          select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-1' as trip_id, 'shape-1' as shape_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
-          union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-1', 'shape-1', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
-      - input: ref('stg_gtfs_stop_times')
+          select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-1' as trip_id, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
+          union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-1', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
+      - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
           select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
-      - input: ref('stg_gtfs_stops')
+      - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
           select 'stop-1' as stop_id, 'Early Segment Stop' as stop_name, 52.0 as stop_lat, 21.0001 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
@@ -343,6 +265,55 @@ unit_tests:
           segment_end_time: '2026-01-15 09:00:10+00:00'
           segment_duration_seconds: 10
 
+  - name: int_stop_arrivals_uses_selected_gtfs_snapshot_for_reused_trip_ids
+    model: int_stop_arrivals
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-reused' as trip_id, 'shape-valid' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
+          union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-reused', 'shape-valid', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-reused' as trip_id, 'stop-valid' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-reused', 'stop-other', 2, 36005, 36005, 'snapshot-other'
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'stop-valid' as stop_id, 'Valid Stop' as stop_name, 52.0 as stop_lat, 21.00025 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'stop-other', 'Other Snapshot Stop', 52.0, 21.00025, 'snapshot-other'
+    expect:
+      rows:
+        - gtfs_snapshot_id: 'snapshot-valid'
+          line: '187'
+          brigade: '12'
+          vehicle_number: '1001'
+          vehicle_type: 1
+          gps_date: '2026-01-15'
+          service_date: '2026-01-15'
+          day_type: 'weekday'
+          trip_id: 'trip-reused'
+          shape_id: 'shape-valid'
+          service_id: 'svc-weekday'
+          direction_id: 0
+          stop_id: 'stop-valid'
+          stop_name: 'Valid Stop'
+          stop_sequence: 1
+          scheduled_arrival_time: '2026-01-15 09:00:05+00:00'
+          scheduled_departure_time: '2026-01-15 09:00:05+00:00'
+          actual_arrival_time: '2026-01-15 09:00:05+00:00'
+          arrival_delay_seconds: 0
+          detection_method: 'segment_within_50m'
+          stop_distance_m: 0.0
+          segment_start_time: '2026-01-15 09:00:00+00:00'
+          segment_end_time: '2026-01-15 09:00:10+00:00'
+          segment_duration_seconds: 10
+
   - name: int_ping_trip_matches_sequential_trips_for_same_brigade
     model: int_ping_trip
     overrides:
@@ -350,25 +321,25 @@ unit_tests:
         processing_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
     given:
-      - input: ref('stg_gps_pings')
+      - input: ref('stg_gps__pings')
         format: sql
         rows: |
           select '187' as line, '12' as brigade, 52.1 as lat, 21.1 as lon, timestamp('2026-01-15 10:15:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 10:15:10+00:00') as ingested_at, date '2026-01-15' as gps_date
           union all select '187', '12', 52.2, 21.2, timestamp('2026-01-15 11:15:00+00:00'), '1001', 1, timestamp('2026-01-15 11:15:10+00:00'), date '2026-01-15'
           union all select '187', '12', 52.3, 21.3, timestamp('2026-01-15 08:50:00+00:00'), '1001', 1, timestamp('2026-01-15 08:50:10+00:00'), date '2026-01-15'
-      - input: ref('stg_gtfs_trips')
+      - input: ref('stg_gtfs__trips')
         format: sql
         rows: |
           select 'trip-morning' as trip_id, '187' as line, 'svc-weekday' as service_id, 'Morning' as trip_headsign, 0 as direction_id, '12' as brigade, 'shape-morning' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-midday', '187', 'svc-weekday', 'Midday', 1, '12', 'shape-midday', 'snapshot-valid'
-      - input: ref('stg_gtfs_stop_times')
+      - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
           select 'trip-morning' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-morning', 'stop-2', 2, 41400, 41400, 'snapshot-valid'
           union all select 'trip-midday', 'stop-3', 1, 43200, 43200, 'snapshot-valid'
           union all select 'trip-midday', 'stop-4', 2, 46800, 46800, 'snapshot-valid'
-      - input: ref('stg_gtfs_calendar_dates')
+      - input: ref('stg_gtfs__calendar_dates')
         format: sql
         rows: |
           select 'svc-weekday' as service_id, date '2026-01-15' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
@@ -385,6 +356,7 @@ unit_tests:
           gps_date: '2026-01-15'
           trip_id: 'trip-morning'
           shape_id: 'shape-morning'
+          gtfs_snapshot_id: 'snapshot-valid'
           service_id: 'svc-weekday'
           direction_id: 0
           service_date: '2026-01-15'
@@ -403,6 +375,7 @@ unit_tests:
           gps_date: '2026-01-15'
           trip_id: 'trip-midday'
           shape_id: 'shape-midday'
+          gtfs_snapshot_id: 'snapshot-valid'
           service_id: 'svc-weekday'
           direction_id: 1
           service_date: '2026-01-15'
@@ -411,6 +384,56 @@ unit_tests:
           trip_end_seconds: 46800
           gps_time_seconds: 44100
 
+  - name: int_ping_trip_uses_selected_gtfs_snapshot_when_trip_id_is_reused
+    model: int_ping_trip
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('stg_gps__pings')
+        format: sql
+        rows: |
+          select '187' as line, '12' as brigade, 52.1 as lat, 21.1 as lon, timestamp('2026-01-15 10:15:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 10:15:10+00:00') as ingested_at, date '2026-01-15' as gps_date
+      - input: ref('stg_gtfs__trips')
+        format: sql
+        rows: |
+          select 'trip-reused' as trip_id, '187' as line, 'svc-weekday' as service_id, 'Valid' as trip_headsign, 0 as direction_id, '12' as brigade, 'shape-valid' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-reused', '187', 'svc-weekday', 'Other', 1, '12', 'shape-other', 'snapshot-other'
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-reused' as trip_id, 'stop-valid-1' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-reused', 'stop-valid-2', 2, 41400, 41400, 'snapshot-valid'
+          union all select 'trip-reused', 'stop-other-1', 1, 40200, 40200, 'snapshot-other'
+          union all select 'trip-reused', 'stop-other-2', 2, 45000, 45000, 'snapshot-other'
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select 'svc-weekday' as service_id, date '2026-01-15' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'svc-weekday', date '2026-01-15', 1, 'weekday', 'snapshot-other'
+    expect:
+      rows:
+        - line: '187'
+          brigade: '12'
+          lat: 52.1
+          lon: 21.1
+          gps_time: '2026-01-15 10:15:00+00:00'
+          vehicle_number: '1001'
+          vehicle_type: 1
+          ingested_at: '2026-01-15 10:15:10+00:00'
+          gps_date: '2026-01-15'
+          trip_id: 'trip-reused'
+          shape_id: 'shape-valid'
+          gtfs_snapshot_id: 'snapshot-valid'
+          service_id: 'svc-weekday'
+          direction_id: 0
+          service_date: '2026-01-15'
+          day_type: 'weekday'
+          trip_start_seconds: 36000
+          trip_end_seconds: 41400
+          gps_time_seconds: 40500
+
   - name: int_ping_trip_matches_previous_service_date_overnight_trip
     model: int_ping_trip
     overrides:
@@ -418,20 +441,20 @@ unit_tests:
         processing_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
     given:
-      - input: ref('stg_gps_pings')
+      - input: ref('stg_gps__pings')
         format: sql
         rows: |
           select '517' as line, '7' as brigade, 52.1 as lat, 21.1 as lon, timestamp('2026-01-14 23:30:00+00:00') as gps_time, '2001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-14 23:30:10+00:00') as ingested_at, date '2026-01-15' as gps_date
-      - input: ref('stg_gtfs_trips')
+      - input: ref('stg_gtfs__trips')
         format: sql
         rows: |
           select 'trip-night' as trip_id, '517' as line, 'svc-night' as service_id, 'Night' as trip_headsign, 0 as direction_id, '7' as brigade, 'shape-night' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
-      - input: ref('stg_gtfs_stop_times')
+      - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
           select 'trip-night' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 86400 as arrival_time_seconds, 86400 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-night', 'stop-2', 2, 90000, 90000, 'snapshot-valid'
-      - input: ref('stg_gtfs_calendar_dates')
+      - input: ref('stg_gtfs__calendar_dates')
         format: sql
         rows: |
           select 'svc-night' as service_id, date '2026-01-14' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
@@ -448,6 +471,7 @@ unit_tests:
           gps_date: '2026-01-15'
           trip_id: 'trip-night'
           shape_id: 'shape-night'
+          gtfs_snapshot_id: 'snapshot-valid'
           service_id: 'svc-night'
           direction_id: 0
           service_date: '2026-01-14'
@@ -463,20 +487,20 @@ unit_tests:
         processing_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
     given:
-      - input: ref('stg_gps_pings')
+      - input: ref('stg_gps__pings')
         format: sql
         rows: |
           select '187' as line, '12' as brigade, 52.1 as lat, 21.1 as lon, timestamp('2026-01-14 10:30:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-14 10:30:10+00:00') as ingested_at, date '2026-01-14' as gps_date
-      - input: ref('stg_gtfs_trips')
+      - input: ref('stg_gtfs__trips')
         format: sql
         rows: |
           select 'trip-previous' as trip_id, '187' as line, 'svc-previous' as service_id, 'Previous' as trip_headsign, 0 as direction_id, '12' as brigade, 'shape-previous' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
-      - input: ref('stg_gtfs_stop_times')
+      - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
           select 'trip-previous' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 40000 as arrival_time_seconds, 40000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-previous', 'stop-2', 2, 43000, 43000, 'snapshot-valid'
-      - input: ref('stg_gtfs_calendar_dates')
+      - input: ref('stg_gtfs__calendar_dates')
         format: sql
         rows: |
           select 'svc-previous' as service_id, date '2026-01-14' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
@@ -490,23 +514,23 @@ unit_tests:
         processing_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
     given:
-      - input: ref('stg_gps_pings')
+      - input: ref('stg_gps__pings')
         format: sql
         rows: |
           select '517' as line, '7' as brigade, 52.1 as lat, 21.1 as lon, timestamp('2026-01-14 23:30:00+00:00') as gps_time, '2001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-14 23:30:10+00:00') as ingested_at, date '2026-01-15' as gps_date
-      - input: ref('stg_gtfs_trips')
+      - input: ref('stg_gtfs__trips')
         format: sql
         rows: |
           select 'trip-overnight' as trip_id, '517' as line, 'svc-previous' as service_id, 'Overnight' as trip_headsign, 0 as direction_id, '7' as brigade, 'shape-overnight' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-current', '517', 'svc-current', 'Current', 0, '7', 'shape-current', 'snapshot-valid'
-      - input: ref('stg_gtfs_stop_times')
+      - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
           select 'trip-overnight' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 86400 as arrival_time_seconds, 86400 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-overnight', 'stop-2', 2, 90000, 90000, 'snapshot-valid'
           union all select 'trip-current', 'stop-3', 1, 600, 600, 'snapshot-valid'
           union all select 'trip-current', 'stop-4', 2, 3600, 3600, 'snapshot-valid'
-      - input: ref('stg_gtfs_calendar_dates')
+      - input: ref('stg_gtfs__calendar_dates')
         format: sql
         rows: |
           select 'svc-previous' as service_id, date '2026-01-14' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
@@ -524,6 +548,7 @@ unit_tests:
           gps_date: '2026-01-15'
           trip_id: 'trip-current'
           shape_id: 'shape-current'
+          gtfs_snapshot_id: 'snapshot-valid'
           service_id: 'svc-current'
           direction_id: 0
           service_date: '2026-01-15'

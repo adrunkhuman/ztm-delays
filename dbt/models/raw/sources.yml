@@ -3,7 +3,7 @@ version: 2
 sources:
   - name: raw
     database: "{{ env_var('DBT_BIGQUERY_PROJECT', 'ztm-data') }}"
-    schema: "{{ env_var('DBT_BIGQUERY_DATASET', 'ztm_bq') }}"
+    schema: "{{ env_var('DBT_BIGQUERY_RAW_DATASET', 'ztm_raw') }}"
     tables:
       - name: raw_gps_pings
         description: Raw GPS pings loaded from poller Parquet files.
@@ -19,28 +19,38 @@ sources:
         columns:
           - name: Lines
             tests:
-              - not_null
+              - not_null:
+                  config: &raw_gps_processing_date_filter
+                    where: "Time >= timestamp(date('{{ var(\"processing_date\", \"1970-01-01\") }}'), 'Europe/Warsaw') and Time < timestamp(date_add(date('{{ var(\"processing_date\", \"1970-01-01\") }}'), interval 1 day), 'Europe/Warsaw')"
           - name: Brigade
             tests:
-              - not_null
+              - not_null:
+                  config: *raw_gps_processing_date_filter
           - name: Lat
             tests:
-              - not_null
+              - not_null:
+                  config: *raw_gps_processing_date_filter
           - name: Lon
             tests:
-              - not_null
+              - not_null:
+                  config: *raw_gps_processing_date_filter
           - name: Time
             tests:
-              - not_null
+              - not_null:
+                  config:
+                    where: "Time is null"
           - name: VehicleNumber
             tests:
-              - not_null
+              - not_null:
+                  config: *raw_gps_processing_date_filter
           - name: vehicle_type
             tests:
-              - not_null
+              - not_null:
+                  config: *raw_gps_processing_date_filter
           - name: ingested_at
             tests:
-              - not_null
+              - not_null:
+                  config: *raw_gps_processing_date_filter
       - name: raw_gtfs_snapshots
         description: Metadata for retained GTFS ZIP snapshots.
         columns:
