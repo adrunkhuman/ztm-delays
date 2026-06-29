@@ -1,0 +1,383 @@
+version: 2
+
+models:
+  - name: dim_line
+    description: Current-snapshot public transit line dimension. One row per public line in the selected GTFS snapshot. A public line number is not a stable historical entity key; future historical marts must join through schedule-version lineage before comparing lines across schedule changes.
+    columns:
+      - name: line
+        description: Public line identifier from GTFS route_id. This is the current-snapshot line key, not a stable long-term historical entity key.
+        tests: [not_null, unique]
+      - name: mode
+        description: Transit mode derived from GTFS route_type. Bus and tram have live GPS pings; metro and rail are schedule-only in this pipeline.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['bus', 'tram', 'metro', 'rail']
+      - name: route_short_name
+        description: Public-facing route short name from GTFS routes.txt.
+        tests: [not_null]
+      - name: route_long_name
+        description: Public-facing route long name when available. Currently null because the raw GTFS route loader does not retain route_long_name.
+      - name: direction_0_headsigns
+        description: Distinct trip headsigns observed for GTFS direction_id 0 in the selected snapshot, pipe-delimited for display/debugging.
+      - name: direction_1_headsigns
+        description: Distinct trip headsigns observed for GTFS direction_id 1 in the selected snapshot, pipe-delimited for display/debugging.
+      - name: has_live_gps
+        description: True when the mode is covered by the live GPS poller. Only bus and tram are currently polled.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
+      - name: gtfs_snapshot_id
+        description: Selected GTFS snapshot used to build this current-snapshot dimension row.
+        tests: [not_null]
+
+  - name: dim_stop_group
+    description: Current-snapshot user-facing stop group dimension. One row per first-four-character stop group in the selected GTFS snapshot. A stop group contains one or more stop/location records.
+    columns:
+      - name: stop_group_id
+        description: User-facing stop group identifier derived as LEFT(stop_id, 4). This is usually four digits for bus/tram passenger posts.
+        tests: [not_null, unique]
+      - name: stop_group_name
+        description: Deterministic display name for the group. Chosen as the most common stop/location name in the group, with alphabetical tie-break. Large interchanges can contain multiple names.
+        tests: [not_null]
+      - name: stop_group_names
+        description: Pipe-delimited set of distinct stop/location names inside the group. Useful when large interchange groups contain multiple user-facing names.
+        tests: [not_null]
+      - name: centroid_lat
+        description: Arithmetic mean latitude across stop/location records in the group.
+        tests: [not_null]
+      - name: centroid_lon
+        description: Arithmetic mean longitude across stop/location records in the group.
+        tests: [not_null]
+      - name: stop_post_count
+        description: Number of stop/location records in the group.
+        tests: [not_null]
+      - name: lines_served
+        description: Comma-delimited public lines serving any stop/location record in the group in the selected GTFS snapshot.
+        tests: [not_null]
+      - name: modes_served
+        description: Comma-delimited transit modes serving any stop/location record in the group in the selected GTFS snapshot.
+        tests: [not_null]
+      - name: directions_served
+        description: Comma-delimited GTFS direction_id values serving any stop/location record in the group in the selected GTFS snapshot.
+        tests: [not_null]
+      - name: gtfs_snapshot_id
+        description: Selected GTFS snapshot used to build this current-snapshot dimension row.
+        tests: [not_null]
+
+  - name: dim_stop_post
+    description: Current-snapshot physical stop/location dimension. One row per GTFS stop_id in the selected GTFS snapshot. Bus and tram passenger posts are usually six-digit IDs, but metro, rail, depot, entrance, and platform records can use other shapes.
+    columns:
+      - name: stop_id
+        description: Stop/location identifier from GTFS stops.txt. Most bus/tram passenger posts are six-digit values; other GTFS location types can use non-six-digit IDs.
+        tests: [not_null, unique]
+      - name: stop_group_id
+        description: Parent stop group identifier derived as LEFT(stop_id, 4). This groups Warsaw passenger posts and related station/entrance records under the same display group.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_stop_group')
+                field: stop_group_id
+      - name: stop_name
+        description: Stop/location name from GTFS stops.txt.
+        tests: [not_null]
+      - name: stop_lat
+        description: Stop/location latitude from GTFS stops.txt after staging coordinate guards.
+        tests: [not_null]
+      - name: stop_lon
+        description: Stop/location longitude from GTFS stops.txt after staging coordinate guards.
+        tests: [not_null]
+      - name: lines_served
+        description: Comma-delimited public lines serving this stop/location record in the selected GTFS snapshot.
+        tests: [not_null]
+      - name: modes_served
+        description: Comma-delimited transit modes serving this stop/location record in the selected GTFS snapshot.
+        tests: [not_null]
+      - name: directions_served
+        description: Comma-delimited GTFS direction_id values serving this stop/location record in the selected GTFS snapshot.
+        tests: [not_null]
+      - name: gtfs_snapshot_id
+        description: Selected GTFS snapshot used to build this current-snapshot dimension row.
+        tests: [not_null]
+
+  - name: dim_date
+    description: Current-snapshot service-date dimension spanning the selected GTFS calendar_dates range. One row per service_date, with calendar classification and GTFS-derived schedule classification.
+    columns:
+      - name: service_date
+        description: Calendar date in Warsaw-local service-date semantics. Primary key for the date dimension.
+        tests: [not_null, unique]
+      - name: day_type
+        description: Calendar day class derived only from weekday/weekend, independent of the schedule pattern that ran.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['weekday', 'weekend']
+      - name: is_holiday
+        description: True when service_date is a Polish public holiday, including fixed-date holidays and Easter-based movable holidays.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
+      - name: weekday_name
+        description: English weekday name for service_date.
+        tests: [not_null]
+      - name: day_of_week
+        description: BigQuery day-of-week number for service_date, where Sunday is 1 and Saturday is 7.
+        tests: [not_null]
+      - name: iso_week
+        description: ISO week number for service_date.
+        tests: [not_null]
+      - name: month
+        description: Calendar month number for service_date.
+        tests: [not_null]
+      - name: year
+        description: Calendar year for service_date.
+        tests: [not_null]
+      - name: schedule_day_type
+        description: Service pattern that actually ran according to GTFS service_id assignments. Date-prefixed service IDs preserve specific weekday patterns; generic Pc/Pt/Sb/Nd IDs map to weekday/friday/saturday/sunday_holiday. Mixed is used if one date receives multiple conflicting specific classes.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday_holiday', 'weekday', 'mixed', 'unknown']
+      - name: schedule_day_types
+        description: Comma-delimited set of schedule classes extracted from all GTFS service_id values for this service_date before collapsing to schedule_day_type.
+      - name: schedule_service_ids
+        description: Comma-delimited raw GTFS service_id values active for this service_date. Kept as lineage for schedule_day_type.
+      - name: gtfs_snapshot_id
+        description: Selected GTFS snapshot used to build this current-snapshot dimension row.
+        tests: [not_null]
+
+unit_tests:
+  - name: dim_line_uses_selected_snapshot_and_collects_headsigns
+    model: dim_line
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-01-01 00:00:00+00:00') as snapshot_timestamp, 'old-hash' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-valid', timestamp('2026-01-02 00:00:00+00:00'), 'valid-hash', 'gs://bucket/valid.zip'
+      - input: ref('stg_gtfs__routes')
+        format: sql
+        rows: |
+          select '187' as route_id, '187' as route_short_name, 3 as route_type, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '9', '9', 0, 'tram', 'snapshot-valid'
+          union all select 'M1', 'M1', 1, 'metro', 'snapshot-valid'
+          union all select 'S1', 'S1', 2, 'rail', 'snapshot-valid'
+          union all select '187', '187', 3, 'bus', 'snapshot-old'
+      - input: ref('stg_gtfs__trips')
+        format: sql
+        rows: |
+          select 'trip-1' as trip_id, '187' as line, 'svc' as service_id, 'Wschodnia' as trip_headsign, 0 as direction_id, '1' as brigade, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-2', '187', 'svc', 'Zachodnia', 1, '1', 'shape-2', 'snapshot-valid'
+          union all select 'trip-3', '187', 'svc', 'Old', 0, '1', 'shape-3', 'snapshot-old'
+    expect:
+      rows:
+        - {line: '187', mode: 'bus', route_short_name: '187', route_long_name: null, direction_0_headsigns: 'Wschodnia', direction_1_headsigns: 'Zachodnia', has_live_gps: true, gtfs_snapshot_id: 'snapshot-valid'}
+        - {line: '9', mode: 'tram', route_short_name: '9', route_long_name: null, direction_0_headsigns: null, direction_1_headsigns: null, has_live_gps: true, gtfs_snapshot_id: 'snapshot-valid'}
+        - {line: 'M1', mode: 'metro', route_short_name: 'M1', route_long_name: null, direction_0_headsigns: null, direction_1_headsigns: null, has_live_gps: false, gtfs_snapshot_id: 'snapshot-valid'}
+        - {line: 'S1', mode: 'rail', route_short_name: 'S1', route_long_name: null, direction_0_headsigns: null, direction_1_headsigns: null, has_live_gps: false, gtfs_snapshot_id: 'snapshot-valid'}
+
+  - name: dim_stop_group_rolls_posts_into_group
+    model: dim_stop_group
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('dim_stop_post')
+        format: sql
+        rows: |
+          select '100101' as stop_id, '1001' as stop_group_id, 'Main' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, '100, 200' as lines_served, 'bus' as modes_served, '0' as directions_served, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '100102', '1001', 'Main', 54.0, 23.0, '100', 'bus', '1', 'snapshot-valid'
+          union all select '100103', '1001', 'Main Alt', 53.0, 22.0, '300', 'tram', '0', 'snapshot-valid'
+    expect:
+      rows:
+        - stop_group_id: '1001'
+          stop_group_name: 'Main'
+          stop_group_names: 'Main | Main Alt'
+          centroid_lat: 53.0
+          centroid_lon: 22.0
+          stop_post_count: 3
+          lines_served: '100, 200, 300'
+          modes_served: 'bus, tram'
+          directions_served: '0, 1'
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: dim_stop_post_uses_selected_snapshot_for_served_lines
+    model: dim_stop_post
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-01-01 00:00:00+00:00') as snapshot_timestamp, 'old-hash' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-valid', timestamp('2026-01-02 00:00:00+00:00'), 'valid-hash', 'gs://bucket/valid.zip'
+          union all select 'snapshot-future', timestamp('2026-01-03 00:00:00+00:00'), 'future-hash', 'gs://bucket/future.zip'
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select '100101' as stop_id, 'Valid Stop' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '100101', 'Future Stop', 52.5, 21.5, 'snapshot-future'
+          union all select '100102', 'Old Stop', 51.5, 20.5, 'snapshot-old'
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-valid-bus' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-valid-tram', '100101', 2, 36100, 36100, 'snapshot-valid'
+          union all select 'trip-future', '100101', 1, 36000, 36000, 'snapshot-future'
+      - input: ref('stg_gtfs__trips')
+        format: sql
+        rows: |
+          select 'trip-valid-bus' as trip_id, '187' as line, 'svc' as service_id, 'Bus Head' as trip_headsign, 0 as direction_id, '1' as brigade, 'shape-bus' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-valid-tram', '9', 'svc', 'Tram Head', 1, '1', 'shape-tram', 'snapshot-valid'
+          union all select 'trip-future', '999', 'svc', 'Future Head', 0, '1', 'shape-future', 'snapshot-future'
+      - input: ref('stg_gtfs__routes')
+        format: sql
+        rows: |
+          select '187' as route_id, '187' as route_short_name, 3 as route_type, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '9', '9', 0, 'tram', 'snapshot-valid'
+          union all select '999', '999', 3, 'bus', 'snapshot-future'
+    expect:
+      rows:
+        - stop_id: '100101'
+          stop_group_id: '1001'
+          stop_name: 'Valid Stop'
+          stop_lat: 52.0
+          stop_lon: 21.0
+          lines_served: '187, 9'
+          modes_served: 'bus, tram'
+          directions_served: '0, 1'
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: dim_date_classifies_fixed_holiday_and_schedule_type
+    model: dim_date
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as snapshot_id, timestamp('2025-12-31 00:00:00+00:00') as snapshot_timestamp, 'hash' as file_hash, 'gs://bucket/valid.zip' as gcs_path
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select '2026-01-01:NdS' as service_id, date '2026-01-01' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'NdM', date '2026-01-01', 1, 'weekday', 'snapshot-valid'
+    expect:
+      rows:
+        - service_date: '2026-01-01'
+          day_type: 'weekday'
+          is_holiday: true
+          weekday_name: 'Thursday'
+          day_of_week: 5
+          iso_week: 1
+          month: 1
+          year: 2026
+          schedule_day_type: 'sunday_holiday'
+          schedule_day_types: 'sunday_holiday'
+          schedule_service_ids: '2026-01-01:NdS, NdM'
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: dim_date_preserves_date_prefixed_weekday_schedule_pattern
+    model: dim_date
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as snapshot_id, timestamp('2026-07-01 00:00:00+00:00') as snapshot_timestamp, 'hash' as file_hash, 'gs://bucket/valid.zip' as gcs_path
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select '2026-07-01:PcS' as service_id, date '2026-07-08' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'PcM', date '2026-07-08', 1, 'weekday', 'snapshot-valid'
+    expect:
+      rows:
+        - service_date: '2026-07-08'
+          day_type: 'weekday'
+          is_holiday: false
+          weekday_name: 'Wednesday'
+          day_of_week: 4
+          iso_week: 28
+          month: 7
+          year: 2026
+          schedule_day_type: 'wednesday'
+          schedule_day_types: 'wednesday, weekday'
+          schedule_service_ids: '2026-07-01:PcS, PcM'
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: dim_date_preserves_date_prefixed_friday_schedule_pattern
+    model: dim_date
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as snapshot_id, timestamp('2026-07-03 00:00:00+00:00') as snapshot_timestamp, 'hash' as file_hash, 'gs://bucket/valid.zip' as gcs_path
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select '2026-07-03:PcS' as service_id, date '2026-07-10' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'PcM', date '2026-07-10', 1, 'weekday', 'snapshot-valid'
+    expect:
+      rows:
+        - service_date: '2026-07-10'
+          day_type: 'weekday'
+          is_holiday: false
+          weekday_name: 'Friday'
+          day_of_week: 6
+          iso_week: 28
+          month: 7
+          year: 2026
+          schedule_day_type: 'friday'
+          schedule_day_types: 'friday, weekday'
+          schedule_service_ids: '2026-07-03:PcS, PcM'
+          gtfs_snapshot_id: 'snapshot-valid'
+
+  - name: dim_date_marks_easter_monday_holiday
+    model: dim_date
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as snapshot_id, timestamp('2026-04-01 00:00:00+00:00') as snapshot_timestamp, 'hash' as file_hash, 'gs://bucket/valid.zip' as gcs_path
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select '2026-04-06:NdS' as service_id, date '2026-04-06' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'NdM', date '2026-04-06', 1, 'weekday', 'snapshot-valid'
+    expect:
+      rows:
+        - service_date: '2026-04-06'
+          day_type: 'weekday'
+          is_holiday: true
+          weekday_name: 'Monday'
+          day_of_week: 2
+          iso_week: 15
+          month: 4
+          year: 2026
+          schedule_day_type: 'sunday_holiday'
+          schedule_day_types: 'sunday_holiday'
+          schedule_service_ids: '2026-04-06:NdS, NdM'
+          gtfs_snapshot_id: 'snapshot-valid'

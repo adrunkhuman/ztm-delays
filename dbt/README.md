@@ -12,6 +12,12 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select stg_gps__
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_ping_trip int_stop_arrivals --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
 ```
 
+Current-snapshot dimensions also require the selected `gtfs_snapshot_id`:
+
+```bash
+uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select dim_line dim_stop_post dim_stop_group dim_date --vars '{"gtfs_snapshot_id": "SNAPSHOT_ID"}'
+```
+
 The local `profiles.yml` uses environment variables for BigQuery connection settings and credentials.
 
 In Airflow, `GOOGLE_APPLICATION_CREDENTIALS` defaults to `/opt/airflow/gcp-key.json` if the environment variable is not set explicitly.

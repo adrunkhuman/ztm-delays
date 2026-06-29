@@ -10,7 +10,7 @@ Runtime contract:
 - Service account can list/read `gs://ztm-analytics-bucket/raw/gps/...` and load/query `ztm-data.ztm_raw`.
 - Service account can write `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/query/insert `ztm-data.ztm_raw.raw_gtfs_snapshots`.
 - Service account can read `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/load/append GTFS raw tables in `ztm-data.ztm_raw`.
-- Service account can create/query/update dbt models in `ztm-data.ztm_stg` and `ztm-data.ztm_int`; `ztm-data.ztm_marts` is required once mart models land.
+- Service account can create/query/update dbt models in `ztm-data.ztm_stg`, `ztm-data.ztm_int`, and `ztm-data.ztm_marts`.
 
 The GPS processing DAG is:
 
@@ -18,9 +18,9 @@ The GPS processing DAG is:
 dag_daily_gps
 ```
 
-The DAG ID is historical; it now runs hourly and rebuilds the current Warsaw-local processing date.
+The DAG ID is historical; it now runs hourly and rebuilds the data interval's Warsaw-local processing date.
 
-It loads poller Parquet files from GCS into `ztm_raw.raw_gps_pings`, selects the governing GTFS snapshot, then runs `stg_gps__pings`, `int_ping_trip`, `int_gps_hourly_completeness`, and `int_stop_arrivals` for the processing date.
+It loads poller Parquet files from GCS into `ztm_raw.raw_gps_pings`, selects the governing GTFS snapshot, then runs `stg_gps__pings`, `int_ping_trip`, `int_gps_hourly_completeness`, and `int_stop_arrivals` for the processing date. The governing snapshot is the latest `ztm_raw.raw_gtfs_snapshots.snapshot_timestamp` whose Warsaw-local date is strictly before the GPS processing date; the DAG fails if no such snapshot exists. This is a metadata lookup only; `dag_daily_gps` does not wait for the selected snapshot's raw GTFS tables or dimensions to be loaded.
 
 Expected input layout:
 
@@ -44,7 +44,7 @@ The GTFS raw loader DAG is:
 dag_gtfs_load
 ```
 
-It loads the triggered GTFS snapshot ZIP into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, then runs and tests GTFS staging models. It is unscheduled and triggered by `dag_gtfs_poll` with immutable `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`.
+It loads the triggered GTFS snapshot ZIP into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, runs and tests GTFS staging models, then refreshes and tests current-snapshot dimensions. It is unscheduled and triggered by `dag_gtfs_poll` with immutable `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`.
 
 Required ZIP members:
 
@@ -69,3 +69,12 @@ stg_gtfs__calendar_dates
 ```
 
 GTFS staging exposes all loaded snapshots and carries `gtfs_snapshot_id` as lineage. Downstream intermediate models use the Airflow-provided governing snapshot ID to pin schedule joins for a processing date.
+
+Current-snapshot dimensions refreshed by `dag_gtfs_load` for the triggered `gtfs_snapshot_id`:
+
+```text
+dim_line
+dim_stop_post
+dim_stop_group
+dim_date
+```

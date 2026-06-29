@@ -147,12 +147,12 @@ with DAG(
 
     @task
     def poll_gtfs_snapshot() -> dict[str, str]:
-        """Poll GTFS source and persist a new snapshot only when content changes."""
+        """TaskFlow boundary for idempotent GTFS snapshot polling."""
         return _poll_gtfs_snapshot()
 
     @task.branch
     def branch_gtfs_load(poll_result: dict[str, str]) -> str:
-        """Route changed snapshots to raw loading and skip unchanged snapshots."""
+        """TaskFlow branch boundary for changed-vs-unchanged GTFS snapshots."""
         return _gtfs_load_branch(poll_result)
 
     trigger_gtfs_load = TriggerDagRunOperator(
