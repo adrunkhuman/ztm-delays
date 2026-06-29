@@ -29,6 +29,7 @@ DBT_PROJECT_DIR = "/opt/airflow/dbt"
 GTFS_STAGING_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates"
 )
+GTFS_DIMENSION_MODELS = "dim_line dim_stop_post dim_stop_group dim_date"
 GTFS_RAW_SOURCES = (
     "source:raw.raw_gtfs_snapshots "
     "source:raw.raw_gtfs_trips "
@@ -238,12 +239,12 @@ with DAG(
 
     @task
     def selected_gtfs_snapshot() -> dict[str, str]:
-        """Return the immutable GTFS snapshot selected by the triggering poll run."""
+        """TaskFlow boundary for immutable snapshot metadata from dag_run.conf."""
         return _selected_gtfs_snapshot(get_current_context()["dag_run"])
 
     @task
     def load_gtfs_snapshot(snapshot: dict[str, str]) -> None:
-        """Load selected GTFS text files from one snapshot ZIP into raw BigQuery tables."""
+        """TaskFlow boundary for loading one immutable GTFS ZIP snapshot."""
         _load_gtfs_snapshot(snapshot)
 
     loaded_gtfs_snapshot = load_gtfs_snapshot(selected_gtfs_snapshot())
@@ -262,4 +263,15 @@ with DAG(
         ),
     )
 
-    loaded_gtfs_snapshot >> dbt_run_gtfs_staging >> dbt_test_gtfs_staging
+    dbt_run_gtfs_dimensions = BashOperator(
+        task_id="dbt_run_gtfs_dimensions",
+        bash_command=(f"cd {DBT_PROJECT_DIR} && dbt run --select {GTFS_DIMENSION_MODELS} --vars '{GTFS_DBT_VARS}'"),
+    )
+
+    dbt_test_gtfs_dimensions = BashOperator(
+        task_id="dbt_test_gtfs_dimensions",
+        bash_command=(f"cd {DBT_PROJECT_DIR} && dbt test --select {GTFS_DIMENSION_MODELS} --vars '{GTFS_DBT_VARS}'"),
+    )
+
+    loaded_gtfs_snapshot >> dbt_run_gtfs_staging >> dbt_test_gtfs_staging >> dbt_run_gtfs_dimensions
+    dbt_run_gtfs_dimensions >> dbt_test_gtfs_dimensions

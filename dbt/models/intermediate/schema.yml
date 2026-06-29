@@ -49,54 +49,99 @@ models:
     description: GPS pings matched to one scheduled GTFS trip per vehicle and GPS timestamp. The model processes one Warsaw-local GPS date at a time, but can match the previous GTFS service date for overnight trips whose GTFS times exceed 24h. When overlapping trip windows match, the trip with the latest start time wins.
     columns:
       - name: line
+        description: Public line identifier from the GPS ping and matched GTFS trip.
       - name: brigade
+        description: Normalized brigade/block short name used to match GPS pings to scheduled trips.
       - name: lat
+        description: GPS latitude after staging coordinate guards.
       - name: lon
+        description: GPS longitude after staging coordinate guards.
       - name: gps_time
+        description: Timestamp reported by the vehicle position source.
       - name: vehicle_number
+        description: Vehicle identifier reported by the GPS source. Together with gps_time this is the model grain within a processed GPS date.
       - name: vehicle_type
+        description: "Vehicle type from the GPS source: 1 for bus, 2 for tram."
       - name: ingested_at
+        description: Timestamp when the poller accepted the raw GPS row.
       - name: gps_date
+        description: Warsaw-local processing date partition for the GPS ping.
       - name: trip_id
+        description: Matched GTFS trip_id for the selected GTFS snapshot.
       - name: shape_id
+        description: GTFS shape_id for the matched trip.
       - name: gtfs_snapshot_id
+        description: Selected GTFS snapshot used for trip matching.
       - name: service_id
+        description: Opaque GTFS service_id for the matched trip. Keep as lineage; do not use as a user-facing schedule class.
       - name: direction_id
+        description: GTFS direction_id for the matched trip.
       - name: service_date
+        description: GTFS service date for the matched trip. Can be the previous calendar date for overnight service.
       - name: day_type
+        description: Calendar weekday/weekend class from GTFS staging. This is not the transit schedule pattern; marts should use dim_date.schedule_day_type when that distinction matters.
       - name: trip_start_seconds
+        description: Earliest scheduled stop time for the matched trip, in seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
       - name: trip_end_seconds
+        description: Latest scheduled stop time for the matched trip, in seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
       - name: gps_time_seconds
+        description: GPS timestamp expressed as seconds since the matched GTFS service-date midnight.
 
   - name: int_stop_arrivals
     description: Realized stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment passes within 50 meters of the scheduled stop point and the scheduled arrival is within a +/-30 minute window around the segment.
     columns:
       - name: gtfs_snapshot_id
+        description: Selected GTFS snapshot used for stop-arrival reconstruction.
       - name: line
+        description: Public line identifier for the matched trip.
       - name: brigade
+        description: Normalized brigade/block short name for the matched trip.
       - name: vehicle_number
+        description: Vehicle identifier from the GPS source.
       - name: vehicle_type
+        description: "Vehicle type from the GPS source: 1 for bus, 2 for tram."
       - name: gps_date
+        description: Warsaw-local processing date partition for the GPS pings used to reconstruct the arrival.
       - name: service_date
+        description: GTFS service date for the matched trip. Can differ from gps_date for overnight service.
       - name: day_type
+        description: Calendar weekday/weekend class from GTFS staging. This is not the transit schedule pattern; marts should use dim_date.schedule_day_type when that distinction matters.
       - name: trip_id
+        description: Matched GTFS trip_id.
       - name: shape_id
+        description: GTFS shape_id for the matched trip.
       - name: service_id
+        description: Opaque GTFS service_id for the matched trip. Kept as lineage.
       - name: direction_id
+        description: GTFS direction_id for the matched trip.
       - name: stop_id
+        description: GTFS stop_id for the scheduled stop arrival.
       - name: stop_name
+        description: Stop name from the selected GTFS snapshot.
       - name: stop_sequence
+        description: GTFS stop_sequence for the stop within the trip. Together with snapshot, service date, trip, and vehicle, this is the model grain.
       - name: scheduled_arrival_time
+        description: Scheduled arrival timestamp reconstructed from service_date and GTFS arrival seconds.
       - name: scheduled_departure_time
+        description: Scheduled departure timestamp reconstructed from service_date and GTFS departure seconds.
       - name: actual_arrival_time
+        description: Estimated actual arrival timestamp from interpolation across the GPS segment that passed the stop.
       - name: arrival_delay_seconds
+        description: Difference in seconds between actual_arrival_time and scheduled_arrival_time. Positive values are late.
       - name: detection_method
+        description: Reconstruction method label. Current value is segment_within_50m.
       - name: stop_distance_m
+        description: Distance in meters from the GPS segment to the scheduled stop point.
       - name: prev_ping_distance_m
+        description: Distance in meters from the segment start ping to the scheduled stop point.
       - name: next_ping_distance_m
+        description: Distance in meters from the segment end ping to the scheduled stop point.
       - name: segment_start_time
+        description: GPS timestamp at the start of the segment used for interpolation.
       - name: segment_end_time
+        description: GPS timestamp at the end of the segment used for interpolation.
       - name: segment_duration_seconds
+        description: Duration in seconds between segment_start_time and segment_end_time.
 
 unit_tests:
   - name: int_gps_hourly_completeness_counts_10_second_buckets

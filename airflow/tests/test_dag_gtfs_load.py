@@ -175,21 +175,31 @@ def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables
     assert any("snapshot-1" in load.loaded_text for load in client.load_calls)
 
 
-def test_dag_runs_and_tests_gtfs_staging_after_raw_load() -> None:
+def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     dag = _load_dag_module()
 
     assert dag.dbt_run_gtfs_staging.task_id == "dbt_run_gtfs_staging"
     assert dag.dbt_test_gtfs_staging.task_id == "dbt_test_gtfs_staging"
-    assert dag.dbt_run_gtfs_staging.bash_command == (
-        f"cd {dag.DBT_PROJECT_DIR} && dbt run --select {dag.GTFS_STAGING_MODELS} "
-        '--vars \'{"processing_date": "{{ dag_run.conf[\'processing_date\'] }}", '
-        '"gtfs_snapshot_id": "{{ dag_run.conf[\'snapshot_id\'] }}"}\''
-    )
-    assert dag.dbt_test_gtfs_staging.bash_command == (
-        f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.GTFS_RAW_SOURCES} {dag.GTFS_STAGING_MODELS} "
-        '--vars \'{"processing_date": "{{ dag_run.conf[\'processing_date\'] }}", '
-        '"gtfs_snapshot_id": "{{ dag_run.conf[\'snapshot_id\'] }}"}\''
-    )
+    assert dag.dbt_run_gtfs_dimensions.task_id == "dbt_run_gtfs_dimensions"
+    assert dag.dbt_test_gtfs_dimensions.task_id == "dbt_test_gtfs_dimensions"
+    _assert_dbt_command(dag.dbt_run_gtfs_staging.bash_command, "run", dag.GTFS_STAGING_MODELS)
+    _assert_dbt_command(dag.dbt_test_gtfs_staging.bash_command, "test", dag.GTFS_STAGING_MODELS)
+    assert dag.GTFS_RAW_SOURCES in dag.dbt_test_gtfs_staging.bash_command
+    _assert_dbt_command(dag.dbt_run_gtfs_dimensions.bash_command, "run", dag.GTFS_DIMENSION_MODELS)
+    _assert_dbt_command(dag.dbt_test_gtfs_dimensions.bash_command, "test", dag.GTFS_DIMENSION_MODELS)
+    assert dag.dbt_run_gtfs_staging in dag.loaded_gtfs_snapshot.downstream
+    assert dag.dbt_test_gtfs_staging in dag.dbt_run_gtfs_staging.downstream
+    assert dag.dbt_run_gtfs_dimensions in dag.dbt_test_gtfs_staging.downstream
+    assert dag.dbt_test_gtfs_dimensions in dag.dbt_run_gtfs_dimensions.downstream
+
+
+def _assert_dbt_command(command: str, dbt_subcommand: str, selector: str) -> None:
+    assert f"dbt {dbt_subcommand}" in command
+    assert "--select" in command
+    assert selector in command
+    assert "--vars" in command
+    assert "processing_date" in command
+    assert "gtfs_snapshot_id" in command
 
 
 def _load_dag_module() -> types.ModuleType:
