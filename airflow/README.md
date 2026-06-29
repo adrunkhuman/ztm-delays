@@ -44,7 +44,7 @@ The GTFS raw loader DAG is:
 dag_gtfs_load
 ```
 
-It loads the triggered GTFS snapshot ZIP into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, runs and tests GTFS staging models, then refreshes and tests archive-safe dimensions plus current-snapshot convenience lookups. It is unscheduled and triggered by `dag_gtfs_poll` with immutable `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`.
+It loads the triggered GTFS snapshot ZIP into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, runs and tests GTFS staging models, then refreshes and tests archive-safe dimensions, schedule-version models, and current-snapshot convenience lookups. It is unscheduled and triggered by `dag_gtfs_poll` with immutable `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`.
 
 Required ZIP members:
 
@@ -78,6 +78,14 @@ dim_stop_post
 dim_stop_group
 dim_date
 dim_schedule_date
+```
+
+Schedule-version models rebuilt from loaded GTFS snapshot history after each GTFS load:
+
+```text
+int_gtfs_trip_schedule
+int_schedule_version
+dim_schedule_version
 ```
 
 Current-snapshot convenience lookups refreshed for the triggered `gtfs_snapshot_id`:

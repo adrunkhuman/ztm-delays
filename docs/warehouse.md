@@ -34,6 +34,7 @@ Archive-safe conformed dimensions:
 - `dim_stop_post`
 - `dim_date`
 - `dim_schedule_date`
+- `dim_schedule_version`
 
 Current convenience lookups:
 
@@ -102,6 +103,20 @@ Most groups share one stop name across posts, but large interchange groups can c
 Intermediate GPS/trip models currently carry `day_type` from GTFS staging, which is only calendar weekday/weekend. Do not use intermediate `day_type` as a transit schedule-pattern field; use `dim_schedule_date` or baked fact columns when a mart needs `schedule_day_type`.
 
 `route_long_name` is currently exposed as null in line dimensions because the raw GTFS route loader does not retain that optional field.
+
+## Schedule Versions
+
+`int_gtfs_trip_schedule` denormalizes scheduled trips under each Warsaw-local GPS processing date's governing GTFS snapshot. The governing snapshot rule is the same rule used by GPS processing: for one processing date, use the latest loaded GTFS snapshot whose Warsaw-local snapshot date is strictly before that processing date. A same-day GTFS snapshot does not govern that same processing date; intraday schedule changes remain out of scope until #27 is implemented. Because GPS matching can use the prior GTFS `service_date` for overnight trips, `int_gtfs_trip_schedule` carries both `processing_date` and `service_date` and keeps only trips whose scheduled window overlaps the processing date. `schedule_day_type` and `schedule_service_ids` on this model are classified per `line` and `direction_id`, so a mixed network service date does not force every line into the `mixed` bucket.
+
+`int_schedule_version` and `dim_schedule_version` implement the "since last schedule change" baseline for line analytics. The grain is one consecutive timetable version for `line`, `direction_id`, and `schedule_day_type`. Public `line` is the working key for now, but schedule-version rows keep governing snapshot lineage so the warehouse can be rebuilt later if a stronger line identity becomes necessary.
+
+The timetable fingerprint is built from the actual scheduled stop/time content only. For each scheduled trip, `trip_timetable_signature` is the ordered list of `(stop_sequence, stop_id, arrival_time_seconds)`. For each `line`, `direction_id`, `schedule_day_type`, and governing processing date, those trip signatures are sorted by absolute scheduled start, absolute scheduled end, and signature, then hashed into `timetable_fingerprint`. The fingerprint deliberately excludes `gtfs_snapshot_id`, `trip_id`, `service_id`, `trip_headsign`, route labels, stop labels, and other display attributes, so rolling-window re-publishes do not create false schedule changes.
+
+`schedule_version_id` changes only when the timetable fingerprint changes between collected governing processing dates for the same `line`, `direction_id`, and `schedule_day_type`. The ID also includes `valid_from_date`, so a timetable that changes away and later returns is represented as a new version period instead of merging across history.
+
+The mkuran GTFS feed is a rolling 31-day window. Schedule versions are therefore only known from collected snapshots onward; versions before collection start are unknowable from warehouse data. `valid_to_date` is null when no later collected timetable change is known, not proof that the public schedule will never change.
+
+Future `fct_trip` and `fct_stop_arrival` models should join to `dim_schedule_version` using `line`, `direction_id`, `schedule_day_type`, and `gps_date`/processing date between `valid_from_date` and `coalesce(valid_to_date, date '9999-12-31')`, then carry `schedule_version_id` on fact rows. Display labels still come from the governing snapshot and archive-safe label rules, not from schedule-version fingerprinting.
 
 ## Error Policy
 
