@@ -254,7 +254,251 @@ models:
         description: Maximum scheduled trip count observed for this line, direction_id, and schedule_day_type inside the version period.
         tests: [not_null]
 
+  - name: int_trip_summary
+    description: Completed-trip reconstruction summary. One row per observed vehicle trip candidate in a GPS processing date, using detected stop arrivals as the realized-trip grain and matched pings for quality diagnostics.
+    columns:
+      - name: gtfs_snapshot_id
+        description: Governing GTFS snapshot used for trip matching, stop reconstruction, labels, and schedule-version lineage.
+        tests: [not_null]
+      - name: gps_date
+        description: Warsaw-local GPS processing date partition rebuilt by dag_daily_gps.
+        tests: [not_null]
+      - name: service_date
+        description: GTFS service date for the trip. Can be the prior calendar date for overnight service.
+        tests: [not_null]
+      - name: trip_id
+        description: Matched GTFS trip_id from the governing snapshot.
+        tests: [not_null]
+      - name: vehicle_number
+        description: Vehicle identifier observed in the GPS source.
+        tests: [not_null]
+      - name: line
+        description: Public line identifier from the matched trip.
+        tests: [not_null]
+      - name: route_short_name
+        description: Public route short name from the governing GTFS snapshot.
+      - name: mode
+        description: Transit mode from the governing GTFS route. Live GPS currently covers bus and tram.
+      - name: brigade
+        description: Normalized brigade/block short name used for GPS-to-GTFS trip matching.
+        tests: [not_null]
+      - name: vehicle_type
+        description: "Vehicle type from the GPS source: 1 for bus, 2 for tram."
+        tests: [not_null]
+      - name: direction_id
+        description: GTFS direction_id for the matched trip.
+        tests: [not_null]
+      - name: service_id
+        description: GTFS service_id for the matched trip in the governing snapshot.
+        tests: [not_null]
+      - name: trip_headsign
+        description: Matched trip headsign from the governing snapshot. This is an archive-safe display label.
+      - name: shape_id
+        description: GTFS shape_id for the matched trip.
+        tests: [not_null]
+      - name: day_type
+        description: Calendar weekday/weekend class carried from upstream matching. Use schedule_day_type for transit service-pattern analytics.
+      - name: schedule_day_type
+        description: GTFS-derived service pattern for this line and direction on the service date.
+        tests: [not_null]
+      - name: schedule_service_ids
+        description: Comma-delimited active GTFS service_id values for this line and direction under the governing snapshot.
+      - name: schedule_version_id
+        description: Timetable-version identifier for since-schedule-change analytics.
+        tests: [not_null]
+      - name: origin_stop_id
+        description: First scheduled stop_id for the matched trip in the governing snapshot.
+      - name: origin_stop_name
+        description: First scheduled stop name from the governing snapshot. This is an archive-safe display label.
+      - name: destination_stop_id
+        description: Last scheduled stop_id for the matched trip in the governing snapshot.
+      - name: destination_stop_name
+        description: Last scheduled stop name from the governing snapshot. This is an archive-safe display label.
+      - name: scheduled_start_time
+        description: Timestamp of the first scheduled stop arrival for the matched trip.
+        tests: [not_null]
+      - name: scheduled_end_time
+        description: Timestamp of the last scheduled stop arrival for the matched trip.
+        tests: [not_null]
+      - name: actual_start_time
+        description: Estimated arrival time at the first detected stop sequence for the realized trip. For partial trips this can be a non-terminal stop, so use is_first_stop_observed before treating start_delay_seconds as a strict terminal delay.
+        tests: [not_null]
+      - name: actual_end_time
+        description: Estimated arrival time at the last detected stop sequence for the realized trip. For partial trips this can be a non-terminal stop, so use is_last_stop_observed before treating end_delay_seconds as a strict terminal delay.
+        tests: [not_null]
+      - name: start_delay_seconds
+        description: Difference in seconds between actual_start_time and scheduled_start_time. Positive values are late.
+        tests: [not_null]
+      - name: end_delay_seconds
+        description: Difference in seconds between actual_end_time and scheduled_end_time. Positive values are late.
+        tests: [not_null]
+      - name: stops_expected
+        description: Scheduled stop count for the matched trip.
+        tests: [not_null]
+      - name: stops_detected
+        description: Number of scheduled stops detected from GPS segment crossings.
+        tests: [not_null]
+      - name: detected_stop_ratio
+        description: stops_detected divided by stops_expected.
+        tests: [not_null]
+      - name: first_detected_stop_sequence
+        description: Lowest scheduled stop_sequence detected for this realized trip.
+        tests: [not_null]
+      - name: last_detected_stop_sequence
+        description: Highest scheduled stop_sequence detected for this realized trip.
+        tests: [not_null]
+      - name: max_stop_sequence_gap
+        description: Largest scheduled stop_sequence gap between consecutive detected stops.
+        tests: [not_null]
+      - name: max_ping_gap_seconds
+        description: Largest observed time gap between consecutive matched GPS pings for this vehicle trip. A value of 0 can mean no consecutive matched ping pair was available.
+        tests: [not_null]
+      - name: max_speed_mps
+        description: Largest implied straight-line speed between consecutive matched GPS pings, in meters per second. A value of 0 can mean no consecutive matched ping pair was available.
+        tests: [not_null]
+      - name: is_first_stop_observed
+        description: True when the first detected stop is within 2 scheduled stop_sequence positions from the scheduled first stop. The tolerance is provisional.
+        tests: [not_null]
+      - name: is_last_stop_observed
+        description: True when the last detected stop is within 2 scheduled stop_sequence positions from the scheduled last stop. The tolerance is provisional.
+        tests: [not_null]
+      - name: has_non_monotonic_stop_progression
+        description: True when detected stops move backward in scheduled stop_sequence when ordered by actual arrival time.
+        tests: [not_null]
+      - name: has_impossible_speed_jump
+        description: True when matched GPS pings imply a straight-line speed above the provisional impossible-speed threshold.
+        tests: [not_null]
+      - name: trip_quality
+        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, max_ping_gap_seconds > 1800, non-monotonic stop progression, max_speed_mps > 50, or terminal delay beyond 3600 seconds. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['complete', 'partial', 'broken']
+      - name: quality_flags
+        description: "Array of explainable quality flags. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. extreme_delay: absolute start or end delay > 3600 seconds. likely_wrong_trip_assignment: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, or non-monotonic progression."
+        tests: [not_null]
+
 unit_tests:
+  - name: int_trip_summary_classifies_quality_and_derives_delays
+    model: int_trip_summary
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_stop_arrivals')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as gtfs_snapshot_id, '187' as line, '12' as brigade, '1001' as vehicle_number, 1 as vehicle_type, date '2026-01-15' as gps_date, date '2026-01-15' as service_date, 'weekday' as day_type, 'trip-complete' as trip_id, 'shape-1' as shape_id, 'svc' as service_id, 0 as direction_id, 1 as stop_sequence, timestamp('2026-01-15 09:01:00+00:00') as actual_arrival_time
+          union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 2, timestamp('2026-01-15 09:11:00+00:00')
+          union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 3, timestamp('2026-01-15 09:21:00+00:00')
+          union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 4, timestamp('2026-01-15 09:31:00+00:00')
+          union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 5, timestamp('2026-01-15 09:45:00+00:00')
+          union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 2, timestamp('2026-01-15 10:11:00+00:00')
+          union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 3, timestamp('2026-01-15 10:21:00+00:00')
+          union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 4, timestamp('2026-01-15 10:31:00+00:00')
+          union all select 'snapshot-valid', '187', '14', '1003', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-broken', 'shape-3', 'svc', 0, 5, timestamp('2026-01-15 11:21:00+00:00')
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as gps_date, date '2026-01-15' as service_date, 'trip-complete' as trip_id, '1001' as vehicle_number, timestamp('2026-01-15 10:00:00+00:00') as gps_time, 52.0 as lat, 21.0 as lon
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-complete', '1001', timestamp('2026-01-15 10:02:00+00:00'), 52.0001, 21.0001
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-partial', '1002', timestamp('2026-01-15 11:00:00+00:00'), 52.0, 21.0
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-partial', '1002', timestamp('2026-01-15 11:02:00+00:00'), 52.0001, 21.0001
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-broken', '1003', timestamp('2026-01-15 12:00:00+00:00'), 52.0, 21.0
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-broken', '1003', timestamp('2026-01-15 12:02:00+00:00'), 52.0001, 21.0001
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-complete' as trip_id, 'svc' as service_id, 'Complete Head' as trip_headsign, 'shape-1' as shape_id, 36000 as trip_start_seconds, 38400 as trip_end_seconds, 5 as stop_count
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-partial', 'svc', 'Partial Head', 'shape-2', 39600, 42000, 5
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-broken', 'svc', 'Broken Head', 'shape-3', 43200, 45600, 10
+      - input: ref('int_schedule_version')
+        format: sql
+        rows: |
+          select 'schedule-version-1' as schedule_version_id, '187' as line, 0 as direction_id, 'weekday' as schedule_day_type, 'fingerprint' as timetable_fingerprint, date '2026-01-01' as valid_from_date, cast(null as date) as valid_to_date, 'snapshot-valid' as first_gtfs_snapshot_id, 'snapshot-valid' as last_gtfs_snapshot_id, date '2026-01-01' as first_processing_date, date '2026-01-15' as last_processing_date, 3 as max_scheduled_trip_count
+      - input: ref('stg_gtfs__routes')
+        format: sql
+        rows: |
+          select '187' as route_id, '187' as route_short_name, 3 as route_type, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-complete' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-complete', '100102', 2, 36600, 36600, 'snapshot-valid'
+          union all select 'trip-complete', '100103', 3, 37200, 37200, 'snapshot-valid'
+          union all select 'trip-complete', '100104', 4, 37800, 37800, 'snapshot-valid'
+          union all select 'trip-complete', '100105', 5, 38400, 38400, 'snapshot-valid'
+          union all select 'trip-partial', '200101', 1, 39600, 39600, 'snapshot-valid'
+          union all select 'trip-partial', '200102', 2, 40200, 40200, 'snapshot-valid'
+          union all select 'trip-partial', '200103', 3, 40800, 40800, 'snapshot-valid'
+          union all select 'trip-partial', '200104', 4, 41400, 41400, 'snapshot-valid'
+          union all select 'trip-partial', '200105', 5, 42000, 42000, 'snapshot-valid'
+          union all select 'trip-broken', '300101', 1, 43200, 43200, 'snapshot-valid'
+          union all select 'trip-broken', '300105', 5, 44400, 44400, 'snapshot-valid'
+          union all select 'trip-broken', '300110', 10, 45600, 45600, 'snapshot-valid'
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select '100101' as stop_id, 'Complete Origin' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '100102', 'Complete Mid 2', 52.02, 21.02, 'snapshot-valid'
+          union all select '100103', 'Complete Mid 3', 52.03, 21.03, 'snapshot-valid'
+          union all select '100104', 'Complete Mid 4', 52.04, 21.04, 'snapshot-valid'
+          union all select '100105', 'Complete Destination', 52.1, 21.1, 'snapshot-valid'
+          union all select '200101', 'Partial Origin', 52.0, 21.0, 'snapshot-valid'
+          union all select '200102', 'Partial Mid 2', 52.02, 21.02, 'snapshot-valid'
+          union all select '200103', 'Partial Mid 3', 52.03, 21.03, 'snapshot-valid'
+          union all select '200104', 'Partial Mid 4', 52.04, 21.04, 'snapshot-valid'
+          union all select '200105', 'Partial Destination', 52.1, 21.1, 'snapshot-valid'
+          union all select '300101', 'Broken Origin', 52.0, 21.0, 'snapshot-valid'
+          union all select '300105', 'Broken Mid 5', 52.05, 21.05, 'snapshot-valid'
+          union all select '300110', 'Broken Destination', 52.1, 21.1, 'snapshot-valid'
+    expect:
+      rows:
+        - trip_id: 'trip-complete'
+          trip_quality: 'complete'
+          start_delay_seconds: 60
+          end_delay_seconds: 300
+          stops_detected: 5
+          detected_stop_ratio: 1.0
+          is_first_stop_observed: true
+          is_last_stop_observed: true
+          schedule_version_id: 'schedule-version-1'
+          mode: 'bus'
+          trip_headsign: 'Complete Head'
+          origin_stop_name: 'Complete Origin'
+          destination_stop_name: 'Complete Destination'
+          quality_flags: []
+        - trip_id: 'trip-partial'
+          trip_quality: 'partial'
+          start_delay_seconds: 660
+          end_delay_seconds: -540
+          stops_detected: 3
+          detected_stop_ratio: 0.6
+          is_first_stop_observed: true
+          is_last_stop_observed: true
+          schedule_version_id: 'schedule-version-1'
+          mode: 'bus'
+          trip_headsign: 'Partial Head'
+          origin_stop_name: 'Partial Origin'
+          destination_stop_name: 'Partial Destination'
+          quality_flags: ['low_stop_coverage']
+        - trip_id: 'trip-broken'
+          trip_quality: 'broken'
+          start_delay_seconds: 1260
+          end_delay_seconds: -1140
+          stops_detected: 1
+          detected_stop_ratio: 0.1
+          is_first_stop_observed: false
+          is_last_stop_observed: false
+          schedule_version_id: 'schedule-version-1'
+          mode: 'bus'
+          trip_headsign: 'Broken Head'
+          origin_stop_name: 'Broken Origin'
+          destination_stop_name: 'Broken Destination'
+          quality_flags: ['missing_first_stop', 'missing_last_stop', 'low_stop_coverage', 'likely_wrong_trip_assignment']
+
   - name: int_gtfs_trip_schedule_uses_prior_day_governing_snapshot
     model: int_gtfs_trip_schedule
     given:

@@ -61,7 +61,7 @@ If an entity disappears from a later governing snapshot, the prior visible versi
 
 Historical fact models must bake display labels from the governing snapshot onto each fact row at build time. The serving/frontend hot path should read those frozen labels directly. `_current` dimensions may be used only when a view intentionally wants present-day labels.
 
-Future `fct_trip` and `fct_stop_arrival` models must be self-contained for archive rendering. Trip facts should carry line mode and matched-trip headsign from the governing snapshot; stop-arrival facts should carry stop name, stop coordinates, stop-group name, line mode, and matched-trip headsign. Use the matched trip's `trip_headsign`, not rolled-up `_current` line headsigns. Later label corrections require rebuilding facts from raw/staging if the archive should reflect the correction.
+Historical fact models must be self-contained for archive rendering. `fct_trip` carries line mode and matched-trip headsign from the governing snapshot. Future stop-arrival facts should carry stop name, stop coordinates, stop-group name, line mode, and matched-trip headsign. Use the matched trip's `trip_headsign`, not rolled-up `_current` line headsigns. Later label corrections require rebuilding facts from raw/staging if the archive should reflect the correction.
 
 Do not treat public `line` as a stable historical entity by itself. The same public line number can keep its label while schedule patterns, directions, or stop sets change. Historical facts and aggregates must join through GTFS snapshot or schedule-version lineage before comparing a line across time.
 
@@ -116,7 +116,27 @@ The timetable fingerprint is built from the actual scheduled stop/time content o
 
 The mkuran GTFS feed is a rolling 31-day window. Schedule versions are therefore only known from collected snapshots onward; versions before collection start are unknowable from warehouse data. `valid_to_date` is null when no later collected timetable change is known, not proof that the public schedule will never change.
 
-Future `fct_trip` and `fct_stop_arrival` models should join to `dim_schedule_version` using `line`, `direction_id`, `schedule_day_type`, and `gps_date`/processing date between `valid_from_date` and `coalesce(valid_to_date, date '9999-12-31')`, then carry `schedule_version_id` on fact rows. Display labels still come from the governing snapshot and archive-safe label rules, not from schedule-version fingerprinting.
+`fct_trip` carries `schedule_version_id` from the timetable-version join on `line`, `direction_id`, `schedule_day_type`, and GPS processing date between `valid_from_date` and `coalesce(valid_to_date, date '9999-12-31')`. Future `fct_stop_arrival` should use the same schedule-version lineage. Display labels still come from the governing snapshot and archive-safe label rules, not from schedule-version fingerprinting.
+
+## Completed Trips
+
+`int_trip_summary` is the completed-trip building block for realized service. The grain is one observed vehicle trip candidate per processing `gps_date`, `gtfs_snapshot_id`, `service_date`, `trip_id`, and `vehicle_number`. Each processing run summarizes reconstructed arrivals from the current and previous GPS dates into the current `gps_date` partition so cross-midnight trips can be represented as one trip candidate. The model starts from reconstructed stop arrivals, so v1 includes trips with at least one detected scheduled stop. Matched pings are used for diagnostics such as maximum ping gap and impossible speed jumps, not as standalone ping-only trip facts.
+
+`fct_trip` is the serving-layer projection of that grain, partitioned by `service_date` and clustered by `line` and `direction_id`. Hourly `dag_daily_gps` overwrites the current and previous service-date partitions from the latest available `int_trip_summary` processing partition, so overnight trips can be added without losing prior-day daytime trips. First deploys and manual backfills should build the prior GPS partition before publishing a service date that depends on it. Trip rows carry archive-safe labels from the governing GTFS snapshot: `mode`, `route_short_name`, `trip_headsign`, origin stop, and destination stop. Historical trip pages should render from these baked labels rather than joining `_current` dimensions.
+
+Trip quality is intentionally categorical, not a fake-precise score:
+
+- `complete`: reliable for normal analytics. Stop coverage is high, terminal stops are observed or near-observed, ping gaps are not large, and stop progression is sane.
+- `partial`: useful for exploration and drill-down, but missing enough route context that strict analytics should exclude it.
+- `broken`: retained for debugging only. These rows show too little stop coverage, implausible progression, impossible GPS movement, extreme delay, or likely wrong trip assignment.
+
+Default filter policy:
+
+- Strict analytics use `trip_quality = 'complete'`.
+- Exploratory views may use `trip_quality in ('complete', 'partial')`.
+- Debug views may include `broken` and should surface `quality_flags`.
+
+The initial thresholds for stop coverage, terminal-stop tolerance, ping gaps, stop-sequence gaps, impossible speed, and extreme delay are provisional constants in `int_trip_summary`. They are implementation guesses, not settled transport truths. Threshold changes should be backed by real-data validation after enough collected days exist.
 
 ## Error Policy
 
