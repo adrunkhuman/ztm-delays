@@ -159,6 +159,7 @@ models:
                 values: [1]
                 quote: false
       - name: day_type
+        description: Calendar weekday/weekend class derived from service_date; not a transit schedule pattern. Use dim_schedule_date.schedule_day_type for GTFS service-pattern grouping.
         tests:
           - not_null
           - accepted_values:

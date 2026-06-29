@@ -27,12 +27,20 @@ Staging follows dbt's `stg_<source>__<entity>` idiom:
 
 Intermediate models use `int_<purpose>`. Marts use `dim_`, `fct_`, `agg_`, or `mart_`. Raw source tables keep loader names such as `raw_gps_pings` and `raw_gtfs_trips`.
 
-Current conformed dimensions:
+Archive-safe conformed dimensions:
 
 - `dim_line`
 - `dim_stop_group`
 - `dim_stop_post`
 - `dim_date`
+- `dim_schedule_date`
+
+Current convenience lookups:
+
+- `dim_line_current`
+- `dim_stop_group_current`
+- `dim_stop_post_current`
+- `dim_schedule_date_current`
 
 ## Staging Contract
 
@@ -44,7 +52,15 @@ Intermediate models that join schedule data must include `gtfs_snapshot_id` in j
 
 ## Conformed Dimensions
 
-`dim_line`, `dim_stop_group`, `dim_stop_post`, and `dim_date` are current-snapshot dimensions. They are rebuilt for the selected `gtfs_snapshot_id`; the normal Airflow path supplies the GTFS snapshot that `dag_gtfs_load` just loaded. This is deliberate for the first serving contract: the frontend needs current lookup tables, while historical schedule-version analysis lands in later models.
+`dim_line`, `dim_stop_group`, and `dim_stop_post` are archive-safe slowly changing dictionaries. They collapse consecutive governing GTFS snapshots into date-ranged rows and emit a new row only when the display attributes change. Validity dates follow the governing-snapshot rule used by GPS processing: a snapshot first governs the Warsaw-local service date after its snapshot date.
+
+If an entity disappears from a later governing snapshot, the prior visible version closes at the day before the disappearance takes effect. Missing-state rows are not emitted.
+
+`dim_line_current`, `dim_stop_group_current`, `dim_stop_post_current`, and `dim_schedule_date_current` are current-snapshot convenience surfaces rebuilt for the selected `gtfs_snapshot_id`; the normal Airflow path supplies the GTFS snapshot that `dag_gtfs_load` just loaded. Use them for current filters, current maps, and operational/debug views. Do not join historical facts to `_current` dimensions to render archive labels.
+
+Historical fact models must bake display labels from the governing snapshot onto each fact row at build time. The serving/frontend hot path should read those frozen labels directly. `_current` dimensions may be used only when a view intentionally wants present-day labels.
+
+Future `fct_trip` and `fct_stop_arrival` models must be self-contained for archive rendering. Trip facts should carry line mode and matched-trip headsign from the governing snapshot; stop-arrival facts should carry stop name, stop coordinates, stop-group name, line mode, and matched-trip headsign. Use the matched trip's `trip_headsign`, not rolled-up `_current` line headsigns. Later label corrections require rebuilding facts from raw/staging if the archive should reflect the correction.
 
 Do not treat public `line` as a stable historical entity by itself. The same public line number can keep its label while schedule patterns, directions, or stop sets change. Historical facts and aggregates must join through GTFS snapshot or schedule-version lineage before comparing a line across time.
 
@@ -70,23 +86,22 @@ stop_group_id = LEFT(stop_id, 4)
 stop_id       = stop_group_id || location_suffix
 ```
 
-`dim_stop_post` is the stop/location dimension keyed by `stop_id`. `dim_stop_group` is the user-facing parent keyed by `stop_group_id`.
+`dim_stop_post` is the date-ranged stop/location dictionary keyed by `stop_id` plus validity range. `dim_stop_group` is the date-ranged user-facing parent keyed by `stop_group_id` plus validity range. Current map views should use the `_current` variants.
 
 Most groups share one stop name across posts, but large interchange groups can contain multiple names under the same parent group. `dim_stop_group.stop_group_name` is therefore a deterministic display name chosen from the most common post name, while `stop_group_names` retains all distinct names in the group.
 
 ### Date Classification
 
-`dim_date` exposes three related but intentionally separate concepts:
+`dim_date` exposes immutable calendar concepts:
 
 - `day_type`: calendar weekday/weekend classification from `service_date` only.
 - `is_holiday`: Polish public-holiday flag from fixed-date holidays and Easter-based movable holidays.
-- `schedule_day_type`: service pattern that actually ran according to GTFS `service_id` assignments.
 
-`schedule_day_type` is authoritative for transit pattern grouping within the selected/current GTFS snapshot represented by `dim_date.gtfs_snapshot_id`. A calendar weekday can still have `schedule_day_type = 'sunday_holiday'` when GTFS says holiday/Sunday service ran. Current GTFS service IDs use provider tokens such as `Pc`, `Pt`, `Sb`, and `Nd`, and surface schedules can prefix those tokens with a pattern date such as `2026-07-01:PcS`. Date-prefixed service IDs preserve specific weekday patterns, so a later date reusing `2026-07-01:PcS` classifies as `wednesday`, not generic `weekday`. Generic service IDs, currently used by metro, remain coarser and map to `weekday`, `friday`, `saturday`, or `sunday_holiday`. `schedule_day_types` and `schedule_service_ids` retain the raw derivation lineage.
+`dim_schedule_date` exposes `schedule_day_type`, the service pattern that actually ran according to GTFS `service_id` assignments in the governing snapshot for each governable `service_date`. Governable dates have a loaded snapshot whose Warsaw-local snapshot date is strictly before `service_date`. If that governing snapshot has no active service IDs for the date, `dim_schedule_date` emits `schedule_day_type = 'unknown'` and empty service-id lineage rather than falling back to an older snapshot. A calendar weekday can still have `schedule_day_type = 'sunday_holiday'` when GTFS says holiday/Sunday service ran. Current GTFS service IDs use provider tokens such as `Pc`, `Pt`, `Sb`, and `Nd`, and surface schedules can prefix those tokens with a pattern date such as `2026-07-01:PcS`. Date-prefixed service IDs preserve specific weekday patterns, so a later date reusing `2026-07-01:PcS` classifies as `wednesday`, not generic `weekday`. Generic service IDs, currently used by metro, remain coarser and map to `weekday`, `friday`, `saturday`, or `sunday_holiday`. `schedule_day_types` and `schedule_service_ids` retain the raw derivation lineage.
 
-Intermediate GPS/trip models currently carry `day_type` from GTFS staging, which is only calendar weekday/weekend. Do not use intermediate `day_type` as a transit schedule-pattern field; join to `dim_date` by `service_date` and the selected snapshot when a mart needs `schedule_day_type` or `is_holiday`.
+Intermediate GPS/trip models currently carry `day_type` from GTFS staging, which is only calendar weekday/weekend. Do not use intermediate `day_type` as a transit schedule-pattern field; use `dim_schedule_date` or baked fact columns when a mart needs `schedule_day_type`.
 
-`route_long_name` is currently exposed as null in `dim_line` because the raw GTFS route loader does not retain that optional field.
+`route_long_name` is currently exposed as null in line dimensions because the raw GTFS route loader does not retain that optional field.
 
 ## Error Policy
 

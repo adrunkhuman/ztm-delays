@@ -29,7 +29,10 @@ DBT_PROJECT_DIR = "/opt/airflow/dbt"
 GTFS_STAGING_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates"
 )
-GTFS_DIMENSION_MODELS = "dim_line dim_stop_post dim_stop_group dim_date"
+GTFS_DIMENSION_MODELS = (
+    "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date "
+    "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
+)
 GTFS_RAW_SOURCES = (
     "source:raw.raw_gtfs_snapshots "
     "source:raw.raw_gtfs_trips "
@@ -229,7 +232,7 @@ def _load_gtfs_snapshot(snapshot: dict[str, str]) -> None:
 
 with DAG(
     dag_id="dag_gtfs_load",
-    description="Load triggered GTFS snapshot ZIP into raw BigQuery tables.",
+    description="Load triggered GTFS snapshot ZIP, then rebuild GTFS staging and dimensions.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule=None,
     catchup=False,
@@ -239,12 +242,12 @@ with DAG(
 
     @task
     def selected_gtfs_snapshot() -> dict[str, str]:
-        """TaskFlow boundary for immutable snapshot metadata from dag_run.conf."""
+        """Require dag_run.conf to pin the immutable snapshot."""
         return _selected_gtfs_snapshot(get_current_context()["dag_run"])
 
     @task
     def load_gtfs_snapshot(snapshot: dict[str, str]) -> None:
-        """TaskFlow boundary for loading one immutable GTFS ZIP snapshot."""
+        """Load one snapshot only; downstream dbt vars pin the same snapshot."""
         _load_gtfs_snapshot(snapshot)
 
     loaded_gtfs_snapshot = load_gtfs_snapshot(selected_gtfs_snapshot())
