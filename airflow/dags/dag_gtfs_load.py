@@ -21,13 +21,13 @@ except ImportError:  # Airflow 2 compatibility for local parser checks and older
     from airflow.operators.python import get_current_context
 
 GCP_PROJECT = "ztm-data"
-BIGQUERY_DATASET = "ztm_bq"
+BIGQUERY_RAW_DATASET = "ztm_raw"
 BIGQUERY_LOCATION = "europe-north1"
-RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_snapshots"
+RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 GTFS_DATE_LENGTH = 8
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
 GTFS_STAGING_MODELS = (
-    "stg_gtfs_trips stg_gtfs_stop_times stg_gtfs_stops stg_gtfs_shapes stg_gtfs_routes stg_gtfs_calendar_dates"
+    "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates"
 )
 GTFS_RAW_SOURCES = (
     "source:raw.raw_gtfs_snapshots "
@@ -50,12 +50,13 @@ class GtfsTableSpec:
     filename: str
     table: str
     schema: list[bigquery.SchemaField]
+    clustering_fields: list[str] | None = None
 
 
 GTFS_TABLES = (
     GtfsTableSpec(
         filename="trips.txt",
-        table=f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_trips",
+        table=f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_trips",
         schema=[
             bigquery.SchemaField("trip_id", "STRING"),
             bigquery.SchemaField("route_id", "STRING"),
@@ -67,10 +68,11 @@ GTFS_TABLES = (
             bigquery.SchemaField("shape_id", "STRING"),
             bigquery.SchemaField("gtfs_snapshot_id", "STRING", mode="REQUIRED"),
         ],
+        clustering_fields=["gtfs_snapshot_id"],
     ),
     GtfsTableSpec(
         filename="stop_times.txt",
-        table=f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_stop_times",
+        table=f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_stop_times",
         schema=[
             bigquery.SchemaField("trip_id", "STRING"),
             bigquery.SchemaField("stop_id", "STRING"),
@@ -79,10 +81,11 @@ GTFS_TABLES = (
             bigquery.SchemaField("departure_time", "STRING"),
             bigquery.SchemaField("gtfs_snapshot_id", "STRING", mode="REQUIRED"),
         ],
+        clustering_fields=["gtfs_snapshot_id"],
     ),
     GtfsTableSpec(
         filename="stops.txt",
-        table=f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_stops",
+        table=f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_stops",
         schema=[
             bigquery.SchemaField("stop_id", "STRING"),
             bigquery.SchemaField("stop_name", "STRING"),
@@ -93,7 +96,7 @@ GTFS_TABLES = (
     ),
     GtfsTableSpec(
         filename="shapes.txt",
-        table=f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_shapes",
+        table=f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_shapes",
         schema=[
             bigquery.SchemaField("shape_id", "STRING"),
             bigquery.SchemaField("shape_pt_lat", "FLOAT"),
@@ -101,10 +104,11 @@ GTFS_TABLES = (
             bigquery.SchemaField("shape_pt_sequence", "INTEGER"),
             bigquery.SchemaField("gtfs_snapshot_id", "STRING", mode="REQUIRED"),
         ],
+        clustering_fields=["gtfs_snapshot_id"],
     ),
     GtfsTableSpec(
         filename="routes.txt",
-        table=f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_routes",
+        table=f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_routes",
         schema=[
             bigquery.SchemaField("route_id", "STRING"),
             bigquery.SchemaField("route_short_name", "STRING"),
@@ -114,7 +118,7 @@ GTFS_TABLES = (
     ),
     GtfsTableSpec(
         filename="calendar_dates.txt",
-        table=f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_calendar_dates",
+        table=f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_calendar_dates",
         schema=[
             bigquery.SchemaField("service_id", "STRING"),
             bigquery.SchemaField("date", "DATE"),
@@ -187,6 +191,7 @@ def _load_csv_to_bigquery(client: bigquery.Client, csv_path: Path, spec: GtfsTab
         schema=spec.schema,
         create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        clustering_fields=spec.clustering_fields,
     )
     job_id = f"load_{spec.table.rsplit('.', 1)[-1]}_{_bigquery_job_id_suffix(snapshot_id)}"
     with csv_path.open("rb") as csv_file:
@@ -223,7 +228,7 @@ def _load_gtfs_snapshot(snapshot: dict[str, str]) -> None:
 
 with DAG(
     dag_id="dag_gtfs_load",
-    description="Load latest GTFS snapshot ZIP into raw BigQuery tables.",
+    description="Load triggered GTFS snapshot ZIP into raw BigQuery tables.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule=None,
     catchup=False,

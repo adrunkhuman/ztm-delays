@@ -10,6 +10,11 @@ test-paths: ["tests"]
 models:
   ztm_pipeline:
     staging:
+      +schema: "{{ env_var('DBT_BIGQUERY_STG_DATASET', 'ztm_stg') }}"
       +materialized: view
     intermediate:
+      +schema: "{{ env_var('DBT_BIGQUERY_INT_DATASET', 'ztm_int') }}"
       +materialized: view
+    marts:
+      +schema: "{{ env_var('DBT_BIGQUERY_MARTS_DATASET', 'ztm_marts') }}"
+      +materialized: table

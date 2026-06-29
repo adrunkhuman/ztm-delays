@@ -21,10 +21,10 @@ except ImportError:  # Airflow 2 compatibility for local parser checks and older
     from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 GCP_PROJECT = "ztm-data"
-BIGQUERY_DATASET = "ztm_bq"
+BIGQUERY_RAW_DATASET = "ztm_raw"
 GCS_BUCKET = "ztm-analytics-bucket"
 GTFS_URL = "https://mkuran.pl/gtfs/warsaw.zip"
-RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_DATASET}.raw_gtfs_snapshots"
+RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 WARSAW_TZ = ZoneInfo("Europe/Warsaw")
 
 

@@ -1,9 +1,3 @@
-with valid_snapshot as (
-    select snapshot_id
-    from {{ source('raw', 'raw_gtfs_snapshots') }}
-    where snapshot_id = '{{ var("gtfs_snapshot_id") }}'
-)
-
 select
     cast(trip_id as string) as trip_id,
     cast(route_id as string) as line,
@@ -14,5 +8,3 @@ select
     cast(shape_id as string) as shape_id,
     cast(gtfs_snapshot_id as string) as gtfs_snapshot_id
 from {{ source('raw', 'raw_gtfs_trips') }}
-inner join valid_snapshot
-    on gtfs_snapshot_id = valid_snapshot.snapshot_id

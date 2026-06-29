@@ -1,9 +1,3 @@
-with valid_snapshot as (
-    select snapshot_id
-    from {{ source('raw', 'raw_gtfs_snapshots') }}
-    where snapshot_id = '{{ var("gtfs_snapshot_id") }}'
-)
-
 select
     cast(service_id as string) as service_id,
     cast(date as date) as service_date,
@@ -14,6 +8,4 @@ select
     end as day_type,
     cast(gtfs_snapshot_id as string) as gtfs_snapshot_id
 from {{ source('raw', 'raw_gtfs_calendar_dates') }}
-inner join valid_snapshot
-    on gtfs_snapshot_id = valid_snapshot.snapshot_id
 where cast(exception_type as int64) = 1

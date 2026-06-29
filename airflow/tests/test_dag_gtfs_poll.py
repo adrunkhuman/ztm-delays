@@ -99,7 +99,7 @@ def test_insert_gtfs_snapshot_uses_expected_metadata_row() -> None:
 
     dag._insert_gtfs_snapshot(client, "2026-06-25T14:00:00Z", "abcdef1234567890", "gs://bucket/raw/gtfs/test.zip")
 
-    assert client.insert_table == "ztm-data.ztm_bq.raw_gtfs_snapshots"
+    assert client.insert_table == "ztm-data.ztm_raw.raw_gtfs_snapshots"
     assert client.inserted_rows == [
         {
             "snapshot_id": "2026-06-25T14:00:00Z_abcdef123456",
