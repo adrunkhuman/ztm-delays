@@ -79,7 +79,7 @@ models:
       - name: service_date
         description: GTFS service date for the matched trip. Can be the previous calendar date for overnight service.
       - name: day_type
-        description: Calendar weekday/weekend class from GTFS staging. This is not the transit schedule pattern; marts should use dim_date.schedule_day_type when that distinction matters.
+        description: Calendar weekday/weekend class from GTFS staging. This is not the transit schedule pattern; marts should use dim_schedule_date.schedule_day_type or baked fact labels when that distinction matters.
       - name: trip_start_seconds
         description: Earliest scheduled stop time for the matched trip, in seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
       - name: trip_end_seconds
@@ -105,7 +105,7 @@ models:
       - name: service_date
         description: GTFS service date for the matched trip. Can differ from gps_date for overnight service.
       - name: day_type
-        description: Calendar weekday/weekend class from GTFS staging. This is not the transit schedule pattern; marts should use dim_date.schedule_day_type when that distinction matters.
+        description: Calendar weekday/weekend class from GTFS staging. This is not the transit schedule pattern; marts should use dim_schedule_date.schedule_day_type or baked fact labels when that distinction matters.
       - name: trip_id
         description: Matched GTFS trip_id.
       - name: shape_id

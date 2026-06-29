@@ -12,11 +12,13 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select stg_gps__
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_ping_trip int_stop_arrivals --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
 ```
 
-Current-snapshot dimensions also require the selected `gtfs_snapshot_id`:
+Archive-safe dimensions rebuild across loaded GTFS snapshots. Current convenience lookups also require the selected `gtfs_snapshot_id`:
 
 ```bash
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select dim_line dim_stop_post dim_stop_group dim_date --vars '{"gtfs_snapshot_id": "SNAPSHOT_ID"}'
+uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current --vars '{"gtfs_snapshot_id": "SNAPSHOT_ID"}'
 ```
+
+Historical facts should bake labels from their governing snapshot. `_current` dimensions are present-day convenience surfaces only and must not be used to relabel historical facts.
 
 The local `profiles.yml` uses environment variables for BigQuery connection settings and credentials.
 

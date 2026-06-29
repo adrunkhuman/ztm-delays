@@ -1,52 +1,131 @@
-with selected_snapshot as (
-    select snapshot_id as gtfs_snapshot_id
-    from {{ source('raw', 'raw_gtfs_snapshots') }}
-    where snapshot_id = '{{ var("gtfs_snapshot_id") }}'
-    limit 1
+with loaded_snapshots as (
+    select distinct gtfs_snapshot_id
+    from {{ ref('stg_gtfs__stops') }}
 ),
 
-stop_service as (
-    select distinct
-        stop_times.stop_id,
-        stop_times.gtfs_snapshot_id,
-        trips.line,
-        routes.mode,
-        trips.direction_id
-    from {{ ref('stg_gtfs__stop_times') }} as stop_times
-    inner join {{ ref('stg_gtfs__trips') }} as trips
-        on stop_times.trip_id = trips.trip_id
-        and stop_times.gtfs_snapshot_id = trips.gtfs_snapshot_id
-    inner join {{ ref('stg_gtfs__routes') }} as routes
-        on trips.line = routes.route_id
-        and trips.gtfs_snapshot_id = routes.gtfs_snapshot_id
-    inner join selected_snapshot
-        on stop_times.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
+-- One loaded snapshot governs each Warsaw-local service date: latest snapshot from the prior local date.
+governing_snapshots as (
+    select
+        snapshots.snapshot_id as gtfs_snapshot_id,
+        snapshots.snapshot_timestamp,
+        date_add(date(snapshots.snapshot_timestamp, 'Europe/Warsaw'), interval 1 day) as valid_from_date
+    from {{ source('raw', 'raw_gtfs_snapshots') }} as snapshots
+    inner join loaded_snapshots
+        on snapshots.snapshot_id = loaded_snapshots.gtfs_snapshot_id
+    qualify row_number() over (
+        partition by date_add(date(snapshots.snapshot_timestamp, 'Europe/Warsaw'), interval 1 day)
+        order by snapshots.snapshot_timestamp desc, snapshots.snapshot_id desc
+    ) = 1
 ),
 
-served_by as (
+entities as (
+    select distinct stop_id
+    from {{ ref('stg_gtfs__stops') }}
+),
+
+-- Keep missing entity states so removals close SCD ranges instead of merging across gaps.
+stop_snapshots as (
+    select
+        entities.stop_id,
+        substr(stops.stop_id, 1, 4) as stop_group_id,
+        stops.stop_name,
+        stops.stop_lat,
+        stops.stop_lon,
+        governing_snapshots.gtfs_snapshot_id,
+        governing_snapshots.snapshot_timestamp,
+        governing_snapshots.valid_from_date,
+        stops.stop_id is not null as is_present,
+        if(
+            stops.stop_id is null,
+            '__missing__',
+            to_hex(md5(to_json_string(struct(
+                substr(stops.stop_id, 1, 4) as stop_group_id,
+                stops.stop_name as stop_name,
+                stops.stop_lat as stop_lat,
+                stops.stop_lon as stop_lon
+            ))))
+        ) as attribute_hash
+    from entities
+    cross join governing_snapshots
+    left join {{ ref('stg_gtfs__stops') }} as stops
+        on entities.stop_id = stops.stop_id
+        and governing_snapshots.gtfs_snapshot_id = stops.gtfs_snapshot_id
+),
+
+changes as (
+    select
+        *,
+        attribute_hash != lag(attribute_hash) over (
+            partition by stop_id
+            order by snapshot_timestamp, gtfs_snapshot_id
+        ) or lag(attribute_hash) over (
+            partition by stop_id
+            order by snapshot_timestamp, gtfs_snapshot_id
+        ) is null as starts_new_version
+    from stop_snapshots
+),
+
+versioned as (
+    select
+        *,
+        countif(starts_new_version) over (
+            partition by stop_id
+            order by snapshot_timestamp, gtfs_snapshot_id
+            rows between unbounded preceding and current row
+        ) as version_group
+    from changes
+),
+
+scd_rows as (
     select
         stop_id,
-        gtfs_snapshot_id,
-        string_agg(distinct line, ', ' order by line) as lines_served,
-        string_agg(distinct mode, ', ' order by mode) as modes_served,
-        string_agg(distinct cast(direction_id as string), ', ' order by cast(direction_id as string)) as directions_served
-    from stop_service
-    group by stop_id, gtfs_snapshot_id
+        stop_group_id,
+        stop_name,
+        stop_lat,
+        stop_lon,
+        is_present,
+        attribute_hash,
+        min(valid_from_date) as valid_from_date,
+        array_agg(gtfs_snapshot_id order by snapshot_timestamp, gtfs_snapshot_id limit 1)[offset(0)] as first_gtfs_snapshot_id,
+        array_agg(gtfs_snapshot_id order by snapshot_timestamp desc, gtfs_snapshot_id desc limit 1)[offset(0)] as last_gtfs_snapshot_id
+    from versioned
+    group by
+        stop_id,
+        stop_group_id,
+        stop_name,
+        stop_lat,
+        stop_lon,
+        is_present,
+        attribute_hash,
+        version_group
+),
+
+ranged_rows as (
+    select
+        stop_id,
+        stop_group_id,
+        stop_name,
+        stop_lat,
+        stop_lon,
+        is_present,
+        attribute_hash,
+        valid_from_date,
+        date_sub(lead(valid_from_date) over (partition by stop_id order by valid_from_date), interval 1 day) as valid_to_date,
+        first_gtfs_snapshot_id,
+        last_gtfs_snapshot_id
+    from scd_rows
 )
 
 select
-    stops.stop_id,
-    substr(stops.stop_id, 1, 4) as stop_group_id,
-    stops.stop_name,
-    stops.stop_lat,
-    stops.stop_lon,
-    coalesce(served_by.lines_served, '') as lines_served,
-    coalesce(served_by.modes_served, '') as modes_served,
-    coalesce(served_by.directions_served, '') as directions_served,
-    stops.gtfs_snapshot_id
-from {{ ref('stg_gtfs__stops') }} as stops
-inner join selected_snapshot
-    on stops.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
-left join served_by
-    on stops.stop_id = served_by.stop_id
-    and stops.gtfs_snapshot_id = served_by.gtfs_snapshot_id
+    stop_id,
+    stop_group_id,
+    stop_name,
+    stop_lat,
+    stop_lon,
+    attribute_hash,
+    valid_from_date,
+    valid_to_date,
+    first_gtfs_snapshot_id,
+    last_gtfs_snapshot_id
+from ranged_rows
+where is_present

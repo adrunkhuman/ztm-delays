@@ -92,6 +92,7 @@ def _load_raw_gps_pings(processing_date: str) -> None:
 
 def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     client = bigquery.Client(project=GCP_PROJECT)
+    # A snapshot first governs the Warsaw service date after its local snapshot date.
     query = f"""
         select snapshot_id
         from `{RAW_GTFS_SNAPSHOTS_TABLE}`

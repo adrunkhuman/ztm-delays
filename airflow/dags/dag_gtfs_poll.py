@@ -104,6 +104,7 @@ def _insert_gtfs_snapshot(client: bigquery.Client, snapshot_timestamp: str, file
 
 def _gtfs_staging_processing_date(snapshot_timestamp: str) -> str:
     snapshot_datetime = datetime.fromisoformat(snapshot_timestamp)
+    # A snapshot first governs the Warsaw service date after its local snapshot date.
     return (snapshot_datetime.astimezone(WARSAW_TZ).date() + timedelta(days=1)).isoformat()
 
 
@@ -147,12 +148,12 @@ with DAG(
 
     @task
     def poll_gtfs_snapshot() -> dict[str, str]:
-        """TaskFlow boundary for idempotent GTFS snapshot polling."""
+        """Persist changed GTFS content before triggering the raw loader."""
         return _poll_gtfs_snapshot()
 
     @task.branch
     def branch_gtfs_load(poll_result: dict[str, str]) -> str:
-        """TaskFlow branch boundary for changed-vs-unchanged GTFS snapshots."""
+        """Avoid triggering raw reloads when the GTFS ZIP hash is unchanged."""
         return _gtfs_load_branch(poll_result)
 
     trigger_gtfs_load = TriggerDagRunOperator(

@@ -44,7 +44,7 @@ The GTFS raw loader DAG is:
 dag_gtfs_load
 ```
 
-It loads the triggered GTFS snapshot ZIP into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, runs and tests GTFS staging models, then refreshes and tests current-snapshot dimensions. It is unscheduled and triggered by `dag_gtfs_poll` with immutable `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`.
+It loads the triggered GTFS snapshot ZIP into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, runs and tests GTFS staging models, then refreshes and tests archive-safe dimensions plus current-snapshot convenience lookups. It is unscheduled and triggered by `dag_gtfs_poll` with immutable `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`.
 
 Required ZIP members:
 
@@ -70,11 +70,21 @@ stg_gtfs__calendar_dates
 
 GTFS staging exposes all loaded snapshots and carries `gtfs_snapshot_id` as lineage. Downstream intermediate models use the Airflow-provided governing snapshot ID to pin schedule joins for a processing date.
 
-Current-snapshot dimensions refreshed by `dag_gtfs_load` for the triggered `gtfs_snapshot_id`:
+Archive-safe dimensions refreshed by `dag_gtfs_load` after each GTFS load:
 
 ```text
 dim_line
 dim_stop_post
 dim_stop_group
 dim_date
+dim_schedule_date
+```
+
+Current-snapshot convenience lookups refreshed for the triggered `gtfs_snapshot_id`:
+
+```text
+dim_line_current
+dim_stop_post_current
+dim_stop_group_current
+dim_schedule_date_current
 ```

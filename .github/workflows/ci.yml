@@ -103,7 +103,7 @@ jobs:
       - name: Compile GTFS staging, matching, and dimensions
         run: >-
           uv run dbt compile --profiles-dir .
-          --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates int_ping_trip dim_line dim_stop_post dim_stop_group dim_date
+          --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates int_ping_trip dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current
           --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
         working-directory: dbt
 
