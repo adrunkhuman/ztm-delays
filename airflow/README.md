@@ -20,7 +20,7 @@ dag_daily_gps
 
 The DAG ID is historical; it now runs hourly and rebuilds the data interval's Warsaw-local processing date.
 
-It loads poller Parquet files from GCS into `ztm_raw.raw_gps_pings`, selects the governing GTFS snapshot, then runs `stg_gps__pings`, `int_ping_trip`, `int_gps_hourly_completeness`, and `int_stop_arrivals` for the processing date. The governing snapshot is the latest `ztm_raw.raw_gtfs_snapshots.snapshot_timestamp` whose Warsaw-local date is strictly before the GPS processing date; the DAG fails if no such snapshot exists. This is a metadata lookup only; `dag_daily_gps` does not wait for the selected snapshot's raw GTFS tables or dimensions to be loaded.
+It loads poller Parquet files from GCS into `ztm_raw.raw_gps_pings`, selects the governing GTFS snapshot, then runs `stg_gps__pings`, `int_ping_trip`, `int_gps_hourly_completeness`, `int_stop_arrivals`, `int_trip_summary`, `fct_trip`, and `fct_stop_arrival` for the processing date. The governing snapshot is the latest `ztm_raw.raw_gtfs_snapshots.snapshot_timestamp` whose Warsaw-local date is strictly before the GPS processing date; the DAG fails if no such snapshot exists. This is a metadata lookup only; `dag_daily_gps` does not wait for the selected snapshot's raw GTFS tables or dimensions to be loaded.
 
 Expected input layout:
 

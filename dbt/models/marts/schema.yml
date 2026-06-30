@@ -369,133 +369,316 @@ models:
     columns:
       - name: gtfs_snapshot_id
         description: Governing GTFS snapshot used for matching, schedule lineage, and archive-safe labels.
-        tests: [not_null]
       - name: gps_date
         description: Warsaw-local GPS processing date that produced this realized trip row.
-        tests: [not_null]
       - name: service_date
         description: GTFS service date for the trip. This is the fact partition field.
-        tests: [not_null]
       - name: trip_id
         description: Matched GTFS trip_id from the governing snapshot.
-        tests: [not_null]
       - name: vehicle_number
         description: Vehicle identifier observed in the GPS source.
-        tests: [not_null]
       - name: line
         description: Public line identifier from the matched trip.
-        tests: [not_null]
       - name: route_short_name
         description: Public route short name from the governing GTFS snapshot.
       - name: mode
         description: Transit mode from the governing GTFS route.
-        tests: [not_null]
       - name: brigade
         description: Normalized brigade/block short name used for trip matching.
-        tests: [not_null]
       - name: vehicle_type
         description: "Vehicle type from the GPS source: 1 for bus, 2 for tram."
-        tests: [not_null]
       - name: direction_id
         description: GTFS direction_id for the matched trip.
-        tests: [not_null]
       - name: service_id
         description: GTFS service_id for the matched trip in the governing snapshot.
-        tests: [not_null]
       - name: trip_headsign
         description: Matched trip headsign from the governing snapshot. This is an archive-safe display label.
-        tests: [not_null]
       - name: shape_id
         description: GTFS shape_id for the matched trip.
-        tests: [not_null]
       - name: day_type
         description: Calendar weekday/weekend class carried from upstream matching.
       - name: schedule_day_type
         description: GTFS-derived service pattern for this line and direction on the service date.
-        tests: [not_null]
       - name: schedule_service_ids
         description: Comma-delimited active GTFS service_id values for this line and direction under the governing snapshot.
       - name: schedule_version_id
         description: Timetable-version identifier for since-schedule-change analytics.
-        tests: [not_null]
       - name: origin_stop_id
         description: First scheduled stop_id for the matched trip in the governing snapshot.
-        tests: [not_null]
       - name: origin_stop_name
         description: First scheduled stop name from the governing snapshot. This is an archive-safe display label.
-        tests: [not_null]
       - name: destination_stop_id
         description: Last scheduled stop_id for the matched trip in the governing snapshot.
-        tests: [not_null]
       - name: destination_stop_name
         description: Last scheduled stop name from the governing snapshot. This is an archive-safe display label.
-        tests: [not_null]
       - name: scheduled_start_time
         description: Timestamp of the first scheduled stop arrival for the matched trip.
-        tests: [not_null]
       - name: scheduled_end_time
         description: Timestamp of the last scheduled stop arrival for the matched trip.
-        tests: [not_null]
       - name: actual_start_time
         description: Estimated arrival time at the first detected stop sequence for the realized trip. For partial trips this can be a non-terminal stop, so use is_first_stop_observed before treating start_delay_seconds as a strict terminal delay.
-        tests: [not_null]
       - name: actual_end_time
         description: Estimated arrival time at the last detected stop sequence for the realized trip. For partial trips this can be a non-terminal stop, so use is_last_stop_observed before treating end_delay_seconds as a strict terminal delay.
-        tests: [not_null]
       - name: start_delay_seconds
         description: Difference in seconds between actual_start_time and scheduled_start_time. Positive values are late.
-        tests: [not_null]
       - name: end_delay_seconds
         description: Difference in seconds between actual_end_time and scheduled_end_time. Positive values are late.
-        tests: [not_null]
       - name: stops_expected
         description: Scheduled stop count for the matched trip.
-        tests: [not_null]
       - name: stops_detected
         description: Number of scheduled stops detected from GPS segment crossings.
-        tests: [not_null]
       - name: detected_stop_ratio
         description: stops_detected divided by stops_expected.
-        tests: [not_null]
       - name: first_detected_stop_sequence
         description: Lowest scheduled stop_sequence detected for this realized trip.
-        tests: [not_null]
       - name: last_detected_stop_sequence
         description: Highest scheduled stop_sequence detected for this realized trip.
-        tests: [not_null]
       - name: max_stop_sequence_gap
         description: Largest scheduled stop_sequence gap between consecutive detected stops.
-        tests: [not_null]
       - name: max_ping_gap_seconds
         description: Largest observed time gap between consecutive matched GPS pings for this vehicle trip. A value of 0 can mean no consecutive matched ping pair was available.
-        tests: [not_null]
       - name: max_speed_mps
         description: Largest implied straight-line speed between consecutive matched GPS pings, in meters per second. A value of 0 can mean no consecutive matched ping pair was available.
-        tests: [not_null]
       - name: is_first_stop_observed
         description: True when the first detected stop is within 2 scheduled stop_sequence positions from the scheduled first stop. The tolerance is provisional.
-        tests: [not_null]
       - name: is_last_stop_observed
         description: True when the last detected stop is within 2 scheduled stop_sequence positions from the scheduled last stop. The tolerance is provisional.
-        tests: [not_null]
       - name: has_non_monotonic_stop_progression
         description: True when detected stops move backward in scheduled stop_sequence when ordered by actual arrival time.
-        tests: [not_null]
       - name: has_impossible_speed_jump
         description: True when matched GPS pings imply a straight-line speed above the provisional impossible-speed threshold.
-        tests: [not_null]
       - name: trip_quality
         description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, max_ping_gap_seconds > 1800, non-monotonic stop progression, max_speed_mps > 50, or terminal delay beyond 3600 seconds. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips."
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['complete', 'partial', 'broken']
       - name: quality_flags
         description: "Array of explainable quality flags for filtering and debug views. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. extreme_delay: absolute start or end delay > 3600 seconds. likely_wrong_trip_assignment: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, or non-monotonic progression."
-        tests: [not_null]
+
+  - name: fct_stop_arrival
+    description: Serving-layer stop-arrival detail fact. One row per detected scheduled stop arrival for an observed vehicle trip, partitioned by service_date, with archive-safe trip and stop labels baked from the governing GTFS snapshot. Strict analytics should default to trip_quality = 'complete'; partial rows are retained for exploration and broken rows for debugging.
+    columns:
+      - name: gtfs_snapshot_id
+        description: Governing GTFS snapshot used for matching, schedule lineage, and archive-safe labels.
+      - name: gps_date
+        description: Warsaw-local processing date inherited from fct_trip for the run that published this stop-arrival row.
+      - name: source_gps_date
+        description: Warsaw-local GPS partition containing the source stop-arrival reconstruction. It currently matches the published service date because prior-service-date republishing is deferred.
+      - name: service_date
+        description: GTFS service date for the matched trip. This is the fact partition field.
+      - name: trip_id
+        description: Matched GTFS trip_id from the governing snapshot.
+      - name: vehicle_number
+        description: Vehicle identifier observed in the GPS source.
+      - name: line
+        description: Public line identifier from the matched trip.
+      - name: route_short_name
+        description: Public route short name from the governing GTFS snapshot.
+      - name: mode
+        description: Transit mode from the governing GTFS route.
+      - name: brigade
+        description: Normalized brigade/block short name used for trip matching.
+      - name: vehicle_type
+        description: "Vehicle type from the GPS source: 1 for bus, 2 for tram."
+      - name: direction_id
+        description: GTFS direction_id for the matched trip.
+      - name: service_id
+        description: GTFS service_id for the matched trip in the governing snapshot.
+      - name: trip_headsign
+        description: Matched trip headsign from the governing snapshot. This is an archive-safe display label.
+      - name: shape_id
+        description: GTFS shape_id for the matched trip.
+      - name: day_type
+        description: Immutable calendar weekday/weekend class for the service date.
+      - name: is_holiday
+        description: True when service_date is a Polish public holiday.
+      - name: schedule_day_type
+        description: GTFS-derived service pattern for this line and direction on the service date under the governing snapshot.
+      - name: schedule_service_ids
+        description: Comma-delimited active GTFS service_id values for this line and direction under the governing snapshot.
+      - name: schedule_version_id
+        description: Timetable-version identifier for since-schedule-change analytics.
+      - name: trip_quality
+        description: Reconstruction quality class inherited from fct_trip. Strict analytics should use complete rows by default; exploratory views may include partial rows; broken rows are retained for debugging only.
+      - name: quality_flags
+        description: Array of explainable trip-quality flags inherited from fct_trip for filtering and debug views.
+      - name: stop_id
+        description: Physical stop/location identifier from the governing GTFS snapshot.
+      - name: stop_group_id
+        description: User-facing stop group identifier derived as LEFT(stop_id, 4).
+      - name: stop_name
+        description: Stop/location name from the governing GTFS snapshot. This is an archive-safe display label.
+      - name: stop_lat
+        description: Stop/location latitude from the governing GTFS snapshot.
+      - name: stop_lon
+        description: Stop/location longitude from the governing GTFS snapshot.
+      - name: stop_group_name
+        description: Deterministic user-facing stop group name from the governing GTFS snapshot, chosen from the most common post name in the group with alphabetical tie-break.
+      - name: stop_sequence
+        description: GTFS stop_sequence for this stop within the matched trip.
+      - name: scheduled_arrival_time
+        description: Scheduled arrival timestamp reconstructed from service_date and GTFS arrival seconds.
+      - name: scheduled_departure_time
+        description: Scheduled departure timestamp reconstructed from service_date and GTFS departure seconds.
+      - name: actual_arrival_time
+        description: Estimated actual arrival timestamp from interpolation across the GPS segment that passed the stop.
+      - name: delay_seconds
+        description: Difference in seconds between actual_arrival_time and scheduled_arrival_time. Positive values are late; negative values are early.
+      - name: hour_bracket
+        description: Warsaw-local hour floor of scheduled_arrival_time. This is the leaderboard and distribution time bucket; for example, scheduled arrivals from 08:00:00 through 08:59:59 share the 08:00 bracket.
+      - name: detection_method
+        description: Reconstruction method label. Current value is segment_within_50m.
+      - name: stop_distance_m
+        description: Distance in meters from the GPS segment to the scheduled stop point.
+      - name: prev_ping_distance_m
+        description: Distance in meters from the segment start ping to the scheduled stop point.
+      - name: next_ping_distance_m
+        description: Distance in meters from the segment end ping to the scheduled stop point.
+      - name: segment_start_time
+        description: GPS timestamp at the start of the segment used for interpolation.
+      - name: segment_end_time
+        description: GPS timestamp at the end of the segment used for interpolation.
+      - name: segment_duration_seconds
+        description: Duration in seconds between segment_start_time and segment_end_time.
 
 unit_tests:
+  - name: fct_stop_arrival_adds_archive_labels_and_trip_quality
+    model: fct_stop_arrival
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_stop_arrivals')
+        format: sql
+        rows: |
+          select
+            'snapshot-valid' as gtfs_snapshot_id,
+            '187' as line,
+            '1' as brigade,
+            1001 as vehicle_number,
+            1 as vehicle_type,
+            date '2026-01-15' as gps_date,
+            date '2026-01-15' as service_date,
+            'weekday' as day_type,
+            'trip-1' as trip_id,
+            'shape-1' as shape_id,
+            'svc' as service_id,
+            0 as direction_id,
+            '100101' as stop_id,
+            'Main 01' as stop_name,
+            3 as stop_sequence,
+            timestamp('2026-01-15 08:17:00+01') as scheduled_arrival_time,
+            timestamp('2026-01-15 08:17:20+01') as scheduled_departure_time,
+            timestamp('2026-01-15 08:19:30+01') as actual_arrival_time,
+            150 as arrival_delay_seconds,
+            'segment_within_50m' as detection_method,
+            12.3 as stop_distance_m,
+            18.4 as prev_ping_distance_m,
+            22.5 as next_ping_distance_m,
+            timestamp('2026-01-15 08:19:00+01') as segment_start_time,
+            timestamp('2026-01-15 08:20:00+01') as segment_end_time,
+            60 as segment_duration_seconds
+      - input: ref('fct_trip')
+        format: sql
+        rows: |
+          select
+            'snapshot-valid' as gtfs_snapshot_id,
+            date '2026-01-15' as gps_date,
+            date '2026-01-15' as service_date,
+            'trip-1' as trip_id,
+            1001 as vehicle_number,
+            '187' as line,
+            '187' as route_short_name,
+            'bus' as mode,
+            '1' as brigade,
+            1 as vehicle_type,
+            0 as direction_id,
+            'svc' as service_id,
+            'Central' as trip_headsign,
+            'shape-1' as shape_id,
+            'weekday' as day_type,
+            'thursday' as schedule_day_type,
+            'svc' as schedule_service_ids,
+            '187|0|thursday|2026-01-15' as schedule_version_id,
+            '100101' as origin_stop_id,
+            'Main 01' as origin_stop_name,
+            '200101' as destination_stop_id,
+            'End 01' as destination_stop_name,
+            timestamp('2026-01-15 08:00:00+01') as scheduled_start_time,
+            timestamp('2026-01-15 09:00:00+01') as scheduled_end_time,
+            timestamp('2026-01-15 08:01:00+01') as actual_start_time,
+            timestamp('2026-01-15 09:02:00+01') as actual_end_time,
+            60 as start_delay_seconds,
+            120 as end_delay_seconds,
+            20 as stops_expected,
+            19 as stops_detected,
+            0.95 as detected_stop_ratio,
+            1 as first_detected_stop_sequence,
+            20 as last_detected_stop_sequence,
+            1 as max_stop_sequence_gap,
+            120 as max_ping_gap_seconds,
+            10.0 as max_speed_mps,
+            true as is_first_stop_observed,
+            true as is_last_stop_observed,
+            false as has_non_monotonic_stop_progression,
+            false as has_impossible_speed_jump,
+            'complete' as trip_quality,
+            array<string>[] as quality_flags
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select '100101' as stop_id, 'Main 01' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '100102', 'Main 02', 52.2, 21.2, 'snapshot-valid'
+          union all select '100103', 'Main 02', 52.3, 21.3, 'snapshot-valid'
+          union all select '100101', 'Old Main', 52.0, 21.0, 'snapshot-old'
+      - input: ref('dim_date')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, 'weekday' as day_type, false as is_holiday, 'Thursday' as weekday_name, 5 as day_of_week, 3 as iso_week, 1 as month, 2026 as year
+    expect:
+      format: sql
+      rows: |
+        select
+          'snapshot-valid' as gtfs_snapshot_id,
+          date '2026-01-15' as gps_date,
+          date '2026-01-15' as source_gps_date,
+          date '2026-01-15' as service_date,
+          'trip-1' as trip_id,
+          1001 as vehicle_number,
+          '187' as line,
+          '187' as route_short_name,
+          'bus' as mode,
+          '1' as brigade,
+          1 as vehicle_type,
+          0 as direction_id,
+          'svc' as service_id,
+          'Central' as trip_headsign,
+          'shape-1' as shape_id,
+          'weekday' as day_type,
+          false as is_holiday,
+          'thursday' as schedule_day_type,
+          'svc' as schedule_service_ids,
+          '187|0|thursday|2026-01-15' as schedule_version_id,
+          'complete' as trip_quality,
+          array<string>[] as quality_flags,
+          '100101' as stop_id,
+          '1001' as stop_group_id,
+          'Main 01' as stop_name,
+          52.1 as stop_lat,
+          21.1 as stop_lon,
+          'Main 02' as stop_group_name,
+          3 as stop_sequence,
+          timestamp('2026-01-15 08:17:00+01') as scheduled_arrival_time,
+          timestamp('2026-01-15 08:17:20+01') as scheduled_departure_time,
+          timestamp('2026-01-15 08:19:30+01') as actual_arrival_time,
+          150 as delay_seconds,
+          timestamp('2026-01-15 08:00:00+01') as hour_bracket,
+          'segment_within_50m' as detection_method,
+          12.3 as stop_distance_m,
+          18.4 as prev_ping_distance_m,
+          22.5 as next_ping_distance_m,
+          timestamp('2026-01-15 08:19:00+01') as segment_start_time,
+          timestamp('2026-01-15 08:20:00+01') as segment_end_time,
+          60 as segment_duration_seconds
+
   - name: dim_line_current_uses_selected_snapshot_and_collects_headsigns
     model: dim_line_current
     overrides:

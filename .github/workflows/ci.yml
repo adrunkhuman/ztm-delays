@@ -100,10 +100,10 @@ jobs:
           uv venv
           uv pip install dbt-core dbt-bigquery
 
-      - name: Compile GTFS staging, matching, and dimensions
+      - name: Compile dbt GPS, GTFS, dimensions, and facts
         run: >-
           uv run dbt compile --profiles-dir .
-          --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates int_ping_trip int_stop_arrivals int_gtfs_trip_schedule int_schedule_version int_trip_summary dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_schedule_version dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current fct_trip
+          --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates int_ping_trip int_stop_arrivals int_gtfs_trip_schedule int_schedule_version int_trip_summary dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_schedule_version dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current fct_trip fct_stop_arrival
           --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
         working-directory: dbt
 

@@ -3,11 +3,10 @@
         materialized='incremental',
         incremental_strategy='insert_overwrite',
         partition_by={"field": "service_date", "data_type": "date"},
-        partitions=[
-            "date_sub(date('" ~ var("processing_date") ~ "'), interval 1 day)",
-            "date('" ~ var("processing_date") ~ "')",
-        ],
+        partitions=["date('" ~ var("processing_date") ~ "')"],
         cluster_by=["line", "direction_id"],
+        require_partition_filter=true,
+        post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
@@ -56,5 +55,4 @@ select
     quality_flags
 from {{ ref('int_trip_summary') }}
 where gps_date = date('{{ var("processing_date") }}')
-  and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
-    and date('{{ var("processing_date") }}')
+  and service_date = date('{{ var("processing_date") }}')

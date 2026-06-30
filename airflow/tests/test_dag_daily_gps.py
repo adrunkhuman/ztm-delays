@@ -199,6 +199,20 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
             f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.TRIP_FACT_MODEL} --vars '{dag.GPS_TRIP_DBT_VARS}'"
         ),
     }
+    assert dag.dbt_run_fct_stop_arrival.kwargs == {
+        "task_id": "dbt_run_fct_stop_arrival",
+        "bash_command": (
+            f"cd {dag.DBT_PROJECT_DIR} && dbt run --select {dag.STOP_ARRIVAL_FACT_MODEL} "
+            f"--vars '{dag.GPS_TRIP_DBT_VARS}'"
+        ),
+    }
+    assert dag.dbt_test_fct_stop_arrival.kwargs == {
+        "task_id": "dbt_test_fct_stop_arrival",
+        "bash_command": (
+            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.STOP_ARRIVAL_FACT_MODEL} "
+            f"--vars '{dag.GPS_TRIP_DBT_VARS}'"
+        ),
+    }
     assert dag.load_raw_gps_pings.downstream == [dag.dbt_run_stg_gps_pings]
     assert dag.dbt_run_stg_gps_pings.downstream == [
         dag.dbt_test_stg_gps_pings,
@@ -216,6 +230,8 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.dbt_run_int_trip_summary.downstream == [dag.dbt_test_int_trip_summary]
     assert dag.dbt_test_int_trip_summary.downstream == [dag.dbt_run_fct_trip]
     assert dag.dbt_run_fct_trip.downstream == [dag.dbt_test_fct_trip]
+    assert dag.dbt_test_fct_trip.downstream == [dag.dbt_run_fct_stop_arrival]
+    assert dag.dbt_run_fct_stop_arrival.downstream == [dag.dbt_test_fct_stop_arrival]
 
 
 @dataclass
