@@ -4,8 +4,8 @@ Data pipeline for collecting Warsaw ZTM GPS pings, loading raw data into GCS/Big
 
 The poller lives in `poller/` as part of this pipeline repo. It should not have its own Git repo unless it gets a separate release lifecycle from the rest of the pipeline.
 
-The dbt project lives in `dbt/`. Date-partitioned GPS models require `processing_date`; trip and arrival matching also require the governing `gtfs_snapshot_id`.
+The dbt project lives in `dbt/`. Date-partitioned GPS models require `processing_date`; trip and arrival matching require the governing `gtfs_snapshot_id`, and Airflow/backfills pass the same vars through serving fact builds.
 
-Airflow DAGs live in `airflow/dags/`. The current DAG scope covers GPS raw loading, GTFS snapshot loading, staging, and existing intermediate GPS/trip/arrival reconstruction.
+Airflow DAGs live in `airflow/dags/`. The current DAG scope covers GPS raw loading, GTFS snapshot loading, staging, intermediate GPS/trip/arrival reconstruction, and serving trip/stop-arrival facts.
 
 CI runs on pull requests and pushes to `master`. The dbt job requires the `GCP_SERVICE_ACCOUNT_JSON` GitHub Actions secret containing the service account key JSON used by `profiles.yml`.

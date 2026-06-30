@@ -31,6 +31,7 @@ GTFS_STOP_ARRIVAL_STAGING_MODELS = "stg_gtfs__stop_times stg_gtfs__stops"
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 TRIP_SUMMARY_MODEL = "int_trip_summary"
 TRIP_FACT_MODEL = "fct_trip"
+STOP_ARRIVAL_FACT_MODEL = "fct_stop_arrival"
 PROCESSING_DATE = "{{ data_interval_start.in_timezone('Europe/Warsaw').to_date_string() }}"
 GPS_DBT_VARS = '{"processing_date": "' + PROCESSING_DATE + '"}'
 GPS_TRIP_DBT_VARS = (
@@ -199,6 +200,20 @@ with DAG(
         bash_command=(f"cd {DBT_PROJECT_DIR} && dbt test --select {TRIP_FACT_MODEL} --vars '{GPS_TRIP_DBT_VARS}'"),
     )
 
+    dbt_run_fct_stop_arrival = BashOperator(
+        task_id="dbt_run_fct_stop_arrival",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} && dbt run --select {STOP_ARRIVAL_FACT_MODEL} --vars '{GPS_TRIP_DBT_VARS}'"
+        ),
+    )
+
+    dbt_test_fct_stop_arrival = BashOperator(
+        task_id="dbt_test_fct_stop_arrival",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} && dbt test --select {STOP_ARRIVAL_FACT_MODEL} --vars '{GPS_TRIP_DBT_VARS}'"
+        ),
+    )
+
     load_raw_gps_pings >> dbt_run_stg_gps_pings
     selected_gtfs_snapshot_id >> dbt_run_int_ping_trip
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
@@ -206,3 +221,4 @@ with DAG(
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
     dbt_run_int_stop_arrivals >> dbt_test_int_stop_arrivals >> dbt_run_int_trip_summary
     dbt_run_int_trip_summary >> dbt_test_int_trip_summary >> dbt_run_fct_trip >> dbt_test_fct_trip
+    dbt_test_fct_trip >> dbt_run_fct_stop_arrival >> dbt_test_fct_stop_arrival

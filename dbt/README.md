@@ -10,6 +10,8 @@ GPS staging and completeness models require `processing_date`. Trip and arrival 
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select stg_gps__pings --vars '{"processing_date": "YYYY-MM-DD"}'
 
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_ping_trip int_stop_arrivals --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
+
+uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_trip_summary fct_trip fct_stop_arrival --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
 ```
 
 Archive-safe dimensions rebuild across loaded GTFS snapshots. Current convenience lookups also require the selected `gtfs_snapshot_id`:
@@ -19,6 +21,8 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select dim_line 
 ```
 
 Historical facts should bake labels from their governing snapshot. `_current` dimensions are present-day convenience surfaces only and must not be used to relabel historical facts.
+
+`fct_trip` and `fct_stop_arrival` overwrite the selected service-date partition for each processing date. Prior-service-date completion from after-midnight GPS is intentionally deferred until the pipeline can rebuild the full prior-day service partition without deleting daytime rows.
 
 Schedule versions are per-line timetable fingerprints derived from governing snapshots across collected history. They intentionally exclude display labels and unstable GTFS identifiers. They are only known from collected snapshots onward, and same-day/intraday schedule changes remain out of scope until #27.
 

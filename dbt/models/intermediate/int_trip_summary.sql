@@ -167,7 +167,7 @@ stop_extents as (
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.stop_id = stops.stop_id
         and stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
-    where stop_times.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+    where stop_times.gtfs_snapshot_id in (select distinct gtfs_snapshot_id from arrival_candidates)
     group by stop_times.gtfs_snapshot_id, stop_times.trip_id
 ),
 

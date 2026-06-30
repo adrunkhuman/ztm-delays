@@ -34,15 +34,18 @@ dbt build --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__calendar_dates
 
 dbt build --select stg_gtfs__stop_times stg_gtfs__stops int_stop_arrivals \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
+
+dbt build --select int_trip_summary fct_trip fct_stop_arrival \
+  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
 ```
 
-The incremental models use static-partition `insert_overwrite`, so rerunning a date replaces that date's partition.
+GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving facts are partitioned by `service_date` and currently overwrite only the selected service date. Prior-service-date completion from after-midnight GPS is deferred until the pipeline can rebuild the full prior-day service partition without deleting daytime rows.
 
 ## Date-Range Backfill
 
 Loop over dates in order. For every date, resolve the governing snapshot from `ztm_raw.raw_gtfs_snapshots`: latest snapshot whose Warsaw-local `snapshot_timestamp` date is before the GPS `processing_date`.
 
-After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each `service_date`. Also verify historical facts carry baked line/stop/schedule labels from the governing snapshot and do not join `_current` dimensions for archive rendering. A successful run is not enough; matching every historical date against the newest snapshot is silent corruption.
+After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each `service_date`. Also verify historical facts carry baked line/stop/schedule labels from the governing snapshot and do not join `_current` dimensions for archive rendering. A successful run is not enough; matching every historical date against the newest snapshot is silent corruption. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
 
 ## Operational Notes
 
