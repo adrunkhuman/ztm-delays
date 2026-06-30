@@ -398,6 +398,9 @@ unit_tests:
           union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 2, timestamp('2026-01-15 10:11:00+00:00')
           union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 3, timestamp('2026-01-15 10:21:00+00:00')
           union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 4, timestamp('2026-01-15 10:31:00+00:00')
+          union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 0, timestamp('2026-01-15 12:01:00+00:00')
+          union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 1, timestamp('2026-01-15 12:11:00+00:00')
+          union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 2, timestamp('2026-01-15 12:21:00+00:00')
           union all select 'snapshot-valid', '187', '14', '1003', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-broken', 'shape-3', 'svc', 0, 5, timestamp('2026-01-15 11:21:00+00:00')
       - input: ref('int_ping_trip')
         format: sql
@@ -406,6 +409,8 @@ unit_tests:
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-complete', '1001', timestamp('2026-01-15 10:02:00+00:00'), 52.0001, 21.0001
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-partial', '1002', timestamp('2026-01-15 11:00:00+00:00'), 52.0, 21.0
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-partial', '1002', timestamp('2026-01-15 11:02:00+00:00'), 52.0001, 21.0001
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-zero-based-terminal-tolerance', '1004', timestamp('2026-01-15 13:00:00+00:00'), 52.0, 21.0
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-zero-based-terminal-tolerance', '1004', timestamp('2026-01-15 13:02:00+00:00'), 52.0001, 21.0001
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-broken', '1003', timestamp('2026-01-15 12:00:00+00:00'), 52.0, 21.0
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-broken', '1003', timestamp('2026-01-15 12:02:00+00:00'), 52.0001, 21.0001
       - input: ref('int_gtfs_trip_schedule')
@@ -413,6 +418,7 @@ unit_tests:
         rows: |
           select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-complete' as trip_id, 'svc' as service_id, 'Complete Head' as trip_headsign, 'shape-1' as shape_id, 36000 as trip_start_seconds, 38400 as trip_end_seconds, 5 as stop_count
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-partial', 'svc', 'Partial Head', 'shape-2', 39600, 42000, 5
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-zero-based-terminal-tolerance', 'svc', 'Zero Based Head', 'shape-4', 46800, 49200, 5
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-broken', 'svc', 'Broken Head', 'shape-3', 43200, 45600, 10
       - input: ref('int_schedule_version')
         format: sql
@@ -435,6 +441,11 @@ unit_tests:
           union all select 'trip-partial', '200103', 3, 40800, 40800, 'snapshot-valid'
           union all select 'trip-partial', '200104', 4, 41400, 41400, 'snapshot-valid'
           union all select 'trip-partial', '200105', 5, 42000, 42000, 'snapshot-valid'
+          union all select 'trip-zero-based-terminal-tolerance', '400100', 0, 46800, 46800, 'snapshot-valid'
+          union all select 'trip-zero-based-terminal-tolerance', '400101', 1, 47400, 47400, 'snapshot-valid'
+          union all select 'trip-zero-based-terminal-tolerance', '400102', 2, 48000, 48000, 'snapshot-valid'
+          union all select 'trip-zero-based-terminal-tolerance', '400103', 3, 48600, 48600, 'snapshot-valid'
+          union all select 'trip-zero-based-terminal-tolerance', '400104', 4, 49200, 49200, 'snapshot-valid'
           union all select 'trip-broken', '300101', 1, 43200, 43200, 'snapshot-valid'
           union all select 'trip-broken', '300105', 5, 44400, 44400, 'snapshot-valid'
           union all select 'trip-broken', '300110', 10, 45600, 45600, 'snapshot-valid'
@@ -451,6 +462,11 @@ unit_tests:
           union all select '200103', 'Partial Mid 3', 52.03, 21.03, 'snapshot-valid'
           union all select '200104', 'Partial Mid 4', 52.04, 21.04, 'snapshot-valid'
           union all select '200105', 'Partial Destination', 52.1, 21.1, 'snapshot-valid'
+          union all select '400100', 'Zero Based Origin', 52.0, 21.0, 'snapshot-valid'
+          union all select '400101', 'Zero Based Mid 1', 52.01, 21.01, 'snapshot-valid'
+          union all select '400102', 'Zero Based Mid 2', 52.02, 21.02, 'snapshot-valid'
+          union all select '400103', 'Zero Based Mid 3', 52.03, 21.03, 'snapshot-valid'
+          union all select '400104', 'Zero Based Destination', 52.1, 21.1, 'snapshot-valid'
           union all select '300101', 'Broken Origin', 52.0, 21.0, 'snapshot-valid'
           union all select '300105', 'Broken Mid 5', 52.05, 21.05, 'snapshot-valid'
           union all select '300110', 'Broken Destination', 52.1, 21.1, 'snapshot-valid'
@@ -483,6 +499,20 @@ unit_tests:
           trip_headsign: 'Partial Head'
           origin_stop_name: 'Partial Origin'
           destination_stop_name: 'Partial Destination'
+          quality_flags: ['low_stop_coverage']
+        - trip_id: 'trip-zero-based-terminal-tolerance'
+          trip_quality: 'partial'
+          start_delay_seconds: 60
+          end_delay_seconds: -1140
+          stops_detected: 3
+          detected_stop_ratio: 0.6
+          is_first_stop_observed: true
+          is_last_stop_observed: true
+          schedule_version_id: 'schedule-version-1'
+          mode: 'bus'
+          trip_headsign: 'Zero Based Head'
+          origin_stop_name: 'Zero Based Origin'
+          destination_stop_name: 'Zero Based Destination'
           quality_flags: ['low_stop_coverage']
         - trip_id: 'trip-broken'
           trip_quality: 'broken'
