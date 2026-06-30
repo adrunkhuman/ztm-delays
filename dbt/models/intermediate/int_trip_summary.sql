@@ -220,7 +220,7 @@ summarized as (
         coalesce(ping_diagnostics.max_ping_gap_seconds, 0) as max_ping_gap_seconds,
         coalesce(ping_diagnostics.max_speed_mps, 0.0) as max_speed_mps,
         arrivals.first_detected_stop_sequence <= quality_thresholds.terminal_stop_tolerance as is_first_stop_observed,
-        arrivals.last_detected_stop_sequence >= schedule.stop_count - quality_thresholds.terminal_stop_tolerance
+        arrivals.last_detected_stop_sequence >= schedule.stop_count - 1 - quality_thresholds.terminal_stop_tolerance
             as is_last_stop_observed,
         coalesce(arrival_time_progression.has_non_monotonic_stop_progression, false)
             as has_non_monotonic_stop_progression,
