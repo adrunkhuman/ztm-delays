@@ -364,6 +364,137 @@ models:
         description: Maximum scheduled trip count observed for this line, direction_id, and schedule_day_type inside the version period.
         tests: [not_null]
 
+  - name: fct_trip
+    description: Serving-layer completed-trip fact. One row per observed vehicle trip candidate, partitioned by service_date, with archive-safe labels baked from the governing GTFS snapshot and trip quality retained for strict/exploratory/debug filtering.
+    columns:
+      - name: gtfs_snapshot_id
+        description: Governing GTFS snapshot used for matching, schedule lineage, and archive-safe labels.
+        tests: [not_null]
+      - name: gps_date
+        description: Warsaw-local GPS processing date that produced this realized trip row.
+        tests: [not_null]
+      - name: service_date
+        description: GTFS service date for the trip. This is the fact partition field.
+        tests: [not_null]
+      - name: trip_id
+        description: Matched GTFS trip_id from the governing snapshot.
+        tests: [not_null]
+      - name: vehicle_number
+        description: Vehicle identifier observed in the GPS source.
+        tests: [not_null]
+      - name: line
+        description: Public line identifier from the matched trip.
+        tests: [not_null]
+      - name: route_short_name
+        description: Public route short name from the governing GTFS snapshot.
+      - name: mode
+        description: Transit mode from the governing GTFS route.
+        tests: [not_null]
+      - name: brigade
+        description: Normalized brigade/block short name used for trip matching.
+        tests: [not_null]
+      - name: vehicle_type
+        description: "Vehicle type from the GPS source: 1 for bus, 2 for tram."
+        tests: [not_null]
+      - name: direction_id
+        description: GTFS direction_id for the matched trip.
+        tests: [not_null]
+      - name: service_id
+        description: GTFS service_id for the matched trip in the governing snapshot.
+        tests: [not_null]
+      - name: trip_headsign
+        description: Matched trip headsign from the governing snapshot. This is an archive-safe display label.
+        tests: [not_null]
+      - name: shape_id
+        description: GTFS shape_id for the matched trip.
+        tests: [not_null]
+      - name: day_type
+        description: Calendar weekday/weekend class carried from upstream matching.
+      - name: schedule_day_type
+        description: GTFS-derived service pattern for this line and direction on the service date.
+        tests: [not_null]
+      - name: schedule_service_ids
+        description: Comma-delimited active GTFS service_id values for this line and direction under the governing snapshot.
+      - name: schedule_version_id
+        description: Timetable-version identifier for since-schedule-change analytics.
+        tests: [not_null]
+      - name: origin_stop_id
+        description: First scheduled stop_id for the matched trip in the governing snapshot.
+        tests: [not_null]
+      - name: origin_stop_name
+        description: First scheduled stop name from the governing snapshot. This is an archive-safe display label.
+        tests: [not_null]
+      - name: destination_stop_id
+        description: Last scheduled stop_id for the matched trip in the governing snapshot.
+        tests: [not_null]
+      - name: destination_stop_name
+        description: Last scheduled stop name from the governing snapshot. This is an archive-safe display label.
+        tests: [not_null]
+      - name: scheduled_start_time
+        description: Timestamp of the first scheduled stop arrival for the matched trip.
+        tests: [not_null]
+      - name: scheduled_end_time
+        description: Timestamp of the last scheduled stop arrival for the matched trip.
+        tests: [not_null]
+      - name: actual_start_time
+        description: Estimated arrival time at the first detected stop sequence for the realized trip. For partial trips this can be a non-terminal stop, so use is_first_stop_observed before treating start_delay_seconds as a strict terminal delay.
+        tests: [not_null]
+      - name: actual_end_time
+        description: Estimated arrival time at the last detected stop sequence for the realized trip. For partial trips this can be a non-terminal stop, so use is_last_stop_observed before treating end_delay_seconds as a strict terminal delay.
+        tests: [not_null]
+      - name: start_delay_seconds
+        description: Difference in seconds between actual_start_time and scheduled_start_time. Positive values are late.
+        tests: [not_null]
+      - name: end_delay_seconds
+        description: Difference in seconds between actual_end_time and scheduled_end_time. Positive values are late.
+        tests: [not_null]
+      - name: stops_expected
+        description: Scheduled stop count for the matched trip.
+        tests: [not_null]
+      - name: stops_detected
+        description: Number of scheduled stops detected from GPS segment crossings.
+        tests: [not_null]
+      - name: detected_stop_ratio
+        description: stops_detected divided by stops_expected.
+        tests: [not_null]
+      - name: first_detected_stop_sequence
+        description: Lowest scheduled stop_sequence detected for this realized trip.
+        tests: [not_null]
+      - name: last_detected_stop_sequence
+        description: Highest scheduled stop_sequence detected for this realized trip.
+        tests: [not_null]
+      - name: max_stop_sequence_gap
+        description: Largest scheduled stop_sequence gap between consecutive detected stops.
+        tests: [not_null]
+      - name: max_ping_gap_seconds
+        description: Largest observed time gap between consecutive matched GPS pings for this vehicle trip. A value of 0 can mean no consecutive matched ping pair was available.
+        tests: [not_null]
+      - name: max_speed_mps
+        description: Largest implied straight-line speed between consecutive matched GPS pings, in meters per second. A value of 0 can mean no consecutive matched ping pair was available.
+        tests: [not_null]
+      - name: is_first_stop_observed
+        description: True when the first detected stop is within 2 scheduled stop_sequence positions from the scheduled first stop. The tolerance is provisional.
+        tests: [not_null]
+      - name: is_last_stop_observed
+        description: True when the last detected stop is within 2 scheduled stop_sequence positions from the scheduled last stop. The tolerance is provisional.
+        tests: [not_null]
+      - name: has_non_monotonic_stop_progression
+        description: True when detected stops move backward in scheduled stop_sequence when ordered by actual arrival time.
+        tests: [not_null]
+      - name: has_impossible_speed_jump
+        description: True when matched GPS pings imply a straight-line speed above the provisional impossible-speed threshold.
+        tests: [not_null]
+      - name: trip_quality
+        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, max_ping_gap_seconds > 1800, non-monotonic stop progression, max_speed_mps > 50, or terminal delay beyond 3600 seconds. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['complete', 'partial', 'broken']
+      - name: quality_flags
+        description: "Array of explainable quality flags for filtering and debug views. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. extreme_delay: absolute start or end delay > 3600 seconds. likely_wrong_trip_assignment: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, or non-monotonic progression."
+        tests: [not_null]
+
 unit_tests:
   - name: dim_line_current_uses_selected_snapshot_and_collects_headsigns
     model: dim_line_current
