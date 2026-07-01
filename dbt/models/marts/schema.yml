@@ -618,6 +618,80 @@ models:
       - name: is_settled_hour
         description: True when service_hour_end is more than 90 minutes before current_timestamp, allowing delayed trips to appear before coverage is judged.
 
+  - name: mart_pipeline_status
+    description: Daily operational-health status by Warsaw-local status date and mode. The service_date field is aligned to the GPS processing date and scheduled-start date so ingestion, matching, trip quality, arrivals, and service coverage use one operational-day grain. Near-real-time poller liveness comes from the private poller heartbeat, not this historical mart.
+    columns:
+      - name: service_date
+        description: Warsaw-local operational status date. This aligns raw GPS processing date with scheduled-start date for coverage metrics; it is not necessarily the GTFS service_date for overnight trips.
+      - name: vehicle_type
+        description: "Vehicle type from the GPS source: 1 for bus, 2 for tram."
+      - name: mode
+        description: Transit mode summarized by this row.
+      - name: expected_hours
+        description: Number of real Warsaw-local hourly GPS buckets expected for this date and mode.
+      - name: present_hours
+        description: Number of expected hourly buckets with at least one staged GPS row.
+      - name: missing_hours
+        description: Array of Warsaw-local hour-of-day integers with no staged GPS rows for this date and mode.
+      - name: first_observed_time
+        description: Earliest GPS timestamp observed for this date and mode. Null when no rows were observed.
+      - name: last_observed_time
+        description: Latest GPS timestamp observed for this date and mode. Null when no rows were observed.
+      - name: completeness_ratio
+        description: present_hours divided by expected_hours.
+      - name: is_complete_day
+        description: True when every expected hourly bucket has at least one staged GPS row.
+      - name: gps_row_count
+        description: Total staged GPS row count from mart_day_completeness for this date and mode.
+      - name: max_vehicle_count
+        description: Maximum distinct vehicle count observed in any hourly bucket for this date and mode.
+      - name: mean_hourly_coverage_ratio
+        description: Average hourly 10-second bucket coverage ratio after zero-filling missing expected hours.
+      - name: min_hourly_coverage_ratio
+        description: Minimum hourly 10-second bucket coverage ratio after zero-filling missing expected hours.
+      - name: max_gap_seconds
+        description: Largest gap reported by present hourly buckets. Missing hours are represented through missing_hours, not as 3600-second gaps.
+      - name: pings_total
+        description: Number of staged, deduplicated GPS pings for this date and mode.
+      - name: pings_matched
+        description: Number of GPS pings matched to a scheduled trip candidate in int_ping_trip.
+      - name: match_rate
+        description: pings_matched divided by pings_total. Zero when no staged pings exist.
+      - name: trips_observed
+        description: int_trip_summary candidate rows for this status date and mode across all trip_quality values.
+      - name: trips_complete
+        description: int_trip_summary candidate rows with trip_quality = complete.
+      - name: trips_partial
+        description: int_trip_summary candidate rows with trip_quality = partial.
+      - name: trips_broken
+        description: int_trip_summary candidate rows with trip_quality = broken.
+      - name: broken_rate
+        description: trips_broken divided by trips_observed. Zero when no trips were observed.
+      - name: expected_trips
+        description: Settled scheduled trips from agg_service_coverage for this scheduled-start date and mode.
+      - name: observed_trips
+        description: Settled complete/partial observed trips from agg_service_coverage for this scheduled-start date and mode.
+      - name: service_coverage_ratio
+        description: observed_trips divided by expected_trips for settled service hours. Null when no settled scheduled service exists.
+      - name: expected_service_minutes
+        description: Settled expected service minutes from agg_service_coverage.
+      - name: observed_service_minutes
+        description: Settled observed service minutes from agg_service_coverage.
+      - name: stop_arrivals_count
+        description: Number of int_stop_arrivals rows for this status date and mode.
+      - name: latest_gtfs_snapshot_id
+        description: Latest GTFS snapshot ID currently present in raw_gtfs_snapshots when the status mart was built.
+      - name: latest_gtfs_snapshot_at
+        description: Timestamp of the latest GTFS snapshot currently present in raw_gtfs_snapshots when the status mart was built.
+      - name: gtfs_snapshot_age_hours
+        description: Age in whole hours of latest_gtfs_snapshot_at at status mart build time.
+      - name: schedule_versions_active
+        description: Number of distinct schedule_version_id values present in settled agg_service_coverage rows for this date and mode.
+      - name: last_export_at
+        description: Timestamp of the last serving export that included this row. Null until the serving export job is implemented.
+      - name: status_generated_at
+        description: Timestamp when this status mart table was generated.
+
   - name: agg_line_stop_period
     description: Precomputed strict-quality delay distribution by line, direction, archive-safe headsign, stop post, scheduled Warsaw-local hour, period, and day class. Built only from fct_stop_arrival rows where trip_quality = 'complete'.
     columns:
@@ -853,6 +927,119 @@ models:
         description: Distinct governing GTFS snapshot IDs contributing source rows to this aggregate cell.
 
 unit_tests:
+  - name: mart_pipeline_status_uses_one_operational_day_grain
+    model: mart_pipeline_status
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        aggregation_start_date: '2026-01-15'
+    given:
+      - input: ref('mart_day_completeness')
+        format: sql
+        rows: |
+          select
+            date '2026-01-15' as gps_date,
+            1 as vehicle_type,
+            'bus' as mode,
+            24 as expected_hours,
+            23 as present_hours,
+            [2] as missing_hours,
+            timestamp('2026-01-15 00:00:05+01') as first_observed_time,
+            timestamp('2026-01-15 23:59:55+01') as last_observed_time,
+            23 / 24.0 as completeness_ratio,
+            false as is_complete_day,
+            100 as gps_row_count,
+            10 as max_vehicle_count,
+            0.9 as mean_hourly_coverage_ratio,
+            0.0 as min_hourly_coverage_ratio,
+            120 as max_gap_seconds
+      - input: ref('stg_gps__pings')
+        format: sql
+        rows: |
+          select date '2026-01-15' as gps_date, 1 as vehicle_type
+          union all select date '2026-01-15', 1
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select date '2026-01-15' as gps_date, 1 as vehicle_type
+      - input: ref('int_trip_summary')
+        format: sql
+        rows: |
+          select date '2026-01-15' as gps_date, date '2026-01-14' as service_date, 1 as vehicle_type, 'bus' as mode, 'overnight-trip' as trip_id, 'partial' as trip_quality
+          union all select date '2026-01-15', date '2026-01-15', 1, 'bus', 'broken-trip', 'broken'
+      - input: ref('agg_service_coverage')
+        format: sql
+        rows: |
+          select
+            date '2026-01-14' as service_date,
+            date '2026-01-15' as scheduled_start_date,
+            'bus' as mode,
+            'schedule-version-1' as schedule_version_id,
+            2 as expected_trip_count,
+            1 as observed_trip_count,
+            60.0 as expected_service_minutes,
+            30.0 as observed_service_minutes,
+            true as is_settled_hour
+          union all
+          select
+            date '2026-01-14',
+            date '2026-01-15',
+            'bus',
+            'schedule-version-2',
+            5,
+            5,
+            100.0,
+            100.0,
+            false
+      - input: ref('int_stop_arrivals')
+        format: sql
+        rows: |
+          select date '2026-01-15' as gps_date, 1 as vehicle_type
+          union all select date '2026-01-15', 1
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as snapshot_id, timestamp('2026-01-15 00:00:00+00') as snapshot_timestamp
+    expect:
+      format: sql
+      rows: |
+        select
+          date '2026-01-15' as service_date,
+          1 as vehicle_type,
+          'bus' as mode,
+          24 as expected_hours,
+          23 as present_hours,
+          [2] as missing_hours,
+          timestamp('2026-01-15 00:00:05+01') as first_observed_time,
+          timestamp('2026-01-15 23:59:55+01') as last_observed_time,
+          23 / 24.0 as completeness_ratio,
+          false as is_complete_day,
+          100 as gps_row_count,
+          10 as max_vehicle_count,
+          0.9 as mean_hourly_coverage_ratio,
+          0.0 as min_hourly_coverage_ratio,
+          120 as max_gap_seconds,
+          2 as pings_total,
+          1 as pings_matched,
+          0.5 as match_rate,
+          2 as trips_observed,
+          0 as trips_complete,
+          1 as trips_partial,
+          1 as trips_broken,
+          0.5 as broken_rate,
+          2 as expected_trips,
+          1 as observed_trips,
+          0.5 as service_coverage_ratio,
+          60.0 as expected_service_minutes,
+          30.0 as observed_service_minutes,
+          2 as stop_arrivals_count,
+          'snapshot-valid' as latest_gtfs_snapshot_id,
+          timestamp('2026-01-15 00:00:00+00') as latest_gtfs_snapshot_at,
+          timestamp_diff(current_timestamp(), timestamp('2026-01-15 00:00:00+00'), hour) as gtfs_snapshot_age_hours,
+          1 as schedule_versions_active,
+          cast(null as timestamp) as last_export_at,
+          current_timestamp() as status_generated_at
+
   - name: mart_day_completeness_emits_missing_mode_rows
     model: mart_day_completeness
     overrides:
