@@ -12,6 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from socket import gethostname
 from typing import TYPE_CHECKING, TypedDict, cast
 from zoneinfo import ZoneInfo
 
@@ -55,7 +56,7 @@ VEHICLE_TYPES = (VehicleType(1, "bus"), VehicleType(2, "tram"))
 
 @dataclass(frozen=True)
 class Config:
-    """Runtime configuration loaded from environment variables."""
+    """Runtime poller settings from env and CLI."""
 
     api_token: str
     vehicle_types: tuple[VehicleType, ...]
@@ -68,6 +69,8 @@ class Config:
     future_ping_tolerance_seconds: float
     partial_flush_interval_seconds: float
     flush_lag_seconds: float
+    heartbeat_gcs_path: str
+    heartbeat_interval_seconds: float
     run_once: bool
     no_upload: bool
 
@@ -79,6 +82,33 @@ class UploadContext:
     bucket: storage.Bucket
     config: Config
     vehicle_type_name: str
+
+
+@dataclass(frozen=True)
+class PollResult:
+    """Outcome of one API poll attempt for heartbeat reporting."""
+
+    vehicle_type_name: str
+    attempted_at: datetime
+    succeeded: bool
+    accepted_rows: int = 0
+    dropped_stale: int = 0
+    dropped_future: int = 0
+    error_type: str | None = None
+
+
+@dataclass
+class PollState:
+    """Latest poll state retained in memory for heartbeat reporting."""
+
+    vehicle_type_name: str
+    last_attempt_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_accepted_rows: int = 0
+    last_dropped_stale_rows: int = 0
+    last_dropped_future_rows: int = 0
+    consecutive_failures: int = 0
+    last_error_type: str | None = None
 
 
 class GpsRow(TypedDict):
@@ -94,7 +124,7 @@ class GpsRow(TypedDict):
 
 
 def main() -> int:
-    """Run the GPS poller daemon."""
+    """Run until signaled unless --once is set."""
     _configure_logging()
     config = _load_config(_parse_args())
     stop_requested = _build_signal_handler()
@@ -112,13 +142,16 @@ def main() -> int:
     buffers: dict[str, dict[datetime, list[GpsRow]]] = {
         vehicle_type.name: defaultdict(list) for vehicle_type in config.vehicle_types
     }
+    poll_states = {vehicle_type.name: PollState(vehicle_type.name) for vehicle_type in config.vehicle_types}
     last_partial_flush = 0.0
+    last_heartbeat = -config.heartbeat_interval_seconds
 
     while not stop_requested():
         loop_started = time.monotonic()
 
         for vehicle_type in config.vehicle_types:
-            _poll_vehicle_type(session, config, vehicle_type, buffers[vehicle_type.name])
+            result = _poll_vehicle_type(session, config, vehicle_type, buffers[vehicle_type.name])
+            _update_poll_state(poll_states[vehicle_type.name], result)
 
         if config.no_upload:
             buffered_rows = sum(len(rows) for vehicle_buffers in buffers.values() for rows in vehicle_buffers.values())
@@ -129,6 +162,10 @@ def main() -> int:
                 flush_before = now - timedelta(seconds=config.flush_lag_seconds)
                 if _flush_vehicle_buffers(cast("storage.Bucket", bucket), config, buffers, flush_before=flush_before):
                     last_partial_flush = loop_started
+            if loop_started - last_heartbeat >= config.heartbeat_interval_seconds and _write_heartbeat(
+                cast("storage.Bucket", bucket), config, poll_states
+            ):
+                last_heartbeat = loop_started
 
         if config.run_once:
             break
@@ -170,7 +207,9 @@ def _load_config(args: Namespace) -> Config:
     future_ping_tolerance_seconds = _positive_float_env("FUTURE_PING_TOLERANCE_SECONDS", "60")
     partial_flush_interval_seconds = _positive_float_env("PARTIAL_FLUSH_INTERVAL_SECONDS", "900")
     flush_lag_seconds = _positive_float_env("FLUSH_LAG_SECONDS", str(max_ping_age_seconds))
+    heartbeat_interval_seconds = _positive_float_env("POLLER_HEARTBEAT_INTERVAL_SECONDS", "60")
     api_proxy = os.getenv("ZTM_API_PROXY", "").strip() or None
+    heartbeat_gcs_path = os.getenv("POLLER_HEARTBEAT_GCS_PATH", "health/poller/latest.json").strip("/")
 
     return Config(
         api_token=api_token,
@@ -184,6 +223,8 @@ def _load_config(args: Namespace) -> Config:
         future_ping_tolerance_seconds=future_ping_tolerance_seconds,
         partial_flush_interval_seconds=partial_flush_interval_seconds,
         flush_lag_seconds=flush_lag_seconds,
+        heartbeat_gcs_path=heartbeat_gcs_path,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
         run_once=args.once,
         no_upload=args.no_upload,
     )
@@ -217,10 +258,11 @@ def _poll_vehicle_type(
     config: Config,
     vehicle_type: VehicleType,
     buffers: dict[datetime, list[GpsRow]],
-) -> None:
+) -> PollResult:
+    attempted_at = datetime.now(UTC)
     try:
         rows = _poll_api(session, config, vehicle_type)
-        rows, dropped_stale, dropped_future = _filter_fresh_rows(rows, datetime.now(UTC), config)
+        rows, dropped_stale, dropped_future = _filter_fresh_rows(rows, attempted_at, config)
         for row in rows:
             buffers[_hour_key(row["Time"].astimezone(WARSAW_TZ))].append(row)
         LOGGER.info(
@@ -230,12 +272,37 @@ def _poll_vehicle_type(
             dropped_stale,
             dropped_future,
         )
+        return PollResult(
+            vehicle_type_name=vehicle_type.name,
+            attempted_at=attempted_at,
+            succeeded=True,
+            accepted_rows=len(rows),
+            dropped_stale=dropped_stale,
+            dropped_future=dropped_future,
+        )
     except requests.RequestException:
         LOGGER.exception("API request failed vehicle_type=%s", vehicle_type.name)
+        return PollResult(vehicle_type.name, attempted_at, succeeded=False, error_type="request_error")
     except json.JSONDecodeError:
         LOGGER.exception("API returned malformed JSON vehicle_type=%s", vehicle_type.name)
+        return PollResult(vehicle_type.name, attempted_at, succeeded=False, error_type="malformed_json")
     except (TypeError, ValueError):
         LOGGER.exception("API returned invalid payload vehicle_type=%s", vehicle_type.name)
+        return PollResult(vehicle_type.name, attempted_at, succeeded=False, error_type="invalid_payload")
+
+
+def _update_poll_state(state: PollState, result: PollResult) -> None:
+    state.last_attempt_at = result.attempted_at
+    if result.succeeded:
+        state.last_success_at = result.attempted_at
+        state.last_accepted_rows = result.accepted_rows
+        state.last_dropped_stale_rows = result.dropped_stale
+        state.last_dropped_future_rows = result.dropped_future
+        state.consecutive_failures = 0
+        state.last_error_type = None
+        return
+    state.consecutive_failures += 1
+    state.last_error_type = result.error_type
 
 
 def _poll_api(session: requests.Session, config: Config, vehicle_type: VehicleType) -> list[GpsRow]:
@@ -409,6 +476,66 @@ def _upload_hour(
         LOGGER.info("hourly parquet already exists gcs_path=gs://%s/%s rows=%d", config.gcs_bucket, path, len(rows))
         return
     LOGGER.info("uploaded hourly parquet gcs_path=gs://%s/%s rows=%d", config.gcs_bucket, path, len(rows))
+
+
+def _write_heartbeat(bucket: storage.Bucket, config: Config, poll_states: dict[str, PollState]) -> bool:
+    payload = _heartbeat_payload(config, poll_states, datetime.now(UTC))
+    data = json.dumps(payload, sort_keys=True).encode()
+    try:
+        bucket.blob(config.heartbeat_gcs_path).upload_from_string(data, content_type="application/json")
+    except (GoogleAPIError, OSError):
+        LOGGER.exception(
+            "failed to upload poller heartbeat gcs_path=gs://%s/%s", config.gcs_bucket, config.heartbeat_gcs_path
+        )
+        return False
+    LOGGER.info(
+        "uploaded poller heartbeat gcs_path=gs://%s/%s status=%s",
+        config.gcs_bucket,
+        config.heartbeat_gcs_path,
+        payload["status"],
+    )
+    return True
+
+
+def _heartbeat_payload(config: Config, poll_states: dict[str, PollState], updated_at: datetime) -> dict[str, object]:
+    return {
+        "updated_at": _isoformat_utc(updated_at),
+        "status": _heartbeat_status(poll_states),
+        "poller_hostname": gethostname(),
+        "poll_interval_seconds": config.poll_interval_seconds,
+        "heartbeat_interval_seconds": config.heartbeat_interval_seconds,
+        "gcs_prefix": config.gcs_prefix,
+        "vehicle_types": {
+            name: {
+                "last_attempt_at": _isoformat_utc(state.last_attempt_at),
+                "last_success_at": _isoformat_utc(state.last_success_at),
+                "last_accepted_rows": state.last_accepted_rows,
+                "last_dropped_stale_rows": state.last_dropped_stale_rows,
+                "last_dropped_future_rows": state.last_dropped_future_rows,
+                "consecutive_failures": state.consecutive_failures,
+                "last_error_type": state.last_error_type,
+            }
+            for name, state in sorted(poll_states.items())
+        },
+    }
+
+
+def _heartbeat_status(poll_states: dict[str, PollState]) -> str:
+    states = list(poll_states.values())
+    if any(state.last_attempt_at is None for state in states):
+        return "starting"
+    failed_states = [state for state in states if state.consecutive_failures > 0]
+    if not failed_states:
+        return "ok"
+    if len(failed_states) == len(states):
+        return "down"
+    return "degraded"
+
+
+def _isoformat_utc(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _rows_digest(rows: list[GpsRow]) -> str:

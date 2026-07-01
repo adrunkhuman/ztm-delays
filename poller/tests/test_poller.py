@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from argparse import Namespace
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,8 @@ EXPECTED_TRAM_TYPE = 2
 EXPECTED_DEFAULT_PARTIAL_FLUSH_SECONDS = 900
 CUSTOM_PARTIAL_FLUSH_SECONDS = 600
 CUSTOM_FLUSH_LAG_SECONDS = 120
+CUSTOM_HEARTBEAT_SECONDS = 30
+HEARTBEAT_ACCEPTED_ROWS = 10
 EXPECTED_RETRY_FLUSH_CALLS = 2
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "entrypoint.sh"
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
@@ -207,6 +210,17 @@ def test_load_config_uses_partial_flush_env(monkeypatch: pytest.MonkeyPatch) -> 
     assert config.flush_lag_seconds == CUSTOM_FLUSH_LAG_SECONDS
 
 
+def test_load_config_uses_heartbeat_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("POLLER_HEARTBEAT_GCS_PATH", "/private/heartbeat.json")
+    monkeypatch.setenv("POLLER_HEARTBEAT_INTERVAL_SECONDS", str(CUSTOM_HEARTBEAT_SECONDS))
+
+    config = poller._load_config(Namespace(once=True, no_upload=True))
+
+    assert config.heartbeat_gcs_path == "private/heartbeat.json"
+    assert config.heartbeat_interval_seconds == CUSTOM_HEARTBEAT_SECONDS
+
+
 def test_load_config_uses_api_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZTM_API_TOKEN", "token")
     monkeypatch.setenv("ZTM_API_PROXY", "socks5h://127.0.0.1:1055")
@@ -313,8 +327,85 @@ def test_main_once_uploads_bus_and_tram_to_separate_partitions(monkeypatch: pyte
 
     bus_path = next(path for path in bucket.blobs if "/vehicle_type=bus/" in path)
     tram_path = next(path for path in bucket.blobs if "/vehicle_type=tram/" in path)
+    heartbeat_path = "health/poller/latest.json"
     assert pq.read_table(io.BytesIO(bucket.blobs[bus_path].data)).to_pylist()[0]["vehicle_type"] == EXPECTED_BUS_TYPE
     assert pq.read_table(io.BytesIO(bucket.blobs[tram_path].data)).to_pylist()[0]["vehicle_type"] == EXPECTED_TRAM_TYPE
+    assert bucket.blobs[heartbeat_path].content_type == "application/json"
+
+
+def test_heartbeat_payload_reports_degraded_and_down_states() -> None:
+    updated_at = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    config = _config()
+    states = {
+        "bus": poller.PollState("bus"),
+        "tram": poller.PollState("tram"),
+    }
+
+    poller._update_poll_state(
+        states["bus"],
+        poller.PollResult("bus", updated_at, succeeded=True, accepted_rows=HEARTBEAT_ACCEPTED_ROWS, dropped_stale=1),
+    )
+    poller._update_poll_state(
+        states["tram"], poller.PollResult("tram", updated_at, succeeded=False, error_type="request_error")
+    )
+
+    payload = poller._heartbeat_payload(config, states, updated_at)
+
+    assert payload["status"] == "degraded"
+    assert payload["updated_at"] == "2026-01-15T12:00:00Z"
+    assert payload["vehicle_types"]["bus"]["last_accepted_rows"] == HEARTBEAT_ACCEPTED_ROWS
+    assert payload["vehicle_types"]["bus"]["last_dropped_stale_rows"] == 1
+    assert payload["vehicle_types"]["tram"]["consecutive_failures"] == 1
+    assert payload["vehicle_types"]["tram"]["last_error_type"] == "request_error"
+
+    poller._update_poll_state(
+        states["bus"], poller.PollResult("bus", updated_at, succeeded=False, error_type="request_error")
+    )
+
+    assert poller._heartbeat_payload(config, states, updated_at)["status"] == "down"
+
+    poller._update_poll_state(
+        states["bus"], poller.PollResult("bus", updated_at + timedelta(seconds=10), succeeded=True)
+    )
+    poller._update_poll_state(
+        states["tram"], poller.PollResult("tram", updated_at + timedelta(seconds=10), succeeded=True)
+    )
+
+    recovered_payload = poller._heartbeat_payload(config, states, updated_at + timedelta(seconds=10))
+    assert recovered_payload["status"] == "ok"
+    assert recovered_payload["vehicle_types"]["bus"]["consecutive_failures"] == 0
+    assert recovered_payload["vehicle_types"]["bus"]["last_error_type"] is None
+
+
+def test_write_heartbeat_uploads_private_gcs_json() -> None:
+    bucket = FakeBucket()
+    config = _config()
+    states = {"bus": poller.PollState("bus"), "tram": poller.PollState("tram")}
+    now = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    for state in states.values():
+        poller._update_poll_state(state, poller.PollResult(state.vehicle_type_name, now, succeeded=True))
+
+    assert poller._write_heartbeat(cast("storage.Bucket", bucket), config, states) is True
+
+    assert bucket.path == "health/poller/latest.json"
+    assert bucket.blob_obj.content_type == "application/json"
+    assert json.loads(bucket.blob_obj.data)["status"] == "ok"
+
+
+def test_write_heartbeat_returns_false_when_upload_fails() -> None:
+    class FailingBlob:
+        def upload_from_string(self, _data: bytes, content_type: str) -> None:
+            assert content_type == "application/json"
+            raise GoogleAPIError("transient failure")
+
+    class FailingBucket:
+        def blob(self, path: str) -> FailingBlob:
+            assert path == "health/poller/latest.json"
+            return FailingBlob()
+
+    states = {"bus": poller.PollState("bus"), "tram": poller.PollState("tram")}
+
+    assert poller._write_heartbeat(cast("storage.Bucket", FailingBucket()), _config(), states) is False
 
 
 def test_main_returns_failure_when_shutdown_flush_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -474,6 +565,8 @@ def _config(api_proxy: str | None = None) -> poller.Config:
         future_ping_tolerance_seconds=60,
         partial_flush_interval_seconds=900,
         flush_lag_seconds=300,
+        heartbeat_gcs_path="health/poller/latest.json",
+        heartbeat_interval_seconds=60,
         run_once=False,
         no_upload=False,
     )
@@ -511,6 +604,10 @@ class FakeBlob:
         if self.raise_precondition_failed:
             raise PreconditionFailed("already exists")
         self.data = file_obj.read()
+        self.content_type = content_type
+
+    def upload_from_string(self, data: bytes, content_type: str) -> None:
+        self.data = data
         self.content_type = content_type
 
 

@@ -6,7 +6,7 @@ One container polls Warsaw ZTM buses and trams every 10 seconds and writes appen
 
 - `ZTM_API_TOKEN`: city API token used as the `Authorization` header.
 - `GOOGLE_APPLICATION_CREDENTIALS`: path to the mounted GCP service account key.
-- `TS_AUTHKEY`: Tailscale auth key used to join the tailnet non-interactively. Required only when no persisted `tailscaled.state` exists.
+- `TS_AUTHKEY`: Tailscale auth key used to join the tailnet non-interactively. Required only when no persisted `tailscaled.state` exists; otherwise the persisted state is sufficient.
 
 ## Optional Environment
 
@@ -18,6 +18,8 @@ One container polls Warsaw ZTM buses and trams every 10 seconds and writes appen
 - `FUTURE_PING_TOLERANCE_SECONDS`: defaults to `60`; farther-future API rows are dropped.
 - `PARTIAL_FLUSH_INTERVAL_SECONDS`: defaults to `900`; flushes buffered rows every 15 minutes to bound hard-crash loss.
 - `FLUSH_LAG_SECONDS`: defaults to `MAX_PING_AGE_SECONDS`; rows are uploaded only after this age unless the poller is shutting down.
+- `POLLER_HEARTBEAT_GCS_PATH`: defaults to `health/poller/latest.json`; private GCS JSON heartbeat for backend-served poller liveness checks.
+- `POLLER_HEARTBEAT_INTERVAL_SECONDS`: defaults to `60`.
 - `LOG_LEVEL`: defaults to `INFO`.
 - `TS_EXIT_NODE`: defaults to `100.103.142.113` (`pl-waw-wg-101.mullvad.ts.net`, Warsaw).
 - `TS_HOSTNAME`: defaults to `ztm-poller`.
@@ -25,6 +27,7 @@ One container polls Warsaw ZTM buses and trams every 10 seconds and writes appen
 - `TS_STATE_DIR`: defaults to `/var/lib/tailscale`; mount this path to persist Tailscale device identity.
 - `TAILSCALED_PID_FILE`: defaults to `/tmp/tailscaled.pid`; used by the Docker healthcheck.
 - `POLLER_PID_FILE`: defaults to `/tmp/ztm-poller.pid`; used by the Docker healthcheck.
+- `TAILSCALE_SOCKET`: defaults to `/var/run/tailscale/tailscaled.sock`; used by the Docker healthcheck.
 - `STARTUP_GRACE_SECONDS`: defaults to `300`; keeps the container alive briefly if the poller exits during startup.
 - `ZTM_API_PROXY`: normally set by `entrypoint.sh`; can be set manually for local proxy smoke tests.
 
@@ -59,6 +62,26 @@ The Docker image defines a local `HEALTHCHECK`. It verifies that:
 - `tailscale status` succeeds against the local daemon.
 
 The healthcheck does not call the Warsaw API, so it does not add API traffic or turn short city API outages into container restarts. Coolify should use the Dockerfile healthcheck rather than a HTTP path check for this non-HTTP worker.
+
+The poller also writes a best-effort private heartbeat JSON object to `gs://<GCS_BUCKET>/<POLLER_HEARTBEAT_GCS_PATH>`. Upload failures are logged but do not fail the worker or Docker healthcheck. This is the near-real-time liveness signal for the status panel. Keep it private; the frontend should receive a sanitized status through the serving/export layer rather than reading GCS directly from the browser.
+
+Heartbeat fields the serving layer may rely on:
+
+```text
+updated_at
+status
+poller_hostname
+poll_interval_seconds
+heartbeat_interval_seconds
+gcs_prefix
+vehicle_types.<mode>.last_attempt_at
+vehicle_types.<mode>.last_success_at
+vehicle_types.<mode>.last_accepted_rows
+vehicle_types.<mode>.last_dropped_stale_rows
+vehicle_types.<mode>.last_dropped_future_rows
+vehicle_types.<mode>.consecutive_failures
+vehicle_types.<mode>.last_error_type
+```
 
 ## Local Run
 
