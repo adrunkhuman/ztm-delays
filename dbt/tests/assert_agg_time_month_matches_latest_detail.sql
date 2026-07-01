@@ -33,39 +33,43 @@ latest_month_detail as (
 
 expected as (
     select
+        format_date('%Y-%m', service_date) as period_id,
         'day_type' as day_class_type,
         day_type as day_class,
         mode,
         hour_bracket,
         count(*) as n
     from latest_month_detail
-    group by day_class_type, day_class, mode, hour_bracket
+    group by period_id, day_class_type, day_class, mode, hour_bracket
 
     union all
 
     select
+        format_date('%Y-%m', service_date) as period_id,
         'weekday' as day_class_type,
         weekday_name as day_class,
         mode,
         hour_bracket,
         count(*) as n
     from latest_month_detail
-    group by day_class_type, day_class, mode, hour_bracket
+    group by period_id, day_class_type, day_class, mode, hour_bracket
 
     union all
 
     select
+        format_date('%Y-%m', service_date) as period_id,
         'schedule_day_type' as day_class_type,
         schedule_day_type as day_class,
         mode,
         hour_bracket,
         count(*) as n
     from latest_month_detail
-    group by day_class_type, day_class, mode, hour_bracket
+    group by period_id, day_class_type, day_class, mode, hour_bracket
 ),
 
 actual as (
     select
+        period_id,
         day_class_type,
         day_class,
         mode,
