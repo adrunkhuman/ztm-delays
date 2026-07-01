@@ -210,7 +210,8 @@ with DAG(
     dbt_test_fct_stop_arrival = BashOperator(
         task_id="dbt_test_fct_stop_arrival",
         bash_command=(
-            f"cd {DBT_PROJECT_DIR} && dbt test --select {STOP_ARRIVAL_FACT_MODEL} --vars '{GPS_TRIP_DBT_VARS}'"
+            f"cd {DBT_PROJECT_DIR} && dbt test --select {STOP_ARRIVAL_FACT_MODEL} "
+            f"--indirect-selection cautious --vars '{GPS_TRIP_DBT_VARS}'"
         ),
     )
 
