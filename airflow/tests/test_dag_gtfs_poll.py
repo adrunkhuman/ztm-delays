@@ -15,13 +15,10 @@ def test_gtfs_hash_and_paths_are_stable() -> None:
     dag = _load_dag_module()
 
     assert dag._sha256(b"abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    assert dag._snapshot_id("2026-06-25T14:00:00Z", "abcdef1234567890") == "2026-06-25T14:00:00Z_abcdef123456"
+    assert dag.gtfs_snapshot_id("2026-06-25T14:00:00Z", "abcdef1234567890") == "2026-06-25T14:00:00Z_abcdef123456"
+    assert dag.gtfs_gcs_path("2026-06-25T14:00:00Z_abcdef123456") == "raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip"
     assert (
-        dag._gtfs_gcs_path("2026-06-25T14:00:00Z", "abcdef1234567890")
-        == "raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip"
-    )
-    assert (
-        dag._gtfs_gcs_uri("2026-06-25T14:00:00Z", "abcdef1234567890")
+        dag.gtfs_gcs_uri("2026-06-25T14:00:00Z_abcdef123456")
         == "gs://ztm-analytics-bucket/raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip"
     )
 

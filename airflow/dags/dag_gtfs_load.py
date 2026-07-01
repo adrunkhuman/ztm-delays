@@ -8,26 +8,19 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import DAG, TriggerRule, get_current_context, task
 from google.api_core.exceptions import Conflict
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
     BIGQUERY_LOCATION,
     BIGQUERY_RAW_DATASET,
     GCP_PROJECT,
-    GCS_BUCKET,
     GTFS_SNAPSHOT_ASSET,
     dbt_command,
+    dbt_vars,
+    gtfs_gcs_uri,
 )
-
-try:
-    from airflow.providers.standard.operators.bash import BashOperator
-    from airflow.sdk import DAG, TriggerRule, get_current_context, task
-except ImportError:  # Airflow 2 compatibility for local parser checks and older images.
-    from airflow import DAG
-    from airflow.decorators import task
-    from airflow.operators.bash import BashOperator
-    from airflow.operators.python import get_current_context
-    from airflow.utils.trigger_rule import TriggerRule
 
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 GTFS_DATE_LENGTH = 8
@@ -53,7 +46,7 @@ GTFS_RAW_SOURCES = (
 )
 GTFS_STAGING_PROCESSING_DATE = "{{ ti.xcom_pull(task_ids='selected_gtfs_snapshot')['processing_date'] }}"
 GTFS_SNAPSHOT_ID = "{{ ti.xcom_pull(task_ids='selected_gtfs_snapshot')['snapshot_id'] }}"
-GTFS_DBT_VARS = f'{{"processing_date": "{GTFS_STAGING_PROCESSING_DATE}", "gtfs_snapshot_id": "{GTFS_SNAPSHOT_ID}"}}'
+GTFS_DBT_VARS = dbt_vars(processing_date=GTFS_STAGING_PROCESSING_DATE, gtfs_snapshot_id=GTFS_SNAPSHOT_ID)
 
 
 @dataclass(frozen=True)
@@ -148,10 +141,14 @@ def _selected_gtfs_snapshot(context: dict[str, object]) -> dict[str, object]:
         return _snapshot_batch([manual_snapshot])
 
     triggering_asset_events = context.get("triggering_asset_events")
+    if not isinstance(triggering_asset_events, dict):
+        raise TypeError("dag_gtfs_load requires a GTFS snapshot asset event or explicit dag_run.conf")
     try:
-        asset_events = triggering_asset_events[GTFS_SNAPSHOT_ASSET]  # type: ignore[index]  # Airflow maps by Asset.
+        asset_events = triggering_asset_events[GTFS_SNAPSHOT_ASSET]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("dag_gtfs_load requires a GTFS snapshot asset event or explicit dag_run.conf") from exc
+    if not isinstance(asset_events, list):
+        raise TypeError("dag_gtfs_load requires a GTFS snapshot asset event or explicit dag_run.conf")
 
     snapshots = [_validate_snapshot_context(getattr(event, "extra", None)) for event in asset_events]
     if not snapshots:
@@ -184,7 +181,7 @@ def _validate_snapshot_context(raw_context: object) -> dict[str, str]:
         raise RuntimeError("dag_gtfs_load requires snapshot_id, gcs_path, and processing_date")
     if not isinstance(gcs_path, str):
         raise TypeError("dag_gtfs_load requires snapshot_id, gcs_path, and processing_date")
-    expected_gcs_path = f"gs://{GCS_BUCKET}/raw/gtfs/{snapshot_id}.zip"
+    expected_gcs_path = gtfs_gcs_uri(snapshot_id)
     if gcs_path != expected_gcs_path:
         raise RuntimeError("dag_gtfs_load requires snapshot_id, gcs_path, and processing_date")
     if not isinstance(processing_date, str) or not PROCESSING_DATE_PATTERN.fullmatch(processing_date):
@@ -329,20 +326,13 @@ with DAG(
 
     @task(trigger_rule=TriggerRule.ONE_FAILED, retries=0)
     def fail_on_any_task_failure() -> None:
-        """Fail the DAG run when any watched task fails."""
+        """Fail the DAG run when the single-sink graph propagates an upstream failure."""
         raise RuntimeError("dag_gtfs_load failed because one or more upstream tasks failed")
 
     loaded_gtfs_snapshot >> dbt_run_gtfs_staging >> dbt_test_gtfs_staging >> dbt_run_gtfs_dimensions
     dbt_run_gtfs_dimensions >> dbt_test_gtfs_dimensions
     watcher = fail_on_any_task_failure()
-    for watched_task in [
-        loaded_gtfs_snapshot,
-        dbt_run_gtfs_staging,
-        dbt_test_gtfs_staging,
-        dbt_run_gtfs_dimensions,
-        dbt_test_gtfs_dimensions,
-    ]:
-        watched_task >> watcher
+    dbt_test_gtfs_dimensions >> watcher
 
 
 if __name__ == "__main__":

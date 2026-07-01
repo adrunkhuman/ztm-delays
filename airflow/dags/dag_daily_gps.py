@@ -5,52 +5,41 @@ from hashlib import sha1
 from typing import TYPE_CHECKING
 
 from airflow.exceptions import AirflowException
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import (
+    DAG,
+    CronPartitionTimetable,
+    Metadata,
+    PartitionedAssetTimetable,
+    StartOfDayMapper,
+    TriggerRule,
+    task,
+)
 from google.api_core.exceptions import Conflict
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
     BIGQUERY_LOCATION,
+    BIGQUERY_MARTS_DATASET,
     BIGQUERY_RAW_DATASET,
     GCP_PROJECT,
     GCS_BUCKET,
     GPS_MODELS_DATE_ASSET,
     RAW_GPS_DATE_ASSET,
     dbt_command,
+    dbt_vars,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-try:
-    from airflow.providers.standard.operators.bash import BashOperator
-    from airflow.providers.standard.operators.python import PythonOperator
-    from airflow.sdk import (
-        DAG,
-        CronPartitionTimetable,
-        Metadata,
-        PartitionedAssetTimetable,
-        StartOfDayMapper,
-        TriggerRule,
-        task,
-    )
-except ImportError:  # Airflow 2 compatibility for local parser checks and older images.
-    from airflow import DAG
-    from airflow.operators.bash import BashOperator
-    from airflow.operators.python import PythonOperator
-    from airflow.sdk import (
-        CronPartitionTimetable,
-        Metadata,
-        PartitionedAssetTimetable,
-        StartOfDayMapper,
-        TriggerRule,
-        task,
-    )
 
 GCS_GPS_PREFIX = "raw/gps"
 VEHICLE_TYPES = ("bus", "tram")
 
 RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gps_pings"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
+DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
 GTFS_TRIP_MATCHING_STAGING_MODELS = "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__calendar_dates"
+TRIP_MATCHING_SCHEDULE_MODELS = "int_gtfs_trip_schedule int_schedule_version"
 GTFS_STOP_ARRIVAL_STAGING_MODELS = "stg_gtfs__stop_times stg_gtfs__stops"
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 TRIP_SUMMARY_MODEL = "int_trip_summary"
@@ -65,37 +54,24 @@ WAREHOUSE_HISTORY_START_DATE = "2026-06-25"
 RAW_GPS_PROCESSING_DATE = "{{ (dag_run.partition_key or dag_run.conf.get('processing_date'))[:10] }}"
 PROCESSING_DATE = "{{ dag_run.partition_key or dag_run.conf.get('processing_date') or data_interval_start.in_timezone('Europe/Warsaw').to_date_string() }}"
 PRIOR_SERVICE_DATE = "{{ macros.ds_add(dag_run.partition_key or dag_run.conf.get('processing_date') or data_interval_start.in_timezone('Europe/Warsaw').to_date_string(), -1) }}"
-GPS_DBT_VARS = '{"processing_date": "' + PROCESSING_DATE + '"}'
-GPS_TRIP_DBT_VARS = (
-    '{"processing_date": "'
-    + PROCESSING_DATE
-    + '", "gtfs_snapshot_id": "{{ ti.xcom_pull(task_ids=\'selected_gtfs_snapshot_id\') }}"}'
+SELECTED_GTFS_SNAPSHOT_ID = "{{ ti.xcom_pull(task_ids='selected_gtfs_snapshot_id') }}"
+GPS_DBT_VARS = dbt_vars(processing_date=PROCESSING_DATE)
+GPS_TRIP_DBT_VARS = dbt_vars(processing_date=PROCESSING_DATE, gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID)
+FACT_CURRENT_DBT_VARS = dbt_vars(
+    processing_date=PROCESSING_DATE,
+    gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
+    publish_service_date=PROCESSING_DATE,
 )
-FACT_CURRENT_DBT_VARS = (
-    '{"processing_date": "'
-    + PROCESSING_DATE
-    + '", "gtfs_snapshot_id": "{{ ti.xcom_pull(task_ids=\'selected_gtfs_snapshot_id\') }}", '
-    + '"publish_service_date": "'
-    + PROCESSING_DATE
-    + '"}'
+FACT_PRIOR_DBT_VARS = dbt_vars(
+    processing_date=PROCESSING_DATE,
+    gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
+    publish_service_date=PRIOR_SERVICE_DATE,
+    aggregation_start_date=PRIOR_SERVICE_DATE,
 )
-FACT_PRIOR_DBT_VARS = (
-    '{"processing_date": "'
-    + PROCESSING_DATE
-    + '", "gtfs_snapshot_id": "{{ ti.xcom_pull(task_ids=\'selected_gtfs_snapshot_id\') }}", '
-    + '"publish_service_date": "'
-    + PRIOR_SERVICE_DATE
-    + '", "aggregation_start_date": "'
-    + PRIOR_SERVICE_DATE
-    + '"}'
-)
-MART_DBT_VARS = (
-    '{"processing_date": "'
-    + PROCESSING_DATE
-    + '", "gtfs_snapshot_id": "{{ ti.xcom_pull(task_ids=\'selected_gtfs_snapshot_id\') }}", '
-    + '"aggregation_start_date": "'
-    + WAREHOUSE_HISTORY_START_DATE
-    + '"}'
+MART_DBT_VARS = dbt_vars(
+    processing_date=PROCESSING_DATE,
+    gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
+    aggregation_start_date=WAREHOUSE_HISTORY_START_DATE,
 )
 
 
@@ -154,12 +130,10 @@ def _load_raw_gps_pings(processing_date: str) -> int:
 
 def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     client = bigquery.Client(project=GCP_PROJECT)
-    # A snapshot first governs the Warsaw service date after its local snapshot date.
     query = f"""
-        select snapshot_id
-        from `{RAW_GTFS_SNAPSHOTS_TABLE}`
-        where date(snapshot_timestamp, 'Europe/Warsaw') < date(@processing_date)
-        order by snapshot_timestamp desc
+        select gtfs_snapshot_id
+        from `{DIM_SCHEDULE_DATE_TABLE}`
+        where service_date = date(@processing_date)
         limit 1
     """
     job_config = bigquery.QueryJobConfig(
@@ -167,8 +141,8 @@ def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     )
     rows = list(client.query(query, job_config=job_config).result())
     if not rows:
-        raise AirflowException(f"No GTFS snapshot available for GPS processing date {processing_date}")
-    return str(rows[0].snapshot_id)
+        raise AirflowException(f"No built GTFS schedule dimension available for GPS processing date {processing_date}")
+    return str(rows[0].gtfs_snapshot_id)
 
 
 with DAG(
@@ -201,11 +175,13 @@ with DAG(
     max_active_runs=1,
     tags=["ztm", "gps", "warehouse"],
 ) as dag:
-    selected_gtfs_snapshot_id = PythonOperator(
-        task_id="selected_gtfs_snapshot_id",
-        python_callable=_selected_gtfs_snapshot_id,
-        op_kwargs={"processing_date": PROCESSING_DATE},
-    )
+
+    @task
+    def selected_gtfs_snapshot_id(processing_date: str) -> str:
+        """Return the dimension-built GTFS snapshot that governs this GPS service date."""
+        return _selected_gtfs_snapshot_id(processing_date)
+
+    selected_gtfs_snapshot = selected_gtfs_snapshot_id(PROCESSING_DATE)
 
     dbt_run_stg_gps_pings = BashOperator(
         task_id="dbt_run_stg_gps_pings",
@@ -214,7 +190,11 @@ with DAG(
 
     dbt_run_int_ping_trip = BashOperator(
         task_id="dbt_run_int_ping_trip",
-        bash_command=dbt_command("run", f"{GTFS_TRIP_MATCHING_STAGING_MODELS} int_ping_trip", GPS_TRIP_DBT_VARS),
+        bash_command=dbt_command(
+            "run",
+            f"{GTFS_TRIP_MATCHING_STAGING_MODELS} {TRIP_MATCHING_SCHEDULE_MODELS} int_ping_trip",
+            GPS_TRIP_DBT_VARS,
+        ),
     )
 
     dbt_run_int_gps_hourly_completeness = BashOperator(
@@ -249,7 +229,7 @@ with DAG(
 
     dbt_run_int_trip_summary = BashOperator(
         task_id="dbt_run_int_trip_summary",
-        bash_command=dbt_command("run", TRIP_SUMMARY_MODEL, GPS_TRIP_DBT_VARS),
+        bash_command=dbt_command("run", f"{TRIP_MATCHING_SCHEDULE_MODELS} {TRIP_SUMMARY_MODEL}", GPS_TRIP_DBT_VARS),
     )
 
     dbt_test_int_trip_summary = BashOperator(
@@ -336,10 +316,10 @@ with DAG(
 
     @task(trigger_rule=TriggerRule.ONE_FAILED, retries=0)
     def fail_on_any_task_failure() -> None:
-        """Fail the DAG run when any watched task fails."""
+        """Fail the DAG run when the single-sink graph propagates an upstream failure."""
         raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
 
-    selected_gtfs_snapshot_id >> dbt_run_int_ping_trip
+    selected_gtfs_snapshot >> dbt_run_int_ping_trip
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
     dbt_test_stg_gps_pings >> dbt_run_int_ping_trip >> dbt_test_int_ping_trip >> dbt_run_int_stop_arrivals
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
@@ -358,36 +338,8 @@ with DAG(
     dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_aggregate_marts
     dbt_run_aggregate_marts >> dbt_test_aggregate_marts >> dbt_run_pipeline_status >> dbt_test_pipeline_status
     dbt_test_pipeline_status >> emit_gps_models_date_asset(PROCESSING_DATE)
-
     watcher = fail_on_any_task_failure()
-    for watched_task in [
-        selected_gtfs_snapshot_id,
-        dbt_run_stg_gps_pings,
-        dbt_test_stg_gps_pings,
-        dbt_run_int_ping_trip,
-        dbt_test_int_ping_trip,
-        dbt_run_int_gps_hourly_completeness,
-        dbt_test_int_gps_hourly_completeness,
-        dbt_run_int_stop_arrivals,
-        dbt_test_int_stop_arrivals,
-        dbt_run_int_trip_summary,
-        dbt_test_int_trip_summary,
-        dbt_run_fct_trip_current,
-        dbt_test_fct_trip_current,
-        dbt_run_fct_stop_arrival_current,
-        dbt_test_fct_stop_arrival_current,
-        dbt_run_fct_trip_prior,
-        dbt_test_fct_trip_prior,
-        dbt_run_fct_stop_arrival_prior,
-        dbt_test_fct_stop_arrival_prior,
-        dbt_run_completeness_and_coverage,
-        dbt_test_completeness_and_coverage,
-        dbt_run_aggregate_marts,
-        dbt_test_aggregate_marts,
-        dbt_run_pipeline_status,
-        dbt_test_pipeline_status,
-    ]:
-        watched_task >> watcher
+    dbt_test_pipeline_status >> watcher
 
 
 if __name__ == "__main__":

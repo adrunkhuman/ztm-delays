@@ -181,7 +181,7 @@ def test_selected_gtfs_snapshot_uses_current_triggering_asset_events() -> None:
 def test_latest_gtfs_snapshot_rejects_missing_metadata_table(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
 
-    with pytest.raises(RuntimeError, match=r"asset event or explicit dag_run\.conf"):
+    with pytest.raises(TypeError, match=r"asset event or explicit dag_run\.conf"):
         dag._selected_gtfs_snapshot({"dag_run": object()})
 
 
@@ -269,6 +269,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert dag.dbt_test_gtfs_staging in dag.dbt_run_gtfs_staging.downstream
     assert dag.dbt_run_gtfs_dimensions in dag.dbt_test_gtfs_staging.downstream
     assert dag.dbt_test_gtfs_dimensions in dag.dbt_run_gtfs_dimensions.downstream
+    assert dag.watcher in dag.dbt_test_gtfs_dimensions.downstream
 
 
 def _assert_dbt_command(command: str, dbt_subcommand: str, selector: str) -> None:
