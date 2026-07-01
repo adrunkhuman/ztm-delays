@@ -1,0 +1,23 @@
+select *
+from {{ ref('agg_line_daily') }}
+where service_date is null
+   or day_type is null
+   or is_holiday is null
+   or weekday_name is null
+   or schedule_day_type is null
+   or schedule_version_id is null
+   or line is null
+   or mode is null
+   or direction_id is null
+   or n <= 0
+   or mean_delay_seconds is null
+   or p10_delay_seconds is null
+   or median_delay_seconds is null
+   or p50_delay_seconds is null
+   or p90_delay_seconds is null
+   or on_time_rate is null
+   or delay_histogram is null
+   or trip_count <= 0
+   or stop_group_count <= 0
+   or gtfs_snapshot_ids is null
+   or array_length(gtfs_snapshot_ids) = 0

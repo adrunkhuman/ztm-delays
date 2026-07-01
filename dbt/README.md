@@ -12,6 +12,8 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select stg_gps__
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_ping_trip int_stop_arrivals --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
 
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_trip_summary fct_trip fct_stop_arrival --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
+
+uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select agg_line_stop_period agg_stop_period agg_time_period agg_line_daily --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD"}'
 ```
 
 Archive-safe dimensions rebuild across loaded GTFS snapshots. Current convenience lookups also require the selected `gtfs_snapshot_id`:
@@ -25,6 +27,8 @@ Historical facts should bake labels from their governing snapshot. `_current` di
 `fct_trip` and `fct_stop_arrival` overwrite the selected service-date partition for each processing date. Prior-service-date completion from after-midnight GPS is intentionally deferred until the pipeline can rebuild the full prior-day service partition without deleting daytime rows.
 
 Schedule versions are per-line timetable fingerprints derived from governing snapshots across collected history. They intentionally exclude display labels and unstable GTFS identifiers. They are only known from collected snapshots onward, and same-day/intraday schedule changes remain out of scope until #27.
+
+Aggregate marts are table materializations over the inclusive `[aggregation_start_date, processing_date]` source window. Set `aggregation_start_date` for bounded rebuilds; if omitted, the models rebuild all available fact history up to `processing_date`. A bounded run replaces the aggregate tables with only that source window, so use `source_start_date`, `source_end_date`, and `is_partial_period` when serving bounded outputs.
 
 The local `profiles.yml` uses environment variables for BigQuery connection settings and credentials.
 
