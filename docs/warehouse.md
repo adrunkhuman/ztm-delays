@@ -150,6 +150,16 @@ The model is partitioned by `service_date`, requires a partition filter, and is 
 
 Strict analytics default to `trip_quality = 'complete'`. Exploratory views may include `partial`; debug views may include `broken` and should expose `quality_flags`. The detail rows remain available even when a day is later marked incomplete by coverage/completeness marts.
 
+## Completeness And Service Coverage
+
+Trip facts are the analytics validity grain. A day can be incomplete while individual `complete` trips from that day remain valid for strict analytics. Completeness and coverage marts exist so downstream consumers can warn, filter, or annotate partial operational windows instead of dropping whole days blindly.
+
+`mart_day_completeness` summarizes raw GPS ingestion by `gps_date` and mode. It answers: did GPS data arrive for bus/tram during each expected Warsaw-local hour? `expected_hours`, `present_hours`, `missing_hours`, `completeness_ratio`, and `is_complete_day` are operational coverage signals. They do not say whether scheduled service existed in those hours.
+
+`agg_service_coverage` summarizes schedule-aware service coverage by line, direction, headsign, scheduled-start date, and scheduled hour for live-GPS modes only: bus and tram. Expected trips come from `int_gtfs_trip_schedule` under the governing snapshot. Observed trips come from `int_trip_summary` and include distinct `trip_id` values with `complete` or `partial` quality; `broken` rows are excluded so likely wrong trip assignments do not inflate coverage. The intermediate source is used here because it retains previous-service-date after-midnight trips in the processing-date window. If duplicate vehicle candidates exist for the same scheduled trip, the best available quality wins. Trips are counted against their scheduled start hour, not the live GPS hour when they happened to be observed.
+
+`agg_service_coverage` emits rows only for scheduled bus/tram service hours. A zero `service_coverage_ratio` means scheduled service was not observed; no scheduled service is represented by absence of a row. `is_settled_hour` is true only after `service_hour_end < current_timestamp() - 90 minutes`. Frontend/live views should avoid treating unsettled low `service_coverage_ratio` as data loss because delayed trips can still arrive in the model after their scheduled hour. Full-day trend views should use `mart_day_completeness.is_complete_day` and `agg_service_coverage.service_coverage_ratio` together: raw completeness explains ingestion gaps, while service coverage separates scheduled-but-unobserved service from hours with no scheduled row.
+
 ## Aggregate Marts
 
 The aggregate marts are pure serving accelerators over `fct_stop_arrival`. They use only `trip_quality = 'complete'` rows and can be rebuilt from detail without data loss.
