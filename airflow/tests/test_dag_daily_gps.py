@@ -105,14 +105,14 @@ def test_selected_gtfs_snapshot_id_returns_latest_snapshot_before_processing_dat
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dag = _load_dag_module()
-    client = FakeBigQueryClient(snapshot_rows=[FakeRow(snapshot_id="snapshot-1")])
+    client = FakeBigQueryClient(snapshot_rows=[FakeRow(gtfs_snapshot_id="snapshot-1")])
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
     assert dag._selected_gtfs_snapshot_id("2026-06-27") == "snapshot-1"
 
     assert client.query_call is not None
-    assert "raw_gtfs_snapshots" in client.query_call.query
-    assert "date(snapshot_timestamp, 'Europe/Warsaw') < date(@processing_date)" in client.query_call.query
+    assert "dim_schedule_date" in client.query_call.query
+    assert "service_date = date(@processing_date)" in client.query_call.query
     assert client.query_call.job_config.query_parameters == [
         dag.bigquery.ScalarQueryParameter("processing_date", "DATE", "2026-06-27")
     ]
@@ -123,7 +123,7 @@ def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.
     client = FakeBigQueryClient(snapshot_rows=[])
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
-    with pytest.raises(dag.AirflowException, match="No GTFS snapshot"):
+    with pytest.raises(dag.AirflowException, match="No built GTFS schedule dimension"):
         dag._selected_gtfs_snapshot_id("2026-06-27")
 
 
@@ -137,12 +137,11 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert "data_interval_start" not in dag.RAW_GPS_PROCESSING_DATE
     assert dag.load_raw_gps_pings.kwargs == {"outlets": [dag.RAW_GPS_DATE_ASSET]}
     assert isinstance(dag.dag.kwargs["schedule"], FakePartitionedAssetTimetable)
-    assert dag.selected_gtfs_snapshot_id.kwargs == {
-        "task_id": "selected_gtfs_snapshot_id",
-        "python_callable": dag._selected_gtfs_snapshot_id,
-        "op_kwargs": {"processing_date": dag.PROCESSING_DATE},
-    }
+    assert dag.selected_gtfs_snapshot_id.kwargs == {}
     assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
+    assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_ping_trip.kwargs["bash_command"]
+    assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_trip_summary.kwargs["bash_command"]
+    assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PROCESSING_DATE in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_fct_trip_prior.kwargs["bash_command"]
     assert dag.AGGREGATE_MODELS in dag.dbt_run_aggregate_marts.kwargs["bash_command"]
@@ -150,7 +149,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.emit_gps_models_date_asset.kwargs == {"outlets": [dag.GPS_MODELS_DATE_ASSET]}
 
     assert dag.dbt_test_stg_gps_pings in dag.dbt_run_stg_gps_pings.downstream
-    assert dag.dbt_run_int_ping_trip in dag.selected_gtfs_snapshot_id.downstream
+    assert dag.dbt_run_int_ping_trip in dag.selected_gtfs_snapshot.downstream
     assert dag.dbt_run_int_ping_trip in dag.dbt_test_stg_gps_pings.downstream
     assert dag.dbt_run_int_gps_hourly_completeness in dag.dbt_test_stg_gps_pings.downstream
     assert dag.dbt_test_int_ping_trip in dag.dbt_run_int_ping_trip.downstream
@@ -167,6 +166,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_fct_stop_arrival_prior.downstream
     assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_int_gps_hourly_completeness.downstream
     assert dag.dbt_run_pipeline_status in dag.dbt_test_aggregate_marts.downstream
+    assert dag.watcher in dag.dbt_test_pipeline_status.downstream
 
 
 @dataclass
@@ -209,7 +209,7 @@ class QueryCall:
 
 @dataclass(frozen=True)
 class FakeRow:
-    snapshot_id: str
+    gtfs_snapshot_id: str
 
 
 class FakeJob:
@@ -292,7 +292,6 @@ def _install_airflow_stubs() -> None:
     airflow_exceptions_module = types.ModuleType("airflow.exceptions")
     airflow_sdk_module = types.ModuleType("airflow.sdk")
     bash_module = types.ModuleType("airflow.providers.standard.operators.bash")
-    python_module = types.ModuleType("airflow.providers.standard.operators.python")
 
     airflow_exceptions_module.AirflowException = type("AirflowException", (Exception,), {})
     airflow_sdk_module.DAG = FakeDAG
@@ -304,7 +303,6 @@ def _install_airflow_stubs() -> None:
     airflow_sdk_module.TriggerRule = types.SimpleNamespace(ONE_FAILED="one_failed")
     airflow_sdk_module.task = FakeTaskDecorator()
     bash_module.BashOperator = FakeOperator
-    python_module.PythonOperator = FakeOperator
 
     sys.modules["airflow"] = airflow_module
     sys.modules["airflow.exceptions"] = airflow_exceptions_module
@@ -313,7 +311,6 @@ def _install_airflow_stubs() -> None:
     sys.modules["airflow.providers.standard"] = types.ModuleType("airflow.providers.standard")
     sys.modules["airflow.providers.standard.operators"] = types.ModuleType("airflow.providers.standard.operators")
     sys.modules["airflow.providers.standard.operators.bash"] = bash_module
-    sys.modules["airflow.providers.standard.operators.python"] = python_module
 
 
 def _install_google_stubs() -> None:

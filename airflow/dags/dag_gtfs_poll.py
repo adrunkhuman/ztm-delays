@@ -10,21 +10,23 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import requests
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.sdk import DAG, Metadata, task
 from google.api_core.exceptions import Conflict, NotFound, PreconditionFailed
 from google.cloud import bigquery, storage
-from ztm_airflow_common import BIGQUERY_LOCATION, BIGQUERY_RAW_DATASET, GCP_PROJECT, GCS_BUCKET, GTFS_SNAPSHOT_ASSET
+from ztm_airflow_common import (
+    BIGQUERY_LOCATION,
+    BIGQUERY_RAW_DATASET,
+    GCP_PROJECT,
+    GCS_BUCKET,
+    GTFS_SNAPSHOT_ASSET,
+    gtfs_gcs_path,
+    gtfs_gcs_uri,
+    gtfs_snapshot_id,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-try:
-    from airflow.providers.standard.operators.empty import EmptyOperator
-    from airflow.sdk import DAG, Metadata, task
-except ImportError:  # Airflow 2 compatibility for local parser checks and older images.
-    from airflow import DAG
-    from airflow.decorators import task
-    from airflow.operators.empty import EmptyOperator
-    from airflow.sdk import Metadata
 
 GTFS_URL = "https://mkuran.pl/gtfs/warsaw.zip"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
@@ -34,18 +36,6 @@ POLL_SNAPSHOT_TIMESTAMP = "{{ data_interval_end.in_timezone('UTC').strftime('%Y-
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def _snapshot_id(snapshot_timestamp: str, file_hash: str) -> str:
-    return f"{snapshot_timestamp}_{file_hash[:12]}"
-
-
-def _gtfs_gcs_path(snapshot_timestamp: str, file_hash: str) -> str:
-    return f"raw/gtfs/{snapshot_timestamp}_{file_hash[:12]}.zip"
-
-
-def _gtfs_gcs_uri(snapshot_timestamp: str, file_hash: str) -> str:
-    return f"gs://{GCS_BUCKET}/{_gtfs_gcs_path(snapshot_timestamp, file_hash)}"
 
 
 def _download_gtfs_zip() -> bytes:
@@ -87,14 +77,15 @@ def _latest_gtfs_hash(client: bigquery.Client) -> str | None:
 
 def _upload_gtfs_zip(snapshot_timestamp: str, file_hash: str, zip_bytes: bytes) -> str:
     bucket = storage.Client(project=GCP_PROJECT).bucket(GCS_BUCKET)
-    gcs_path = _gtfs_gcs_path(snapshot_timestamp, file_hash)
+    snapshot_id = gtfs_snapshot_id(snapshot_timestamp, file_hash)
+    gcs_path = gtfs_gcs_path(snapshot_id)
     with suppress(PreconditionFailed):
         bucket.blob(gcs_path).upload_from_string(zip_bytes, content_type="application/zip", if_generation_match=0)
-    return f"gs://{GCS_BUCKET}/{gcs_path}"
+    return gtfs_gcs_uri(snapshot_id)
 
 
 def _insert_gtfs_snapshot(client: bigquery.Client, snapshot_timestamp: str, file_hash: str, gcs_path: str) -> str:
-    snapshot_id = _snapshot_id(snapshot_timestamp, file_hash)
+    snapshot_id = gtfs_snapshot_id(snapshot_timestamp, file_hash)
     query = f"""
         merge `{RAW_GTFS_SNAPSHOTS_TABLE}` as target
         using (
