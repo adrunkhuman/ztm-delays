@@ -1,10 +1,11 @@
--- Overwrite only the selected service date until prior-day facts can be rebuilt without losing daytime rows.
+{% set publish_service_date = var("publish_service_date", var("processing_date")) %}
+
 {{
     config(
         materialized='incremental',
         incremental_strategy='insert_overwrite',
         partition_by={"field": "service_date", "data_type": "date"},
-        partitions=["date('" ~ var("processing_date") ~ "')"],
+        partitions=["date('" ~ publish_service_date ~ "')"],
         cluster_by=["line", "stop_group_id", "hour_bracket"],
         require_partition_filter=true,
         post_hook="alter table {{ this }} set options (require_partition_filter = true)",
@@ -40,8 +41,9 @@ with arrivals as (
         segment_end_time,
         segment_duration_seconds
     from {{ ref('int_stop_arrivals') }}
-    where gps_date = date('{{ var("processing_date") }}')
-      and service_date = date('{{ var("processing_date") }}')
+    where service_date = date('{{ publish_service_date }}')
+      and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
+      and gps_date <= date('{{ var("processing_date") }}')
 ),
 
 trip_facts as (
@@ -61,7 +63,7 @@ trip_facts as (
         trip_quality,
         quality_flags
     from {{ ref('fct_trip') }}
-    where service_date = date('{{ var("processing_date") }}')
+    where service_date = date('{{ publish_service_date }}')
 ),
 
 stops as (
@@ -101,7 +103,7 @@ calendar_dates as (
         service_date,
         is_holiday
     from {{ ref('dim_date') }}
-    where service_date = date('{{ var("processing_date") }}')
+    where service_date = date('{{ publish_service_date }}')
 )
 
 select

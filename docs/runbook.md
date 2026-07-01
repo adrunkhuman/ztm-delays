@@ -35,17 +35,34 @@ dbt build --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__calendar_dates
 dbt build --select stg_gtfs__stop_times stg_gtfs__stops int_stop_arrivals \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
 
-dbt build --select int_trip_summary fct_trip fct_stop_arrival \
+dbt build --select int_trip_summary \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
+
+dbt build --select fct_trip fct_stop_arrival \
+  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"PROCESSING_DATE"}'
+
+dbt build --select fct_trip fct_stop_arrival \
+  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"PRIOR_SERVICE_DATE","aggregation_start_date":"PRIOR_SERVICE_DATE"}'
 ```
 
-GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving facts are partitioned by `service_date` and currently overwrite only the selected service date. Prior-service-date completion from after-midnight GPS is deferred until the pipeline can rebuild the full prior-day service partition without deleting daytime rows.
+GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the production DAG publishes both the current service date and the prior service date for each GPS processing date.
 
 ## Date-Range Backfill
 
-Loop over dates in order. For every date, resolve the governing snapshot from `ztm_raw.raw_gtfs_snapshots`: latest snapshot whose Warsaw-local `snapshot_timestamp` date is before the GPS `processing_date`.
+Loop over dates in order. For every GPS processing date, ensure at least one loaded GTFS snapshot exists before that date. Schedule matching resolves governing snapshots per GTFS `service_date`: latest snapshot whose Warsaw-local `snapshot_timestamp` date is before the service date.
 
-After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each `service_date`. Also verify historical facts carry baked line/stop/schedule labels from the governing snapshot and do not join `_current` dimensions for archive rendering. A successful run is not enough; matching every historical date against the newest snapshot is silent corruption. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
+For each GPS processing date, rebuild the GPS/intermediate models, then publish facts for the current service date and the prior service date. After detail exists, rebuild completeness, coverage, aggregate, and pipeline-status marts over the collected-history window.
+
+After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each `service_date` by running the governing-snapshot tests on `fct_trip` and `fct_stop_arrival`. Also verify `schedule_version_id` resolves to a version covering the row's GPS processing date. A successful run is not enough; matching every historical date against the newest snapshot is silent corruption. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
+
+## Airflow Asset Graph
+
+- `dag_gtfs_poll` produces `gtfs_snapshot` only when the GTFS ZIP hash changes.
+- `dag_gtfs_load` consumes `gtfs_snapshot` and loads/tests the exact emitted snapshot.
+- `dag_gps_raw_load` produces partitioned `raw_gps_date` events keyed by Warsaw-local GPS date. This records an hourly raw-load attempt, not a complete-day guarantee; completeness/status marts determine health.
+- `dag_daily_gps` consumes `raw_gps_date`, rebuilds that date's warehouse graph, and emits `gps_models_date` after marts/status succeed.
+
+Manual recovery remains explicit: trigger `dag_gtfs_load` with `snapshot_id`, `gcs_path`, and `processing_date`, or trigger `dag_daily_gps` with `processing_date` / partition key for the failed date. GTFS manual config must use `snapshot_id=YYYY-MM-DDTHH:MM:SSZ_<12 hex>`, `gcs_path=gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip`, and `processing_date=YYYY-MM-DD`. Rerun failed date partitions rather than clearing unrelated dates.
 
 ## Operational Notes
 

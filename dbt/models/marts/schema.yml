@@ -312,7 +312,7 @@ models:
         tests: [not_null]
 
   - name: dim_schedule_version
-    description: Archive-safe schedule version dimension. One row per consecutive unchanged timetable fingerprint for line, direction_id, and schedule_day_type, derived from the governing GTFS snapshot for each Warsaw-local GPS processing date. Versions are only known from collected GTFS snapshots onward because the mkuran feed is a rolling 31-day window. Same-day/intraday schedule changes are not represented until #27. Use this model for timetable baselines only; display labels come from governing-snapshot/archive-safe label columns.
+    description: Archive-safe schedule version dimension. One row per consecutive unchanged timetable fingerprint for line, direction_id, and schedule_day_type, derived from service-date governing GTFS snapshots observed in GPS processing windows. Versions are only known from collected GTFS snapshots onward because the mkuran feed is a rolling 31-day window. Same-day/intraday schedule changes are not represented until #27. Use this model for timetable baselines only; display labels come from governing-snapshot/archive-safe label columns.
     columns:
       - name: schedule_version_id
         description: Stable identifier for one consecutive timetable version period. Includes valid_from_date so a timetable that returns after a change becomes a new version period.
@@ -460,7 +460,7 @@ models:
       - name: gps_date
         description: Warsaw-local processing date inherited from fct_trip for the run that published this stop-arrival row.
       - name: source_gps_date
-        description: Warsaw-local GPS partition containing the source stop-arrival reconstruction. It currently matches the published service date because prior-service-date republishing is deferred.
+        description: Warsaw-local GPS partition containing the source stop-arrival reconstruction. It can be the day after service_date for overnight trips completed by after-midnight GPS.
       - name: service_date
         description: GTFS service date for the matched trip. This is the fact partition field.
       - name: trip_id

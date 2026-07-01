@@ -144,26 +144,26 @@ models:
         description: Duration in seconds between segment_start_time and segment_end_time.
 
   - name: int_gtfs_trip_schedule
-    description: Denormalized scheduled GTFS trip under the governing snapshot for each Warsaw-local GPS processing date. One row per processing_date, service_date, governing gtfs_snapshot_id, and trip_id.
+    description: Denormalized scheduled GTFS trip under the service date's governing snapshot for each Warsaw-local GPS processing date. One row per processing_date, service_date, governing gtfs_snapshot_id, and trip_id.
     columns:
       - name: service_date
         description: GTFS service date for the scheduled trip. Can be the previous date for overnight trips operating on processing_date.
         tests: [not_null]
       - name: processing_date
-        description: Warsaw-local GPS processing date whose governing snapshot supplies this scheduled trip. Matches the snapshot selection rule used by dag_daily_gps.
+        description: Warsaw-local GPS processing date whose raw pings can overlap this scheduled trip.
         tests: [not_null]
       - name: schedule_day_type
-        description: GTFS-derived service pattern for this line and direction on service_date under the processing date's governing snapshot.
+        description: GTFS-derived service pattern for this line and direction on service_date under the service date's governing snapshot.
         tests:
           - not_null
           - accepted_values:
               arguments:
                 values: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday_holiday', 'weekday', 'mixed', 'unknown']
       - name: schedule_service_ids
-        description: Comma-delimited active GTFS service_id values for this line and direction on service_date in the processing date's governing snapshot.
+        description: Comma-delimited active GTFS service_id values for this line and direction on service_date in the service date's governing snapshot.
         tests: [not_null]
       - name: gtfs_snapshot_id
-        description: Governing GTFS snapshot selected as the latest loaded snapshot whose Warsaw-local snapshot date is strictly before processing_date.
+        description: Governing GTFS snapshot selected as the latest loaded snapshot whose Warsaw-local snapshot date is strictly before service_date.
         tests: [not_null]
       - name: line
         description: Public line identifier from GTFS route_id. This is the current working line key, not a permanent historical entity guarantee.
@@ -535,7 +535,7 @@ unit_tests:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
         rows: |
-          select 'snapshot-prior' as snapshot_id, timestamp('2026-07-07 00:00:00+00:00') as snapshot_timestamp, 'prior-hash' as file_hash, 'gs://bucket/prior.zip' as gcs_path
+          select 'snapshot-prior' as snapshot_id, timestamp('2026-07-06 00:00:00+00:00') as snapshot_timestamp, 'prior-hash' as file_hash, 'gs://bucket/prior.zip' as gcs_path
           union all select 'snapshot-same-day', timestamp('2026-07-08 00:00:00+00:00'), 'same-day-hash', 'gs://bucket/same-day.zip'
       - input: ref('stg_gtfs__calendar_dates')
         format: sql
@@ -654,7 +654,7 @@ unit_tests:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
         rows: |
-          select 'snapshot-prior' as snapshot_id, timestamp('2026-07-07 00:00:00+00:00') as snapshot_timestamp, 'prior-hash' as file_hash, 'gs://bucket/prior.zip' as gcs_path
+          select 'snapshot-prior' as snapshot_id, timestamp('2026-07-06 00:00:00+00:00') as snapshot_timestamp, 'prior-hash' as file_hash, 'gs://bucket/prior.zip' as gcs_path
       - input: ref('stg_gtfs__calendar_dates')
         format: sql
         rows: |
@@ -675,6 +675,23 @@ unit_tests:
     expect:
       rows:
         - service_date: '2026-07-07'
+          processing_date: '2026-07-07'
+          schedule_day_type: 'weekday'
+          schedule_service_ids: 'PcM'
+          gtfs_snapshot_id: 'snapshot-prior'
+          line: '187'
+          direction_id: 0
+          trip_id: 'trip-daytime'
+          service_id: 'PcM'
+          trip_headsign: 'Daytime'
+          shape_id: 'shape-daytime'
+          trip_start_seconds: 36000
+          trip_end_seconds: 36600
+          stop_count: 2
+          ordered_stop_ids: '200101 | 200102'
+          ordered_arrival_time_seconds: '36000 | 36600'
+          trip_timetable_signature: '000001:200101:00036000 | 000002:200102:00036600'
+        - service_date: '2026-07-07'
           processing_date: '2026-07-08'
           schedule_day_type: 'weekday'
           schedule_service_ids: 'PcM'
@@ -691,6 +708,70 @@ unit_tests:
           ordered_stop_ids: '100101 | 100102'
           ordered_arrival_time_seconds: '90000 | 90600'
           trip_timetable_signature: '000001:100101:00090000 | 000002:100102:00090600'
+
+  - name: int_gtfs_trip_schedule_uses_service_date_snapshot_for_overnight_processing
+    model: int_gtfs_trip_schedule
+    given:
+      - input: source('raw', 'raw_gtfs_snapshots')
+        format: sql
+        rows: |
+          select 'snapshot-old' as snapshot_id, timestamp('2026-07-06 00:00:00+00:00') as snapshot_timestamp, 'old-hash' as file_hash, 'gs://bucket/old.zip' as gcs_path
+          union all select 'snapshot-current', timestamp('2026-07-07 00:00:00+00:00'), 'current-hash', 'gs://bucket/current.zip'
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select 'PcM' as service_id, date '2026-07-07' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'NdM', date '2026-07-07', 1, 'weekday', 'snapshot-current'
+          union all select 'PcS', date '2026-07-08', 1, 'weekday', 'snapshot-current'
+      - input: ref('stg_gtfs__trips')
+        format: sql
+        rows: |
+          select 'trip-prior-night' as trip_id, '187' as line, 'PcM' as service_id, 'Prior Night' as trip_headsign, 0 as direction_id, '12' as brigade, 'shape-prior' as shape_id, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'trip-prior-wrong-snapshot', '187', 'NdM', 'Wrong Prior', 0, '12', 'shape-wrong', 'snapshot-current'
+          union all select 'trip-current-day', '187', 'PcS', 'Current Day', 0, '12', 'shape-current', 'snapshot-current'
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-prior-night' as trip_id, '100101' as stop_id, 1 as stop_sequence, 90000 as arrival_time_seconds, 90000 as departure_time_seconds, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'trip-prior-night', '100102', 2, 90600, 90600, 'snapshot-old'
+          union all select 'trip-prior-wrong-snapshot', '999901', 1, 90000, 90000, 'snapshot-current'
+          union all select 'trip-current-day', '200101', 1, 36000, 36000, 'snapshot-current'
+    expect:
+      rows:
+        - service_date: '2026-07-07'
+          processing_date: '2026-07-08'
+          schedule_day_type: 'weekday'
+          schedule_service_ids: 'PcM'
+          gtfs_snapshot_id: 'snapshot-old'
+          line: '187'
+          direction_id: 0
+          trip_id: 'trip-prior-night'
+          service_id: 'PcM'
+          trip_headsign: 'Prior Night'
+          shape_id: 'shape-prior'
+          trip_start_seconds: 90000
+          trip_end_seconds: 90600
+          stop_count: 2
+          ordered_stop_ids: '100101 | 100102'
+          ordered_arrival_time_seconds: '90000 | 90600'
+          trip_timetable_signature: '000001:100101:00090000 | 000002:100102:00090600'
+        - service_date: '2026-07-08'
+          processing_date: '2026-07-08'
+          schedule_day_type: 'weekday'
+          schedule_service_ids: 'PcS'
+          gtfs_snapshot_id: 'snapshot-current'
+          line: '187'
+          direction_id: 0
+          trip_id: 'trip-current-day'
+          service_id: 'PcS'
+          trip_headsign: 'Current Day'
+          shape_id: 'shape-current'
+          trip_start_seconds: 36000
+          trip_end_seconds: 36000
+          stop_count: 1
+          ordered_stop_ids: '200101'
+          ordered_arrival_time_seconds: '36000'
+          trip_timetable_signature: '000001:200101:00036000'
 
   - name: int_gps_hourly_completeness_counts_10_second_buckets
     model: int_gps_hourly_completeness
@@ -925,6 +1006,11 @@ unit_tests:
         rows: |
           select 'trip-morning' as trip_id, '187' as line, 'svc-weekday' as service_id, 'Morning' as trip_headsign, 0 as direction_id, '12' as brigade, 'shape-morning' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-midday', '187', 'svc-weekday', 'Midday', 1, '12', 'shape-midday', 'snapshot-valid'
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc-weekday' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-morning' as trip_id, 'svc-weekday' as service_id, 'Morning' as trip_headsign, 'shape-morning' as shape_id, 36000 as trip_start_seconds, 41400 as trip_end_seconds, 2 as stop_count, 'stop-1 | stop-2' as ordered_stop_ids, '36000 | 41400' as ordered_arrival_time_seconds, 'morning' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc-weekday', 'snapshot-valid', '187', 1, 'trip-midday', 'svc-weekday', 'Midday', 'shape-midday', 43200, 46800, 2, 'stop-3 | stop-4', '43200 | 46800', 'midday'
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
@@ -977,7 +1063,7 @@ unit_tests:
           trip_end_seconds: 46800
           gps_time_seconds: 44100
 
-  - name: int_ping_trip_uses_selected_gtfs_snapshot_when_trip_id_is_reused
+  - name: int_ping_trip_uses_governing_gtfs_snapshot_when_trip_id_is_reused
     model: int_ping_trip
     overrides:
       vars:
@@ -993,6 +1079,10 @@ unit_tests:
         rows: |
           select 'trip-reused' as trip_id, '187' as line, 'svc-weekday' as service_id, 'Valid' as trip_headsign, 0 as direction_id, '12' as brigade, 'shape-valid' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-reused', '187', 'svc-weekday', 'Other', 1, '12', 'shape-other', 'snapshot-other'
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc-weekday' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-reused' as trip_id, 'svc-weekday' as service_id, 'Valid' as trip_headsign, 'shape-valid' as shape_id, 36000 as trip_start_seconds, 41400 as trip_end_seconds, 2 as stop_count, 'stop-valid-1 | stop-valid-2' as ordered_stop_ids, '36000 | 41400' as ordered_arrival_time_seconds, 'valid' as trip_timetable_signature
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
@@ -1042,6 +1132,10 @@ unit_tests:
         format: sql
         rows: |
           select 'trip-night' as trip_id, '517' as line, 'svc-night' as service_id, 'Night' as trip_headsign, 0 as direction_id, '7' as brigade, 'shape-night' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-14' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc-night' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '517' as line, 0 as direction_id, 'trip-night' as trip_id, 'svc-night' as service_id, 'Night' as trip_headsign, 'shape-night' as shape_id, 86400 as trip_start_seconds, 90000 as trip_end_seconds, 2 as stop_count, 'stop-1 | stop-2' as ordered_stop_ids, '86400 | 90000' as ordered_arrival_time_seconds, 'night' as trip_timetable_signature
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
@@ -1088,6 +1182,10 @@ unit_tests:
         format: sql
         rows: |
           select 'trip-previous' as trip_id, '187' as line, 'svc-previous' as service_id, 'Previous' as trip_headsign, 0 as direction_id, '12' as brigade, 'shape-previous' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-14' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc-previous' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-previous' as trip_id, 'svc-previous' as service_id, 'Previous' as trip_headsign, 'shape-previous' as shape_id, 40000 as trip_start_seconds, 43000 as trip_end_seconds, 2 as stop_count, 'stop-1 | stop-2' as ordered_stop_ids, '40000 | 43000' as ordered_arrival_time_seconds, 'previous' as trip_timetable_signature
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
@@ -1116,6 +1214,11 @@ unit_tests:
         rows: |
           select 'trip-overnight' as trip_id, '517' as line, 'svc-previous' as service_id, 'Overnight' as trip_headsign, 0 as direction_id, '7' as brigade, 'shape-overnight' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-current', '517', 'svc-current', 'Current', 0, '7', 'shape-current', 'snapshot-valid'
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-14' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc-previous' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '517' as line, 0 as direction_id, 'trip-overnight' as trip_id, 'svc-previous' as service_id, 'Overnight' as trip_headsign, 'shape-overnight' as shape_id, 86400 as trip_start_seconds, 90000 as trip_end_seconds, 2 as stop_count, 'stop-1 | stop-2' as ordered_stop_ids, '86400 | 90000' as ordered_arrival_time_seconds, 'overnight' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc-current', 'snapshot-valid', '517', 0, 'trip-current', 'svc-current', 'Current', 'shape-current', 600, 3600, 2, 'stop-3 | stop-4', '600 | 3600', 'current'
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |

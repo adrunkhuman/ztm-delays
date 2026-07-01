@@ -1,6 +1,8 @@
+{% set test_service_date = var("publish_service_date", var("processing_date")) %}
+
 select quality_flag
 from {{ ref('fct_trip') }}, unnest(quality_flags) as quality_flag
-where service_date = date('{{ var("processing_date") }}')
+where service_date = date('{{ test_service_date }}')
   and quality_flag not in (
     'missing_first_stop',
     'missing_last_stop',

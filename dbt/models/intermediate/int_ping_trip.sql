@@ -11,22 +11,28 @@
 
 with active_trips as (
     select
-        trips.trip_id,
-        trips.line,
-        trips.service_id,
-        trips.direction_id,
+        schedule.trip_id,
+        schedule.line,
+        schedule.service_id,
+        schedule.direction_id,
         trips.brigade,
-        trips.shape_id,
-        trips.gtfs_snapshot_id,
-        calendar_dates.service_date,
+        schedule.shape_id,
+        schedule.gtfs_snapshot_id,
+        schedule.service_date,
+        schedule.trip_start_seconds,
+        schedule.trip_end_seconds,
         calendar_dates.day_type
-    from {{ ref('stg_gtfs__trips') }} as trips
+    from {{ ref('int_gtfs_trip_schedule') }} as schedule
+    inner join {{ ref('stg_gtfs__trips') }} as trips
+        on schedule.trip_id = trips.trip_id
+        and schedule.gtfs_snapshot_id = trips.gtfs_snapshot_id
     inner join {{ ref('stg_gtfs__calendar_dates') }} as calendar_dates
-        on trips.service_id = calendar_dates.service_id
-        and trips.gtfs_snapshot_id = calendar_dates.gtfs_snapshot_id
-    where calendar_dates.service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
+        on schedule.service_id = calendar_dates.service_id
+        and schedule.service_date = calendar_dates.service_date
+        and schedule.gtfs_snapshot_id = calendar_dates.gtfs_snapshot_id
+    where schedule.processing_date = date('{{ var("processing_date") }}')
+      and schedule.service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
         and date('{{ var("processing_date") }}')
-      and trips.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
 ),
 
 gps_pings as (
@@ -44,41 +50,6 @@ gps_pings as (
     where gps_date = date('{{ var("processing_date") }}')
 ),
 
-trip_windows as (
-    select
-        active_trips.trip_id,
-        active_trips.line,
-        active_trips.service_id,
-        active_trips.direction_id,
-        active_trips.brigade,
-        active_trips.shape_id,
-        active_trips.gtfs_snapshot_id,
-        active_trips.service_date,
-        active_trips.day_type,
-        min(least(
-            coalesce(stop_times.arrival_time_seconds, stop_times.departure_time_seconds),
-            coalesce(stop_times.departure_time_seconds, stop_times.arrival_time_seconds)
-        )) as trip_start_seconds,
-        max(greatest(
-            coalesce(stop_times.arrival_time_seconds, stop_times.departure_time_seconds),
-            coalesce(stop_times.departure_time_seconds, stop_times.arrival_time_seconds)
-        )) as trip_end_seconds
-    from active_trips
-    inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
-        on active_trips.trip_id = stop_times.trip_id
-        and active_trips.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
-    group by
-        active_trips.trip_id,
-        active_trips.line,
-        active_trips.service_id,
-        active_trips.direction_id,
-        active_trips.brigade,
-        active_trips.shape_id,
-        active_trips.gtfs_snapshot_id,
-        active_trips.service_date,
-        active_trips.day_type
-),
-
 candidate_matches as (
     select
         gps.line,
@@ -90,22 +61,22 @@ candidate_matches as (
         gps.vehicle_type,
         gps.ingested_at,
         gps.gps_date,
-        trip_windows.trip_id,
-        trip_windows.shape_id,
-        trip_windows.gtfs_snapshot_id,
-        trip_windows.service_id,
-        trip_windows.direction_id,
-        trip_windows.service_date,
-        trip_windows.day_type,
-        trip_windows.trip_start_seconds,
-        trip_windows.trip_end_seconds,
-        timestamp_diff(gps.gps_time, timestamp(trip_windows.service_date, 'Europe/Warsaw'), second) as gps_time_seconds
+        active_trips.trip_id,
+        active_trips.shape_id,
+        active_trips.gtfs_snapshot_id,
+        active_trips.service_id,
+        active_trips.direction_id,
+        active_trips.service_date,
+        active_trips.day_type,
+        active_trips.trip_start_seconds,
+        active_trips.trip_end_seconds,
+        timestamp_diff(gps.gps_time, timestamp(active_trips.service_date, 'Europe/Warsaw'), second) as gps_time_seconds
     from gps_pings as gps
-    inner join trip_windows
-        on gps.line = trip_windows.line
-        and gps.brigade = trip_windows.brigade
-        and timestamp_diff(gps.gps_time, timestamp(trip_windows.service_date, 'Europe/Warsaw'), second)
-        between trip_windows.trip_start_seconds and trip_windows.trip_end_seconds
+    inner join active_trips
+        on gps.line = active_trips.line
+        and gps.brigade = active_trips.brigade
+        and timestamp_diff(gps.gps_time, timestamp(active_trips.service_date, 'Europe/Warsaw'), second)
+        between active_trips.trip_start_seconds and active_trips.trip_end_seconds
 )
 
 select

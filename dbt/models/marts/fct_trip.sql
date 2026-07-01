@@ -1,9 +1,11 @@
+{% set publish_service_date = var("publish_service_date", var("processing_date")) %}
+
 {{
     config(
         materialized='incremental',
         incremental_strategy='insert_overwrite',
         partition_by={"field": "service_date", "data_type": "date"},
-        partitions=["date('" ~ var("processing_date") ~ "')"],
+        partitions=["date('" ~ publish_service_date ~ "')"],
         cluster_by=["line", "direction_id"],
         require_partition_filter=true,
         post_hook="alter table {{ this }} set options (require_partition_filter = true)",
@@ -54,5 +56,18 @@ select
     trip_quality,
     quality_flags
 from {{ ref('int_trip_summary') }}
-where gps_date = date('{{ var("processing_date") }}')
-  and service_date = date('{{ var("processing_date") }}')
+where service_date = date('{{ publish_service_date }}')
+  and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
+  and gps_date <= date('{{ var("processing_date") }}')
+qualify row_number() over (
+    partition by gtfs_snapshot_id, service_date, trip_id, vehicle_number
+    order by
+        case trip_quality
+            when 'complete' then 3
+            when 'partial' then 2
+            when 'broken' then 1
+            else 0
+        end desc,
+        gps_date desc,
+        actual_end_time desc
+) = 1

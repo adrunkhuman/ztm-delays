@@ -11,6 +11,19 @@ processing_date_spine as (
         unnest(generate_date_array(min_service_date, max_service_date)) as processing_date
 ),
 
+processing_service_dates as (
+    select
+        processing_date_spine.processing_date,
+        service_date
+    from processing_date_spine
+    cross join unnest([
+        date_sub(processing_date_spine.processing_date, interval 1 day),
+        processing_date_spine.processing_date
+    ]) as service_date
+    where service_date between (select min_service_date from date_bounds)
+        and (select max_service_date from date_bounds)
+),
+
 loaded_snapshots as (
     select distinct gtfs_snapshot_id
     from {{ ref('stg_gtfs__calendar_dates') }}
@@ -18,16 +31,17 @@ loaded_snapshots as (
 
 governing_snapshots as (
     select
-        processing_date_spine.processing_date,
+        processing_service_dates.processing_date,
+        processing_service_dates.service_date,
         snapshots.snapshot_id as gtfs_snapshot_id,
         snapshots.snapshot_timestamp
-    from processing_date_spine
+    from processing_service_dates
     inner join {{ source('raw', 'raw_gtfs_snapshots') }} as snapshots
-        on date(snapshots.snapshot_timestamp, 'Europe/Warsaw') < processing_date_spine.processing_date
+        on date(snapshots.snapshot_timestamp, 'Europe/Warsaw') < processing_service_dates.service_date
     inner join loaded_snapshots
         on snapshots.snapshot_id = loaded_snapshots.gtfs_snapshot_id
     qualify row_number() over (
-        partition by processing_date_spine.processing_date
+        partition by processing_service_dates.processing_date, processing_service_dates.service_date
         order by snapshots.snapshot_timestamp desc, snapshots.snapshot_id desc
     ) = 1
 ),
@@ -43,8 +57,7 @@ calendar_dates as (
     from governing_snapshots
     inner join {{ ref('stg_gtfs__calendar_dates') }} as calendar_dates
         on governing_snapshots.gtfs_snapshot_id = calendar_dates.gtfs_snapshot_id
-        and calendar_dates.service_date between date_sub(governing_snapshots.processing_date, interval 1 day)
-        and governing_snapshots.processing_date
+        and governing_snapshots.service_date = calendar_dates.service_date
 ),
 
 calendar_schedule_classes as (
