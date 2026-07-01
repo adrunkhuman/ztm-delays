@@ -14,6 +14,8 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_ping_
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_trip_summary fct_trip fct_stop_arrival --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
 
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select agg_line_stop_period agg_stop_period agg_time_period agg_line_daily --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD"}'
+
+uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select mart_day_completeness agg_service_coverage --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD"}'
 ```
 
 Archive-safe dimensions rebuild across loaded GTFS snapshots. Current convenience lookups also require the selected `gtfs_snapshot_id`:
@@ -29,6 +31,8 @@ Historical facts should bake labels from their governing snapshot. `_current` di
 Schedule versions are per-line timetable fingerprints derived from governing snapshots across collected history. They intentionally exclude display labels and unstable GTFS identifiers. They are only known from collected snapshots onward, and same-day/intraday schedule changes remain out of scope until #27.
 
 Aggregate marts are table materializations over the inclusive `[aggregation_start_date, processing_date]` source window. Set `aggregation_start_date` for bounded rebuilds; if omitted, the models rebuild all available fact history up to `processing_date`. A bounded run replaces the aggregate tables with only that source window, so use `source_start_date`, `source_end_date`, and `is_partial_period` when serving bounded outputs.
+
+Completeness and service-coverage marts are also table materializations over the inclusive `[aggregation_start_date, processing_date]` source window. If `aggregation_start_date` is omitted, they build only `processing_date`. `mart_day_completeness` summarizes raw GPS presence by GPS date and mode. `agg_service_coverage` compares governed scheduled trips to complete/partial observed trip candidates from `int_trip_summary` by scheduled service hour and partitions rows by `scheduled_start_date`; overnight rows can keep the prior GTFS `service_date`.
 
 The local `profiles.yml` uses environment variables for BigQuery connection settings and credentials.
 
