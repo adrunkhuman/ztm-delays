@@ -1,6 +1,8 @@
+{% set test_service_date = var("publish_service_date", var("processing_date")) %}
+
 select *
 from {{ ref('fct_trip') }}
-where service_date = date('{{ var("processing_date") }}')
+where service_date = date('{{ test_service_date }}')
   and (
     gtfs_snapshot_id is null
     or gps_date is null

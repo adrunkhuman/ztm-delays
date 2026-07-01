@@ -127,32 +127,92 @@ def test_load_csv_to_bigquery_waits_on_existing_job_after_conflict(tmp_path: Pat
 
 def test_latest_gtfs_snapshot_returns_latest_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
+    snapshot_id = "2026-06-25T14:00:00Z_abcdef123456"
     dag_run = FakeDagRun(
         {
-            "snapshot_id": "snapshot-1",
-            "gcs_path": "gs://bucket/raw/gtfs/test.zip",
+            "snapshot_id": snapshot_id,
+            "gcs_path": f"gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip",
             "processing_date": "2026-06-26",
         }
     )
 
-    assert dag._selected_gtfs_snapshot(dag_run) == {
-        "snapshot_id": "snapshot-1",
-        "gcs_path": "gs://bucket/raw/gtfs/test.zip",
+    assert dag._selected_gtfs_snapshot({"dag_run": dag_run}) == {
+        "snapshot_id": snapshot_id,
+        "gcs_path": f"gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip",
+        "processing_date": "2026-06-26",
+        "snapshots": [
+            {
+                "snapshot_id": snapshot_id,
+                "gcs_path": f"gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip",
+                "processing_date": "2026-06-26",
+            }
+        ],
     }
+
+
+def test_selected_gtfs_snapshot_uses_current_triggering_asset_events() -> None:
+    dag = _load_dag_module()
+    first_snapshot_id = "2026-06-25T14:00:00Z_abcdef123456"
+    latest_snapshot_id = "2026-06-25T15:00:00Z_fedcba654321"
+    first_snapshot = {
+        "snapshot_id": first_snapshot_id,
+        "gcs_path": f"gs://ztm-analytics-bucket/raw/gtfs/{first_snapshot_id}.zip",
+        "processing_date": "2026-06-26",
+    }
+    latest_snapshot = {
+        "snapshot_id": latest_snapshot_id,
+        "gcs_path": f"gs://ztm-analytics-bucket/raw/gtfs/{latest_snapshot_id}.zip",
+        "processing_date": "2026-06-26",
+    }
+
+    selected = dag._selected_gtfs_snapshot(
+        {
+            "dag_run": object(),
+            "triggering_asset_events": {
+                dag.GTFS_SNAPSHOT_ASSET: [FakeAssetEvent(first_snapshot), FakeAssetEvent(latest_snapshot)]
+            },
+        }
+    )
+
+    assert selected["snapshot_id"] == latest_snapshot_id
+    assert selected["snapshots"] == [first_snapshot, latest_snapshot]
 
 
 def test_latest_gtfs_snapshot_rejects_missing_metadata_table(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
 
-    with pytest.raises(TypeError, match=r"dag_run\.conf"):
-        dag._selected_gtfs_snapshot(object())
+    with pytest.raises(RuntimeError, match=r"asset event or explicit dag_run\.conf"):
+        dag._selected_gtfs_snapshot({"dag_run": object()})
 
 
 def test_latest_gtfs_snapshot_rejects_empty_metadata_table(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
 
     with pytest.raises(RuntimeError, match="snapshot_id, gcs_path, and processing_date"):
-        dag._selected_gtfs_snapshot(FakeDagRun({"snapshot_id": "snapshot-1"}))
+        dag._selected_gtfs_snapshot({"dag_run": FakeDagRun({"snapshot_id": "snapshot-1"})})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("snapshot_id", "snapshot-1' && echo bad"),
+        ("gcs_path", "gs://evil-bucket/raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip"),
+        ("processing_date", "2026-06-26' && echo bad"),
+        ("processing_date", "2026-02-31"),
+    ],
+)
+def test_selected_gtfs_snapshot_rejects_unsafe_manual_config(field: str, value: str) -> None:
+    dag = _load_dag_module()
+    snapshot_id = "2026-06-25T14:00:00Z_abcdef123456"
+    conf = {
+        "snapshot_id": snapshot_id,
+        "gcs_path": f"gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip",
+        "processing_date": "2026-06-26",
+    }
+    conf[field] = value
+
+    with pytest.raises((RuntimeError, ValueError), match=r"dag_gtfs_load requires|day is out of range"):
+        dag._selected_gtfs_snapshot({"dag_run": FakeDagRun(conf)})
 
 
 def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables(
@@ -224,7 +284,10 @@ def _load_dag_module() -> types.ModuleType:
     _install_airflow_stubs()
     _install_google_stubs()
 
-    module_path = Path(__file__).parents[1] / "dags" / "dag_gtfs_load.py"
+    dag_dir = Path(__file__).parents[1] / "dags"
+    if str(dag_dir) not in sys.path:
+        sys.path.insert(0, str(dag_dir))
+    module_path = dag_dir / "dag_gtfs_load.py"
     module_name = "dag_gtfs_load_under_test"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -250,6 +313,8 @@ def _install_airflow_stubs() -> None:
 
     airflow_sdk_module.DAG = FakeDAG
     airflow_sdk_module.task = FakeTaskDecorator()
+    airflow_sdk_module.Asset = FakeAsset
+    airflow_sdk_module.TriggerRule = types.SimpleNamespace(ONE_FAILED="one_failed")
     airflow_decorators_module.task = FakeTaskDecorator()
     airflow_providers_standard_bash_module.BashOperator = FakeBashOperator
     airflow_operators_bash_module.BashOperator = FakeBashOperator
@@ -297,13 +362,28 @@ def _install_google_stubs() -> None:
 
 
 class FakeTaskDecorator:
-    def __call__(self, function: Any) -> FakeTask:
-        return FakeTask(function)
+    def __call__(self, function: Any | None = None, **kwargs: Any) -> Any:
+        if function is None:
+            return lambda decorated: FakeTask(decorated, kwargs)
+        return FakeTask(function, kwargs)
+
+
+class FakeAsset:
+    def __init__(self, uri: str, *, name: str | None = None) -> None:
+        self.uri = uri
+        self.name = name
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, FakeAsset) and self.uri == other.uri
+
+    def __hash__(self) -> int:
+        return hash(self.uri)
 
 
 class FakeTask:
-    def __init__(self, function: Any) -> None:
+    def __init__(self, function: Any, kwargs: dict[str, Any] | None = None) -> None:
         self.function = function
+        self.kwargs = kwargs or {}
         self.downstream: list[object] = []
 
     def __call__(self, *_args: object, **_kwargs: object) -> FakeTask:
@@ -339,6 +419,11 @@ class FakeDAG:
 class FakeDagRun:
     def __init__(self, conf: dict[str, str]) -> None:
         self.conf = conf
+
+
+@dataclass(frozen=True)
+class FakeAssetEvent:
+    extra: dict[str, str]
 
 
 class FakeSchemaField:

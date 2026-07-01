@@ -130,108 +130,43 @@ def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.
 def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     dag = _load_dag_module()
 
+    assert isinstance(dag.raw_gps_dag.kwargs["schedule"], FakeCronPartitionTimetable)
+    assert dag.raw_gps_dag.kwargs["schedule"].cron == "20 * * * *"
+    assert dag.raw_gps_dag.kwargs["schedule"].timezone == "Europe/Warsaw"
+    assert "dag_run.partition_key" in dag.RAW_GPS_PROCESSING_DATE
+    assert "data_interval_start" not in dag.RAW_GPS_PROCESSING_DATE
+    assert dag.load_raw_gps_pings.kwargs == {"outlets": [dag.RAW_GPS_DATE_ASSET]}
+    assert isinstance(dag.dag.kwargs["schedule"], FakePartitionedAssetTimetable)
     assert dag.selected_gtfs_snapshot_id.kwargs == {
         "task_id": "selected_gtfs_snapshot_id",
         "python_callable": dag._selected_gtfs_snapshot_id,
         "op_kwargs": {"processing_date": dag.PROCESSING_DATE},
     }
-    assert dag.dbt_run_int_ping_trip.kwargs == {
-        "task_id": "dbt_run_int_ping_trip",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && "
-            f"dbt run --select {dag.GTFS_TRIP_MATCHING_STAGING_MODELS} int_ping_trip "
-            f"--vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_test_int_ping_trip.kwargs == {
-        "task_id": "dbt_test_int_ping_trip",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select int_ping_trip --vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_run_int_gps_hourly_completeness.kwargs == {
-        "task_id": "dbt_run_int_gps_hourly_completeness",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt run --select {dag.GPS_COMPLETENESS_MODEL} --vars '{dag.GPS_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_test_int_gps_hourly_completeness.kwargs == {
-        "task_id": "dbt_test_int_gps_hourly_completeness",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.GPS_COMPLETENESS_MODEL} --vars '{dag.GPS_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_run_int_stop_arrivals.kwargs == {
-        "task_id": "dbt_run_int_stop_arrivals",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && "
-            f"dbt run --select {dag.GTFS_STOP_ARRIVAL_STAGING_MODELS} int_stop_arrivals "
-            f"--vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_test_int_stop_arrivals.kwargs == {
-        "task_id": "dbt_test_int_stop_arrivals",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select int_stop_arrivals --vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_run_int_trip_summary.kwargs == {
-        "task_id": "dbt_run_int_trip_summary",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt run --select {dag.TRIP_SUMMARY_MODEL} --vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_test_int_trip_summary.kwargs == {
-        "task_id": "dbt_test_int_trip_summary",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.TRIP_SUMMARY_MODEL} --vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_run_fct_trip.kwargs == {
-        "task_id": "dbt_run_fct_trip",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt run --select {dag.TRIP_FACT_MODEL} --vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_test_fct_trip.kwargs == {
-        "task_id": "dbt_test_fct_trip",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.TRIP_FACT_MODEL} --vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_run_fct_stop_arrival.kwargs == {
-        "task_id": "dbt_run_fct_stop_arrival",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt run --select {dag.STOP_ARRIVAL_FACT_MODEL} "
-            f"--vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.dbt_test_fct_stop_arrival.kwargs == {
-        "task_id": "dbt_test_fct_stop_arrival",
-        "bash_command": (
-            f"cd {dag.DBT_PROJECT_DIR} && dbt test --select {dag.STOP_ARRIVAL_FACT_MODEL} "
-            f"--indirect-selection cautious --vars '{dag.GPS_TRIP_DBT_VARS}'"
-        ),
-    }
-    assert dag.load_raw_gps_pings.downstream == [dag.dbt_run_stg_gps_pings]
-    assert dag.dbt_run_stg_gps_pings.downstream == [
-        dag.dbt_test_stg_gps_pings,
-    ]
-    assert dag.selected_gtfs_snapshot_id.downstream == [dag.dbt_run_int_ping_trip]
-    assert dag.dbt_test_stg_gps_pings.downstream == [
-        dag.dbt_run_int_ping_trip,
-        dag.dbt_run_int_gps_hourly_completeness,
-    ]
-    assert dag.dbt_run_int_ping_trip.downstream == [dag.dbt_test_int_ping_trip]
-    assert dag.dbt_test_int_ping_trip.downstream == [dag.dbt_run_int_stop_arrivals]
-    assert dag.dbt_run_int_gps_hourly_completeness.downstream == [dag.dbt_test_int_gps_hourly_completeness]
-    assert dag.dbt_run_int_stop_arrivals.downstream == [dag.dbt_test_int_stop_arrivals]
-    assert dag.dbt_test_int_stop_arrivals.downstream == [dag.dbt_run_int_trip_summary]
-    assert dag.dbt_run_int_trip_summary.downstream == [dag.dbt_test_int_trip_summary]
-    assert dag.dbt_test_int_trip_summary.downstream == [dag.dbt_run_fct_trip]
-    assert dag.dbt_run_fct_trip.downstream == [dag.dbt_test_fct_trip]
-    assert dag.dbt_test_fct_trip.downstream == [dag.dbt_run_fct_stop_arrival]
-    assert dag.dbt_run_fct_stop_arrival.downstream == [dag.dbt_test_fct_stop_arrival]
+    assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
+    assert '"publish_service_date": "' + dag.PROCESSING_DATE in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
+    assert '"publish_service_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_fct_trip_prior.kwargs["bash_command"]
+    assert dag.AGGREGATE_MODELS in dag.dbt_run_aggregate_marts.kwargs["bash_command"]
+    assert dag.PIPELINE_STATUS_MODEL in dag.dbt_run_pipeline_status.kwargs["bash_command"]
+    assert dag.emit_gps_models_date_asset.kwargs == {"outlets": [dag.GPS_MODELS_DATE_ASSET]}
+
+    assert dag.dbt_test_stg_gps_pings in dag.dbt_run_stg_gps_pings.downstream
+    assert dag.dbt_run_int_ping_trip in dag.selected_gtfs_snapshot_id.downstream
+    assert dag.dbt_run_int_ping_trip in dag.dbt_test_stg_gps_pings.downstream
+    assert dag.dbt_run_int_gps_hourly_completeness in dag.dbt_test_stg_gps_pings.downstream
+    assert dag.dbt_test_int_ping_trip in dag.dbt_run_int_ping_trip.downstream
+    assert dag.dbt_run_int_stop_arrivals in dag.dbt_test_int_ping_trip.downstream
+    assert dag.dbt_test_int_gps_hourly_completeness in dag.dbt_run_int_gps_hourly_completeness.downstream
+    assert dag.dbt_test_int_stop_arrivals in dag.dbt_run_int_stop_arrivals.downstream
+    assert dag.dbt_run_int_trip_summary in dag.dbt_test_int_stop_arrivals.downstream
+    assert dag.dbt_test_int_trip_summary in dag.dbt_run_int_trip_summary.downstream
+    assert dag.dbt_run_fct_trip_current in dag.dbt_test_int_trip_summary.downstream
+    assert dag.dbt_run_fct_trip_prior in dag.dbt_test_int_trip_summary.downstream
+    assert dag.dbt_run_fct_stop_arrival_current in dag.dbt_test_fct_trip_current.downstream
+    assert dag.dbt_run_fct_stop_arrival_prior in dag.dbt_test_fct_trip_prior.downstream
+    assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_fct_stop_arrival_current.downstream
+    assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_fct_stop_arrival_prior.downstream
+    assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_int_gps_hourly_completeness.downstream
+    assert dag.dbt_run_pipeline_status in dag.dbt_test_aggregate_marts.downstream
 
 
 @dataclass
@@ -337,7 +272,10 @@ def _load_dag_module() -> types.ModuleType:
     _install_airflow_stubs()
     _install_google_stubs()
 
-    module_path = Path(__file__).parents[1] / "dags" / "dag_daily_gps.py"
+    dag_dir = Path(__file__).parents[1] / "dags"
+    if str(dag_dir) not in sys.path:
+        sys.path.insert(0, str(dag_dir))
+    module_path = dag_dir / "dag_daily_gps.py"
     module_name = "dag_daily_gps_under_test"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -358,6 +296,13 @@ def _install_airflow_stubs() -> None:
 
     airflow_exceptions_module.AirflowException = type("AirflowException", (Exception,), {})
     airflow_sdk_module.DAG = FakeDAG
+    airflow_sdk_module.Asset = FakeAsset
+    airflow_sdk_module.CronPartitionTimetable = FakeCronPartitionTimetable
+    airflow_sdk_module.Metadata = FakeMetadata
+    airflow_sdk_module.PartitionedAssetTimetable = FakePartitionedAssetTimetable
+    airflow_sdk_module.StartOfDayMapper = FakeStartOfDayMapper
+    airflow_sdk_module.TriggerRule = types.SimpleNamespace(ONE_FAILED="one_failed")
+    airflow_sdk_module.task = FakeTaskDecorator()
     bash_module.BashOperator = FakeOperator
     python_module.PythonOperator = FakeOperator
 
@@ -406,8 +351,8 @@ class Conflict(Exception):
 
 
 class FakeDAG:
-    def __init__(self, **_kwargs: Any) -> None:
-        return None
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
 
     def __enter__(self) -> FakeDAG:
         return self
@@ -424,6 +369,73 @@ class FakeOperator:
     def __rshift__(self, _other: FakeOperator) -> FakeOperator:
         self.downstream.append(_other)
         return _other
+
+    def __rrshift__(self, upstream: list[object]) -> FakeOperator:
+        for task in upstream:
+            if hasattr(task, "downstream"):
+                task.downstream.append(self)
+        return self
+
+
+class FakeTaskDecorator:
+    def __call__(self, function: Any | None = None, **kwargs: Any) -> Any:
+        if function is None:
+            return lambda decorated: FakeTask(decorated, kwargs)
+        return FakeTask(function, kwargs)
+
+
+class FakeTask:
+    def __init__(self, function: Any, kwargs: dict[str, Any] | None = None) -> None:
+        self.function = function
+        self.kwargs = kwargs or {}
+        self.downstream: list[object] = []
+
+    def __call__(self, *_args: object, **_kwargs: object) -> FakeTask:
+        return self
+
+    def __rshift__(self, downstream: object) -> object:
+        self.downstream.append(downstream)
+        return downstream
+
+    def __rrshift__(self, upstream: list[object]) -> FakeTask:
+        for task in upstream:
+            if hasattr(task, "downstream"):
+                task.downstream.append(self)
+        return self
+
+
+class FakeAsset:
+    def __init__(self, uri: str, *, name: str | None = None) -> None:
+        self.uri = uri
+        self.name = name
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, FakeAsset) and self.uri == other.uri
+
+    def __hash__(self) -> int:
+        return hash(self.uri)
+
+
+class FakeCronPartitionTimetable:
+    def __init__(self, cron: str, *, timezone: str) -> None:
+        self.cron = cron
+        self.timezone = timezone
+
+
+class FakeStartOfDayMapper:
+    pass
+
+
+class FakePartitionedAssetTimetable:
+    def __init__(self, *, assets: FakeAsset, default_partition_mapper: FakeStartOfDayMapper) -> None:
+        self.assets = assets
+        self.default_partition_mapper = default_partition_mapper
+
+
+class FakeMetadata:
+    def __init__(self, asset: FakeAsset, extra: dict[str, Any]) -> None:
+        self.asset = asset
+        self.extra = extra
 
 
 class FakeTimePartitioning:

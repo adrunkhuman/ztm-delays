@@ -16,8 +16,14 @@ def test_gtfs_hash_and_paths_are_stable() -> None:
 
     assert dag._sha256(b"abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     assert dag._snapshot_id("2026-06-25T14:00:00Z", "abcdef1234567890") == "2026-06-25T14:00:00Z_abcdef123456"
-    assert dag._gtfs_gcs_path("2026-06-25T14:00:00Z") == "raw/gtfs/2026-06-25T14:00:00Z.zip"
-    assert dag._gtfs_gcs_uri("2026-06-25T14:00:00Z") == "gs://ztm-analytics-bucket/raw/gtfs/2026-06-25T14:00:00Z.zip"
+    assert (
+        dag._gtfs_gcs_path("2026-06-25T14:00:00Z", "abcdef1234567890")
+        == "raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip"
+    )
+    assert (
+        dag._gtfs_gcs_uri("2026-06-25T14:00:00Z", "abcdef1234567890")
+        == "gs://ztm-analytics-bucket/raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip"
+    )
 
 
 def test_poll_gtfs_snapshot_skips_unchanged_snapshot(monkeypatch: Any) -> None:
@@ -31,7 +37,7 @@ def test_poll_gtfs_snapshot_skips_unchanged_snapshot(monkeypatch: Any) -> None:
     monkeypatch.setattr(dag, "_upload_gtfs_zip", _fail_if_called)
     monkeypatch.setattr(dag, "_insert_gtfs_snapshot", _fail_if_called)
 
-    assert dag._poll_gtfs_snapshot() == {"status": "unchanged"}
+    assert dag._poll_gtfs_snapshot("2026-06-25T14:00:00Z") == {"status": "unchanged"}
     assert client.created_table is not None
 
 
@@ -45,27 +51,23 @@ def test_poll_gtfs_snapshot_uploads_changed_snapshot(monkeypatch: Any) -> None:
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
     monkeypatch.setattr(dag.storage, "Client", lambda project: storage_client)
 
-    poll_result = dag._poll_gtfs_snapshot()
+    poll_result = dag._poll_gtfs_snapshot("2026-06-25T14:00:00Z")
 
     assert poll_result["status"] == "uploaded"
     assert client.created_table is not None
-    assert len(client.inserted_rows) == 1
-    inserted_row = client.inserted_rows[0]
-    assert poll_result["snapshot_id"] == inserted_row["snapshot_id"]
-    assert poll_result["gcs_path"] == inserted_row["gcs_path"]
+    assert poll_result["snapshot_id"] == "2026-06-25T14:00:00Z_" + dag._sha256(zip_bytes)[:12]
+    expected_path = "raw/gtfs/2026-06-25T14:00:00Z_" + dag._sha256(zip_bytes)[:12] + ".zip"
+    assert poll_result["gcs_path"] == "gs://ztm-analytics-bucket/" + expected_path
+    assert poll_result["file_hash"] == dag._sha256(zip_bytes)
     assert "processing_date" in poll_result
-    assert inserted_row["snapshot_timestamp"].endswith("Z")
-    assert inserted_row["file_hash"] == dag._sha256(zip_bytes)
-    assert inserted_row["gcs_path"] == f"gs://ztm-analytics-bucket/raw/gtfs/{inserted_row['snapshot_timestamp']}.zip"
-    assert storage_client.bucket_obj.uploads == [
-        (f"raw/gtfs/{inserted_row['snapshot_timestamp']}.zip", zip_bytes, "application/zip")
-    ]
+    assert storage_client.bucket_obj.uploads == [(expected_path, zip_bytes, "application/zip")]
+    assert any(call[2].startswith("merge_raw_gtfs_snapshots_") for call in client.query_calls)
 
 
 def test_gtfs_load_branch_routes_only_changed_snapshots() -> None:
     dag = _load_dag_module()
 
-    assert dag._gtfs_load_branch({"status": "uploaded"}) == "trigger_gtfs_load"
+    assert dag._gtfs_load_branch({"status": "uploaded"}) == "emit_gtfs_snapshot_asset"
     assert dag._gtfs_load_branch({"status": "unchanged"}) == "skip_gtfs_load"
 
     with pytest.raises(ValueError, match="Unexpected GTFS poll result"):
@@ -79,17 +81,10 @@ def test_gtfs_staging_processing_date_uses_next_warsaw_local_date() -> None:
     assert dag._gtfs_staging_processing_date("2026-06-25T23:30:00Z") == "2026-06-27"
 
 
-def test_dag_triggers_gtfs_load_dag_on_changed_snapshot() -> None:
+def test_dag_emits_gtfs_snapshot_asset_on_changed_snapshot() -> None:
     dag = _load_dag_module()
 
-    assert dag.trigger_gtfs_load.task_id == "trigger_gtfs_load"
-    assert dag.trigger_gtfs_load.trigger_dag_id == "dag_gtfs_load"
-    assert dag.trigger_gtfs_load.conf == {
-        "snapshot_id": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['snapshot_id'] }}",
-        "gcs_path": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['gcs_path'] }}",
-        "processing_date": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['processing_date'] }}",
-    }
-    assert dag.trigger_gtfs_load.wait_for_completion is False
+    assert dag.emit_gtfs_snapshot_asset.kwargs == {"outlets": [dag.GTFS_SNAPSHOT_ASSET]}
     assert dag.skip_gtfs_load.task_id == "skip_gtfs_load"
 
 
@@ -99,15 +94,28 @@ def test_insert_gtfs_snapshot_uses_expected_metadata_row() -> None:
 
     dag._insert_gtfs_snapshot(client, "2026-06-25T14:00:00Z", "abcdef1234567890", "gs://bucket/raw/gtfs/test.zip")
 
-    assert client.insert_table == "ztm-data.ztm_raw.raw_gtfs_snapshots"
-    assert client.inserted_rows == [
-        {
-            "snapshot_id": "2026-06-25T14:00:00Z_abcdef123456",
-            "snapshot_timestamp": "2026-06-25T14:00:00Z",
-            "file_hash": "abcdef1234567890",
-            "gcs_path": "gs://bucket/raw/gtfs/test.zip",
-        }
+    assert len(client.query_calls) == 1
+    query, job_config, job_id, location = client.query_calls[0]
+    assert "merge `ztm-data.ztm_raw.raw_gtfs_snapshots`" in query
+    assert job_id == "merge_raw_gtfs_snapshots_2026_06_25T14_00_00Z_abcdef123456"
+    assert location == dag.BIGQUERY_LOCATION
+    assert [(param.name, param.type_, param.value) for param in job_config.query_parameters] == [
+        ("snapshot_id", "STRING", "2026-06-25T14:00:00Z_abcdef123456"),
+        ("snapshot_timestamp", "STRING", "2026-06-25T14:00:00Z"),
+        ("file_hash", "STRING", "abcdef1234567890"),
+        ("gcs_path", "STRING", "gs://bucket/raw/gtfs/test.zip"),
     ]
+
+
+def test_insert_gtfs_snapshot_waits_on_existing_merge_job_after_conflict() -> None:
+    dag = _load_dag_module()
+    job_id = "merge_raw_gtfs_snapshots_2026_06_25T14_00_00Z_abcdef123456"
+    client = FakeBigQueryClient(query_conflict_job_ids={job_id})
+
+    dag._insert_gtfs_snapshot(client, "2026-06-25T14:00:00Z", "abcdef1234567890", "gs://bucket/raw/gtfs/test.zip")
+
+    assert client.get_job_call == (job_id, "ztm-data", dag.BIGQUERY_LOCATION)
+    assert client.existing_job.result_called is True
 
 
 def test_download_gtfs_zip_rejects_non_zip_response(monkeypatch: Any) -> None:
@@ -126,7 +134,10 @@ def _load_dag_module() -> types.ModuleType:
     _install_google_stubs()
     _install_requests_stub()
 
-    module_path = Path(__file__).parents[1] / "dags" / "dag_gtfs_poll.py"
+    dag_dir = Path(__file__).parents[1] / "dags"
+    if str(dag_dir) not in sys.path:
+        sys.path.insert(0, str(dag_dir))
+    module_path = dag_dir / "dag_gtfs_poll.py"
     module_name = "dag_gtfs_poll_under_test"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -153,6 +164,8 @@ def _install_airflow_stubs() -> None:
 
     airflow_sdk_module.DAG = FakeDAG
     airflow_sdk_module.task = FakeTaskDecorator()
+    airflow_sdk_module.Asset = FakeAsset
+    airflow_sdk_module.Metadata = FakeMetadata
     airflow_decorators_module.task = FakeTaskDecorator()
     airflow_providers_standard_empty_module.EmptyOperator = FakeEmptyOperator
     airflow_providers_standard_trigger_module.TriggerDagRunOperator = FakeTriggerDagRunOperator
@@ -180,10 +193,14 @@ def _install_google_stubs() -> None:
     bigquery_module = types.ModuleType("google.cloud.bigquery")
     storage_module = types.ModuleType("google.cloud.storage")
 
+    google_api_core_exceptions_module.Conflict = Conflict
     google_api_core_exceptions_module.NotFound = NotFound
+    google_api_core_exceptions_module.PreconditionFailed = PreconditionFailed
     bigquery_module.Client = lambda project: FakeBigQueryClient()
     bigquery_module.Table = FakeTable
     bigquery_module.SchemaField = FakeSchemaField
+    bigquery_module.QueryJobConfig = FakeQueryJobConfig
+    bigquery_module.ScalarQueryParameter = FakeScalarQueryParameter
     storage_module.Client = lambda project: FakeStorageClient()
     google_cloud_module.bigquery = bigquery_module
     google_cloud_module.storage = storage_module
@@ -206,13 +223,34 @@ class FakeTaskDecorator:
     def __init__(self) -> None:
         self.branch = self
 
-    def __call__(self, function: Any) -> FakeTask:
-        return FakeTask(function)
+    def __call__(self, function: Any | None = None, **kwargs: Any) -> Any:
+        if function is None:
+            return lambda decorated: FakeTask(decorated, kwargs)
+        return FakeTask(function, kwargs)
+
+
+class FakeAsset:
+    def __init__(self, uri: str, *, name: str | None = None) -> None:
+        self.uri = uri
+        self.name = name
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, FakeAsset) and self.uri == other.uri
+
+    def __hash__(self) -> int:
+        return hash(self.uri)
+
+
+class FakeMetadata:
+    def __init__(self, asset: FakeAsset, extra: dict[str, str]) -> None:
+        self.asset = asset
+        self.extra = extra
 
 
 class FakeTask:
-    def __init__(self, function: Any) -> None:
+    def __init__(self, function: Any, kwargs: dict[str, Any] | None = None) -> None:
         self.function = function
+        self.kwargs = kwargs or {}
         self.downstream: list[object] = []
 
     def __call__(self, *_args: object, **_kwargs: object) -> FakeTask:
@@ -224,6 +262,12 @@ class FakeTask:
         else:
             self.downstream.append(downstream)
         return downstream
+
+    def __rrshift__(self, upstream: list[object]) -> FakeTask:
+        for task in upstream:
+            if hasattr(task, "downstream"):
+                task.downstream.append(self)
+        return self
 
 
 class FakeEmptyOperator:
@@ -264,17 +308,26 @@ class FakeTable:
 
 
 class FakeBigQueryClient:
-    def __init__(self, *, latest_hash: str | None = None) -> None:
+    def __init__(self, *, latest_hash: str | None = None, query_conflict_job_ids: set[str] | None = None) -> None:
         self.latest_hash = latest_hash
+        self.query_conflict_job_ids = query_conflict_job_ids or set()
         self.created_table: FakeTable | None = None
         self.insert_table: str | None = None
         self.inserted_rows: list[dict[str, str]] = []
+        self.query_calls: list[tuple[str, Any, str, str]] = []
+        self.existing_job = FakeQueryJob(self.latest_hash)
+        self.get_job_call: tuple[str, str, str] | None = None
 
     def create_table(self, table: FakeTable, *, exists_ok: bool) -> None:
         assert exists_ok is True
         self.created_table = table
 
-    def query(self, _query: str) -> FakeQueryJob:
+    def query(
+        self, query: str, *, job_config: Any | None = None, job_id: str | None = None, location: str | None = None
+    ) -> FakeQueryJob:
+        if job_id in self.query_conflict_job_ids:
+            raise Conflict("job already exists")
+        self.query_calls.append((query, job_config, job_id or "", location or ""))
         return FakeQueryJob(self.latest_hash)
 
     def insert_rows_json(self, table: str, rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -282,15 +335,33 @@ class FakeBigQueryClient:
         self.inserted_rows = rows
         return []
 
+    def get_job(self, job_id: str, *, project: str, location: str) -> FakeQueryJob:
+        self.get_job_call = (job_id, project, location)
+        return self.existing_job
+
 
 class FakeQueryJob:
     def __init__(self, latest_hash: str | None) -> None:
         self.latest_hash = latest_hash
+        self.result_called = False
 
     def result(self) -> list[FakeRow]:
+        self.result_called = True
         if self.latest_hash is None:
             return []
         return [FakeRow(self.latest_hash)]
+
+
+class FakeQueryJobConfig:
+    def __init__(self, *, query_parameters: list[FakeScalarQueryParameter]) -> None:
+        self.query_parameters = query_parameters
+
+
+class FakeScalarQueryParameter:
+    def __init__(self, name: str, type_: str, value: str) -> None:
+        self.name = name
+        self.type_ = type_
+        self.value = value
 
 
 class FakeRow:
@@ -320,11 +391,19 @@ class FakeBlob:
         self.path = path
         self.uploads = uploads
 
-    def upload_from_string(self, data: bytes, *, content_type: str) -> None:
+    def upload_from_string(self, data: bytes, *, content_type: str, if_generation_match: int | None = None) -> None:
         self.uploads.append((self.path, data, content_type))
 
 
 class NotFound(Exception):
+    pass
+
+
+class PreconditionFailed(Exception):
+    pass
+
+
+class Conflict(Exception):
     pass
 
 

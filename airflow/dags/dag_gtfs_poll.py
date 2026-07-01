@@ -1,31 +1,35 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import zipfile
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import requests
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import Conflict, NotFound, PreconditionFailed
 from google.cloud import bigquery, storage
+from ztm_airflow_common import BIGQUERY_LOCATION, BIGQUERY_RAW_DATASET, GCP_PROJECT, GCS_BUCKET, GTFS_SNAPSHOT_ASSET
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 try:
     from airflow.providers.standard.operators.empty import EmptyOperator
-    from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
-    from airflow.sdk import DAG, task
+    from airflow.sdk import DAG, Metadata, task
 except ImportError:  # Airflow 2 compatibility for local parser checks and older images.
     from airflow import DAG
     from airflow.decorators import task
     from airflow.operators.empty import EmptyOperator
-    from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+    from airflow.sdk import Metadata
 
-GCP_PROJECT = "ztm-data"
-BIGQUERY_RAW_DATASET = "ztm_raw"
-GCS_BUCKET = "ztm-analytics-bucket"
 GTFS_URL = "https://mkuran.pl/gtfs/warsaw.zip"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 WARSAW_TZ = ZoneInfo("Europe/Warsaw")
+POLL_SNAPSHOT_TIMESTAMP = "{{ data_interval_end.in_timezone('UTC').strftime('%Y-%m-%dT%H:%M:%SZ') }}"
 
 
 def _sha256(data: bytes) -> str:
@@ -36,12 +40,12 @@ def _snapshot_id(snapshot_timestamp: str, file_hash: str) -> str:
     return f"{snapshot_timestamp}_{file_hash[:12]}"
 
 
-def _gtfs_gcs_path(snapshot_timestamp: str) -> str:
-    return f"raw/gtfs/{snapshot_timestamp}.zip"
+def _gtfs_gcs_path(snapshot_timestamp: str, file_hash: str) -> str:
+    return f"raw/gtfs/{snapshot_timestamp}_{file_hash[:12]}.zip"
 
 
-def _gtfs_gcs_uri(snapshot_timestamp: str) -> str:
-    return f"gs://{GCS_BUCKET}/{_gtfs_gcs_path(snapshot_timestamp)}"
+def _gtfs_gcs_uri(snapshot_timestamp: str, file_hash: str) -> str:
+    return f"gs://{GCS_BUCKET}/{_gtfs_gcs_path(snapshot_timestamp, file_hash)}"
 
 
 def _download_gtfs_zip() -> bytes:
@@ -66,7 +70,7 @@ def _ensure_raw_gtfs_snapshots_table(client: bigquery.Client) -> None:
 
 
 def _latest_gtfs_hash(client: bigquery.Client) -> str | None:
-    query = f"""  # noqa: S608 - table name is a module constant, not user input.
+    query = f"""
         select file_hash
         from `{RAW_GTFS_SNAPSHOTS_TABLE}`
         order by snapshot_timestamp desc
@@ -81,25 +85,49 @@ def _latest_gtfs_hash(client: bigquery.Client) -> str | None:
     return str(rows[0].file_hash)
 
 
-def _upload_gtfs_zip(snapshot_timestamp: str, zip_bytes: bytes) -> str:
+def _upload_gtfs_zip(snapshot_timestamp: str, file_hash: str, zip_bytes: bytes) -> str:
     bucket = storage.Client(project=GCP_PROJECT).bucket(GCS_BUCKET)
-    gcs_path = _gtfs_gcs_path(snapshot_timestamp)
-    bucket.blob(gcs_path).upload_from_string(zip_bytes, content_type="application/zip")
+    gcs_path = _gtfs_gcs_path(snapshot_timestamp, file_hash)
+    with suppress(PreconditionFailed):
+        bucket.blob(gcs_path).upload_from_string(zip_bytes, content_type="application/zip", if_generation_match=0)
     return f"gs://{GCS_BUCKET}/{gcs_path}"
 
 
 def _insert_gtfs_snapshot(client: bigquery.Client, snapshot_timestamp: str, file_hash: str, gcs_path: str) -> str:
     snapshot_id = _snapshot_id(snapshot_timestamp, file_hash)
-    row = {
-        "snapshot_id": snapshot_id,
-        "snapshot_timestamp": snapshot_timestamp,
-        "file_hash": file_hash,
-        "gcs_path": gcs_path,
-    }
-    errors = client.insert_rows_json(RAW_GTFS_SNAPSHOTS_TABLE, [row])
-    if errors:
-        raise RuntimeError(f"Failed to insert GTFS snapshot metadata: {errors}")
+    query = f"""
+        merge `{RAW_GTFS_SNAPSHOTS_TABLE}` as target
+        using (
+            select
+                @snapshot_id as snapshot_id,
+                timestamp(@snapshot_timestamp) as snapshot_timestamp,
+                @file_hash as file_hash,
+                @gcs_path as gcs_path
+        ) as source
+        on target.snapshot_id = source.snapshot_id
+        when not matched then
+            insert (snapshot_id, snapshot_timestamp, file_hash, gcs_path)
+            values (source.snapshot_id, source.snapshot_timestamp, source.file_hash, source.gcs_path)
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("snapshot_id", "STRING", snapshot_id),
+            bigquery.ScalarQueryParameter("snapshot_timestamp", "STRING", snapshot_timestamp),
+            bigquery.ScalarQueryParameter("file_hash", "STRING", file_hash),
+            bigquery.ScalarQueryParameter("gcs_path", "STRING", gcs_path),
+        ]
+    )
+    job_id = f"merge_raw_gtfs_snapshots_{_bigquery_job_id_suffix(snapshot_id)}"
+    try:
+        job = client.query(query, job_config=job_config, job_id=job_id, location=BIGQUERY_LOCATION)
+    except Conflict:
+        job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
+    job.result()
     return snapshot_id
+
+
+def _bigquery_job_id_suffix(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", value).strip("_")
 
 
 def _gtfs_staging_processing_date(snapshot_timestamp: str) -> str:
@@ -108,7 +136,7 @@ def _gtfs_staging_processing_date(snapshot_timestamp: str) -> str:
     return (snapshot_datetime.astimezone(WARSAW_TZ).date() + timedelta(days=1)).isoformat()
 
 
-def _poll_gtfs_snapshot() -> dict[str, str]:
+def _poll_gtfs_snapshot(snapshot_timestamp: str) -> dict[str, str]:
     zip_bytes = _download_gtfs_zip()
     file_hash = _sha256(zip_bytes)
     bigquery_client = bigquery.Client(project=GCP_PROJECT)
@@ -117,20 +145,20 @@ def _poll_gtfs_snapshot() -> dict[str, str]:
     if _latest_gtfs_hash(bigquery_client) == file_hash:
         return {"status": "unchanged"}
 
-    snapshot_timestamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    gcs_path = _upload_gtfs_zip(snapshot_timestamp, zip_bytes)
+    gcs_path = _upload_gtfs_zip(snapshot_timestamp, file_hash, zip_bytes)
     snapshot_id = _insert_gtfs_snapshot(bigquery_client, snapshot_timestamp, file_hash, gcs_path)
     return {
         "status": "uploaded",
         "snapshot_id": snapshot_id,
         "gcs_path": gcs_path,
+        "file_hash": file_hash,
         "processing_date": _gtfs_staging_processing_date(snapshot_timestamp),
     }
 
 
 def _gtfs_load_branch(poll_result: dict[str, str]) -> str:
     if poll_result["status"] == "uploaded":
-        return "trigger_gtfs_load"
+        return "emit_gtfs_snapshot_asset"
     if poll_result["status"] == "unchanged":
         return "skip_gtfs_load"
     raise ValueError(f"Unexpected GTFS poll result: {poll_result['status']}")
@@ -138,7 +166,7 @@ def _gtfs_load_branch(poll_result: dict[str, str]) -> str:
 
 with DAG(
     dag_id="dag_gtfs_poll",
-    description="Download GTFS ZIP when changed and record snapshot metadata.",
+    description="Download GTFS ZIP when changed and emit a GTFS snapshot asset event.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule="0 * * * *",
     catchup=False,
@@ -147,26 +175,33 @@ with DAG(
 ) as dag:
 
     @task
-    def poll_gtfs_snapshot() -> dict[str, str]:
-        """Persist changed GTFS content before triggering the raw loader."""
-        return _poll_gtfs_snapshot()
+    def poll_gtfs_snapshot(snapshot_timestamp: str) -> dict[str, str]:
+        """Persist changed GTFS content before emitting the raw-loader asset."""
+        return _poll_gtfs_snapshot(snapshot_timestamp)
 
     @task.branch
     def branch_gtfs_load(poll_result: dict[str, str]) -> str:
         """Avoid triggering raw reloads when the GTFS ZIP hash is unchanged."""
         return _gtfs_load_branch(poll_result)
 
-    trigger_gtfs_load = TriggerDagRunOperator(
-        task_id="trigger_gtfs_load",
-        trigger_dag_id="dag_gtfs_load",
-        conf={
-            "snapshot_id": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['snapshot_id'] }}",
-            "gcs_path": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['gcs_path'] }}",
-            "processing_date": "{{ ti.xcom_pull(task_ids='poll_gtfs_snapshot')['processing_date'] }}",
-        },
-        wait_for_completion=False,
-    )
+    @task(outlets=[GTFS_SNAPSHOT_ASSET])
+    def emit_gtfs_snapshot_asset(poll_result: dict[str, str]) -> Iterator[Metadata]:
+        """Publish the immutable snapshot context as an Airflow asset event."""
+        yield Metadata(
+            GTFS_SNAPSHOT_ASSET,
+            {
+                "snapshot_id": poll_result["snapshot_id"],
+                "gcs_path": poll_result["gcs_path"],
+                "processing_date": poll_result["processing_date"],
+                "file_hash": poll_result["file_hash"],
+            },
+        )
+
     skip_gtfs_load = EmptyOperator(task_id="skip_gtfs_load")
 
-    poll_result = poll_gtfs_snapshot()
-    branch_gtfs_load(poll_result) >> [trigger_gtfs_load, skip_gtfs_load]
+    poll_result = poll_gtfs_snapshot(POLL_SNAPSHOT_TIMESTAMP)
+    branch_gtfs_load(poll_result) >> [emit_gtfs_snapshot_asset(poll_result), skip_gtfs_load]
+
+
+if __name__ == "__main__":
+    dag.test()
