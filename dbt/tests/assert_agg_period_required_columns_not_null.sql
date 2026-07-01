@@ -1,0 +1,32 @@
+select *
+from {{ ref('agg_line_stop_period') }}
+where period_type is null
+   or period_id is null
+   or period_start_date is null
+   or source_start_date is null
+   or source_end_date is null
+   or is_partial_period is null
+   or day_class_type is null
+   or day_class is null
+   or schedule_version_id is null
+   or line is null
+   or mode is null
+   or direction_id is null
+   or stop_group_id is null
+   or stop_id is null
+   or hour_bracket is null
+   or n <= 0
+   or mean_delay_seconds is null
+   or p10_delay_seconds is null
+   or median_delay_seconds is null
+   or p50_delay_seconds is null
+   or p90_delay_seconds is null
+   or on_time_rate is null
+   or delay_histogram is null
+   or gtfs_snapshot_ids is null
+
+union all
+
+select *
+from {{ ref('agg_line_stop_period') }}
+where array_length(gtfs_snapshot_ids) = 0

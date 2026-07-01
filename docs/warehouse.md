@@ -150,6 +150,52 @@ The model is partitioned by `service_date`, requires a partition filter, and is 
 
 Strict analytics default to `trip_quality = 'complete'`. Exploratory views may include `partial`; debug views may include `broken` and should expose `quality_flags`. The detail rows remain available even when a day is later marked incomplete by coverage/completeness marts.
 
+## Aggregate Marts
+
+The aggregate marts are pure serving accelerators over `fct_stop_arrival`. They use only `trip_quality = 'complete'` rows and can be rebuilt from detail without data loss.
+
+Aggregate period types:
+
+- `month`: calendar month, with `period_id = YYYY-MM` and `period_start_date` set to the first day of the month. Month rows only include source rows from the latest `schedule_version_id` observed in that month for each `line`, `direction_id`, and `schedule_day_type`; "latest" is ordered by `dim_schedule_version.valid_from_date`, not by lexical ID. Earlier in-month schedule versions remain available through `schedule_version` period rows.
+- `schedule_version`: per-line timetable-version period, with `period_id = schedule_version_id` and date bounds from `dim_schedule_version`.
+
+Period aggregates expose `source_start_date`, `source_end_date`, and `is_partial_period`. `is_partial_period` is true when the built source window does not cover the natural period bounds, such as a current month before month end or a bounded backfill that starts after a schedule version began. Open-ended `schedule_version` rows have null `period_end_date`, so `is_partial_period` does not mean "still accumulating" for the open side; use `source_end_date` as the observed-through date. Consumers should label or exclude partial periods when comparing complete periods.
+
+Aggregate day-class rows:
+
+- `day_type`: `weekday` or `weekend`.
+- `weekday`: lowercase weekday name, Monday through Sunday.
+- `schedule_day_type`: GTFS-derived service pattern. Holiday service grouping is represented here because Warsaw holiday schedules usually follow a GTFS service pattern such as Sunday/holiday rather than a pure calendar label.
+
+Shared delay statistics:
+
+- `n`: strict-quality stop-arrival row count in the cell.
+- `mean_delay_seconds`: average `delay_seconds`.
+- `p10_delay_seconds`, `median_delay_seconds`, `p50_delay_seconds`, `p90_delay_seconds`: approximate BigQuery quantiles over `delay_seconds`.
+- `stddev_delay_seconds`: sample standard deviation, null for one-row cells.
+- `on_time_rate`: share of rows with `delay_seconds` between `-60` and `180` inclusive.
+
+Fixed histogram buckets are stored as an array of structs with `bucket_label`, `min_delay_seconds`, `max_delay_seconds`, and `n`. Open-ended buckets use null for the unbounded side:
+
+- `early_over_5m`: `< -300` seconds.
+- `early_1_to_5m`: `-300..-61` seconds.
+- `on_time`: `-60..180` seconds.
+- `late_3_to_5m`: `181..300` seconds.
+- `late_5_to_10m`: `301..600` seconds.
+- `late_10_to_20m`: `601..1200` seconds.
+- `late_over_20m`: `> 1200` seconds.
+
+Aggregate model roles:
+
+- `agg_line_stop_period`: line axis, by line, direction, archive-safe headsign, stop post, scheduled Warsaw-local hour, period, and day class.
+- `agg_stop_period`: stop axis, by stop group, line, direction, archive-safe headsign, scheduled Warsaw-local hour, period, and day class. Direction remains explicit because schedule versions are per line and direction.
+- `agg_time_period`: time-of-day axis, by scheduled Warsaw-local hour, day class, period, and mode. Month rows are network-wide within mode; schedule-version rows are line/direction/headsign-scoped because `schedule_version_id` is per line.
+- `agg_line_daily`: daily line trend surface, by line, direction, archive-safe headsign, service date, and schedule version. Unlike month-period rows, daily rows retain every observed `schedule_version_id` because there is no separate daily schedule-version fallback.
+
+The aggregate marts carry display labels from the label-bearing source facts and preserve `gtfs_snapshot_ids` lineage. Frontend code must not relabel historical aggregate rows through `_current` dimensions.
+
+DuckDB latency over the real `2026-06-30` detail partition showed these aggregates are serving/cache conveniences at current volume, not a hard feasibility requirement.
+
 ## Error Policy
 
 Structural garbage is removed at staging when it cannot be analyzed safely, for example non-numeric vehicle identifiers or coordinates outside the Warsaw bounding box. Later model layers should flag suspicious but analyzable behavior with quality columns instead of failing an entire run.
