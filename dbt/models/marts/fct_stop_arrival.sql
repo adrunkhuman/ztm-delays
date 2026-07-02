@@ -44,6 +44,10 @@ with arrivals as (
     where service_date = date('{{ publish_service_date }}')
       and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
       and gps_date <= date('{{ var("processing_date") }}')
+    qualify row_number() over (
+        partition by gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence
+        order by stop_distance_m, abs(arrival_delay_seconds), actual_arrival_time, gps_date desc
+    ) = 1
 ),
 
 trip_facts as (

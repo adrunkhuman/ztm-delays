@@ -85,6 +85,24 @@ def test_dag_emits_gtfs_snapshot_asset_on_changed_snapshot() -> None:
     assert dag.skip_gtfs_load.task_id == "skip_gtfs_load"
 
 
+def test_gtfs_snapshot_asset_extra_contains_loader_context() -> None:
+    dag = _load_dag_module()
+    poll_result = {
+        "status": "uploaded",
+        "snapshot_id": "2026-06-25T14:00:00Z_abcdef123456",
+        "gcs_path": "gs://ztm-analytics-bucket/raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip",
+        "file_hash": "abcdef1234567890",
+        "processing_date": "2026-06-26",
+    }
+
+    assert dag._gtfs_snapshot_asset_extra(poll_result) == {
+        "snapshot_id": "2026-06-25T14:00:00Z_abcdef123456",
+        "gcs_path": "gs://ztm-analytics-bucket/raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip",
+        "file_hash": "abcdef1234567890",
+        "processing_date": "2026-06-26",
+    }
+
+
 def test_insert_gtfs_snapshot_uses_expected_metadata_row() -> None:
     dag = _load_dag_module()
     client = FakeBigQueryClient()
