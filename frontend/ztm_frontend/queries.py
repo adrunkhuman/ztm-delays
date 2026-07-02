@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 STOP_ROWS_PER_COURSE = 36
 STOP_PICKER_LIMIT = 300
+DELAY_POINT_LIMIT = 600
 NUMERIC_STOP_POST_SUFFIX_LENGTH = 2
 STOP_POST_PRIMARY_MODES = ("bus", "tram")
 
@@ -114,6 +115,10 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
         "mode_stats": _by_mode(mode_stats),
         "worst_lines": _by_mode_list(worst_lines),
         "worst_stops": _by_mode_list(worst_stops),
+        "delay_plots": {
+            "bus": _delay_points(db_path, selected_date, mode="bus"),
+            "tram": _delay_points(db_path, selected_date, mode="tram"),
+        },
     }
 
 
@@ -219,6 +224,7 @@ def get_lines(
         "selected_mode": selected_mode,
         "summary": summary,
         "courses": courses,
+        "delay_plot": _delay_points(db_path, selected_date, line=selected_line) if selected_line is not None else [],
     }
 
 
@@ -369,6 +375,9 @@ def get_stops(  # noqa: PLR0913
         "stop_post_groups": stop_post_groups,
         "selected_post": selected_post,
         "line_stats": line_stats,
+        "delay_plot": _delay_points(db_path, selected_date, stop_id=selected_stop_id)
+        if selected_stop_id is not None
+        else [],
     }
 
 
@@ -513,6 +522,35 @@ def _selected_date(date_options: list[str], selected_date: str | None) -> str | 
     if date_options:
         return date_options[0]
     return None
+
+
+def _delay_points(
+    db_path: Path,
+    service_date: str | None,
+    *,
+    mode: str | None = None,
+    line: str | None = None,
+    stop_id: str | None = None,
+) -> list[int]:
+    if service_date is None:
+        return []
+    rows = fetch_all(
+        db_path,
+        """
+        select delay_seconds
+        from fct_stop_arrival
+        where service_date = ?
+          and (? is null or mode = ?)
+          and (? is null or line = ?)
+          and (? is null or stop_id = ?)
+          and trip_quality = 'complete'
+          and delay_seconds is not null
+        order by hash(trip_id, vehicle_number, stop_sequence)
+        limit ?
+        """,
+        [service_date, mode, mode, line, line, stop_id, stop_id, DELAY_POINT_LIMIT],
+    )
+    return [row["delay_seconds"] for row in rows]
 
 
 def _by_mode(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

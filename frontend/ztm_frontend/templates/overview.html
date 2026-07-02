@@ -29,6 +29,16 @@
   </section>
 
   <section class="section-pair">
+    {% for mode in ["bus", "tram"] %}
+      <article class="panel distribution-panel">
+        <h2>{{ mode|capitalize }} distribution</h2>
+        <canvas class="delay-distribution" data-points-id="overview-{{ mode }}"></canvas>
+        <script type="application/json" id="overview-{{ mode }}">{{ delay_plots.get(mode, [])|to_json|safe }}</script>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="section-pair">
     <article class="panel">
       <h2>Worst bus lines</h2>
       <table>
@@ -95,4 +105,8 @@
       </table>
     </article>
   </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='distribution.js') }}" defer></script>
 {% endblock %}

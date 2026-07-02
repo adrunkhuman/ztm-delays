@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,6 +25,7 @@ def create_app() -> Flask:
     app.add_template_filter(_format_integer, "integer")
     app.add_template_filter(_format_percent, "percent")
     app.add_template_filter(_format_time, "time")
+    app.add_template_filter(lambda value: json.dumps(value, separators=(",", ":")), "to_json")
 
     @app.context_processor
     def inject_globals() -> dict[str, Any]:

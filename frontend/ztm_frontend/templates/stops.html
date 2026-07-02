@@ -60,6 +60,12 @@
           {% endfor %}
         </div>
 
+        <section class="panel distribution-panel">
+          <h2>Distribution</h2>
+          <canvas class="delay-distribution" data-points-id="stop-delay-points"></canvas>
+          <script type="application/json" id="stop-delay-points">{{ delay_plot|to_json|safe }}</script>
+        </section>
+
         <section class="panel">
           <table>
             <thead><tr><th>Line</th><th>Direction</th><th>Delay</th><th>On time</th></tr></thead>
@@ -81,4 +87,8 @@
       {% endif %}
     </section>
   </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='distribution.js') }}" defer></script>
 {% endblock %}
