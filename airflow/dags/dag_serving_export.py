@@ -341,17 +341,22 @@ def _download_mart_parquet(
     bucket = storage_client.bucket(config.gcs_bucket)
     table_dir = local_export_dir / table_name
     table_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
+    blob_names = []
     for blob in bucket.list_blobs(prefix=f"{_table_staging_prefix(config, table_name)}/"):
         if not blob.name.endswith(".parquet"):
             continue
-        path = table_dir / Path(blob.name).name
-        blob.download_to_filename(str(path))
+        blob_names.append(blob.name)
+
+    paths = []
+    for blob_name in sorted(blob_names):
+        path = table_dir / Path(blob_name).name
+        # Avoid stale listed generations; download the current object by name.
+        bucket.blob(blob_name).download_to_filename(str(path))
         paths.append(path)
 
     if not paths:
         raise RuntimeError(f"BigQuery extract produced no parquet files for {table_name}")
-    return sorted(paths)
+    return paths
 
 
 def _publish_duckdb(
@@ -541,8 +546,8 @@ def _write_metadata_file(path: Path, metadata: dict[str, object]) -> None:
 def _cleanup_gcs_staging(storage_client: storage.Client, config: ExportConfig) -> None:
     bucket = storage_client.bucket(config.gcs_bucket)
     prefix = f"{config.gcs_prefix}/export_id={config.export_id}/"
-    for blob in bucket.list_blobs(prefix=prefix):
-        blob.delete()
+    for blob_name in [blob.name for blob in bucket.list_blobs(prefix=prefix)]:
+        bucket.blob(blob_name).delete()
 
 
 def _bigquery_job_id(*parts: str) -> str:
