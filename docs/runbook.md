@@ -64,6 +64,43 @@ After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each
 
 Manual recovery remains explicit: trigger `dag_gtfs_load` with `snapshot_id`, `gcs_path`, and `processing_date`, or trigger `dag_daily_gps` with `processing_date` / partition key for the failed date. GTFS manual config must use `snapshot_id=YYYY-MM-DDTHH:MM:SSZ_<12 hex>`, `gcs_path=gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip`, and `processing_date=YYYY-MM-DD`. Rerun failed date partitions rather than clearing unrelated dates.
 
+## Manual Serving Export
+
+`dag_serving_export` is manual-only for the alpha serving path. Run it after the mart tables are built and validated for the archive window you want to expose. It exports the fixed `MART_TABLES` allowlist, currently intended to mirror all serving marts in `ztm_marts`, to GCS Parquet under `gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds a local DuckDB file, validates it, and atomically swaps the stable serving file. When adding a new serving mart, update the DAG allowlist, its test, and `docs/serving_contract.md` together.
+
+Default output path inside the Airflow container:
+
+```text
+/opt/airflow/serving/ztm.duckdb
+```
+
+Mount that directory to a stable VPS host path before using the export for the frontend. The frontend container should mount the same host path read-only and reopen DuckDB connections when `export_metadata.export_id` or the metadata JSON changes. A daily rebuild does not require a frontend container restart.
+
+Useful manual config:
+
+```json
+{
+  "export_id": "alpha-20260702",
+  "output_dir": "/opt/airflow/serving",
+  "output_filename": "ztm.duckdb",
+  "max_source_bytes": 21474836480,
+  "max_duckdb_bytes": 21474836480,
+  "cleanup_gcs_staging": false
+}
+```
+
+The Airflow image must include the `duckdb` Python package. The export fails before publication if required mart tables are missing, required serving tables are empty, source bytes exceed the configured guardrail, the built DuckDB file exceeds its guardrail, or validation cannot query the expected tables.
+
+Use a fresh `export_id` for every rerun. The export ID is embedded in deterministic BigQuery extract job IDs; failed or successful attempts reserve those job IDs even if GCS staging files are later removed.
+
+The export queries BigQuery table metadata/date ranges, extracts tables to GCS, lists and downloads GCS staging objects, and writes the local serving file. If `cleanup_gcs_staging=true`, it also deletes staging objects after a successful export. Failed exports leave GCS staging files behind for inspection; remove them manually with:
+
+```bash
+gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=EXPORT_ID/
+```
+
+The stable DuckDB file and sidecar JSON are not swapped transactionally as one unit. The DuckDB file is the source of truth for consumers; use `export_metadata` inside the database when exact consistency matters. The sidecar is `ztm.duckdb.meta.json` by default and mirrors the same export summary for operational inspection.
+
 ## Operational Notes
 
 - Raw load retries are safe because job IDs are deterministic.

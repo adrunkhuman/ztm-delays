@@ -59,13 +59,13 @@ jobs:
           cache-dependency-glob: airflow/pyproject.toml
 
       - name: Compile Airflow DAGs
-        run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py
+        run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py airflow/dags/dag_serving_export.py
 
       - name: Lint Airflow
         run: uvx ruff check airflow
 
       - name: Test Airflow DAG boundaries
-        run: uvx --with pytest --with tzdata pytest airflow/tests
+        run: uvx --with pytest --with tzdata --with duckdb pytest airflow/tests
 
   dbt:
     name: dbt

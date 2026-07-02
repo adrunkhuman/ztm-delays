@@ -5,13 +5,36 @@ DAGs in this directory are deployed to the Airflow host volume and run inside th
 Runtime contract:
 
 - `dbt/` is mounted at `/opt/airflow/dbt`.
-- Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, and `google-cloud-storage`.
+- Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, and `duckdb`.
 - Airflow image supports Airflow 3.2 partitioned asset APIs used by these DAGs: `Asset`, asset-event `Metadata`, `CronPartitionTimetable`, `PartitionedAssetTimetable`, and `StartOfDayMapper`.
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
 - Service account can list/read `gs://ztm-analytics-bucket/raw/gps/...` and load/query `ztm-data.ztm_raw`.
 - Service account can write `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/query/insert `ztm-data.ztm_raw.raw_gtfs_snapshots`.
 - Service account can read `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/load/append GTFS raw tables in `ztm-data.ztm_raw`.
 - Service account can create/query/update dbt models in `ztm-data.ztm_stg`, `ztm-data.ztm_int`, and `ztm-data.ztm_marts`.
+- Service account can query `ztm-data.ztm_marts` table metadata/date ranges and extract the fixed serving mart allowlist to `gs://ztm-analytics-bucket/serving/duckdb/staging/...` for manual serving exports.
+- Service account can list/read GCS serving export staging objects, and can delete them when `cleanup_gcs_staging=true`.
+- `/opt/airflow/serving` or the configured `SERVING_EXPORT_DIR` is writable by the Airflow task and mounted to a stable VPS host path when the frontend will read the artifact.
+
+The manual serving export DAG is:
+
+```text
+dag_serving_export
+```
+
+It has no schedule. Trigger it on demand after the marts are in the state you want to serve. The DAG exports the fixed `MART_TABLES` allowlist, currently intended to mirror all serving marts in `ztm_marts`, to GCS Parquet. It downloads those Parquet files into the Airflow worker temp directory, builds a DuckDB file, validates expected tables and size guardrails, then atomically swaps the configured stable serving path.
+
+Default paths and limits:
+
+```text
+SERVING_EXPORT_DIR=/opt/airflow/serving
+SERVING_EXPORT_FILENAME=ztm.duckdb
+SERVING_EXPORT_GCS_PREFIX=serving/duckdb/staging
+SERVING_EXPORT_MAX_SOURCE_BYTES=21474836480
+SERVING_EXPORT_MAX_DUCKDB_BYTES=21474836480
+```
+
+Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`, `max_source_bytes`, `max_duckdb_bytes`, and `cleanup_gcs_staging`. Use a fresh `export_id` for every run because BigQuery extract job IDs are reserved permanently. Keep `output_dir` mounted to a VPS host path if another frontend container will read the resulting file.
 
 The GPS raw-load DAG is:
 

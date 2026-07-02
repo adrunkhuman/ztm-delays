@@ -18,3 +18,5 @@ convention = "google"
 "dags/dag_gtfs_poll.py" = ["S608"]
 # The GPS daily DAG queries GTFS metadata using module-level BigQuery table constants, not user input.
 "dags/dag_daily_gps.py" = ["S608"]
+# The serving export DAG queries fixed mart table names and metadata constants, not user input.
+"dags/dag_serving_export.py" = ["S608"]

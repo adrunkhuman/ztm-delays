@@ -12,6 +12,11 @@ GCS_BUCKET = "ztm-analytics-bucket"
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
 RAW_GTFS_PREFIX = "raw/gtfs"
 
+SERVING_EXPORT_DIR = "/opt/airflow/serving"
+SERVING_EXPORT_GCS_PREFIX = "serving/duckdb/staging"
+SERVING_EXPORT_FILENAME = "ztm.duckdb"
+SERVING_EXPORT_MAX_BYTES = 20 * 1024 * 1024 * 1024
+
 GTFS_SNAPSHOT_ASSET = Asset("x-ztm://gtfs/snapshot")
 RAW_GPS_DATE_ASSET = Asset("x-ztm://gps/raw-date")
 GPS_MODELS_DATE_ASSET = Asset("x-ztm://gps/models-date")
