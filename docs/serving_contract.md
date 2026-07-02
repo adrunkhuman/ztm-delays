@@ -8,6 +8,8 @@ ztm.duckdb
 
 The export includes the fixed `MART_TABLES` allowlist, currently intended to mirror all current serving marts in `ztm_marts`, plus `export_metadata` and `export_table_stats`. When a new serving mart is added, update the Airflow allowlist, export tests, and this contract together. The file is built to a temporary path and atomically swapped into the stable path, so frontend containers do not need to restart after a rebuild. Frontend code should avoid one permanent DuckDB connection; open per request or reopen cached connections when `export_metadata.export_id` changes.
 
+If the frontend watches the serving directory, it should react only to `ztm.duckdb` and `ztm.duckdb.meta.json`. Ignore hidden export build artifacts such as `.duckdb-tmp-*`, `.*.tmp`, and `*.wal`.
+
 Alpha export source mode is `current_pipeline_provisional`: the serving file reflects the current marts as built by the existing pipeline. It is not yet the later settled nightly matcher/export design.
 
 The frontend should read historical labels from facts and aggregate marts by default. Do not join historical rows to `_current` dimensions for display labels.

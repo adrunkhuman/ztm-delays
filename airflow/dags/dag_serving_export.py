@@ -34,7 +34,7 @@ if TYPE_CHECKING:
         """Minimal DuckDB connection protocol used by build-time settings."""
 
         def execute(self, query: str) -> object:
-            """Execute SQL on the connection."""
+            """DuckDB-compatible execute; return value is ignored."""
             ...
 
 
@@ -42,6 +42,7 @@ EXPORT_VERSION = "alpha-1"
 EXPORT_SOURCE_MODE = "current_pipeline_provisional"
 EXPORT_ID_PATTERN = re.compile(r"^[0-9A-Za-z_.=-]+$")
 DUCKDB_MEMORY_LIMIT = "1GB"
+DUCKDB_TEMP_DIRECTORY_LIMIT = "2GB"
 DUCKDB_THREADS = 2
 MART_TABLES = (
     "agg_line_daily",
@@ -115,7 +116,7 @@ class ExportResult:
 
 @dataclass(frozen=True)
 class DuckdbBuildInput:
-    """Immutable inputs shared by the DuckDB build and validation steps."""
+    """Inputs needed to materialize the DuckDB file and embedded metadata."""
 
     parquet_paths_by_table: dict[str, list[Path]]
     source_stats: Sequence[TableStats]
@@ -414,8 +415,13 @@ def _publish_duckdb(
         raise
     shutil.rmtree(duckdb_temp_dir, ignore_errors=True)
 
-    temp_path.replace(final_path)
-    _write_metadata_file(metadata_path, metadata)
+    try:
+        temp_path.replace(final_path)
+        _write_metadata_file(metadata_path, metadata)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        _remove_duckdb_sidecar_files(temp_path)
+        raise
     return ExportResult(
         export_id=config.export_id,
         duckdb_path=str(final_path),
@@ -505,9 +511,12 @@ def _build_duckdb_file(
 
 def _configure_duckdb_build_connection(connection: DuckdbConnection, temp_directory: Path) -> None:
     temp_directory_sql = temp_directory.as_posix().replace("'", "''")
+    # Build runs on a constrained Airflow worker; cap memory/threads and spill under the serving mount.
     connection.execute(f"set temp_directory = '{temp_directory_sql}'")
+    connection.execute(f"set max_temp_directory_size = '{DUCKDB_TEMP_DIRECTORY_LIMIT}'")
     connection.execute(f"set memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
     connection.execute(f"set threads = {DUCKDB_THREADS}")
+    # Serving SQL must order explicitly; preserving import order is wasted memory here.
     connection.execute("set preserve_insertion_order = false")
 
 

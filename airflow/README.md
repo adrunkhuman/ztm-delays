@@ -24,6 +24,8 @@ dag_serving_export
 
 It has no schedule. Trigger it on demand after the marts are in the state you want to serve. The DAG exports the fixed `MART_TABLES` allowlist, currently intended to mirror all serving marts in `ztm_marts`, to GCS Parquet. It downloads those Parquet files into the Airflow worker temp directory, builds a DuckDB file, validates expected tables and size guardrails, then atomically swaps the configured stable serving path.
 
+DuckDB build resource profile is hard-coded for the current VPS: `memory_limit='1GB'`, `max_temp_directory_size='2GB'`, `threads=2`, and `preserve_insertion_order=false`. The source/download temp files use worker temp storage, while DuckDB spill files use `.duckdb-tmp-<export_id>` under `SERVING_EXPORT_DIR`. Keep enough free space on the serving mount for the final database, the temporary database, WAL sidecars, and up to the DuckDB temp-directory limit. `SERVING_EXPORT_MAX_DUCKDB_BYTES` is an output-size guardrail, not the DuckDB memory limit.
+
 Default paths and limits:
 
 ```text
