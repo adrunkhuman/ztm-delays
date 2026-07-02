@@ -56,12 +56,6 @@
     ctx.lineWidth = 1;
 
     const bucketAreaWidth = width - PADDING.left - PADDING.right;
-    const bucketWidth = bucketAreaWidth / BUCKETS.length;
-
-    BUCKETS.forEach((bucket, index) => {
-      ctx.fillStyle = "#777";
-      ctx.fillText(bucket.label, PADDING.left + index * bucketWidth + 6, height - 6);
-    });
 
     periods.forEach((period, periodIndex) => {
       const rowTop = PADDING.top + periodIndex * ROW_HEIGHT;
@@ -74,15 +68,19 @@
       ctx.fillStyle = "#8e8e8e";
       ctx.fillText(period.range, 8, centerY + 12);
 
+      let x = PADDING.left;
       BUCKETS.forEach((bucket, index) => {
-        const x = PADDING.left + index * bucketWidth;
         const share = counts[index] / total;
-        drawBucket(ctx, x, centerY - 11, bucketWidth - 4, 22, share, bucket.label === "on time");
+        const segmentWidth = bucketAreaWidth * share;
+        if (segmentWidth <= 0) return;
 
-        if (counts[index] > 0) {
+        drawBucket(ctx, x, centerY - 11, Math.max(2, segmentWidth - 2), 22, share, bucket.label === "on time");
+
+        if (segmentWidth >= 34) {
           ctx.fillStyle = share > 0.34 ? "#000" : "#d8d8d8";
           ctx.fillText(`${Math.round(share * 100)}%`, x + 8, centerY + 4);
         }
+        x += segmentWidth;
       });
 
       ctx.fillStyle = "#f5f5f5";
@@ -91,6 +89,11 @@
       ctx.fillText(`med ${formatDelay(period.median_delay_seconds)}`, width - 104, centerY + 7);
       ctx.fillText(`p90 ${formatDelay(period.p90_delay_seconds)}`, width - 104, centerY + 22);
     });
+
+    ctx.fillStyle = "#777";
+    ctx.fillText("early", PADDING.left, height - 6);
+    ctx.fillText("on time", PADDING.left + bucketAreaWidth * 0.28, height - 6);
+    ctx.fillText("late", PADDING.left + bucketAreaWidth * 0.72, height - 6);
 
     if (periods.every((period) => period.points.length === 0)) {
       ctx.fillStyle = "#8e8e8e";
