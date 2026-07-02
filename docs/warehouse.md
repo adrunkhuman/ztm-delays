@@ -160,7 +160,15 @@ Trip facts are the analytics validity grain. A day can be incomplete while indiv
 
 `agg_service_coverage` emits rows only for scheduled bus/tram service hours. A zero `service_coverage_ratio` means scheduled service was not observed; no scheduled service is represented by absence of a row. `is_settled_hour` is true only after `service_hour_end < current_timestamp() - 90 minutes`. Frontend/live views should avoid treating unsettled low `service_coverage_ratio` as data loss because delayed trips can still arrive in the model after their scheduled hour. Full-day trend views should use `mart_day_completeness.is_complete_day` and `agg_service_coverage.service_coverage_ratio` together: raw completeness explains ingestion gaps, while service coverage separates scheduled-but-unobserved service from hours with no scheduled row.
 
-`mart_pipeline_status` is the historical archive-health surface by Warsaw-local status date and mode. Its `service_date` column is aligned to the GPS processing date and scheduled-start date, so ingestion, matching, trip quality, arrivals, and service coverage use one operational-day grain; it is not necessarily the GTFS service_date for overnight trips. `last_export_at` is null until the serving export job owns that watermark. Near-real-time poller liveness is intentionally separate from this mart and comes from the private poller heartbeat.
+`mart_pipeline_status` is the historical archive-health surface by Warsaw-local status date and mode. Its `service_date` column is aligned to the GPS processing date and scheduled-start date, so ingestion, matching, trip quality, arrivals, and service coverage use one operational-day grain; it is not necessarily the GTFS service_date for overnight trips. The manual DuckDB export does not update `last_export_at`; serving freshness comes from DuckDB `export_metadata` until a status-watermark update is added. Near-real-time poller liveness is intentionally separate from this mart and comes from the private poller heartbeat.
+
+## Serving Export
+
+`dag_serving_export` is a manual alpha export that publishes the current mart layer to a single DuckDB file for the separate frontend. It exports the fixed `MART_TABLES` allowlist, currently intended to mirror all serving marts in `ztm_marts`, to GCS Parquet. It downloads the Parquet files in the Airflow worker, builds a local DuckDB file, validates row/table guardrails, then atomically swaps the stable file path. Adding a new serving mart requires updating the DAG allowlist, tests, and serving contract together.
+
+The export is intentionally serving-only. It does not change mart semantics, does not implement the future settled nightly matcher, and does not remove the current hourly BigQuery/modeling path. Its `export_metadata.source_mode` is `current_pipeline_provisional` until the backend is redesigned around settled nightly archive processing.
+
+The serving artifact includes all mart tables plus `export_metadata` and `export_table_stats`. Current-snapshot `_current` tables are exported for present-day filters/maps only; archive views should still render labels from label-bearing facts and aggregates. The frontend should reopen DuckDB connections when `export_metadata.export_id` changes instead of restarting the container.
 
 ## Aggregate Marts
 
