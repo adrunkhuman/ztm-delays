@@ -91,12 +91,21 @@ Useful manual config:
 
 The Airflow image must include the `duckdb` Python package. The export fails before publication if required mart tables are missing, required serving tables are empty, source bytes exceed the configured guardrail, the built DuckDB file exceeds its guardrail, or validation cannot query the expected tables.
 
+DuckDB builds run with the current VPS resource profile: `memory_limit='1GB'`, `max_temp_directory_size='2GB'`, `threads=2`, and `preserve_insertion_order=false`. The DuckDB memory limit is separate from `max_duckdb_bytes`, which only guards the final output file size. Resource-pressure failures leave the stable serving file unchanged; free disk/memory or reduce the export scope, then rerun with a fresh `export_id`.
+
 Use a fresh `export_id` for every rerun. The export ID is embedded in deterministic BigQuery extract job IDs; failed or successful attempts reserve those job IDs even if GCS staging files are later removed.
 
 The export queries BigQuery table metadata/date ranges, extracts tables to GCS, lists and downloads GCS staging objects, and writes the local serving file. If `cleanup_gcs_staging=true`, it also deletes staging objects after a successful export. Failed exports leave GCS staging files behind for inspection; remove them manually with:
 
 ```bash
 gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=EXPORT_ID/
+```
+
+Killed exports can also leave local hidden build artifacts under the serving directory. After confirming no serving export is running, remove them with:
+
+```bash
+rm -rf /opt/airflow/serving/.duckdb-tmp-EXPORT_ID \
+  /opt/airflow/serving/.ztm.duckdb.EXPORT_ID.tmp*
 ```
 
 The stable DuckDB file and sidecar JSON are not swapped transactionally as one unit. The DuckDB file is the source of truth for consumers; use `export_metadata` inside the database when exact consistency matters. The sidecar is `ztm.duckdb.meta.json` by default and mirrors the same export summary for operational inspection.

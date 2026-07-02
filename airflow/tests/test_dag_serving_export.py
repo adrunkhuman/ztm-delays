@@ -270,6 +270,49 @@ def test_cleanup_gcs_staging_resolves_listed_blobs_by_name(tmp_path: Path) -> No
     ]
 
 
+def test_configure_duckdb_build_connection_sets_resource_limits(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    connection = RecordingDuckdbConnection()
+    temp_directory = tmp_path / "duckdb temp's"
+
+    dag._configure_duckdb_build_connection(connection, temp_directory)
+
+    escaped_temp_directory = temp_directory.as_posix().replace("'", "''")
+    assert connection.queries == [
+        f"set temp_directory = '{escaped_temp_directory}'",
+        "set max_temp_directory_size = '2GB'",
+        "set memory_limit = '1GB'",
+        "set threads = 2",
+        "set preserve_insertion_order = false",
+    ]
+
+
+def test_configure_duckdb_build_connection_applies_real_duckdb_settings(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    temp_directory = tmp_path / "duckdb-temp"
+    temp_directory.mkdir()
+
+    with duckdb.connect() as connection:
+        dag._configure_duckdb_build_connection(connection, temp_directory)
+        settings = connection.execute(
+            """
+            select
+                current_setting('memory_limit'),
+                current_setting('max_temp_directory_size'),
+                current_setting('threads'),
+                current_setting('preserve_insertion_order'),
+                current_setting('temp_directory')
+            """
+        ).fetchone()
+
+    assert settings[0]
+    assert settings[1]
+    assert settings[2] == 2
+    assert settings[3] is False
+    assert Path(settings[4]) == temp_directory
+
+
 def test_publish_duckdb_removes_temp_file_after_build_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
     config = dag.ExportConfig(
@@ -284,6 +327,11 @@ def test_publish_duckdb_removes_temp_file_after_build_failure(tmp_path: Path, mo
     )
     source_stats = [dag.TableStats(table_name=table_name, row_count=1, size_bytes=1) for table_name in dag.MART_TABLES]
     parquet_paths_by_table = {table_name: [tmp_path / f"{table_name}.parquet"] for table_name in dag.MART_TABLES}
+    temp_wal_path = tmp_path / ".ztm.duckdb.export-1.tmp.wal"
+    temp_wal_path.write_text("stale wal", encoding="utf-8")
+    stale_temp_dir = tmp_path / ".duckdb-tmp-export-1"
+    stale_temp_dir.mkdir()
+    (stale_temp_dir / "stale.tmp").write_text("stale", encoding="utf-8")
     monkeypatch.setattr(dag, "_duckdb_module", FailingDuckdbModule)
 
     with pytest.raises(RuntimeError, match="build failed"):
@@ -291,6 +339,8 @@ def test_publish_duckdb_removes_temp_file_after_build_failure(tmp_path: Path, mo
 
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
+    assert not temp_wal_path.exists()
+    assert list(tmp_path.glob(".duckdb-tmp-*")) == []
 
 
 def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> None:
@@ -323,6 +373,7 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
 
     assert Path(result.duckdb_path).exists()
     assert Path(result.metadata_path).exists()
+    assert list(tmp_path.glob(".duckdb-tmp-*")) == []
     with duckdb.connect(result.duckdb_path, read_only=True) as connection:
         assert connection.execute("select count(*) from fct_trip").fetchone()[0] == 1
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "export-1"
@@ -356,6 +407,38 @@ def test_publish_duckdb_keeps_previous_file_when_validation_fails(tmp_path: Path
     assert metadata_path.read_text(encoding="utf-8") == "old metadata"
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
+    assert list(tmp_path.glob(".duckdb-tmp-*")) == []
+
+
+def test_publish_duckdb_cleans_temp_files_when_metadata_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    parquet_paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
+    source_stats = [dag.TableStats(table_name=table_name, row_count=1, size_bytes=10) for table_name in dag.MART_TABLES]
+    config = dag.ExportConfig(
+        export_id="export-1",
+        output_dir=tmp_path,
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=10_000_000,
+        cleanup_gcs_staging=False,
+    )
+
+    def fail_metadata_write(_path: Path, _metadata: dict[str, object]) -> None:
+        raise RuntimeError("metadata write failed")
+
+    monkeypatch.setattr(dag, "_write_metadata_file", fail_metadata_write)
+
+    with pytest.raises(RuntimeError, match="metadata write failed"):
+        dag._publish_duckdb(config, parquet_paths_by_table, source_stats, datetime(2026, 7, 2, tzinfo=UTC))
+
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
+    assert list(tmp_path.glob(".duckdb-tmp-*")) == []
 
 
 def test_dag_is_manual_and_exposes_single_export_task() -> None:
@@ -607,6 +690,14 @@ class FakeBlob:
 
 class Conflict(Exception):
     pass
+
+
+class RecordingDuckdbConnection:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def execute(self, query: str) -> None:
+        self.queries.append(query)
 
 
 def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], duckdb: Any) -> dict[str, list[Path]]:

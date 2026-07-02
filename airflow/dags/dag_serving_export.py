@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -27,10 +28,22 @@ from ztm_airflow_common import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from types import ModuleType
+    from typing import Protocol
+
+    class DuckdbConnection(Protocol):
+        """Minimal DuckDB connection protocol used by build-time settings."""
+
+        def execute(self, query: str) -> object:
+            """DuckDB-compatible execute; return value is ignored."""
+            ...
+
 
 EXPORT_VERSION = "alpha-1"
 EXPORT_SOURCE_MODE = "current_pipeline_provisional"
 EXPORT_ID_PATTERN = re.compile(r"^[0-9A-Za-z_.=-]+$")
+DUCKDB_MEMORY_LIMIT = "1GB"
+DUCKDB_TEMP_DIRECTORY_LIMIT = "2GB"
+DUCKDB_THREADS = 2
 MART_TABLES = (
     "agg_line_daily",
     "agg_line_stop_period",
@@ -103,12 +116,13 @@ class ExportResult:
 
 @dataclass(frozen=True)
 class DuckdbBuildInput:
-    """Immutable inputs shared by the DuckDB build and validation steps."""
+    """Inputs needed to materialize the DuckDB file and embedded metadata."""
 
     parquet_paths_by_table: dict[str, list[Path]]
     source_stats: Sequence[TableStats]
     config: ExportConfig
     exported_at: datetime
+    temp_directory: Path
 
 
 def _export_config(context: dict[str, object], now: datetime | None = None) -> ExportConfig:
@@ -369,9 +383,14 @@ def _publish_duckdb(
     config.output_dir.mkdir(parents=True, exist_ok=True)
     final_path = config.output_dir / config.output_filename
     temp_path = config.output_dir / f".{config.output_filename}.{config.export_id}.tmp"
+    duckdb_temp_dir = config.output_dir / f".duckdb-tmp-{config.export_id}"
     metadata_path = config.output_dir / f"{config.output_filename}.meta.json"
     if temp_path.exists():
         temp_path.unlink()
+    _remove_duckdb_sidecar_files(temp_path)
+    if duckdb_temp_dir.exists():
+        shutil.rmtree(duckdb_temp_dir)
+    duckdb_temp_dir.mkdir(parents=True)
 
     try:
         build_input = DuckdbBuildInput(
@@ -379,6 +398,7 @@ def _publish_duckdb(
             source_stats=source_stats,
             config=config,
             exported_at=exported_at,
+            temp_directory=duckdb_temp_dir,
         )
         _build_duckdb_file(duckdb_module, temp_path, build_input)
         duckdb_size_bytes = temp_path.stat().st_size
@@ -390,10 +410,18 @@ def _publish_duckdb(
         _validate_duckdb_export(duckdb_module, temp_path, source_stats)
     except Exception:
         temp_path.unlink(missing_ok=True)
+        _remove_duckdb_sidecar_files(temp_path)
+        shutil.rmtree(duckdb_temp_dir, ignore_errors=True)
         raise
+    shutil.rmtree(duckdb_temp_dir, ignore_errors=True)
 
-    temp_path.replace(final_path)
-    _write_metadata_file(metadata_path, metadata)
+    try:
+        temp_path.replace(final_path)
+        _write_metadata_file(metadata_path, metadata)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        _remove_duckdb_sidecar_files(temp_path)
+        raise
     return ExportResult(
         export_id=config.export_id,
         duckdb_path=str(final_path),
@@ -424,6 +452,7 @@ def _build_duckdb_file(
     build_input: DuckdbBuildInput,
 ) -> None:
     with duckdb_module.connect(str(path)) as connection:
+        _configure_duckdb_build_connection(connection, build_input.temp_directory)
         for table_name in MART_TABLES:
             connection.execute(
                 f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
@@ -478,6 +507,17 @@ def _build_duckdb_file(
                 0,
             ],
         )
+
+
+def _configure_duckdb_build_connection(connection: DuckdbConnection, temp_directory: Path) -> None:
+    temp_directory_sql = temp_directory.as_posix().replace("'", "''")
+    # Build runs on a constrained Airflow worker; cap memory/threads and spill under the serving mount.
+    connection.execute(f"set temp_directory = '{temp_directory_sql}'")
+    connection.execute(f"set max_temp_directory_size = '{DUCKDB_TEMP_DIRECTORY_LIMIT}'")
+    connection.execute(f"set memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
+    connection.execute(f"set threads = {DUCKDB_THREADS}")
+    # Serving SQL must order explicitly; preserving import order is wasted memory here.
+    connection.execute("set preserve_insertion_order = false")
 
 
 def _update_duckdb_file_size(duckdb_module: ModuleType, path: Path, duckdb_size_bytes: int) -> None:
@@ -541,6 +581,10 @@ def _write_metadata_file(path: Path, metadata: dict[str, object]) -> None:
     temp_path = path.with_suffix(f"{path.suffix}.tmp")
     temp_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temp_path.replace(path)
+
+
+def _remove_duckdb_sidecar_files(path: Path) -> None:
+    path.with_name(f"{path.name}.wal").unlink(missing_ok=True)
 
 
 def _cleanup_gcs_staging(storage_client: storage.Client, config: ExportConfig) -> None:
