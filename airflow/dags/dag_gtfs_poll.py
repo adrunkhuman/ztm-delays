@@ -6,6 +6,7 @@ import zipfile
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import requests
@@ -28,6 +29,14 @@ GTFS_URL = "https://mkuran.pl/gtfs/warsaw.zip"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 WARSAW_TZ = ZoneInfo("Europe/Warsaw")
 POLL_SNAPSHOT_TIMESTAMP = "{{ data_interval_end.in_timezone('UTC').strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+
+
+class _AssetOutletEvent(Protocol):
+    extra: dict[str, str]
+
+
+class _OutletEvents(Protocol):
+    def __getitem__(self, key: object) -> _AssetOutletEvent: ...
 
 
 def _sha256(data: bytes) -> str:
@@ -181,7 +190,7 @@ with DAG(
         return _gtfs_load_branch(poll_result)
 
     @task(outlets=[GTFS_SNAPSHOT_ASSET])
-    def emit_gtfs_snapshot_asset(poll_result: dict[str, str], outlet_events=None) -> None:
+    def emit_gtfs_snapshot_asset(poll_result: dict[str, str], outlet_events: _OutletEvents | None = None) -> None:
         """Publish the immutable snapshot context as an Airflow asset event."""
         if outlet_events is None:
             raise RuntimeError("GTFS snapshot asset emission requires Airflow outlet_events")
