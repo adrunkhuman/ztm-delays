@@ -262,6 +262,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert dag.GTFS_RAW_SOURCES in dag.dbt_test_gtfs_staging.bash_command
     _assert_dbt_command(dag.dbt_run_gtfs_dimensions.bash_command, "run", dag.GTFS_DIMENSION_MODELS)
     _assert_dbt_command(dag.dbt_test_gtfs_dimensions.bash_command, "test", dag.GTFS_DIMENSION_MODELS)
+    assert "--indirect-selection cautious" in dag.dbt_test_gtfs_dimensions.bash_command
     for model_name in expected_dimension_models:
         assert model_name in dag.dbt_run_gtfs_dimensions.bash_command
         assert model_name in dag.dbt_test_gtfs_dimensions.bash_command

@@ -321,7 +321,7 @@ with DAG(
 
     dbt_test_gtfs_dimensions = BashOperator(
         task_id="dbt_test_gtfs_dimensions",
-        bash_command=dbt_command("test", GTFS_DIMENSION_MODELS, GTFS_DBT_VARS),
+        bash_command=dbt_command("test", GTFS_DIMENSION_MODELS, GTFS_DBT_VARS, "--indirect-selection cautious"),
     )
 
     @task(trigger_rule=TriggerRule.ONE_FAILED, retries=0)

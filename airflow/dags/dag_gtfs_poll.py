@@ -6,12 +6,11 @@ import zipfile
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
-from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import requests
 from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.sdk import DAG, Metadata, task
+from airflow.sdk import DAG, task
 from google.api_core.exceptions import Conflict, NotFound, PreconditionFailed
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
@@ -24,9 +23,6 @@ from ztm_airflow_common import (
     gtfs_gcs_uri,
     gtfs_snapshot_id,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 GTFS_URL = "https://mkuran.pl/gtfs/warsaw.zip"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
@@ -155,6 +151,15 @@ def _gtfs_load_branch(poll_result: dict[str, str]) -> str:
     raise ValueError(f"Unexpected GTFS poll result: {poll_result['status']}")
 
 
+def _gtfs_snapshot_asset_extra(poll_result: dict[str, str]) -> dict[str, str]:
+    return {
+        "snapshot_id": poll_result["snapshot_id"],
+        "gcs_path": poll_result["gcs_path"],
+        "processing_date": poll_result["processing_date"],
+        "file_hash": poll_result["file_hash"],
+    }
+
+
 with DAG(
     dag_id="dag_gtfs_poll",
     description="Download GTFS ZIP when changed and emit a GTFS snapshot asset event.",
@@ -176,17 +181,11 @@ with DAG(
         return _gtfs_load_branch(poll_result)
 
     @task(outlets=[GTFS_SNAPSHOT_ASSET])
-    def emit_gtfs_snapshot_asset(poll_result: dict[str, str]) -> Iterator[Metadata]:
+    def emit_gtfs_snapshot_asset(poll_result: dict[str, str], outlet_events=None) -> None:
         """Publish the immutable snapshot context as an Airflow asset event."""
-        yield Metadata(
-            GTFS_SNAPSHOT_ASSET,
-            {
-                "snapshot_id": poll_result["snapshot_id"],
-                "gcs_path": poll_result["gcs_path"],
-                "processing_date": poll_result["processing_date"],
-                "file_hash": poll_result["file_hash"],
-            },
-        )
+        if outlet_events is None:
+            raise RuntimeError("GTFS snapshot asset emission requires Airflow outlet_events")
+        outlet_events[GTFS_SNAPSHOT_ASSET].extra = _gtfs_snapshot_asset_extra(poll_result)
 
     skip_gtfs_load = EmptyOperator(task_id="skip_gtfs_load")
 
