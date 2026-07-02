@@ -1,0 +1,51 @@
+[project]
+name = "ztm-frontend"
+version = "0.1.0"
+description = "Server-rendered frontend for the ZTM serving DuckDB artifact."
+requires-python = ">=3.14"
+dependencies = [
+    "duckdb>=1.4.0",
+    "flask>=3.1.0",
+    "pytz>=2025.2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.0",
+    "ty>=0.0.15",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D203",
+    "D213",
+    "D100",
+    "D104",
+    "COM812",
+    "ISC001",
+    "E501",
+    "EM101",
+    "EM102",
+    "TRY003",
+    "G004",
+    "T201",
+    "FBT",
+    "TD",
+    "FIX",
+    "ERA001",
+    "CPY001",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ty.environment]
+python-version = "3.14"

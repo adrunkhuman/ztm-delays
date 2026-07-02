@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}Stops · ZTM{% endblock %}
+
+{% block body %}
+  <section class="split-page">
+    <aside class="sidebar">
+      <div class="mode-switch">
+        <a href="{{ url_for('stops', mode='bus', q=search, date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">Bus</a>
+        <a href="{{ url_for('stops', mode='tram', q=search, date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">Tram</a>
+      </div>
+      <form class="stop-search" action="{{ url_for('stops') }}" method="get">
+        <input type="hidden" name="mode" value="{{ selected_mode }}">
+        <input type="hidden" name="date" value="{{ selected_date }}">
+        <input type="search" name="q" value="{{ search }}" placeholder="Search stops">
+      </form>
+      <div class="picker-list simple-list">
+        {% for row in stop_list %}
+          <a href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=selected_mode, q=search, date=selected_date) }}" class="picker-item {% if row.stop_group_id == selected_stop_group_id %}active{% endif %}">
+            <span>{{ row.stop_group_name }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    </aside>
+
+    <section class="content-panel">
+      {% if summary %}
+        <section class="stop-summary">
+          <h1>{{ summary.stop_group_name }}</h1>
+          <form method="get" class="date-picker inline-picker">
+            <input type="hidden" name="mode" value="{{ selected_mode }}">
+            <input type="hidden" name="q" value="{{ search }}">
+            {% if selected_stop_id %}<input type="hidden" name="post" value="{{ selected_stop_id }}">{% endif %}
+            <select name="date" onchange="this.form.submit()">
+              {% for date in date_options %}
+                <option value="{{ date }}" {% if date == selected_date %}selected{% endif %}>{{ date }}</option>
+              {% endfor %}
+            </select>
+          </form>
+          <dl>
+            <div><dt>Mean delay</dt><dd>{{ (selected_post or summary).mean_delay_seconds|delay }}</dd></div>
+            <div><dt>On time</dt><dd>{{ (selected_post or summary).on_time_rate|percent }}</dd></div>
+          </dl>
+        </section>
+
+        <div class="post-selector">
+          {% for group in stop_post_groups %}
+            <section class="post-group">
+              <h2>{{ group.title }}</h2>
+              <div>
+                {% for post in group.posts %}
+                  <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=group.mode if group.mode in ['bus', 'tram'] else selected_mode, q=search, post=post.stop_id, date=selected_date) }}" class="{% if post.stop_id == selected_stop_id %}active{% endif %}">
+                    {{ post.display_name }}
+                  </a>
+                {% endfor %}
+              </div>
+            </section>
+          {% endfor %}
+        </div>
+
+        <section class="panel">
+          <table>
+            <thead><tr><th>Line</th><th>Direction</th><th>Delay</th><th>On time</th></tr></thead>
+            <tbody>
+              {% for row in line_stats %}
+                <tr>
+                  <td><a href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">{{ row.route_short_name }}</a></td>
+                  <td>{{ row.trip_headsign }}</td>
+                  <td>{{ row.mean_delay_seconds|delay }}</td>
+                  <td>{{ row.on_time_rate|percent }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>By Hour</h2>
+          <div class="bars">
+            {% for row in hourly_stats %}
+              <div class="bar-row">
+                <span>{{ "%02d"|format(row.hour_bracket) }}</span>
+                <meter min="-120" max="240" low="0" high="180" optimum="0" value="{{ row.mean_delay_seconds }}"></meter>
+                <strong>{{ row.mean_delay_seconds|delay }}</strong>
+              </div>
+            {% endfor %}
+          </div>
+        </section>
+      {% else %}
+        <div class="empty-state">No stop data available.</div>
+      {% endif %}
+    </section>
+  </section>
+{% endblock %}

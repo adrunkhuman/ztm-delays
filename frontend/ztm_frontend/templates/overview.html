@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Overview · ZTM{% endblock %}
+
+{% block body %}
+  <section class="delay-hero">
+    <div class="title-row">
+      <h1>Average delay on {{ selected_date or "n/a" }}</h1>
+      <form method="get" class="date-picker">
+        <select name="date" onchange="this.form.submit()">
+          {% for date in date_options %}
+            <option value="{{ date }}" {% if date == selected_date %}selected{% endif %}>{{ date }}</option>
+          {% endfor %}
+        </select>
+      </form>
+    </div>
+    <div class="mode-delay-grid">
+      {% for mode in ["bus", "tram"] %}
+        {% set row = mode_stats.get(mode) %}
+        <article>
+          <span>{{ mode|upper }}</span>
+          <div class="mode-stats">
+            <strong>{{ row.mean_delay_seconds|delay if row else "n/a" }} <small>delay</small></strong>
+            <strong>{{ row.on_time_rate|percent if row else "n/a" }} <small>on time</small></strong>
+          </div>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="section-pair">
+    <article class="panel">
+      <h2>Worst bus lines</h2>
+      <table>
+        <thead><tr><th>Line</th><th>Delay</th><th>On time</th></tr></thead>
+        <tbody>
+          {% for row in worst_lines.get("bus", []) %}
+            <tr>
+              <td><a href="{{ url_for('lines', line=row.line, mode='bus', date=selected_date) }}">{{ row.route_short_name }}</a></td>
+              <td>{{ row.mean_delay_seconds|delay }}</td>
+              <td>{{ row.on_time_rate|percent }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+
+    <article class="panel">
+      <h2>Worst tram lines</h2>
+      <table>
+        <thead><tr><th>Line</th><th>Delay</th><th>On time</th></tr></thead>
+        <tbody>
+          {% for row in worst_lines.get("tram", []) %}
+            <tr>
+              <td><a href="{{ url_for('lines', line=row.line, mode='tram', date=selected_date) }}">{{ row.route_short_name }}</a></td>
+              <td>{{ row.mean_delay_seconds|delay }}</td>
+              <td>{{ row.on_time_rate|percent }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+  </section>
+
+  <section class="section-pair">
+    <article class="panel">
+      <h2>Worst bus stops</h2>
+      <table>
+        <thead><tr><th>Stop</th><th>Delay</th><th>On time</th></tr></thead>
+        <tbody>
+          {% for row in worst_stops.get("bus", []) %}
+            <tr>
+              <td><a href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode='bus', date=selected_date) }}">{{ row.display_name }}</a></td>
+              <td>{{ row.mean_delay_seconds|delay }}</td>
+              <td>{{ row.on_time_rate|percent }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+
+    <article class="panel">
+      <h2>Worst tram stops</h2>
+      <table>
+        <thead><tr><th>Stop</th><th>Delay</th><th>On time</th></tr></thead>
+        <tbody>
+          {% for row in worst_stops.get("tram", []) %}
+            <tr>
+              <td><a href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode='tram', date=selected_date) }}">{{ row.display_name }}</a></td>
+              <td>{{ row.mean_delay_seconds|delay }}</td>
+              <td>{{ row.on_time_rate|percent }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+  </section>
+{% endblock %}

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Status · ZTM{% endblock %}
+
+{% block body %}
+  <section class="status-top">
+    <span>Exported</span>
+    <strong>{{ metadata.exported_at }}</strong>
+  </section>
+
+  <section class="section-pair">
+    {% for mode in ["bus", "tram"] %}
+      <article class="panel">
+        <h2>{{ mode|capitalize }}</h2>
+        <table>
+          <thead><tr><th>Date</th><th>Completeness</th><th>Match</th><th>Coverage</th><th>Complete</th><th>Broken</th></tr></thead>
+          <tbody>
+            {% for row in pipeline_status.get(mode, []) %}
+              <tr>
+                <td>{{ row.service_date }}</td>
+                <td>{{ row.completeness_ratio|percent }}</td>
+                <td>{{ row.match_rate|percent }}</td>
+                <td>{{ row.service_coverage_ratio|percent }}</td>
+                <td>{{ row.trips_complete|integer }}</td>
+                <td>{{ row.trips_broken|integer }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    {% endfor %}
+  </section>
+{% endblock %}

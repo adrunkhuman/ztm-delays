@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}ZTM{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='site.css') }}">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="{{ url_for('index') }}">ZTM</a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">Overview</a>
+        <a href="{{ url_for('lines') }}" class="{% if request.endpoint == 'lines' %}active{% endif %}">Lines</a>
+        <a href="{{ url_for('stops') }}" class="{% if request.endpoint == 'stops' %}active{% endif %}">Stops</a>
+      </nav>
+      <a class="status-link {% if request.endpoint == 'status' %}active{% endif %}" href="{{ url_for('status') }}">
+        Status
+      </a>
+    </header>
+    <main class="shell">
+      {% block body %}{% endblock %}
+    </main>
+  </body>
+</html>

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Lines · ZTM{% endblock %}
+
+{% block body %}
+  <section class="split-page">
+    <aside class="sidebar line-sidebar">
+      <div class="mode-switch">
+        <a href="{{ url_for('lines', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">Bus</a>
+        <a href="{{ url_for('lines', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">Tram</a>
+      </div>
+      <div class="line-grid">
+        {% for row in line_list %}
+          <a href="{{ url_for('lines', line=row.line, mode=selected_mode, date=selected_date) }}" class="line-tile {% if row.line == selected_line %}active{% endif %}">
+            {{ row.route_short_name }}
+          </a>
+        {% endfor %}
+      </div>
+    </aside>
+
+    <section class="content-panel">
+      {% if summary %}
+        <section class="line-summary">
+          <div>
+            <h1>{{ summary.route_short_name }}</h1>
+            <form method="get" class="date-picker inline-picker">
+              <input type="hidden" name="mode" value="{{ selected_mode }}">
+              <select name="date" onchange="this.form.submit()">
+                {% for date in date_options %}
+                  <option value="{{ date }}" {% if date == selected_date %}selected{% endif %}>{{ date }}</option>
+                {% endfor %}
+              </select>
+            </form>
+          </div>
+          <dl>
+            <div><dt>Mean delay</dt><dd>{{ summary.mean_delay_seconds|delay }}</dd></div>
+            <div><dt>On time</dt><dd>{{ summary.on_time_rate|percent }}</dd></div>
+          </dl>
+        </section>
+
+        <section class="simple-bars panel">
+          {% for row in hourly_stats %}
+            <div class="bar-row">
+              <span>{{ "%02d"|format(row.hour_bracket) }}</span>
+              <meter min="-120" max="240" low="0" high="180" optimum="0" value="{{ row.mean_delay_seconds }}"></meter>
+              <strong>{{ row.mean_delay_seconds|delay }}</strong>
+            </div>
+          {% endfor %}
+        </section>
+
+        <section class="directions">
+          {% for course in courses %}
+            <article class="panel direction-panel">
+              <h2>{{ course.trip_headsign }}</h2>
+              <ol class="stop-timeline">
+                {% for stop in course.stops %}
+                  <li>
+                    <span class="stop-dot"></span>
+                    <a href="{{ url_for('stops', stop_group_id=stop.stop_group_id, mode=summary.mode, date=selected_date) }}">{{ stop.stop_name }}</a>
+                    <strong>{{ stop.mean_delay_seconds|delay }} <small>{{ stop.on_time_rate|percent }} on time</small></strong>
+                  </li>
+                {% endfor %}
+              </ol>
+            </article>
+          {% endfor %}
+        </section>
+      {% else %}
+        <div class="empty-state">No line data available.</div>
+      {% endif %}
+    </section>
+  </section>
+{% endblock %}
