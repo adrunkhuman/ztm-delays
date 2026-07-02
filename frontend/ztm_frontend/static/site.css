@@ -341,23 +341,6 @@ h2 {
   color: var(--muted);
 }
 
-.bars {
-  display: grid;
-  gap: 0.6rem;
-}
-
-.bar-row {
-  display: grid;
-  grid-template-columns: 2.5rem 1fr 4rem;
-  gap: 0.8rem;
-  align-items: center;
-}
-
-meter {
-  width: 100%;
-  height: 0.8rem;
-}
-
 .empty-state {
   display: grid;
   min-height: 30rem;
@@ -616,6 +599,68 @@ meter {
   font: inherit;
 }
 
+.sidebar-form {
+  padding: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.sidebar-form select {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: #050505;
+  color: var(--text);
+  font: inherit;
+}
+
+.schedule-content {
+  display: grid;
+  grid-template-columns: minmax(18rem, 28rem) 1fr;
+  gap: 1rem;
+}
+
+.trip-list {
+  max-height: calc(100vh - 8.5rem);
+  overflow: auto;
+  padding: 0.45rem;
+}
+
+.trip-row {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.8rem;
+  border-radius: 0.8rem;
+  color: var(--muted);
+}
+
+.trip-row strong,
+.trip-row span {
+  color: var(--text);
+}
+
+.trip-row:hover,
+.trip-row.active {
+  background: var(--panel-strong);
+}
+
+.trip-title {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1rem;
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+.trip-title h1 {
+  font-size: clamp(4rem, 10vw, 8rem);
+}
+
+.trip-title p {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+}
+
 .simple-list .picker-item small {
   display: none;
 }
@@ -626,10 +671,6 @@ meter {
   margin-bottom: 1rem;
 }
 
-.simple-bars {
-  display: grid;
-  gap: 0.6rem;
-}
 
 .post-group {
   display: grid;
@@ -680,6 +721,8 @@ meter {
   .mode-delay-grid,
   .line-summary,
   .stop-summary,
+  .schedule-content,
+  .trip-title,
   .line-summary dl,
   .stop-summary dl {
     grid-template-columns: 1fr;

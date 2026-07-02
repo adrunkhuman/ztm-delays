@@ -39,6 +39,8 @@
           </form>
           <dl>
             <div><dt>Mean delay</dt><dd>{{ (selected_post or summary).mean_delay_seconds|delay }}</dd></div>
+            <div><dt>Median</dt><dd>{{ (selected_post or summary).median_delay_seconds|delay }}</dd></div>
+            <div><dt>P90</dt><dd>{{ (selected_post or summary).p90_delay_seconds|delay }}</dd></div>
             <div><dt>On time</dt><dd>{{ (selected_post or summary).on_time_rate|percent }}</dd></div>
           </dl>
         </section>
@@ -74,18 +76,6 @@
           </table>
         </section>
 
-        <section class="panel">
-          <h2>By Hour</h2>
-          <div class="bars">
-            {% for row in hourly_stats %}
-              <div class="bar-row">
-                <span>{{ "%02d"|format(row.hour_bracket) }}</span>
-                <meter min="-120" max="240" low="0" high="180" optimum="0" value="{{ row.mean_delay_seconds }}"></meter>
-                <strong>{{ row.mean_delay_seconds|delay }}</strong>
-              </div>
-            {% endfor %}
-          </div>
-        </section>
       {% else %}
         <div class="empty-state">No stop data available.</div>
       {% endif %}

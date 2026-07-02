@@ -134,6 +134,8 @@ def get_lines(
             sum(trip_count) as trip_count,
             sum(n) as arrival_count,
             sum(mean_delay_seconds * n) / nullif(sum(n), 0) as mean_delay_seconds,
+            sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
+            sum(p90_delay_seconds * n) / nullif(sum(n), 0) as p90_delay_seconds,
             sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate
         from agg_line_daily
         where service_date = ?
@@ -148,7 +150,6 @@ def get_lines(
 
     summary = None
     courses: list[dict[str, Any]] = []
-    hourly_stats: list[dict[str, Any]] = []
     if selected_line is not None:
         summary = fetch_one(
             db_path,
@@ -160,6 +161,8 @@ def get_lines(
                 sum(trip_count) as trip_count,
                 sum(n) as arrival_count,
                 sum(mean_delay_seconds * n) / nullif(sum(n), 0) as mean_delay_seconds,
+                sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
+                sum(p90_delay_seconds * n) / nullif(sum(n), 0) as p90_delay_seconds,
                 sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate
             from agg_line_daily
             where line = ?
@@ -208,29 +211,6 @@ def get_lines(
                 """,
                 [selected_line, selected_date, course["direction_id"], course["trip_headsign"], STOP_ROWS_PER_COURSE],
             )
-        hourly_stats = fetch_all(
-            db_path,
-            """
-            with arrivals as (
-                select
-                    extract('hour' from scheduled_arrival_time)::integer as hour_bracket,
-                    delay_seconds
-                from fct_stop_arrival
-                where line = ?
-                  and service_date = ?
-                  and trip_quality = 'complete'
-            )
-            select
-                hour_bracket,
-                avg(delay_seconds) as mean_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
-            from arrivals
-            group by hour_bracket
-            order by hour_bracket
-            """,
-            [selected_line, selected_date],
-        )
-
     return {
         "date_options": date_options,
         "selected_date": selected_date,
@@ -239,7 +219,6 @@ def get_lines(
         "selected_mode": selected_mode,
         "summary": summary,
         "courses": courses,
-        "hourly_stats": hourly_stats,
     }
 
 
@@ -279,7 +258,6 @@ def get_stops(  # noqa: PLR0913
     stop_post_groups: list[dict[str, Any]] = []
     selected_post: dict[str, Any] | None = None
     line_stats: list[dict[str, Any]] = []
-    hourly_stats: list[dict[str, Any]] = []
     if selected_stop_group_id is not None:
         summary = fetch_one(
             db_path,
@@ -288,6 +266,8 @@ def get_stops(  # noqa: PLR0913
                 stop_group_id,
                 any_value(stop_group_name) as stop_group_name,
                 avg(delay_seconds) as mean_delay_seconds,
+                quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
+                quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
                 count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
             from fct_stop_arrival
             where stop_group_id = ?
@@ -343,6 +323,8 @@ def get_stops(  # noqa: PLR0913
                     any_value(stop_group_name) as stop_group_name,
                     any_value(stop_name) as stop_name,
                     avg(delay_seconds) as mean_delay_seconds,
+                    quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
+                    quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
                     count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
                 from fct_stop_arrival
                 where stop_id = ?
@@ -374,29 +356,6 @@ def get_stops(  # noqa: PLR0913
             """,
             [selected_stop_id, selected_stop_id, selected_stop_id, selected_stop_group_id, selected_date],
         )
-        hourly_stats = fetch_all(
-            db_path,
-            """
-            with arrivals as (
-                select
-                    extract('hour' from scheduled_arrival_time)::integer as hour_bracket,
-                    delay_seconds
-                from fct_stop_arrival
-                where ((? is not null and stop_id = ?) or (? is null and stop_group_id = ?))
-                  and service_date = ?
-                  and trip_quality = 'complete'
-            )
-            select
-                hour_bracket,
-                avg(delay_seconds) as mean_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
-            from arrivals
-            group by hour_bracket
-            order by hour_bracket
-            """,
-            [selected_stop_id, selected_stop_id, selected_stop_id, selected_stop_group_id, selected_date],
-        )
-
     return {
         "date_options": date_options,
         "selected_date": selected_date,
@@ -410,7 +369,102 @@ def get_stops(  # noqa: PLR0913
         "stop_post_groups": stop_post_groups,
         "selected_post": selected_post,
         "line_stats": line_stats,
-        "hourly_stats": hourly_stats,
+    }
+
+
+def get_schedule(  # noqa: PLR0913
+    db_path: Path,
+    selected_mode: str | None,
+    selected_line: str | None,
+    selected_date: str | None,
+    selected_trip_id: str | None,
+    selected_vehicle: str | None,
+) -> dict[str, Any]:
+    """Build the individual trip schedule page data."""
+    selected_mode = selected_mode or "bus"
+    date_options = _date_options(db_path)
+    selected_date = _selected_date(date_options, selected_date)
+    line_list = fetch_all(
+        db_path,
+        """
+        select line, mode, route_short_name, count(*) as trip_count
+        from fct_trip
+        where service_date = ?
+          and mode = ?
+          and trip_quality = 'complete'
+        group by line, mode, route_short_name
+        order by mode, try_cast(line as integer), line
+        """,
+        [selected_date, selected_mode],
+    )
+    if selected_line is None and line_list:
+        selected_line = max(line_list, key=lambda row: row["trip_count"] or 0)["line"]
+
+    trips: list[dict[str, Any]] = []
+    selected_trip: dict[str, Any] | None = None
+    trip_stops: list[dict[str, Any]] = []
+    if selected_line is not None:
+        trips = fetch_all(
+            db_path,
+            """
+            select
+                trip_id,
+                vehicle_number,
+                route_short_name,
+                trip_headsign,
+                origin_stop_name,
+                destination_stop_name,
+                scheduled_start_time,
+                scheduled_end_time,
+                start_delay_seconds,
+                end_delay_seconds,
+                stops_expected,
+                stops_detected
+            from fct_trip
+            where service_date = ?
+              and mode = ?
+              and line = ?
+              and trip_quality = 'complete'
+            order by scheduled_start_time, trip_headsign, vehicle_number
+            limit 160
+            """,
+            [selected_date, selected_mode, selected_line],
+        )
+        if trips and not _trip_selected(trips, selected_trip_id, selected_vehicle):
+            selected_trip_id = trips[0]["trip_id"]
+            selected_vehicle = trips[0]["vehicle_number"]
+        selected_trip = _find_trip(trips, selected_trip_id, selected_vehicle)
+        if selected_trip is not None:
+            trip_stops = fetch_all(
+                db_path,
+                """
+                select
+                    stop_sequence,
+                    stop_group_id,
+                    stop_name,
+                    scheduled_arrival_time,
+                    actual_arrival_time,
+                    delay_seconds
+                from fct_stop_arrival
+                where service_date = ?
+                  and trip_id = ?
+                  and vehicle_number = ?
+                order by stop_sequence
+                """,
+                [selected_date, selected_trip["trip_id"], selected_trip["vehicle_number"]],
+            )
+
+    return {
+        "date_options": date_options,
+        "selected_date": selected_date,
+        "selected_mode": selected_mode,
+        "selected_line": selected_line,
+        "selected_trip_id": selected_trip_id,
+        "selected_vehicle": selected_vehicle,
+        "line_list": line_list,
+        "trips": trips,
+        "selected_trip": selected_trip,
+        "trip_stops": trip_stops,
     }
 
 
@@ -470,6 +524,17 @@ def _by_mode_list(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]
     for row in rows:
         grouped[row["mode"]].append(row)
     return dict(grouped)
+
+
+def _trip_selected(trips: list[dict[str, Any]], trip_id: str | None, vehicle_number: str | None) -> bool:
+    return _find_trip(trips, trip_id, vehicle_number) is not None
+
+
+def _find_trip(trips: list[dict[str, Any]], trip_id: str | None, vehicle_number: str | None) -> dict[str, Any] | None:
+    for trip in trips:
+        if trip["trip_id"] == trip_id and trip["vehicle_number"] == vehicle_number:
+            return trip
+    return None
 
 
 def _stop_post_label(stop_id: str, stop_group_id: str) -> str:

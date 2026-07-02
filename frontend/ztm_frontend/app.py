@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from flask import Flask, current_app, render_template, request
 
 from ztm_frontend import queries
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 def create_app() -> Flask:
@@ -20,6 +23,7 @@ def create_app() -> Flask:
     app.add_template_filter(_format_delay, "delay")
     app.add_template_filter(_format_integer, "integer")
     app.add_template_filter(_format_percent, "percent")
+    app.add_template_filter(_format_time, "time")
 
     @app.context_processor
     def inject_globals() -> dict[str, Any]:
@@ -61,6 +65,23 @@ def create_app() -> Flask:
             ),
         )
 
+    @app.get("/schedule/")
+    def schedule() -> str:
+        mode = request.args.get("mode")
+        if mode not in {"bus", "tram"}:
+            mode = None
+        return render_template(
+            "schedule.html",
+            **queries.get_schedule(
+                current_app.config["ZTM_DUCKDB_PATH"],
+                mode,
+                request.args.get("line"),
+                request.args.get("date"),
+                request.args.get("trip"),
+                request.args.get("vehicle"),
+            ),
+        )
+
     @app.get("/status")
     def status() -> str:
         return render_template("status.html", **queries.get_status(current_app.config["ZTM_DUCKDB_PATH"]))
@@ -88,6 +109,12 @@ def _format_percent(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{float(value) * 100:.0f}%"
+
+
+def _format_time(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.strftime("%H:%M")
 
 
 app = create_app()

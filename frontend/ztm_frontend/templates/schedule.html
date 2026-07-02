@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block title %}Schedule · ZTM{% endblock %}
+
+{% block body %}
+  <section class="split-page schedule-page">
+    <aside class="sidebar line-sidebar">
+      <div class="mode-switch">
+        <a href="{{ url_for('schedule', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">Bus</a>
+        <a href="{{ url_for('schedule', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">Tram</a>
+      </div>
+      <form method="get" class="sidebar-form">
+        <input type="hidden" name="mode" value="{{ selected_mode }}">
+        <select name="date" onchange="this.form.submit()">
+          {% for date in date_options %}
+            <option value="{{ date }}" {% if date == selected_date %}selected{% endif %}>{{ date }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      <div class="line-grid">
+        {% for row in line_list %}
+          <a href="{{ url_for('schedule', mode=selected_mode, line=row.line, date=selected_date) }}" class="line-tile {% if row.line == selected_line %}active{% endif %}">
+            {{ row.route_short_name }}
+          </a>
+        {% endfor %}
+      </div>
+    </aside>
+
+    <section class="content-panel schedule-content">
+      <section class="trip-list panel">
+        {% for trip in trips %}
+          <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, trip=trip.trip_id, vehicle=trip.vehicle_number) }}" class="trip-row {% if trip.trip_id == selected_trip_id and trip.vehicle_number == selected_vehicle %}active{% endif %}">
+            <strong>{{ trip.scheduled_start_time|time }}</strong>
+            <span>{{ trip.origin_stop_name }} → {{ trip.destination_stop_name }}</span>
+            <small>{{ trip.trip_headsign }} · {{ trip.start_delay_seconds|delay }} start · {{ trip.end_delay_seconds|delay }} end</small>
+          </a>
+        {% endfor %}
+      </section>
+
+      <section class="panel trip-detail">
+        {% if selected_trip %}
+          <div class="trip-title">
+            <h1>{{ selected_trip.route_short_name }}</h1>
+            <div>
+              <strong>{{ selected_trip.scheduled_start_time|time }} → {{ selected_trip.scheduled_end_time|time }}</strong>
+              <p>{{ selected_trip.origin_stop_name }} → {{ selected_trip.destination_stop_name }}</p>
+            </div>
+          </div>
+          <table>
+            <thead><tr><th>Stop</th><th>Scheduled</th><th>Actual</th><th>Delay</th></tr></thead>
+            <tbody>
+              {% for stop in trip_stops %}
+                <tr>
+                  <td><a href="{{ url_for('stops', stop_group_id=stop.stop_group_id, mode=selected_mode, date=selected_date) }}">{{ stop.stop_name }}</a></td>
+                  <td>{{ stop.scheduled_arrival_time|time }}</td>
+                  <td>{{ stop.actual_arrival_time|time }}</td>
+                  <td>{{ stop.delay_seconds|delay }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="empty-state">No trip selected.</div>
+        {% endif %}
+      </section>
+    </section>
+  </section>
+{% endblock %}

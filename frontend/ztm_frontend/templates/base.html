@@ -13,6 +13,7 @@
         <a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">Overview</a>
         <a href="{{ url_for('lines') }}" class="{% if request.endpoint == 'lines' %}active{% endif %}">Lines</a>
         <a href="{{ url_for('stops') }}" class="{% if request.endpoint == 'stops' %}active{% endif %}">Stops</a>
+        <a href="{{ url_for('schedule') }}" class="{% if request.endpoint == 'schedule' %}active{% endif %}">Schedule</a>
       </nav>
       <a class="status-link {% if request.endpoint == 'status' %}active{% endif %}" href="{{ url_for('status') }}">
         Status
