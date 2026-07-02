@@ -270,6 +270,22 @@ def test_cleanup_gcs_staging_resolves_listed_blobs_by_name(tmp_path: Path) -> No
     ]
 
 
+def test_configure_duckdb_build_connection_sets_resource_limits(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    connection = RecordingDuckdbConnection()
+    temp_directory = tmp_path / "duckdb temp's"
+
+    dag._configure_duckdb_build_connection(connection, temp_directory)
+
+    escaped_temp_directory = temp_directory.as_posix().replace("'", "''")
+    assert connection.queries == [
+        f"set temp_directory = '{escaped_temp_directory}'",
+        "set memory_limit = '1GB'",
+        "set threads = 2",
+        "set preserve_insertion_order = false",
+    ]
+
+
 def test_publish_duckdb_removes_temp_file_after_build_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
     config = dag.ExportConfig(
@@ -291,6 +307,7 @@ def test_publish_duckdb_removes_temp_file_after_build_failure(tmp_path: Path, mo
 
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
+    assert list(tmp_path.glob(".duckdb-tmp-*")) == []
 
 
 def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> None:
@@ -323,6 +340,7 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
 
     assert Path(result.duckdb_path).exists()
     assert Path(result.metadata_path).exists()
+    assert list(tmp_path.glob(".duckdb-tmp-*")) == []
     with duckdb.connect(result.duckdb_path, read_only=True) as connection:
         assert connection.execute("select count(*) from fct_trip").fetchone()[0] == 1
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "export-1"
@@ -356,6 +374,7 @@ def test_publish_duckdb_keeps_previous_file_when_validation_fails(tmp_path: Path
     assert metadata_path.read_text(encoding="utf-8") == "old metadata"
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
+    assert list(tmp_path.glob(".duckdb-tmp-*")) == []
 
 
 def test_dag_is_manual_and_exposes_single_export_task() -> None:
@@ -607,6 +626,14 @@ class FakeBlob:
 
 class Conflict(Exception):
     pass
+
+
+class RecordingDuckdbConnection:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def execute(self, query: str) -> None:
+        self.queries.append(query)
 
 
 def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], duckdb: Any) -> dict[str, list[Path]]:
