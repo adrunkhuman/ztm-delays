@@ -14,6 +14,8 @@ STOP_PICKER_LIMIT = 300
 DELAY_POINT_LIMIT = 600
 NUMERIC_STOP_POST_SUFFIX_LENGTH = 2
 STOP_POST_PRIMARY_MODES = ("bus", "tram")
+ON_TIME_EARLY_SECONDS = -60
+ON_TIME_LATE_SECONDS = 180
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -531,13 +533,20 @@ def _delay_points(
     mode: str | None = None,
     line: str | None = None,
     stop_id: str | None = None,
-) -> list[int]:
+) -> list[dict[str, Any]]:
     if service_date is None:
         return []
     rows = fetch_all(
         db_path,
         """
-        select delay_seconds
+        select delay_seconds,
+            case
+                when extract('hour' from scheduled_arrival_time) between 6 and 9 then 'Morning'
+                when extract('hour' from scheduled_arrival_time) between 10 and 15 then 'Midday'
+                when extract('hour' from scheduled_arrival_time) between 16 and 19 then 'Evening'
+                when extract('hour' from scheduled_arrival_time) between 20 and 23 then 'Late'
+                else 'Night'
+            end as period_label
         from fct_stop_arrival
         where service_date = ?
           and (? is null or mode = ?)
@@ -550,7 +559,49 @@ def _delay_points(
         """,
         [service_date, mode, mode, line, line, stop_id, stop_id, DELAY_POINT_LIMIT],
     )
-    return [row["delay_seconds"] for row in rows]
+    return _delay_periods(rows)
+
+
+def _delay_periods(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    period_order = [
+        ("Morning", "06-09"),
+        ("Midday", "10-15"),
+        ("Evening", "16-19"),
+        ("Late", "20-23"),
+        ("Night", "00-05"),
+    ]
+    delays_by_period: defaultdict[str, list[int]] = defaultdict(list)
+    for row in rows:
+        delays_by_period[row["period_label"]].append(row["delay_seconds"])
+
+    periods = []
+    for label, time_range in period_order:
+        delays = delays_by_period[label]
+        periods.append(
+            {
+                "label": label,
+                "range": time_range,
+                "points": delays,
+                "on_time_rate": _on_time_rate(delays),
+                "median_delay_seconds": _quantile(delays, 0.5),
+                "p90_delay_seconds": _quantile(delays, 0.9),
+            }
+        )
+    return periods
+
+
+def _on_time_rate(delays: list[int]) -> float | None:
+    if not delays:
+        return None
+    return sum(ON_TIME_EARLY_SECONDS <= delay <= ON_TIME_LATE_SECONDS for delay in delays) / len(delays)
+
+
+def _quantile(values: list[int], quantile: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = round((len(ordered) - 1) * quantile)
+    return ordered[index]
 
 
 def _by_mode(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
