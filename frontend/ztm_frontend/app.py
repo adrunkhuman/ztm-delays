@@ -10,7 +10,7 @@ from flask import Flask, current_app, render_template, request
 from ztm_frontend import queries
 
 EARLY_DELAY_SECONDS = -60
-LATE_DELAY_SECONDS = 120
+LATE_DELAY_SECONDS = 180
 LOW_ON_TIME_RATE = 0.6
 
 if TYPE_CHECKING:

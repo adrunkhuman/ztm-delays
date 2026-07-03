@@ -16,10 +16,10 @@ DELAY_POINT_LIMIT = 600
 NUMERIC_STOP_POST_SUFFIX_LENGTH = 2
 STOP_POST_PRIMARY_MODES = ("bus", "tram")
 ON_TIME_EARLY_SECONDS = -60
-ON_TIME_LATE_SECONDS = 120
+ON_TIME_LATE_SECONDS = 180
 LOW_ON_TIME_RATE = 0.6
-SERVICE_START_HOUR = 4
-SERVICE_END_HOUR = 24
+SERVICE_DAY_HOURS = (*range(4, 24), *range(4))
+NEXT_DAY_PLACEHOLDER_HOURS = frozenset(range(4))
 AM_RUSH_START_HOUR = 7
 AM_RUSH_END_HOUR = 9
 PM_RUSH_START_HOUR = 16
@@ -27,7 +27,7 @@ PM_RUSH_END_HOUR = 18
 WEEKEND_START_INDEX = 5
 HISTOGRAM_BUCKET_COUNT = 12
 EARLY_BUCKET_COUNT = 2
-LATE_BUCKET_START = 9
+LATE_BUCKET_START = 8
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -108,7 +108,7 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
                 mode,
                 stop_group_name,
                 avg(delay_seconds) as mean_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate,
+                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate,
                 row_number() over (partition by mode order by avg(delay_seconds) desc) as row_number
             from fct_stop_arrival
             where service_date = ?
@@ -224,7 +224,7 @@ def get_lines(
                     stop_sequence,
                     any_value(stop_name) as stop_name,
                     avg(delay_seconds) as mean_delay_seconds,
-                    count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate
+                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
                 from fct_stop_arrival
                 where line = ?
                   and service_date = ?
@@ -299,7 +299,7 @@ def get_stops(  # noqa: PLR0913
                 avg(delay_seconds) as mean_delay_seconds,
                 quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
                 quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate
+                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
             from fct_stop_arrival
             where stop_group_id = ?
               and service_date = ?
@@ -356,7 +356,7 @@ def get_stops(  # noqa: PLR0913
                     avg(delay_seconds) as mean_delay_seconds,
                     quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
                     quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                    count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate
+                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
                 from fct_stop_arrival
                 where stop_id = ?
                   and service_date = ?
@@ -375,7 +375,7 @@ def get_stops(  # noqa: PLR0913
                 direction_id,
                 trip_headsign,
                 avg(delay_seconds) as mean_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate
+                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
             from fct_stop_arrival
             where ((? is not null and stop_id = ?) or (? is null and stop_group_id = ?))
               and service_date = ?
@@ -657,7 +657,10 @@ def _delay_shape(median_delay_seconds: float | None, on_time_rate: float | None)
 
 def _hour_bars(seed: int, baseline: float) -> list[dict[str, Any]]:
     bars = []
-    for index, hour in enumerate(range(SERVICE_START_HOUR, SERVICE_END_HOUR)):
+    for index, hour in enumerate(SERVICE_DAY_HOURS):
+        if hour in NEXT_DAY_PLACEHOLDER_HOURS:
+            bars.append({"hour": hour, "delay": None, "height": 0, "tone": "empty"})
+            continue
         rush = 55 if AM_RUSH_START_HOUR <= hour <= AM_RUSH_END_HOUR else 0
         if PM_RUSH_START_HOUR <= hour <= PM_RUSH_END_HOUR:
             rush = 70
@@ -714,7 +717,7 @@ def _line_worst_departures(stops: list[dict[str, Any]], seed: int) -> list[dict[
                 "delay_seconds": (stop.get("mean_delay_seconds") or 0) + 120 + index * 17,
             }
         )
-    return rows
+    return sorted(rows, key=lambda row: row["delay_seconds"], reverse=True)
 
 
 def _stop_worst_departures(line_stats: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:

@@ -3,8 +3,8 @@
   const PADDING = { top: 12, right: 118, bottom: 24, left: 92 };
   const BUCKETS = [
     { label: "early", min: Number.NEGATIVE_INFINITY, max: -61 },
-    { label: "on time", min: -60, max: 120 },
-    { label: "2-5m", min: 121, max: 300 },
+    { label: "on time", min: -60, max: 180 },
+    { label: "3-5m", min: 181, max: 300 },
     { label: "5-10m", min: 301, max: 600 },
     { label: ">10m", min: 601, max: Number.POSITIVE_INFINITY },
   ];

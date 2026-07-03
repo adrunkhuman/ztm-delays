@@ -15,6 +15,8 @@
   --ontime: #4a4a4a;
   --late: #a03d3d;
   --red: #e05555;
+  --nav-height: 46px;
+  --footer-height: 28px;
   --mono: "JetBrains Mono", ui-monospace, monospace;
   --sans: "IBM Plex Sans", system-ui, sans-serif;
 }
@@ -24,6 +26,7 @@
 }
 
 body {
+  min-height: 100dvh;
   margin: 0;
   background: var(--page-bg);
   color: var(--fg);
@@ -48,7 +51,7 @@ table {
 }
 
 th {
-  color: var(--dim);
+  color: #9a9a9a;
   font-size: 0.6rem;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -70,7 +73,7 @@ tr:hover td {
   display: flex;
   flex-direction: column;
   width: min(1240px, 100%);
-  min-height: 100vh;
+  min-height: 100dvh;
   margin: 0 auto;
   background: var(--bg);
 }
@@ -111,9 +114,10 @@ td:nth-child(n + 2) {
 
 .nav {
   display: flex;
+  flex: none;
   align-items: stretch;
   gap: 1.4rem;
-  height: 46px;
+  height: var(--nav-height);
   padding: 0 1.5rem;
   border-bottom: 1px solid var(--border);
 }
@@ -166,6 +170,7 @@ td:nth-child(n + 2) {
   display: grid;
   flex: 1;
   grid-template-columns: 172px minmax(0, 1fr);
+  min-height: 0;
 }
 
 .rail {
@@ -174,8 +179,22 @@ td:nth-child(n + 2) {
   border-right: 1px solid var(--border);
 }
 
+.line-rail {
+  position: relative;
+  overflow: hidden;
+}
+
+.line-rail-scroll {
+  position: absolute;
+  inset: 1rem 0.8rem 1.5rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--dim) transparent;
+}
+
 .main {
   min-width: 0;
+  min-height: 0;
   padding: 0 1.5rem 1.6rem;
 }
 
@@ -196,12 +215,16 @@ td:nth-child(n + 2) {
 }
 
 .hero-title.mono {
-  font-size: 3.4rem;
+  font-size: 3rem;
+}
+
+.line-headline {
+  gap: 0.8rem;
 }
 
 .tag {
-  align-self: flex-start;
-  margin-top: 0.35rem;
+  align-self: center;
+  margin-top: 0.2rem;
   padding: 0.15rem 0.4rem;
   border: 1px solid var(--dim);
   color: #888888;
@@ -447,6 +470,11 @@ td:nth-child(n + 2) {
   background: var(--late);
 }
 
+.bar.empty {
+  min-height: 1px;
+  background: transparent;
+}
+
 .legend {
   display: flex;
   gap: 0.8rem;
@@ -535,20 +563,34 @@ td:nth-child(n + 2) {
 }
 
 .hist-axis {
-  display: grid;
-  grid-template-columns: 16.7% 33.3% 33.3% 16.7%;
-  color: var(--dim);
+  position: relative;
+  height: 0.75rem;
+  color: #8a8a8a;
   font-family: var(--mono);
   font-size: 0.6rem;
 }
 
-.hist-axis span:nth-child(2),
+.hist-axis span {
+  position: absolute;
+  top: 0;
+}
+
+.hist-axis span:first-child {
+  left: 0;
+}
+
+.hist-axis span:nth-child(2) {
+  left: 16.7%;
+  transform: translateX(-50%);
+}
+
 .hist-axis span:nth-child(3) {
-  text-align: center;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 .hist-axis span:last-child {
-  text-align: right;
+  right: 0;
 }
 
 .hour-bars {
@@ -567,8 +609,8 @@ td:nth-child(n + 2) {
 }
 
 .hour-bars .bar {
-  flex: none;
-  width: 10px;
+  flex: 1;
+  width: auto;
 }
 
 .hour-bars.small .bar {
@@ -580,7 +622,7 @@ td:nth-child(n + 2) {
   display: flex;
   justify-content: space-between;
   width: 257px;
-  color: var(--dim);
+  color: #8a8a8a;
   font-family: var(--mono);
   font-size: 0.6rem;
 }
@@ -592,7 +634,8 @@ td:nth-child(n + 2) {
 }
 
 .week-plot {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 4px;
   align-items: flex-end;
   height: 50px;
@@ -602,7 +645,6 @@ td:nth-child(n + 2) {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  width: 13px;
   height: 50px;
 }
 
@@ -616,14 +658,14 @@ td:nth-child(n + 2) {
 }
 
 .week-axis {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 4px;
 }
 
 .week .lbl {
   display: block;
-  width: 13px;
-  color: var(--dim);
+  color: #8a8a8a;
   font-family: var(--mono);
   font-size: 0.58rem;
   text-align: center;
@@ -802,7 +844,7 @@ td:nth-child(n + 2) {
   min-height: auto;
   padding-bottom: 4px;
   border-bottom-color: var(--border);
-  color: var(--dim);
+  color: #9a9a9a;
   font-size: 0.6rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -813,7 +855,46 @@ td:nth-child(n + 2) {
 }
 
 .line-worst-row {
-  grid-template-columns: 38px 88px minmax(0, 1fr) 58px;
+  grid-template-columns: max-content max-content minmax(0, 1fr) max-content;
+  column-gap: 14px;
+}
+
+.line-worst-table {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.line-worst-table .line-worst-row {
+  display: table-row;
+}
+
+.line-worst-table .line-worst-row > * {
+  display: table-cell;
+  height: 29px;
+  padding: 0 14px 0 0;
+  border-bottom: 1px solid var(--hair);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.line-worst-table .line-worst-row > :first-child {
+  padding-left: 4px;
+}
+
+.line-worst-table .line-worst-row > :nth-child(3) {
+  width: 100%;
+}
+
+.line-worst-table .line-worst-row > :last-child {
+  padding-right: 4px;
+  text-align: right;
+}
+
+.line-worst-table .table-head > * {
+  height: auto;
+  padding-bottom: 4px;
+  border-bottom-color: var(--border);
 }
 
 .worst-row > *,
@@ -824,6 +905,7 @@ td:nth-child(n + 2) {
 }
 
 .line-worst-row .muted,
+.vehicle-row .muted,
 .trip-picker .data-link,
 .schedule-route .section-title,
 .schedule-route .muted {
@@ -834,7 +916,7 @@ td:nth-child(n + 2) {
 
 .vehicle-row,
 .vehicle-head {
-  grid-template-columns: 64px 56px minmax(0, 1fr) 54px 40px;
+  grid-template-columns: 64px 86px minmax(0, 1fr) 54px 40px;
 }
 
 .trips {
@@ -966,9 +1048,33 @@ td:nth-child(n + 2) {
   display: flex;
   justify-content: space-between;
   margin-top: -2px;
-  color: var(--dim);
+  color: #8a8a8a;
   font-family: var(--mono);
   font-size: 0.56rem;
+}
+
+.mini-delay-axis {
+  position: relative;
+  display: block;
+  height: 0.65rem;
+}
+
+.mini-delay-axis span {
+  position: absolute;
+  top: 0;
+}
+
+.mini-delay-axis span:first-child {
+  left: 0;
+}
+
+.mini-delay-axis span:nth-child(2) {
+  left: 16.7%;
+  transform: translateX(-50%);
+}
+
+.mini-delay-axis span:last-child {
+  right: 0;
 }
 
 .chips {
@@ -1052,9 +1158,11 @@ td:nth-child(n + 2) {
 
 .foot {
   display: flex;
+  flex: none;
   gap: 1rem;
   align-items: center;
-  padding: 0.55rem 1.5rem;
+  height: var(--footer-height);
+  padding: 0 1.5rem;
   border-top: 1px solid var(--border);
   color: var(--muted);
   font-size: 0.64rem;

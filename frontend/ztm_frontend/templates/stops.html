@@ -78,12 +78,12 @@
                   <div class="postbody">
                     <div class="disto">
                       {{ ui.hist(post.shape, true) }}
-                      <div class="mini-axis"><span>−1m</span><span>0</span><span>+5m</span></div>
+                      <div class="mini-axis mini-delay-axis"><span>−1m</span><span>0</span><span>+5m</span></div>
                     </div>
                     <div class="med"><span class="k">MED</span><span class="v {{ post.median_delay_seconds|delay_class }}">{{ post.median_delay_seconds|delay }}</span></div>
                     <div class="spark">
                       {{ ui.hour_bars(post.hours, true) }}
-                      <div class="mini-axis"><span>04</span><span>14</span><span>24</span></div>
+                      <div class="mini-axis"><span>04</span><span>16</span><span>03</span></div>
                     </div>
                   </div>
                   <div class="chips">

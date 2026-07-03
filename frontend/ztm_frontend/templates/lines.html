@@ -5,21 +5,23 @@
 
 {% block body %}
   <div class="body">
-    <aside class="rail">
-      <div class="mode">
-        <a href="{{ url_for('lines', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
-        <a href="{{ url_for('lines', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
-      </div>
-      <div class="linegrid">
-        {% for row in line_list %}
-          <a href="{{ url_for('lines', line=row.line, mode=selected_mode, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
-        {% endfor %}
+    <aside class="rail line-rail">
+      <div class="line-rail-scroll">
+        <div class="mode">
+          <a href="{{ url_for('lines', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+          <a href="{{ url_for('lines', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+        </div>
+        <div class="linegrid">
+          {% for row in line_list %}
+            <a href="{{ url_for('lines', line=row.line, mode=selected_mode, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
+          {% endfor %}
+        </div>
       </div>
     </aside>
 
     <main class="main">
       {% if summary %}
-        <header class="head">
+        <header class="head line-headline">
           <h1 class="hero-title mono">{{ summary.route_short_name }}</h1>
           <div class="tag">{{ summary.mode|upper }}</div>
           {{ ui.datebox(selected_date, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.previous) if date_nav.previous else none, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.next) if date_nav.next else none) }}
@@ -76,14 +78,17 @@
         <section class="bottom">
           <div>
             <div class="label" style="margin-bottom: .6rem">Worst departures</div>
-            {% for row in line_widgets.worst %}
-              <div class="worst-row line-worst-row">
-                <span class="mono muted">{{ row.time }}</span>
-                <span class="muted">{{ row.direction }}</span>
-                <a class="data-link" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=summary.mode, date=selected_date) }}">{{ row.stop_name }}</a>
-                <span class="sval {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
+            <div class="line-worst-table">
+              <div class="table-head line-worst-row"><div>Time</div><div>Stop</div><div>Towards</div><div style="text-align:right">Delay</div></div>
+              {% for row in line_widgets.worst %}
+                <div class="worst-row line-worst-row">
+                  <span class="mono muted">{{ row.time }}</span>
+                  <a class="data-link" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=summary.mode, date=selected_date) }}">{{ row.stop_name }}</a>
+                  <span class="muted">{{ row.direction }}</span>
+                  <span class="sval {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
+                </div>
+              {% endfor %}
               </div>
-            {% endfor %}
           </div>
           <div>
             <div class="label" style="margin-bottom: .6rem">By vehicle</div>

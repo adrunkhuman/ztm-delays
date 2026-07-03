@@ -5,20 +5,22 @@
 
 {% block body %}
   <div class="body">
-    <aside class="rail">
-      <div class="mode">
-        <a href="{{ url_for('schedule', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
-        <a href="{{ url_for('schedule', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
-      </div>
-      <div class="linegrid">
-        {% for row in line_list %}
-          <a href="{{ url_for('schedule', mode=selected_mode, line=row.line, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
-        {% endfor %}
+    <aside class="rail line-rail">
+      <div class="line-rail-scroll">
+        <div class="mode">
+          <a href="{{ url_for('schedule', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+          <a href="{{ url_for('schedule', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+        </div>
+        <div class="linegrid">
+          {% for row in line_list %}
+            <a href="{{ url_for('schedule', mode=selected_mode, line=row.line, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
+          {% endfor %}
+        </div>
       </div>
     </aside>
 
     <main class="main">
-      <header class="head">
+      <header class="head line-headline">
         <h1 class="hero-title mono">{{ selected_line or "schedule" }}</h1>
         <div class="tag">{{ selected_mode|upper }}</div>
         {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, line=selected_line, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, date=date_nav.next) if date_nav.next else none) }}
