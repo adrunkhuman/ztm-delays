@@ -6,11 +6,11 @@
 {% block body %}
   <div class="body">
     <aside class="rail line-rail">
+      <div class="mode">
+        <a href="{{ url_for('lines', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+        <a href="{{ url_for('lines', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+      </div>
       <div class="line-rail-scroll">
-        <div class="mode">
-          <a href="{{ url_for('lines', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
-          <a href="{{ url_for('lines', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
-        </div>
         <div class="linegrid">
           {% for row in line_list %}
             <a href="{{ url_for('lines', line=row.line, mode=selected_mode, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
@@ -63,7 +63,7 @@
                 <div class="stop-row">
                   <div class="route">
                     <div class="rline" style="top: {% if loop.first %}50%{% else %}0{% endif %}; bottom: {% if loop.last %}50%{% else %}0{% endif %}"></div>
-                    <div class="dot {% if loop.first or loop.last %}term{% endif %}" style="left: {% if loop.first or loop.last %}5.5px{% else %}6.5px{% endif %}; width: {% if loop.first or loop.last %}7px{% else %}5px{% endif %}; height: {% if loop.first or loop.last %}7px{% else %}5px{% endif %}; margin-top: {% if loop.first or loop.last %}-3.5px{% else %}-2.5px{% endif %}"></div>
+                    <div class="dot {% if loop.first or loop.last %}term{% endif %}"></div>
                   </div>
                   <a class="sname" href="{{ url_for('stops', stop_group_id=stop.stop_group_id, mode=summary.mode, date=selected_date) }}" style="font-weight: {% if loop.first or loop.last %}700{% else %}400{% endif %}">{{ stop.stop_name }}</a>
                   {{ ui.hist(stop.shape, true) }}
@@ -91,17 +91,19 @@
               </div>
           </div>
           <div>
-            <div class="label" style="margin-bottom: .6rem">By vehicle</div>
-            <div class="table-head vehicle-head"><div>Vehicle</div><div>Brigade</div><div>Trips</div><div style="text-align:right">Med</div><div style="text-align:right">On t</div></div>
-            {% for row in line_widgets.vehicles %}
-              <div class="vehicle-row">
-                <a class="data-link mono" href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, vehicle=row.vehicle_number) }}">{{ row.vehicle_number }}</a>
-                <span class="mono muted">{{ row.brigade }}</span>
-                <div class="trips">{% for trip in row.trips %}<span class="trip-square {{ trip }}"></span>{% endfor %}</div>
-                <span class="sval {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</span>
-                <span class="spct {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</span>
+            <div class="label" style="margin-bottom: .6rem">Reliability strip</div>
+            {% for row in line_widgets.reliability %}
+              <div class="reliability-block">
+                <div class="reliability-head">
+                  <span>→ {{ row.direction }}</span>
+                  <span class="mono muted">{{ row.counts.clean }} clean · {{ row.counts.partial }} partial · {{ row.counts.broken }} broken</span>
+                </div>
+                <div class="reliability-squares" aria-label="trip outcomes">
+                  {% for trip in row.outcomes %}<span class="reliability-square {{ trip.outcome }}" title="{{ trip.label }}"></span>{% endfor %}
+                </div>
               </div>
             {% endfor %}
+            <div class="reliability-legend"><span><i class="clean"></i> clean</span><span><i class="partial"></i> partial</span><span><i class="broken"></i> broken</span></div>
           </div>
         </section>
       {% else %}

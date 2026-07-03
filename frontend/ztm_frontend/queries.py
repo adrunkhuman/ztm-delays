@@ -28,6 +28,8 @@ WEEKEND_START_INDEX = 5
 HISTOGRAM_BUCKET_COUNT = 12
 EARLY_BUCKET_COUNT = 2
 LATE_BUCKET_START = 8
+PARTIAL_TRIP_SCORE = 80
+BROKEN_TRIP_SCORE = 92
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -585,7 +587,7 @@ def _line_widgets(
         "timeline": _timeline(seed, baseline, 100),
         "segments": _on_time_segments(on_time_rate),
         "worst": _line_worst_departures(stops, seed),
-        "vehicles": _vehicle_rows(selected_line, baseline, on_time_rate, seed),
+        "reliability": _reliability_strip(courses, seed),
     }
 
 
@@ -711,7 +713,7 @@ def _line_worst_departures(stops: list[dict[str, Any]], seed: int) -> list[dict[
         rows.append(
             {
                 "time": _fake_time(seed, index),
-                "direction": f"-> {stop.get('direction', '')}",
+                "direction": f"→ {stop.get('direction', '')}",
                 "stop_name": stop.get("stop_name"),
                 "stop_group_id": stop.get("stop_group_id"),
                 "delay_seconds": (stop.get("mean_delay_seconds") or 0) + 120 + index * 17,
@@ -735,24 +737,27 @@ def _stop_worst_departures(line_stats: list[dict[str, Any]], seed: int) -> list[
     return rows
 
 
-def _vehicle_rows(selected_line: str | None, baseline: float, on_time_rate: float, seed: int) -> list[dict[str, Any]]:
-    vehicles = []
-    for index in range(6):
-        vehicle_seed = seed + index * 113
-        median = round(baseline + ((vehicle_seed % 110) - 35))
-        rate = _clamp(on_time_rate + ((vehicle_seed % 30) - 15) / 100, 0.35, 0.98)
-        vehicles.append(
+def _reliability_strip(courses: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
+    rows = []
+    for direction_index, course in enumerate(courses):
+        direction_seed = _seed(seed, course.get("trip_headsign"), direction_index)
+        outcomes = []
+        counts = {"clean": 0, "partial": 0, "broken": 0}
+        sample_count = min(max(round((course.get("trip_count") or 18) / 2), 14), 28)
+        for trip_index in range(sample_count):
+            score = (direction_seed + trip_index * 37) % 100
+            outcome = "broken" if score >= BROKEN_TRIP_SCORE else "partial" if score >= PARTIAL_TRIP_SCORE else "clean"
+            counts[outcome] += 1
+            outcomes.append({"outcome": outcome, "label": outcome.replace("clean", "ran clean")})
+
+        rows.append(
             {
-                "vehicle_number": str(8700 + vehicle_seed % 900),
-                "brigade": f"{selected_line or '?'} / {index + 1}",
-                "trips": [
-                    _delay_tone(median + ((vehicle_seed + trip * 23) % 120) - 50) for trip in range(7 - index % 3)
-                ],
-                "median_delay_seconds": median,
-                "on_time_rate": rate,
+                "direction": course.get("trip_headsign"),
+                "outcomes": outcomes,
+                "counts": counts,
             }
         )
-    return vehicles
+    return rows
 
 
 def _on_time_segments(on_time_rate: float) -> dict[str, float]:

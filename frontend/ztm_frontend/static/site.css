@@ -186,10 +186,17 @@ td:nth-child(n + 2) {
 
 .line-rail-scroll {
   position: absolute;
-  inset: 1rem 0.8rem 1.5rem;
+  inset: 3.55rem 0.25rem 1.5rem 0.8rem;
   overflow-y: auto;
+  padding-right: 14px;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: var(--dim) transparent;
+}
+
+.line-rail .linegrid {
+  margin-left: 0;
+  margin-right: 0;
 }
 
 .main {
@@ -459,15 +466,24 @@ td:nth-child(n + 2) {
 .stack .ontime,
 .bar.ontime,
 .tick.ontime,
-.trip-square.ontime {
+.trip-square.ontime,
+.reliability-square.clean,
+.reliability-legend .clean {
   background: var(--ontime);
 }
 
 .stack .late,
 .bar.late,
 .tick.late,
-.trip-square.late {
+.trip-square.late,
+.reliability-square.broken,
+.reliability-legend .broken {
   background: var(--late);
+}
+
+.reliability-square.partial,
+.reliability-legend .partial {
+  background: var(--early);
 }
 
 .bar.empty {
@@ -771,18 +787,25 @@ td:nth-child(n + 2) {
 
 .route .rline {
   position: absolute;
-  left: 8px;
+  left: 50%;
   width: 1px;
   background: var(--dim);
+  transform: translateX(-50%);
 }
 
 .route .dot {
   position: absolute;
   top: 50%;
+  left: 50%;
+  width: 7px;
+  height: 7px;
   background: #555555;
+  transform: translate(-50%, -50%);
 }
 
 .route .dot.term {
+  width: 9px;
+  height: 9px;
   background: var(--fg);
 }
 
@@ -897,6 +920,10 @@ td:nth-child(n + 2) {
   border-bottom-color: var(--border);
 }
 
+.line-worst-table .table-head > :nth-child(3) {
+  padding-left: 1.15em;
+}
+
 .worst-row > *,
 .data-row > *,
 .vehicle-row > *,
@@ -925,6 +952,48 @@ td:nth-child(n + 2) {
 }
 
 .trip-square {
+  width: 7px;
+  height: 7px;
+}
+
+.reliability-block {
+  padding: 0 4px 0.45rem;
+  border-bottom: 1px solid var(--hair);
+}
+
+.reliability-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  min-height: 29px;
+  color: var(--fg2);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.reliability-squares {
+  display: flex;
+  align-items: center;
+  min-height: 18px;
+  gap: 2px;
+  min-width: 0;
+}
+
+.reliability-square {
+  width: 8px;
+  height: 8px;
+}
+
+.reliability-legend {
+  display: flex;
+  gap: 0.8rem;
+  padding: 0.55rem 4px 0;
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.reliability-legend i {
+  display: inline-block;
   width: 7px;
   height: 7px;
 }

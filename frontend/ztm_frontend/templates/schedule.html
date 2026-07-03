@@ -6,11 +6,11 @@
 {% block body %}
   <div class="body">
     <aside class="rail line-rail">
+      <div class="mode">
+        <a href="{{ url_for('schedule', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+        <a href="{{ url_for('schedule', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+      </div>
       <div class="line-rail-scroll">
-        <div class="mode">
-          <a href="{{ url_for('schedule', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
-          <a href="{{ url_for('schedule', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
-        </div>
         <div class="linegrid">
           {% for row in line_list %}
             <a href="{{ url_for('schedule', mode=selected_mode, line=row.line, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
