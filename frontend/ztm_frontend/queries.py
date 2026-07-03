@@ -95,6 +95,9 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
         """,
         [selected_date],
     )
+    for line in worst_lines:
+        line["shape"] = _delay_shape(line.get("mean_delay_seconds"), line.get("on_time_rate"))
+
     worst_stops = fetch_all(
         db_path,
         """
@@ -121,7 +124,9 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
         [selected_date],
     )
     for stop in worst_stops:
-        stop["display_name"] = f"{stop['stop_group_name']} [{_stop_post_label(stop['stop_id'], stop['stop_group_id'])}]"
+        stop["post_label"] = _stop_post_label(stop["stop_id"], stop["stop_group_id"])
+        stop["display_name"] = f"{stop['stop_group_name']} [{stop['post_label']}]"
+        stop["shape"] = _delay_shape(stop.get("mean_delay_seconds"), stop.get("on_time_rate"))
 
     mode_stats_by_mode = _by_mode(mode_stats)
     return {

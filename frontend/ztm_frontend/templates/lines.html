@@ -77,7 +77,7 @@
           <div>
             <div class="label" style="margin-bottom: .6rem">Worst departures</div>
             {% for row in line_widgets.worst %}
-              <div class="worst-row">
+              <div class="worst-row line-worst-row">
                 <span class="mono muted">{{ row.time }}</span>
                 <span class="muted">{{ row.direction }}</span>
                 <a class="data-link" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=summary.mode, date=selected_date) }}">{{ row.stop_name }}</a>

@@ -64,7 +64,7 @@
           {{ ui.timeline(stop_widgets.timeline) }}
         </section>
 
-        <section class="two-up">
+        <section class="stop-mid">
           <div>
             <div class="label" style="margin-bottom: .8rem">By post</div>
             <div class="postgrid">
@@ -109,7 +109,7 @@
 
         <section class="section">
           <div class="label" style="margin-bottom: .6rem">Lines here · worst first</div>
-          <div class="two-up" style="padding-top: 0; border-top: 0">
+          <div class="two-up stop-lines" style="padding-top: 0; border-top: 0">
             {% for chunk in [stop_widgets.line_rows[:(stop_widgets.line_rows|length + 1) // 2], stop_widgets.line_rows[(stop_widgets.line_rows|length + 1) // 2:]] %}
               <div>
                 <div class="table-head line-head"><div>Line</div><div>Post</div><div>Towards</div><div></div><div style="text-align:right">Med</div><div style="text-align:right">On t</div></div>

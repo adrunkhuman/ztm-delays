@@ -25,13 +25,13 @@
       </header>
 
       {% if selected_trip %}
-        <section class="widgets">
+        <section class="schedule-summary">
           <div class="widget">
             <div class="label">Trip</div>
             <div><span class="big">{{ selected_trip.scheduled_start_time|time }}</span> <span>start</span></div>
             <div class="mono muted">{{ selected_trip.scheduled_end_time|time }} end · vehicle {{ selected_trip.vehicle_number }}</div>
           </div>
-          <div class="widget grow">
+          <div class="widget schedule-route">
             <div class="label">Route</div>
             <div class="section-title">{{ selected_trip.origin_stop_name }} → {{ selected_trip.destination_stop_name }}</div>
             <div class="mono muted">{{ selected_trip.trip_headsign }}</div>
