@@ -1,0 +1,82 @@
+{% macro datebox(selected_date, previous_href=None, next_href=None) %}
+  <div class="datebox">
+    <div class="date">
+      <a href="{{ previous_href or '#' }}" class="{% if not previous_href %}disabled{% endif %}">‹</a>
+      <b>{{ selected_date or "n/a" }}</b>
+      <a href="{{ next_href or '#' }}" class="{% if not next_href %}disabled{% endif %}">›</a>
+    </div>
+    <div class="scope"><a class="active" href="#">day</a><a href="#">weekdays</a><a href="#">weekend</a><a href="#">month</a></div>
+  </div>
+{% endmacro %}
+
+{% macro stack(segments) %}
+  <div class="stack">
+    <div class="early" style="width: {{ (segments.early * 100)|round(1) }}%"></div>
+    <div class="ontime" style="width: {{ (segments.on_time * 100)|round(1) }}%"></div>
+    <div class="late" style="width: {{ (segments.late * 100)|round(1) }}%"></div>
+  </div>
+  <div class="legend">
+    <span><i style="background: var(--early)"></i> early {{ segments.early|percent }}</span>
+    <span><i style="background: var(--ontime)"></i> on time {{ segments.on_time|percent }}</span>
+    <span><i style="background: var(--late)"></i> late {{ segments.late|percent }}</span>
+  </div>
+{% endmacro %}
+
+{% macro hist(shape, mini=False) %}
+  <div class="hist {% if mini %}mini{% endif %}">
+    <div class="bars">
+      {% for bucket in shape.buckets %}
+        <div class="bar {{ bucket.tone }}" style="height: {{ bucket.height }}px"></div>
+      {% endfor %}
+    </div>
+    <div class="zero-line" style="left: 16.7%; top: {% if mini %}2px{% else %}12px{% endif %}; bottom: {% if mini %}2px{% else %}14px{% endif %}"></div>
+    <div class="marker-med" style="left: {{ shape.median_x }}%; top: {% if mini %}0{% else %}12px{% endif %}; bottom: {% if mini %}2px{% else %}14px{% endif %}"></div>
+    <div class="marker-p90" style="left: {{ shape.p90_x }}%; top: {% if mini %}0{% else %}12px{% endif %}; bottom: {% if mini %}2px{% else %}14px{% endif %}"></div>
+    {% if not mini %}
+      <div class="axis" style="left: 0; bottom: 0">−1m</div>
+      <div class="axis" style="left: 16.7%; bottom: 0; transform: translateX(-50%)">0</div>
+      <div class="axis" style="left: 50%; bottom: 0; transform: translateX(-50%)">+2m</div>
+      <div class="axis" style="right: 0; bottom: 0">+5m</div>
+    {% endif %}
+  </div>
+{% endmacro %}
+
+{% macro hour_bars(hours, small=False) %}
+  <div class="hour-bars {% if small %}small{% endif %}">
+    {% for row in hours %}
+      <div class="bar {{ row.tone }}" style="height: {{ row.height }}px" title="{{ '%02d'|format(row.hour) }} · {{ row.delay|delay }}"></div>
+    {% endfor %}
+  </div>
+  {% if not small %}
+    <div class="hour-axis"><span>04</span><span>08</span><span>12</span><span>16</span><span>20</span><span>23</span></div>
+  {% endif %}
+{% endmacro %}
+
+{% macro week_bars(week) %}
+  <div class="week">
+    {% for row in week %}
+      <span class="{% if row.selected %}selected{% endif %}">
+        <span class="col"><span class="daybar" style="height: {{ row.height }}px"></span></span>
+        <span class="lbl">{{ row.label }}</span>
+      </span>
+    {% endfor %}
+  </div>
+{% endmacro %}
+
+{% macro timeline(points) %}
+  <div class="timeline">
+    <div class="base"></div>
+    {% for point in points %}
+      <div class="tick {{ point.tone }}" style="left: {{ point.x }}%; height: {{ point.height }}px" title="{{ point.delay|delay }}"></div>
+    {% endfor %}
+    <div class="t" style="left: 0">04:00</div>
+    <div class="t" style="left: 25%; transform: translateX(-50%)">09:00</div>
+    <div class="t" style="left: 50%; transform: translateX(-50%)">14:00</div>
+    <div class="t" style="left: 75%; transform: translateX(-50%)">19:00</div>
+    <div class="t" style="right: 0">24:00</div>
+  </div>
+{% endmacro %}
+
+{% macro chip(line, mode, href=None, active=False) %}
+  {% if href %}<a href="{{ href }}" class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</a>{% else %}<span class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</span>{% endif %}
+{% endmacro %}

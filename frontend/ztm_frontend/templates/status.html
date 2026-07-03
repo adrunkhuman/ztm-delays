@@ -1,33 +1,64 @@
 {% extends "base.html" %}
 
-{% block title %}Status · ZTM{% endblock %}
+{% block title %}status · ZTM delays{% endblock %}
 
 {% block body %}
-  <section class="status-top">
-    <span>Exported</span>
-    <strong>{{ metadata.exported_at }}</strong>
-  </section>
+  <div class="body">
+    <aside class="rail">
+      <div class="railgroup">
+        <div class="label">Status</div>
+        <a class="rail-link" href="#bus">bus</a>
+        <a class="rail-link" href="#tram">tram</a>
+      </div>
+      <div class="railgroup">
+        <div class="label">Export</div>
+        <span class="rail-link mono">{{ metadata.export_version or "n/a" }}</span>
+        <span class="rail-link mono">{{ metadata.source_mode or "n/a" }}</span>
+      </div>
+    </aside>
 
-  <section class="section-pair">
-    {% for mode in ["bus", "tram"] %}
-      <article class="panel">
-        <h2>{{ mode|capitalize }}</h2>
-        <table>
-          <thead><tr><th>Date</th><th>Completeness</th><th>Match</th><th>Coverage</th><th>Complete</th><th>Broken</th></tr></thead>
-          <tbody>
+    <main class="main">
+      <header class="head">
+        <h1 class="hero-title">status</h1>
+        <div class="tag">PIPELINE</div>
+        <div class="datebox"><div class="date"><b>{{ metadata.exported_at or "n/a" }}</b></div><div class="scope"><a class="active" href="#">export</a></div></div>
+      </header>
+
+      <section class="widgets">
+        <div class="widget">
+          <div class="label">Rows</div>
+          <div class="big">{{ metadata.source_row_count|integer if metadata.source_row_count else "n/a" }}</div>
+        </div>
+        <div class="widget">
+          <div class="label">Tables</div>
+          <div class="big">{{ metadata.exported_table_count|integer if metadata.exported_table_count else "n/a" }}</div>
+        </div>
+        <div class="widget grow">
+          <div class="label">Source</div>
+          <div class="section-title mono">{{ metadata.source_project or "n/a" }} / {{ metadata.source_dataset or "n/a" }}</div>
+          <div class="mono muted">{{ metadata.export_id or "n/a" }}</div>
+        </div>
+      </section>
+
+      <section class="two-up">
+        {% for mode in ["bus", "tram"] %}
+          <div id="{{ mode }}">
+            <div class="label" style="margin-bottom: .6rem">{{ mode }} health</div>
+            <div class="table-head status-head"><div>Date</div><div>Mode</div><div style="text-align:right">Complete</div><div style="text-align:right">Match</div><div style="text-align:right">Cover</div><div style="text-align:right">Trips</div><div style="text-align:right">Broken</div></div>
             {% for row in pipeline_status.get(mode, []) %}
-              <tr>
-                <td>{{ row.service_date }}</td>
-                <td>{{ row.completeness_ratio|percent }}</td>
-                <td>{{ row.match_rate|percent }}</td>
-                <td>{{ row.service_coverage_ratio|percent }}</td>
-                <td>{{ row.trips_complete|integer }}</td>
-                <td>{{ row.trips_broken|integer }}</td>
-              </tr>
+              <div class="data-row status-row">
+                <span class="mono">{{ row.service_date }}</span>
+                <span class="mono muted">{{ row.mode }}</span>
+                <span class="spct {{ row.completeness_ratio|percent_class }}">{{ row.completeness_ratio|percent }}</span>
+                <span class="spct {{ row.match_rate|percent_class }}">{{ row.match_rate|percent }}</span>
+                <span class="spct {{ row.service_coverage_ratio|percent_class }}">{{ row.service_coverage_ratio|percent }}</span>
+                <span class="sval neutral-text">{{ row.trips_complete|integer }}</span>
+                <span class="sval late-text">{{ row.trips_broken|integer }}</span>
+              </div>
             {% endfor %}
-          </tbody>
-        </table>
-      </article>
-    {% endfor %}
-  </section>
+          </div>
+        {% endfor %}
+      </section>
+    </main>
+  </div>
 {% endblock %}

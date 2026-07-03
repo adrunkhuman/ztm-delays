@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from ztm_frontend.db import fetch_all, fetch_one
@@ -15,7 +16,18 @@ DELAY_POINT_LIMIT = 600
 NUMERIC_STOP_POST_SUFFIX_LENGTH = 2
 STOP_POST_PRIMARY_MODES = ("bus", "tram")
 ON_TIME_EARLY_SECONDS = -60
-ON_TIME_LATE_SECONDS = 180
+ON_TIME_LATE_SECONDS = 120
+LOW_ON_TIME_RATE = 0.6
+SERVICE_START_HOUR = 4
+SERVICE_END_HOUR = 24
+AM_RUSH_START_HOUR = 7
+AM_RUSH_END_HOUR = 9
+PM_RUSH_START_HOUR = 16
+PM_RUSH_END_HOUR = 18
+WEEKEND_START_INDEX = 5
+HISTOGRAM_BUCKET_COUNT = 12
+EARLY_BUCKET_COUNT = 2
+LATE_BUCKET_START = 9
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -93,7 +105,7 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
                 mode,
                 stop_group_name,
                 avg(delay_seconds) as mean_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate,
+                count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate,
                 row_number() over (partition by mode order by avg(delay_seconds) desc) as row_number
             from fct_stop_arrival
             where service_date = ?
@@ -111,10 +123,13 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
     for stop in worst_stops:
         stop["display_name"] = f"{stop['stop_group_name']} [{_stop_post_label(stop['stop_id'], stop['stop_group_id'])}]"
 
+    mode_stats_by_mode = _by_mode(mode_stats)
     return {
         "date_options": date_options,
         "selected_date": selected_date,
-        "mode_stats": _by_mode(mode_stats),
+        "date_nav": _date_nav(date_options, selected_date),
+        "mode_stats": mode_stats_by_mode,
+        "overview_widgets": _overview_widgets(mode_stats_by_mode, selected_date),
         "worst_lines": _by_mode_list(worst_lines),
         "worst_stops": _by_mode_list(worst_stops),
         "delay_plots": {
@@ -204,7 +219,7 @@ def get_lines(
                     stop_sequence,
                     any_value(stop_name) as stop_name,
                     avg(delay_seconds) as mean_delay_seconds,
-                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
+                    count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate
                 from fct_stop_arrival
                 where line = ?
                   and service_date = ?
@@ -218,14 +233,17 @@ def get_lines(
                 """,
                 [selected_line, selected_date, course["direction_id"], course["trip_headsign"], STOP_ROWS_PER_COURSE],
             )
+    line_widgets = _line_widgets(selected_line, selected_date, summary, courses)
     return {
         "date_options": date_options,
         "selected_date": selected_date,
+        "date_nav": _date_nav(date_options, selected_date),
         "line_list": line_list,
         "selected_line": selected_line,
         "selected_mode": selected_mode,
         "summary": summary,
         "courses": courses,
+        "line_widgets": line_widgets,
         "delay_plot": _delay_points(db_path, selected_date, line=selected_line) if selected_line is not None else [],
     }
 
@@ -276,7 +294,7 @@ def get_stops(  # noqa: PLR0913
                 avg(delay_seconds) as mean_delay_seconds,
                 quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
                 quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
+                count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate
             from fct_stop_arrival
             where stop_group_id = ?
               and service_date = ?
@@ -333,7 +351,7 @@ def get_stops(  # noqa: PLR0913
                     avg(delay_seconds) as mean_delay_seconds,
                     quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
                     quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
+                    count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate
                 from fct_stop_arrival
                 where stop_id = ?
                   and service_date = ?
@@ -352,7 +370,7 @@ def get_stops(  # noqa: PLR0913
                 direction_id,
                 trip_headsign,
                 avg(delay_seconds) as mean_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
+                count(*) filter (where delay_seconds between -60 and 120) / count(*) as on_time_rate
             from fct_stop_arrival
             where ((? is not null and stop_id = ?) or (? is null and stop_group_id = ?))
               and service_date = ?
@@ -364,9 +382,11 @@ def get_stops(  # noqa: PLR0913
             """,
             [selected_stop_id, selected_stop_id, selected_stop_id, selected_stop_group_id, selected_date],
         )
+    stop_widgets = _stop_widgets(stop_posts, selected_post or summary, line_stats)
     return {
         "date_options": date_options,
         "selected_date": selected_date,
+        "date_nav": _date_nav(date_options, selected_date),
         "stop_list": stop_list,
         "selected_stop_group_id": selected_stop_group_id,
         "selected_mode": selected_mode,
@@ -377,6 +397,7 @@ def get_stops(  # noqa: PLR0913
         "stop_post_groups": stop_post_groups,
         "selected_post": selected_post,
         "line_stats": line_stats,
+        "stop_widgets": stop_widgets,
         "delay_plot": _delay_points(db_path, selected_date, stop_id=selected_stop_id)
         if selected_stop_id is not None
         else [],
@@ -468,6 +489,7 @@ def get_schedule(  # noqa: PLR0913
     return {
         "date_options": date_options,
         "selected_date": selected_date,
+        "date_nav": _date_nav(date_options, selected_date),
         "selected_mode": selected_mode,
         "selected_line": selected_line,
         "selected_trip_id": selected_trip_id,
@@ -504,6 +526,275 @@ def get_status(db_path: Path) -> dict[str, Any]:
         "metadata": get_export_metadata(db_path),
         "pipeline_status": _by_mode_list(pipeline_status),
     }
+
+
+def _date_nav(date_options: list[str], selected_date: str | None) -> dict[str, str | None]:
+    if selected_date not in date_options:
+        return {"previous": None, "next": None}
+    selected_index = date_options.index(selected_date)
+    return {
+        "previous": date_options[selected_index + 1] if selected_index + 1 < len(date_options) else None,
+        "next": date_options[selected_index - 1] if selected_index > 0 else None,
+    }
+
+
+def _overview_widgets(mode_stats: dict[str, dict[str, Any]], selected_date: str | None) -> dict[str, dict[str, Any]]:
+    widgets = {}
+    for mode in ("bus", "tram"):
+        row = mode_stats.get(mode, {})
+        baseline = row.get("mean_delay_seconds") or 45
+        on_time_rate = row.get("on_time_rate") or 0.75
+        seed = _seed(mode, selected_date)
+        widgets[mode] = {
+            "shape": _delay_shape(baseline, on_time_rate),
+            "hours": _hour_bars(seed, baseline),
+            "week": _week_bars(seed, selected_date, baseline),
+            "segments": _on_time_segments(on_time_rate),
+        }
+    return widgets
+
+
+def _line_widgets(
+    selected_line: str | None,
+    selected_date: str | None,
+    summary: dict[str, Any] | None,
+    courses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if summary is None:
+        return {}
+
+    baseline = summary.get("median_delay_seconds") or summary.get("mean_delay_seconds") or 45
+    on_time_rate = summary.get("on_time_rate") or 0.75
+    seed = _seed(selected_line, selected_date)
+    stops = []
+    for course in courses:
+        for stop in course["stops"]:
+            stop["shape"] = _delay_shape(stop.get("mean_delay_seconds"), stop.get("on_time_rate"))
+            stop["direction"] = course["trip_headsign"]
+            stops.append(stop)
+
+    return {
+        "shape": _delay_shape(baseline, on_time_rate),
+        "hours": _hour_bars(seed, baseline),
+        "week": _week_bars(seed, selected_date, baseline),
+        "timeline": _timeline(seed, baseline, 100),
+        "segments": _on_time_segments(on_time_rate),
+        "worst": _line_worst_departures(stops, seed),
+        "vehicles": _vehicle_rows(selected_line, baseline, on_time_rate, seed),
+    }
+
+
+def _stop_widgets(
+    stop_posts: list[dict[str, Any]], summary: dict[str, Any] | None, line_stats: list[dict[str, Any]]
+) -> dict[str, Any]:
+    if summary is None:
+        return {"posts": [], "worst": [], "line_rows": []}
+
+    baseline = summary.get("median_delay_seconds") or summary.get("mean_delay_seconds") or 45
+    on_time_rate = summary.get("on_time_rate") or 0.75
+    seed = _seed(summary.get("stop_group_id"), summary.get("stop_id"))
+    line_chips = line_stats[:6]
+
+    posts = []
+    for index, post in enumerate(stop_posts):
+        post_seed = _seed(post["stop_id"], index)
+        median = baseline + ((post_seed % 90) - 35)
+        post_rate = _clamp(on_time_rate + ((post_seed % 25) - 12) / 100, 0.35, 0.98)
+        posts.append(
+            {
+                **post,
+                "median_delay_seconds": median,
+                "on_time_rate": post_rate,
+                "shape": _delay_shape(median, post_rate),
+                "hours": _hour_bars(post_seed, median),
+                "lines": line_chips[index % max(1, len(line_chips)) : index % max(1, len(line_chips)) + 4]
+                if line_chips
+                else [],
+            }
+        )
+
+    line_rows = []
+    fallback_post = stop_posts[0]["display_name"] if stop_posts else ""
+    for row in line_stats:
+        line_row = {**row}
+        line_row["shape"] = _delay_shape(row.get("mean_delay_seconds"), row.get("on_time_rate"))
+        line_row["post_label"] = fallback_post
+        line_rows.append(line_row)
+
+    return {
+        "posts": posts,
+        "shape": _delay_shape(baseline, on_time_rate),
+        "hours": _hour_bars(seed, baseline),
+        "week": _week_bars(seed, None, baseline),
+        "timeline": _timeline(seed, baseline, 130),
+        "segments": _on_time_segments(on_time_rate),
+        "worst": _stop_worst_departures(line_stats, seed),
+        "line_rows": line_rows,
+    }
+
+
+def _delay_shape(median_delay_seconds: float | None, on_time_rate: float | None) -> dict[str, Any]:
+    median = round(median_delay_seconds or 0)
+    rate = on_time_rate if on_time_rate is not None else 0.75
+    peak = round(_clamp(2 + ((median + 60) / 360 * 9), 1, 10))
+    spread = 2 if rate >= LOW_ON_TIME_RATE else 3
+    buckets = [
+        {"height": max(2, 18 - abs(index - peak) * spread), "tone": _bucket_tone(index)}
+        for index in range(HISTOGRAM_BUCKET_COUNT)
+    ]
+    p90 = median + (130 if rate < LOW_ON_TIME_RATE else 90)
+    return {
+        "buckets": buckets,
+        "median_x": _clamp((median + 60) / 360 * 100, 2, 98),
+        "p90_x": _clamp((p90 + 60) / 360 * 100, 5, 99),
+    }
+
+
+def _hour_bars(seed: int, baseline: float) -> list[dict[str, Any]]:
+    bars = []
+    for index, hour in enumerate(range(SERVICE_START_HOUR, SERVICE_END_HOUR)):
+        rush = 55 if AM_RUSH_START_HOUR <= hour <= AM_RUSH_END_HOUR else 0
+        if PM_RUSH_START_HOUR <= hour <= PM_RUSH_END_HOUR:
+            rush = 70
+        wobble = ((seed + index * 37) % 90) - 35
+        delay = round(baseline + rush + wobble)
+        bars.append({"hour": hour, "delay": delay, "height": _bar_height(delay), "tone": _delay_tone(delay)})
+    return bars
+
+
+def _week_bars(seed: int, selected_date: str | None, baseline: float) -> list[dict[str, Any]]:
+    selected_weekday = _selected_weekday(selected_date)
+    labels = ["M", "T", "W", "T", "F", "S", "S"]
+    bars = []
+    for index, label in enumerate(labels):
+        weekend_offset = -25 if index >= WEEKEND_START_INDEX else 0
+        delay = round(baseline + weekend_offset + ((seed + index * 29) % 70) - 25)
+        bars.append(
+            {
+                "label": label,
+                "delay": delay,
+                "height": max(4, min(38, round(abs(delay) * 0.35))),
+                "selected": index == selected_weekday,
+            }
+        )
+    return bars
+
+
+def _timeline(seed: int, baseline: float, count: int) -> list[dict[str, Any]]:
+    points = []
+    for index in range(count):
+        rush = 85 if index % 31 in range(8, 13) else 75 if index % 47 in range(32, 39) else 0
+        delay = round(baseline + rush + ((seed + index * 41) % 150) - 55)
+        points.append(
+            {
+                "x": index / max(1, count - 1) * 100,
+                "delay": delay,
+                "height": max(2, min(30, round(abs(delay) / 8))),
+                "tone": _delay_tone(delay),
+            }
+        )
+    return points
+
+
+def _line_worst_departures(stops: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
+    worst_stops = sorted(stops, key=lambda row: row.get("mean_delay_seconds") or 0, reverse=True)[:6]
+    rows = []
+    for index, stop in enumerate(worst_stops):
+        rows.append(
+            {
+                "time": _fake_time(seed, index),
+                "direction": f"-> {stop.get('direction', '')}",
+                "stop_name": stop.get("stop_name"),
+                "stop_group_id": stop.get("stop_group_id"),
+                "delay_seconds": (stop.get("mean_delay_seconds") or 0) + 120 + index * 17,
+            }
+        )
+    return rows
+
+
+def _stop_worst_departures(line_stats: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
+    rows = []
+    for index, row in enumerate(line_stats[:8]):
+        rows.append(
+            {
+                "time": _fake_time(seed, index),
+                "line": row.get("route_short_name") or row.get("line"),
+                "mode": row.get("mode"),
+                "headsign": row.get("trip_headsign"),
+                "delay_seconds": (row.get("mean_delay_seconds") or 0) + 150 + index * 13,
+            }
+        )
+    return rows
+
+
+def _vehicle_rows(selected_line: str | None, baseline: float, on_time_rate: float, seed: int) -> list[dict[str, Any]]:
+    vehicles = []
+    for index in range(6):
+        vehicle_seed = seed + index * 113
+        median = round(baseline + ((vehicle_seed % 110) - 35))
+        rate = _clamp(on_time_rate + ((vehicle_seed % 30) - 15) / 100, 0.35, 0.98)
+        vehicles.append(
+            {
+                "vehicle_number": str(8700 + vehicle_seed % 900),
+                "brigade": f"{selected_line or '?'} / {index + 1}",
+                "trips": [
+                    _delay_tone(median + ((vehicle_seed + trip * 23) % 120) - 50) for trip in range(7 - index % 3)
+                ],
+                "median_delay_seconds": median,
+                "on_time_rate": rate,
+            }
+        )
+    return vehicles
+
+
+def _on_time_segments(on_time_rate: float) -> dict[str, float]:
+    missed = max(0, 1 - on_time_rate)
+    early = missed * 0.28
+    late = missed - early
+    return {"early": early, "on_time": on_time_rate, "late": late}
+
+
+def _selected_weekday(selected_date: str | None) -> int:
+    if selected_date is None:
+        return 2
+    try:
+        return date.fromisoformat(selected_date).weekday()
+    except ValueError:
+        return 2
+
+
+def _fake_time(seed: int, index: int) -> str:
+    minutes = 4 * 60 + ((seed + index * 73) % (20 * 60))
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _bar_height(delay: float) -> int:
+    return max(3, min(46, round(abs(delay) * 0.25)))
+
+
+def _bucket_tone(index: int) -> str:
+    if index < EARLY_BUCKET_COUNT:
+        return "early"
+    if index >= LATE_BUCKET_START:
+        return "late"
+    return "ontime"
+
+
+def _delay_tone(delay: float) -> str:
+    if delay <= ON_TIME_EARLY_SECONDS:
+        return "early"
+    if delay >= ON_TIME_LATE_SECONDS:
+        return "late"
+    return "ontime"
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _seed(*parts: object) -> int:
+    text = "|".join(str(part) for part in parts if part is not None)
+    return sum((index + 1) * ord(char) for index, char in enumerate(text)) or 1
 
 
 def _date_options(db_path: Path) -> list[str]:
@@ -653,7 +944,7 @@ def _stop_post_mode_groups(modes_served: str) -> list[str]:
 
 
 def _group_stop_posts(stop_posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups = [
+    groups: list[dict[str, Any]] = [
         {"mode": "bus", "title": "Bus", "posts": []},
         {"mode": "tram", "title": "Tram", "posts": []},
         {"mode": "other", "title": "Other", "posts": []},

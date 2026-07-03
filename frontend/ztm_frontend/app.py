@@ -9,6 +9,10 @@ from flask import Flask, current_app, render_template, request
 
 from ztm_frontend import queries
 
+EARLY_DELAY_SECONDS = -60
+LATE_DELAY_SECONDS = 120
+LOW_ON_TIME_RATE = 0.6
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -25,6 +29,8 @@ def create_app() -> Flask:
     app.add_template_filter(_format_integer, "integer")
     app.add_template_filter(_format_percent, "percent")
     app.add_template_filter(_format_time, "time")
+    app.add_template_filter(_delay_class, "delay_class")
+    app.add_template_filter(_percent_class, "percent_class")
     app.add_template_filter(lambda value: json.dumps(value, separators=(",", ":")), "to_json")
 
     @app.context_processor
@@ -117,6 +123,24 @@ def _format_time(value: datetime | None) -> str:
     if value is None:
         return ""
     return value.strftime("%H:%M")
+
+
+def _delay_class(value: float | None) -> str:
+    if value is None:
+        return "muted"
+    if value <= EARLY_DELAY_SECONDS:
+        return "early-text"
+    if value >= LATE_DELAY_SECONDS:
+        return "late-text"
+    return "neutral-text"
+
+
+def _percent_class(value: float | None) -> str:
+    if value is None:
+        return "muted"
+    if value < LOW_ON_TIME_RATE:
+        return "late-text"
+    return "dim-text"
 
 
 app = create_app()
