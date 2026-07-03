@@ -57,7 +57,8 @@ def create_app() -> Flask:
 
     @app.get("/stops/")
     @app.get("/stops/<stop_group_id>")
-    def stops(stop_group_id: str | None = None) -> str:
+    @app.get("/stops/<stop_group_id>/<post>")
+    def stops(stop_group_id: str | None = None, post: str | None = None) -> str:
         mode = request.args.get("mode")
         if mode not in {"bus", "tram"}:
             mode = None
@@ -68,7 +69,7 @@ def create_app() -> Flask:
                 stop_group_id,
                 mode,
                 request.args.get("q", ""),
-                request.args.get("post"),
+                post or request.args.get("post"),
                 request.args.get("date"),
             ),
         )

@@ -28,20 +28,20 @@
         </header>
 
         <section class="widgets">
-          <div class="widget">
+          <div class="widget metric-widget">
             <div class="label">On time</div>
-            <div><span class="big {{ summary.on_time_rate|percent_class }}">{{ summary.on_time_rate|percent }}</span> <span>of {{ summary.arrival_count|integer }} arrivals</span></div>
+            <div class="metric-line"><span class="big {{ summary.on_time_rate|percent_class }}">{{ summary.on_time_rate|percent }}</span> <span>of {{ summary.arrival_count|integer }} arrivals</span></div>
             {{ ui.stack(line_widgets.segments) }}
           </div>
-          <div class="widget grow">
+          <div class="widget chart-widget grow">
             <div class="label">Delay distribution</div>
             {{ ui.hist(line_widgets.shape) }}
           </div>
-          <div class="widget">
+          <div class="widget chart-widget">
             <div class="label">Median delay by hour</div>
             {{ ui.hour_bars(line_widgets.hours) }}
           </div>
-          <div class="widget">
+          <div class="widget chart-widget">
             <div class="label">This week · mean</div>
             {{ ui.week_bars(line_widgets.week) }}
           </div>

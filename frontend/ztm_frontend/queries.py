@@ -291,6 +291,7 @@ def get_stops(  # noqa: PLR0913
     stop_post_groups: list[dict[str, Any]] = []
     selected_post: dict[str, Any] | None = None
     line_stats: list[dict[str, Any]] = []
+    post_line_stats: list[dict[str, Any]] = []
     if selected_stop_group_id is not None:
         summary = fetch_one(
             db_path,
@@ -316,7 +317,12 @@ def get_stops(  # noqa: PLR0913
             with observed_posts as (
                 select
                     stop_id,
-                    string_agg(distinct mode, ', ' order by mode) as observed_modes
+                    string_agg(distinct mode, ', ' order by mode) as observed_modes,
+                    avg(delay_seconds) as mean_delay_seconds,
+                    quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
+                    quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
+                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate,
+                    count(*) as arrival_count
                 from fct_stop_arrival
                 where stop_group_id = ?
                   and service_date = ?
@@ -329,7 +335,12 @@ def get_stops(  # noqa: PLR0913
                 post.stop_lat,
                 post.stop_lon,
                 post.stop_group_id,
-                observed_posts.observed_modes as modes_served
+                observed_posts.observed_modes as modes_served,
+                observed_posts.mean_delay_seconds,
+                observed_posts.median_delay_seconds,
+                observed_posts.p90_delay_seconds,
+                observed_posts.on_time_rate,
+                observed_posts.arrival_count
             from dim_stop_post_current as post
             inner join observed_posts
                 on post.stop_id = observed_posts.stop_id
@@ -342,9 +353,33 @@ def get_stops(  # noqa: PLR0913
             post["display_name"] = _stop_post_label(post["stop_id"], post["stop_group_id"])
             post["mode_groups"] = _stop_post_mode_groups(post["modes_served"])
         stop_posts.sort(key=lambda post: _stop_post_sort_key(post["display_name"]))
+        post_line_stats = fetch_all(
+            db_path,
+            """
+            select
+                stop_id,
+                line,
+                mode,
+                route_short_name,
+                trip_headsign,
+                avg(delay_seconds) as mean_delay_seconds,
+                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
+            from fct_stop_arrival
+            where stop_group_id = ?
+              and service_date = ?
+              and trip_quality = 'complete'
+            group by stop_id, line, mode, route_short_name, trip_headsign
+            order by stop_id, try_cast(line as integer), line, trip_headsign
+            """,
+            [selected_stop_group_id, selected_date],
+        )
+        lines_by_post = _collapse_lines_by_post(post_line_stats)
+        for post in stop_posts:
+            post["lines"] = lines_by_post.get(post["stop_id"], [])
         stop_post_groups = _group_stop_posts(stop_posts)
-        if stop_posts and not any(post["stop_id"] == selected_stop_id for post in stop_posts):
-            selected_stop_id = _default_stop_post_id(stop_posts, selected_mode)
+        selected_stop_id = _resolve_stop_post_id(stop_posts, selected_stop_id)
+        if selected_stop_id is None and len(stop_posts) == 1:
+            selected_stop_id = stop_posts[0]["stop_id"]
 
         if selected_stop_id is not None:
             selected_post = fetch_one(
@@ -358,7 +393,8 @@ def get_stops(  # noqa: PLR0913
                     avg(delay_seconds) as mean_delay_seconds,
                     quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
                     quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
+                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate,
+                    count(*) as arrival_count
                 from fct_stop_arrival
                 where stop_id = ?
                   and service_date = ?
@@ -367,6 +403,10 @@ def get_stops(  # noqa: PLR0913
                 """,
                 [selected_stop_id, selected_date],
             )
+            if selected_post is not None:
+                selected_post["display_name"] = _stop_post_label(
+                    selected_post["stop_id"], selected_post["stop_group_id"]
+                )
         line_stats = fetch_all(
             db_path,
             """
@@ -600,13 +640,11 @@ def _stop_widgets(
     baseline = summary.get("median_delay_seconds") or summary.get("mean_delay_seconds") or 45
     on_time_rate = summary.get("on_time_rate") or 0.75
     seed = _seed(summary.get("stop_group_id"), summary.get("stop_id"))
-    line_chips = line_stats[:6]
-
     posts = []
     for index, post in enumerate(stop_posts):
         post_seed = _seed(post["stop_id"], index)
-        median = baseline + ((post_seed % 90) - 35)
-        post_rate = _clamp(on_time_rate + ((post_seed % 25) - 12) / 100, 0.35, 0.98)
+        median = post.get("median_delay_seconds") or baseline + ((post_seed % 90) - 35)
+        post_rate = post.get("on_time_rate") or _clamp(on_time_rate + ((post_seed % 25) - 12) / 100, 0.35, 0.98)
         posts.append(
             {
                 **post,
@@ -614,9 +652,7 @@ def _stop_widgets(
                 "on_time_rate": post_rate,
                 "shape": _delay_shape(median, post_rate),
                 "hours": _hour_bars(post_seed, median),
-                "lines": line_chips[index % max(1, len(line_chips)) : index % max(1, len(line_chips)) + 4]
-                if line_chips
-                else [],
+                "lines": post.get("lines", []),
             }
         )
 
@@ -646,7 +682,7 @@ def _delay_shape(median_delay_seconds: float | None, on_time_rate: float | None)
     peak = round(_clamp(2 + ((median + 60) / 360 * 9), 1, 10))
     spread = 2 if rate >= LOW_ON_TIME_RATE else 3
     buckets = [
-        {"height": max(2, 18 - abs(index - peak) * spread), "tone": _bucket_tone(index)}
+        {"height": max(3, 38 - abs(index - peak) * spread * 2), "tone": _bucket_tone(index)}
         for index in range(HISTOGRAM_BUCKET_COUNT)
     ]
     p90 = median + (130 if rate < LOW_ON_TIME_RATE else 90)
@@ -967,6 +1003,39 @@ def _group_stop_posts(stop_posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for mode in post["mode_groups"]:
             by_mode[mode]["posts"].append(post)
     return [group for group in groups if group["posts"]]
+
+
+def _collapse_lines_by_post(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    collapsed: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (row["stop_id"], row["line"], row["mode"])
+        line = collapsed.setdefault(
+            key,
+            {
+                "stop_id": row["stop_id"],
+                "line": row["line"],
+                "mode": row["mode"],
+                "route_short_name": row["route_short_name"],
+                "destinations": [],
+            },
+        )
+        if row["trip_headsign"] not in line["destinations"]:
+            line["destinations"].append(row["trip_headsign"])
+
+    lines_by_post: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for line in collapsed.values():
+        line["trip_headsign"] = ", ".join(line["destinations"])
+        lines_by_post[line["stop_id"]].append(line)
+    return dict(lines_by_post)
+
+
+def _resolve_stop_post_id(stop_posts: list[dict[str, Any]], selected_stop_id: str | None) -> str | None:
+    if selected_stop_id is None:
+        return None
+    for post in stop_posts:
+        if selected_stop_id in {post["stop_id"], post["display_name"]}:
+            return post["stop_id"]
+    return None
 
 
 def _default_stop_post_id(stop_posts: list[dict[str, Any]], selected_mode: str) -> str:

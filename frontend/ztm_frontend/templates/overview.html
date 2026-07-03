@@ -31,30 +31,30 @@
         {% for mode in ["bus", "tram"] %}
           {% set row = mode_stats.get(mode) %}
           {% set widget = overview_widgets.get(mode) %}
-          <div class="widget" id="{{ mode }}">
+          <div class="widget metric-widget" id="{{ mode }}">
             <div class="label">{{ mode }} on time</div>
-            <div><span class="big {{ row.on_time_rate|percent_class if row else 'muted' }}">{{ row.on_time_rate|percent if row else "n/a" }}</span> <span>mean {{ row.mean_delay_seconds|delay if row else "n/a" }}</span></div>
+            <div class="metric-line"><span class="big {{ row.on_time_rate|percent_class if row else 'muted' }}">{{ row.on_time_rate|percent if row else "n/a" }}</span> <span>mean {{ row.mean_delay_seconds|delay if row else "n/a" }}</span></div>
             {% if widget %}{{ ui.stack(widget.segments) }}{% endif %}
           </div>
         {% endfor %}
-        <div class="widget">
+        <div class="widget chart-widget">
           <div class="label">Bus delay distribution</div>
           {{ ui.hist(overview_widgets.bus.shape) }}
         </div>
-        <div class="widget">
+        <div class="widget chart-widget">
           <div class="label">Tram delay distribution</div>
           {{ ui.hist(overview_widgets.tram.shape) }}
         </div>
-        <div class="widget">
+        <div class="widget chart-widget">
           <div class="label">Bus median by hour</div>
           {{ ui.hour_bars(overview_widgets.bus.hours) }}
         </div>
-        <div class="widget">
+        <div class="widget chart-widget">
           <div class="label">Tram median by hour</div>
           {{ ui.hour_bars(overview_widgets.tram.hours) }}
         </div>
         <div class="widget overview-empty" aria-hidden="true"></div>
-        <div class="widget">
+        <div class="widget chart-widget">
           <div class="label">This week · network mean</div>
           {{ ui.week_bars(overview_widgets.bus.week) }}
         </div>

@@ -15,7 +15,7 @@
     <div class="ontime" style="width: {{ (segments.on_time * 100)|round(1) }}%"></div>
     <div class="late" style="width: {{ (segments.late * 100)|round(1) }}%"></div>
   </div>
-  <div class="legend">
+  <div class="plot-axis legend">
     <span><i style="background: var(--early)"></i> early {{ segments.early|percent }}</span>
     <span><i style="background: var(--ontime)"></i> on time {{ segments.on_time|percent }}</span>
     <span><i style="background: var(--late)"></i> late {{ segments.late|percent }}</span>
@@ -24,7 +24,7 @@
 
 {% macro hist(shape, mini=False) %}
   <div class="hist {% if mini %}mini{% endif %}">
-    <div class="hist-plot">
+    <div class="plot {% if mini %}plot-mini{% endif %} hist-plot">
       <div class="bars">
         {% for bucket in shape.buckets %}
           <div class="bar {{ bucket.tone }}" style="height: {{ bucket.height }}px"></div>
@@ -34,30 +34,30 @@
       <div class="marker-p90" style="left: {{ shape.p90_x }}%"></div>
     </div>
     {% if not mini %}
-      <div class="hist-axis"><span>−1m</span><span>0</span><span>+2m</span><span>+5m</span></div>
+      <div class="plot-axis hist-axis"><span>−1m</span><span>0</span><span>+2m</span><span>+5m</span></div>
     {% endif %}
   </div>
 {% endmacro %}
 
 {% macro hour_bars(hours, small=False) %}
-  <div class="hour-bars {% if small %}small{% endif %}">
+  <div class="plot {% if small %}plot-mini{% endif %} hour-bars {% if small %}small{% endif %}">
     {% for row in hours %}
       <div class="bar {{ row.tone }}" style="height: {{ row.height }}px" title="{{ '%02d'|format(row.hour) }} · {{ row.delay|delay }}"></div>
     {% endfor %}
   </div>
   {% if not small %}
-    <div class="hour-axis"><span>04</span><span>08</span><span>12</span><span>16</span><span>20</span><span>00</span><span>03</span></div>
+    <div class="plot-axis hour-axis"><span>04</span><span>08</span><span>12</span><span>16</span><span>20</span><span>00</span><span>03</span></div>
   {% endif %}
 {% endmacro %}
 
 {% macro week_bars(week) %}
   <div class="week">
-    <div class="week-plot">
+    <div class="plot week-plot">
       {% for row in week %}
         <span class="week-day {% if row.selected %}selected{% endif %}"><span class="daybar" style="height: {{ row.height }}px"></span></span>
       {% endfor %}
     </div>
-    <div class="week-axis">
+    <div class="plot-axis week-axis">
       {% for row in week %}
         <span class="lbl {% if row.selected %}selected{% endif %}">{{ row.label }}</span>
       {% endfor %}
