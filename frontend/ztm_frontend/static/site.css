@@ -580,9 +580,9 @@ td:nth-child(n + 2) {
 .landing-route,
 .landing-stop-name {
   overflow: hidden;
-  color: #e6e6e6;
-  font-size: 0.82rem;
-  font-weight: 600;
+  color: var(--fg2);
+  font-size: 0.8rem;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
