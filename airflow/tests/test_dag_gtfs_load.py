@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import types
 import zipfile
+from collections import UserDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -176,6 +177,26 @@ def test_selected_gtfs_snapshot_uses_current_triggering_asset_events() -> None:
 
     assert selected["snapshot_id"] == latest_snapshot_id
     assert selected["snapshots"] == [first_snapshot, latest_snapshot]
+
+
+def test_selected_gtfs_snapshot_accepts_airflow_mapping_accessor() -> None:
+    dag = _load_dag_module()
+    snapshot_id = "2026-06-25T14:00:00Z_abcdef123456"
+    snapshot = {
+        "snapshot_id": snapshot_id,
+        "gcs_path": f"gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip",
+        "processing_date": "2026-06-26",
+    }
+
+    selected = dag._selected_gtfs_snapshot(
+        {
+            "dag_run": object(),
+            "triggering_asset_events": UserDict({dag.GTFS_SNAPSHOT_ASSET: (FakeAssetEvent(snapshot),)}),
+        }
+    )
+
+    assert selected["snapshot_id"] == snapshot_id
+    assert selected["snapshots"] == [snapshot]
 
 
 def test_latest_gtfs_snapshot_rejects_missing_metadata_table(monkeypatch: pytest.MonkeyPatch) -> None:
