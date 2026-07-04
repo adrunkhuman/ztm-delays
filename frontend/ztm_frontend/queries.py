@@ -868,9 +868,8 @@ def _line_landing_rows(
         ),
 
         route_labels as (
-            select line, mode, string_agg(trip_headsign, ' -> ' order by head_rank) as route_label
+            select line, mode, any_value(trip_headsign) filter (where head_rank = 1) as route_label
             from ranked_heads
-            where head_rank <= 2
             group by line, mode
         )
 
@@ -1035,7 +1034,7 @@ def _trip_landing_rows(
         delay_profile = row.get("delay_profile") or []
         row["trace"] = _trip_trace(delay_profile)
         row["erratic_score"] = _trip_erratic_score(delay_profile)
-        row["route_label"] = f"{row['origin_stop_name']} -> {row['destination_stop_name']}"
+        row["route_label"] = row.get("trip_headsign") or row.get("destination_stop_name")
     return sorted(rows, key=lambda row: _trip_landing_sort_key(row, selected_rank))[:LANDING_ROW_LIMIT]
 
 
