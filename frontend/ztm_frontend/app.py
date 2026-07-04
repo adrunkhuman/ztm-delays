@@ -71,6 +71,7 @@ def create_app() -> Flask:
                 request.args.get("q", ""),
                 post or request.args.get("post"),
                 request.args.get("date"),
+                request.args.get("view"),
             ),
         )
 

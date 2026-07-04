@@ -56,13 +56,17 @@
               </div>
             {% endif %}
           </div>
-          {{ ui.datebox(selected_date, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, date=date_nav.previous) if date_nav.previous else none, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, date=date_nav.next) if date_nav.next else none) }}
+          {{ ui.datebox(selected_date, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.previous) if date_nav.previous else none, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.next) if date_nav.next else none) }}
         </header>
 
         {% if not selected_post %}
           <section class="section post-landing">
-            <div class="label" style="margin-bottom: .8rem">By post</div>
-            <div class="post-list">
+            <div class="stop-view-switch scope">
+              <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=selected_mode, q=search, date=selected_date, view='post') }}" class="{% if selected_view == 'post' %}active{% endif %}">by post</a>
+              <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=selected_mode, q=search, date=selected_date, view='line') }}" class="{% if selected_view == 'line' %}active{% endif %}">by line</a>
+            </div>
+            {% if selected_view == 'post' %}
+              <div class="post-list">
               {% for post in stop_widgets.posts %}
                 <div class="post-band">
                   <a class="post-band-hit" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}" aria-label="open post {{ post.display_name }}"></a>
@@ -103,7 +107,30 @@
                   </div>
                 </div>
               {% endfor %}
-            </div>
+              </div>
+            {% else %}
+              <div class="stop-line-list">
+                {% for line in stop_line_groups %}
+                  <div class="stop-line-band">
+                    <a class="stop-line-main" href="{{ url_for('lines', line=line.line, mode=line.mode, date=selected_date) }}">
+                      <span class="stop-line-title mono">{{ line.route_short_name }}</span>
+                    </a>
+                    <div class="stop-line-destinations {% if line.destinations|length >= 3 %}split{% endif %}">
+                      {% for destination in line.destinations %}
+                        <div class="stop-line-destination">
+                          <span class="stop-line-headsign" title="{{ destination.trip_headsign }}">→ {{ destination.trip_headsign }}</span>
+                          <span class="stop-line-posts">
+                            {% for post in destination.posts %}
+                              <a class="stop-line-post" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">{{ post.display_name }}</a>
+                            {% endfor %}
+                          </span>
+                        </div>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
           </section>
         {% else %}
           <section class="widgets">

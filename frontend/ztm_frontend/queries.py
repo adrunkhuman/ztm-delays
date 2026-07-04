@@ -264,9 +264,11 @@ def get_stops(  # noqa: PLR0913
     search: str,
     selected_stop_id: str | None,
     selected_date: str | None,
+    selected_view: str | None = None,
 ) -> dict[str, Any]:
     """Build the stop picker and selected-stop page data."""
     selected_mode = selected_mode or "bus"
+    selected_view = selected_view if selected_view in {"post", "line"} else "post"
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
     search_pattern = f"%{search.strip().lower()}%"
@@ -294,6 +296,7 @@ def get_stops(  # noqa: PLR0913
     selected_post: dict[str, Any] | None = None
     line_stats: list[dict[str, Any]] = []
     post_line_stats: list[dict[str, Any]] = []
+    stop_line_groups: list[dict[str, Any]] = []
     if selected_stop_group_id is not None:
         summary = fetch_one(
             db_path,
@@ -377,6 +380,8 @@ def get_stops(  # noqa: PLR0913
         )
         lines_by_post = _collapse_lines_by_post(post_line_stats)
         line_groups_by_post = _group_lines_by_destination(post_line_stats)
+        posts_by_id = {post["stop_id"]: post for post in stop_posts}
+        stop_line_groups = _group_posts_by_line(post_line_stats, posts_by_id)
         for post in stop_posts:
             post["lines"] = lines_by_post.get(post["stop_id"], [])
             post["line_groups"] = line_groups_by_post.get(post["stop_id"], [])
@@ -441,6 +446,7 @@ def get_stops(  # noqa: PLR0913
         "stop_list": stop_list,
         "selected_stop_group_id": selected_stop_group_id,
         "selected_mode": selected_mode,
+        "selected_view": selected_view,
         "search": search,
         "selected_stop_id": selected_stop_id,
         "summary": summary,
@@ -448,6 +454,7 @@ def get_stops(  # noqa: PLR0913
         "stop_post_groups": stop_post_groups,
         "selected_post": selected_post,
         "line_stats": line_stats,
+        "stop_line_groups": stop_line_groups,
         "stop_widgets": stop_widgets,
         "delay_plot": _delay_points(db_path, selected_date, stop_id=selected_stop_id)
         if selected_stop_id is not None
@@ -760,7 +767,7 @@ def _line_worst_departures(stops: list[dict[str, Any]], seed: int) -> list[dict[
         rows.append(
             {
                 "time": _fake_time(seed, index),
-                "direction": f"→ {stop.get('direction', '')}",
+                "direction": stop.get("direction", ""),
                 "stop_name": stop.get("stop_name"),
                 "stop_group_id": stop.get("stop_group_id"),
                 "delay_seconds": (stop.get("mean_delay_seconds") or 0) + 120 + index * 17,
@@ -1006,6 +1013,12 @@ def _stop_post_band_sort_key(post: dict[str, Any]) -> tuple[int, tuple[int, str,
     return (mode_order, _stop_post_sort_key(post["display_name"]))
 
 
+def _line_sort_value(line: str) -> tuple[int, int, str]:
+    if line.isdecimal():
+        return (0, int(line), line)
+    return (1, 0, line)
+
+
 def _stop_post_mode_groups(modes_served: str) -> list[str]:
     modes = {mode.strip() for mode in modes_served.split(",") if mode.strip()}
     groups = [mode for mode in STOP_POST_PRIMARY_MODES if mode in modes]
@@ -1083,6 +1096,57 @@ def _group_lines_by_destination(rows: list[dict[str, Any]]) -> dict[str, list[di
     for groups in groups_by_post.values():
         groups.sort(key=lambda group: group["trip_headsign"].casefold())
     return dict(groups_by_post)
+
+
+def _group_posts_by_line(rows: list[dict[str, Any]], posts_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        line_key = (row["line"], row["mode"])
+        line_group = grouped.setdefault(
+            line_key,
+            {
+                "line": row["line"],
+                "mode": row["mode"],
+                "route_short_name": row["route_short_name"],
+                "destinations": {},
+            },
+        )
+        destinations = line_group["destinations"]
+        destination = destinations.setdefault(
+            row["trip_headsign"],
+            {
+                "trip_headsign": row["trip_headsign"],
+                "posts": [],
+                "post_ids": set(),
+            },
+        )
+        if row["stop_id"] in destination["post_ids"]:
+            continue
+        post = posts_by_id.get(row["stop_id"])
+        if post is None:
+            continue
+        destination["post_ids"].add(row["stop_id"])
+        destination["posts"].append(
+            {
+                "stop_id": row["stop_id"],
+                "display_name": post["display_name"],
+                "on_time_rate": row.get("on_time_rate"),
+                "mean_delay_seconds": row.get("mean_delay_seconds"),
+            }
+        )
+
+    line_groups = []
+    for line_group in grouped.values():
+        destinations = []
+        for destination in line_group["destinations"].values():
+            destination.pop("post_ids")
+            destination["posts"].sort(key=lambda post: _stop_post_sort_key(post["display_name"]))
+            destinations.append(destination)
+        destinations.sort(key=lambda destination: destination["trip_headsign"].casefold())
+        line_group["destinations"] = destinations
+        line_groups.append(line_group)
+    line_groups.sort(key=lambda line: (line["mode"] != "bus", _line_sort_value(line["line"]), line["line"]))
+    return line_groups
 
 
 def _resolve_stop_post_id(stop_posts: list[dict[str, Any]], selected_stop_id: str | None) -> str | None:
