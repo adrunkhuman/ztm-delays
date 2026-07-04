@@ -5,21 +5,7 @@
 
 {% block body %}
   <div class="body">
-    <aside class="rail">
-      <div class="railgroup">
-        <div class="label">Modes</div>
-        {% for mode in ["bus", "tram"] %}
-          {% set row = mode_stats.get(mode) %}
-          <a class="rail-link" href="#{{ mode }}"><span class="mono">{{ mode|upper }}</span><span class="spct {{ row.on_time_rate|percent_class if row else 'muted' }}">{{ row.on_time_rate|percent if row else "n/a" }}</span></a>
-        {% endfor %}
-      </div>
-      <div class="railgroup">
-        <div class="label">Jump</div>
-        <a class="rail-link" href="#worst-lines">worst lines</a>
-        <a class="rail-link" href="#worst-stops">worst stops</a>
-        <a class="rail-link" href="{{ url_for('status') }}">pipeline status</a>
-      </div>
-    </aside>
+    <aside class="rail"></aside>
 
     <main class="main">
       <header class="head">
