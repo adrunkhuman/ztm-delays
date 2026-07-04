@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from datetime import date
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 from ztm_frontend.db import fetch_all, fetch_one
@@ -32,6 +33,12 @@ EARLY_BUCKET_COUNT = 2
 LATE_BUCKET_START = 8
 PARTIAL_TRIP_SCORE = 80
 BROKEN_TRIP_SCORE = 92
+TRIP_TRACE_BASELINE = 16
+TRIP_TRACE_LATE_SCALE_SECONDS = 18
+TRIP_TRACE_EARLY_SCALE_SECONDS = 24
+TRIP_TRACE_LATE_MAX_PX = 20
+TRIP_TRACE_EARLY_MAX_PX = 7
+MIN_TRIP_TRACE_POINTS = 2
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -469,9 +476,11 @@ def get_schedule(  # noqa: PLR0913
     selected_date: str | None,
     selected_trip_id: str | None,
     selected_vehicle: str | None,
+    selected_sort: str | None = None,
 ) -> dict[str, Any]:
     """Build the individual trip schedule page data."""
     selected_mode = selected_mode or "bus"
+    selected_sort = selected_sort if selected_sort in {"departure", "delay", "erratic"} else "departure"
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
     line_list = fetch_all(
@@ -498,28 +507,48 @@ def get_schedule(  # noqa: PLR0913
             db_path,
             """
             select
-                trip_id,
-                vehicle_number,
-                route_short_name,
-                trip_headsign,
-                origin_stop_name,
-                destination_stop_name,
-                scheduled_start_time,
-                scheduled_end_time,
-                start_delay_seconds,
-                end_delay_seconds,
-                stops_expected,
-                stops_detected
-            from fct_trip
-            where service_date = ?
-              and mode = ?
-              and line = ?
-              and trip_quality = 'complete'
-            order by scheduled_start_time, trip_headsign, vehicle_number
+                trips.trip_id,
+                trips.vehicle_number,
+                trips.route_short_name,
+                trips.direction_id,
+                trips.trip_headsign,
+                trips.origin_stop_name,
+                trips.destination_stop_name,
+                trips.scheduled_start_time,
+                trips.scheduled_end_time,
+                trips.start_delay_seconds,
+                trips.end_delay_seconds,
+                trips.stops_expected,
+                trips.stops_detected,
+                stop_arrivals.delay_profile
+            from fct_trip as trips
+            left join (
+                select
+                    service_date,
+                    trip_id,
+                    vehicle_number,
+                    list(delay_seconds order by stop_sequence) as delay_profile
+                from fct_stop_arrival
+                where service_date = ?
+                  and trip_quality = 'complete'
+                group by service_date, trip_id, vehicle_number
+            ) as stop_arrivals
+                on trips.service_date = stop_arrivals.service_date
+                and trips.trip_id = stop_arrivals.trip_id
+                and trips.vehicle_number = stop_arrivals.vehicle_number
+            where trips.service_date = ?
+              and trips.mode = ?
+              and trips.line = ?
+              and trips.trip_quality = 'complete'
+            order by trips.scheduled_start_time, trips.trip_headsign, trips.vehicle_number
             limit 160
             """,
-            [selected_date, selected_mode, selected_line],
+            [selected_date, selected_date, selected_mode, selected_line],
         )
+        for trip in trips:
+            trip["trace"] = _trip_trace(trip.get("delay_profile") or [])
+            trip["erratic_score"] = _trip_erratic_score(trip.get("delay_profile") or [])
+        trips.sort(key=lambda trip: _trip_sort_key(trip, selected_sort))
         if trips and not _trip_selected(trips, selected_trip_id, selected_vehicle):
             selected_trip_id = trips[0]["trip_id"]
             selected_vehicle = trips[0]["vehicle_number"]
@@ -552,8 +581,10 @@ def get_schedule(  # noqa: PLR0913
         "selected_line": selected_line,
         "selected_trip_id": selected_trip_id,
         "selected_vehicle": selected_vehicle,
+        "selected_sort": selected_sort,
         "line_list": line_list,
         "trips": trips,
+        "trip_groups": _trip_groups(trips),
         "selected_trip": selected_trip,
         "trip_stops": trip_stops,
     }
@@ -971,6 +1002,61 @@ def _by_mode_list(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]
     for row in rows:
         grouped[row["mode"]].append(row)
     return dict(grouped)
+
+
+def _trip_trace(delays: list[int]) -> list[dict[str, Any]]:
+    points = []
+    for delay in delays:
+        tone = _delay_tone(delay)
+        if delay >= 0:
+            offset = min(TRIP_TRACE_LATE_MAX_PX, round(delay / TRIP_TRACE_LATE_SCALE_SECONDS))
+        else:
+            offset = -min(TRIP_TRACE_EARLY_MAX_PX, round(abs(delay) / TRIP_TRACE_EARLY_SCALE_SECONDS))
+        points.append(
+            {
+                "delay": delay,
+                "tone": tone,
+                "dot_top": TRIP_TRACE_BASELINE - offset - 2,
+                "stem_top": TRIP_TRACE_BASELINE - offset if offset >= 0 else TRIP_TRACE_BASELINE,
+                "stem_height": abs(offset),
+                "has_stem": offset != 0,
+            }
+        )
+    return points
+
+
+def _trip_erratic_score(delays: list[int]) -> int:
+    if len(delays) < MIN_TRIP_TRACE_POINTS:
+        return 0
+    return max(abs(delay - previous) for previous, delay in pairwise(delays))
+
+
+def _trip_sort_key(trip: dict[str, Any], selected_sort: str) -> tuple[Any, ...]:
+    if selected_sort == "delay":
+        return (-(trip.get("end_delay_seconds") or 0), trip["scheduled_start_time"], trip["trip_headsign"])
+    if selected_sort == "erratic":
+        return (-(trip.get("erratic_score") or 0), trip["scheduled_start_time"], trip["trip_headsign"])
+    return (trip["scheduled_start_time"], trip["trip_headsign"], trip["vehicle_number"])
+
+
+def _trip_groups(trips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[int, str], dict[str, Any]] = {}
+    for trip in trips:
+        key = (trip["direction_id"], trip["trip_headsign"])
+        group = grouped.setdefault(
+            key,
+            {
+                "direction_id": trip["direction_id"],
+                "trip_headsign": trip["trip_headsign"],
+                "origin_stop_name": trip["origin_stop_name"],
+                "destination_stop_name": trip["destination_stop_name"],
+                "trips": [],
+            },
+        )
+        group["trips"].append(trip)
+    return sorted(
+        grouped.values(), key=lambda group: (-len(group["trips"]), group["direction_id"], group["trip_headsign"])
+    )
 
 
 def _trip_selected(trips: list[dict[str, Any]], trip_id: str | None, vehicle_number: str | None) -> bool:

@@ -1,19 +1,19 @@
 {% extends "base.html" %}
 {% import "_widgets.html" as ui %}
 
-{% block title %}schedule · ZTM delays{% endblock %}
+{% block title %}trips · ZTM delays{% endblock %}
 
 {% block body %}
   <div class="body">
     <aside class="rail line-rail">
       <div class="mode">
-        <a href="{{ url_for('schedule', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
-        <a href="{{ url_for('schedule', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+        <a href="{{ url_for('schedule', mode='bus', date=selected_date, sort=selected_sort) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+        <a href="{{ url_for('schedule', mode='tram', date=selected_date, sort=selected_sort) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
       </div>
       <div class="line-rail-scroll">
         <div class="linegrid">
           {% for row in line_list %}
-            <a href="{{ url_for('schedule', mode=selected_mode, line=row.line, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
+            <a href="{{ url_for('schedule', mode=selected_mode, line=row.line, date=selected_date, sort=selected_sort) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
           {% endfor %}
         </div>
       </div>
@@ -21,65 +21,60 @@
 
     <main class="main">
       <header class="head line-headline">
-        <h1 class="hero-title mono">{{ selected_line or "schedule" }}</h1>
-        <div class="tag">{{ selected_mode|upper }}</div>
-        {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, line=selected_line, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, date=date_nav.next) if date_nav.next else none) }}
+        <h1 class="hero-title mono">{{ selected_line or "trips" }}</h1>
+        <div class="tag {{ selected_mode }}">{{ selected_mode|upper }}</div>
+        {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.next) if date_nav.next else none) }}
       </header>
 
-      {% if selected_trip %}
-        <section class="schedule-summary">
-          <div class="widget">
-            <div class="label">Trip</div>
-            <div><span class="big">{{ selected_trip.scheduled_start_time|time }}</span> <span>start</span></div>
-            <div class="mono muted">{{ selected_trip.scheduled_end_time|time }} end · vehicle {{ selected_trip.vehicle_number }}</div>
-          </div>
-          <div class="widget schedule-route">
-            <div class="label">Route</div>
-            <div class="section-title">{{ selected_trip.origin_stop_name }} → {{ selected_trip.destination_stop_name }}</div>
-            <div class="mono muted">{{ selected_trip.trip_headsign }}</div>
-          </div>
-          <div class="widget">
-            <div class="label">Start delay</div>
-            <div class="big {{ selected_trip.start_delay_seconds|delay_class }}">{{ selected_trip.start_delay_seconds|delay }}</div>
-          </div>
-          <div class="widget">
-            <div class="label">End delay</div>
-            <div class="big {{ selected_trip.end_delay_seconds|delay_class }}">{{ selected_trip.end_delay_seconds|delay }}</div>
-          </div>
-        </section>
-      {% endif %}
+      <div class="trip-sort scope">
+        <span class="label">Sort</span>
+        <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='departure') }}" class="{% if selected_sort == 'departure' %}active{% endif %}">departure</a>
+        <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='delay') }}" class="{% if selected_sort == 'delay' %}active{% endif %}">worst end delay</a>
+        <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='erratic') }}" class="{% if selected_sort == 'erratic' %}active{% endif %}">most erratic</a>
+      </div>
 
-      <section class="section schedule-layout">
-        <div>
-          <div class="label" style="margin-bottom: .6rem">Trips</div>
-          <div class="trip-list">
-            {% for trip in trips %}
-              <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, trip=trip.trip_id, vehicle=trip.vehicle_number) }}" class="trip-picker {% if trip.trip_id == selected_trip_id and trip.vehicle_number == selected_vehicle %}active{% endif %}">
-                <span class="mono">{{ trip.scheduled_start_time|time }}</span>
-                <span class="data-link">{{ trip.origin_stop_name }} → {{ trip.destination_stop_name }}</span>
-                <span class="sval {{ trip.end_delay_seconds|delay_class }}">{{ trip.end_delay_seconds|delay }}</span>
-              </a>
-            {% endfor %}
-          </div>
-        </div>
-
-        <div>
-          <div class="label" style="margin-bottom: .6rem">Stop arrivals</div>
-          {% if selected_trip %}
-            <div class="table-head trip-head"><div>Seq</div><div>Stop</div><div>Sched</div><div style="text-align:right">Delay</div></div>
-            {% for stop in trip_stops %}
-              <div class="data-row trip-row">
-                <span class="mono muted">{{ stop.stop_sequence }}</span>
-                <a class="data-link" href="{{ url_for('stops', stop_group_id=stop.stop_group_id, mode=selected_mode, date=selected_date) }}">{{ stop.stop_name }}</a>
-                <span class="mono muted">{{ stop.scheduled_arrival_time|time }}</span>
-                <span class="sval {{ stop.delay_seconds|delay_class }}">{{ stop.delay_seconds|delay }}</span>
+      {% if trip_groups %}
+        <section class="trip-columns">
+          {% for group in trip_groups %}
+            <div class="trip-direction">
+              <div class="trip-dirhead">
+                <h2>→ {{ group.trip_headsign }}</h2>
+                <div class="mono muted">{{ group.trips|length|integer }} runs</div>
               </div>
-            {% endfor %}
-          {% else %}
-            <div class="muted">No trip selected.</div>
-          {% endif %}
+              <div class="trip-table-head">
+                <div>Dep</div>
+                <div class="trip-axis"><span>route →</span></div>
+                <div>End</div>
+              </div>
+              {% for trip in group.trips %}
+                <a class="trip-run" href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort=selected_sort, trip=trip.trip_id, vehicle=trip.vehicle_number) }}">
+                  <span class="trip-dep mono">{{ trip.scheduled_start_time|time }}</span>
+                  <span class="trip-trace" aria-label="per-stop delay trace">
+                    <span class="trip-trace-base"></span>
+                    <span class="trip-trace-stops">
+                      {% for point in trip.trace %}
+                        <span class="trip-trace-stop" title="{{ point.delay|delay }}">
+                          {% if point.has_stem %}<span class="trip-trace-stem {{ point.tone }}" style="top: {{ point.stem_top }}px; height: {{ point.stem_height }}px"></span>{% endif %}
+                          <span class="trip-trace-dot {{ point.tone }}" style="top: {{ point.dot_top }}px"></span>
+                        </span>
+                      {% endfor %}
+                    </span>
+                  </span>
+                  <span class="trip-end mono {{ trip.end_delay_seconds|delay_class }}">{{ trip.end_delay_seconds|delay }}</span>
+                </a>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </section>
+
+        <div class="trip-legend">
+          <span><i class="late"></i> above = late</span>
+          <span><i class="early"></i> below = early</span>
+          <span>each square = one stop, in travel order</span>
         </div>
-      </section>
+      {% else %}
+        <section class="section muted">No complete trips available for this line and date.</section>
+      {% endif %}
     </main>
   </div>
 {% endblock %}

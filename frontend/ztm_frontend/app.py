@@ -76,6 +76,7 @@ def create_app() -> Flask:
         )
 
     @app.get("/schedule/")
+    @app.get("/trips/")
     def schedule() -> str:
         mode = request.args.get("mode")
         if mode not in {"bus", "tram"}:
@@ -89,6 +90,7 @@ def create_app() -> Flask:
                 request.args.get("date"),
                 request.args.get("trip"),
                 request.args.get("vehicle"),
+                request.args.get("sort"),
             ),
         )
 
