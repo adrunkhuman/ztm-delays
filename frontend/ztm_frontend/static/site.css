@@ -883,7 +883,8 @@ td:nth-child(n + 2) {
 .data-row:hover,
 .worst-row:hover,
 .vehicle-row:hover,
-.postcell:hover {
+.postcell:hover,
+.post-band:hover {
   background: var(--hover);
 }
 
@@ -1100,9 +1101,10 @@ td:nth-child(n + 2) {
 }
 
 .chip {
-  display: inline-block;
+  display: inline-grid;
+  place-items: center;
   width: calc(3.4ch + 10px);
-  padding: 0 5px;
+  padding: 0;
   border: 1px solid var(--dim);
   color: var(--fg2);
   font-family: var(--mono);
@@ -1114,7 +1116,6 @@ td:nth-child(n + 2) {
 }
 
 .chip.tram {
-  width: calc(2ch + 10px);
   border-color: var(--border);
   background: #262626;
 }
@@ -1136,6 +1137,139 @@ td:nth-child(n + 2) {
 .postgrid-wide {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   max-width: none;
+}
+
+.post-list {
+  border-top: 1px solid var(--border);
+}
+
+.post-band {
+  position: relative;
+  display: grid;
+  grid-template-columns: 82px 300px minmax(0, 1fr);
+  column-gap: 0.65rem;
+  align-items: center;
+  padding: 0.75rem 0.5rem;
+  border-bottom: 1px solid var(--hair);
+  color: inherit;
+}
+
+.post-band-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+}
+
+.post-band-meta,
+.post-band-charts {
+  position: relative;
+  z-index: 3;
+}
+
+.post-band-lines .chip {
+  position: relative;
+  z-index: 3;
+}
+
+.post-band-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.post-band-number {
+  color: var(--fg);
+  font-size: 2.35rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.post-band-id {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  align-items: flex-start;
+}
+
+.post-band-modes {
+  display: flex;
+  gap: 0.18rem;
+}
+
+.post-band-subline {
+  display: flex;
+  gap: 0.35rem;
+  align-items: baseline;
+  font-size: 0.74rem;
+  line-height: 1.05;
+}
+
+.post-band-modes .tag {
+  align-self: auto;
+  margin-top: 0;
+  padding: 0.08rem 0.25rem;
+  font-size: 0.48rem;
+}
+
+.post-band-charts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 0.75rem;
+  min-width: 0;
+}
+
+.post-band-chart {
+  display: grid;
+  grid-template-rows: 20px 0.65rem;
+  row-gap: 2px;
+  min-width: 0;
+}
+
+.post-band-chart .plot-axis {
+  margin-top: 0;
+}
+
+.post-band-chart .hour-bars.small .bar {
+  max-height: 20px;
+}
+
+.post-band-lines {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem 1rem;
+  padding-left: 0.8rem;
+  min-width: 0;
+}
+
+.post-band-destination {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1.15rem auto;
+  row-gap: 0.18rem;
+  break-inside: avoid;
+  margin-bottom: 0.45rem;
+  min-width: 0;
+}
+
+.post-band-headsign {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.15rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.post-band-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.22rem;
+  align-items: flex-start;
+  min-width: 0;
+  color: var(--fg2);
+  font-size: 0.72rem;
 }
 
 .stop-mid {
@@ -1441,5 +1575,24 @@ td:nth-child(n + 2) {
 
   .postgrid {
     grid-template-columns: 1fr;
+  }
+
+  .post-band {
+    grid-template-columns: 1fr;
+    row-gap: 0.7rem;
+  }
+
+  .post-band-meta {
+    flex-direction: row;
+    align-items: baseline;
+  }
+
+  .post-band-number {
+    font-size: 2rem;
+  }
+
+  .post-band-lines {
+    grid-template-columns: 1fr;
+    padding-left: 0;
   }
 }

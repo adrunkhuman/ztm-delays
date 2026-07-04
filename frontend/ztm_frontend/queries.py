@@ -27,7 +27,7 @@ PM_RUSH_END_HOUR = 18
 WEEKEND_START_INDEX = 5
 HISTOGRAM_BUCKET_COUNT = 12
 HISTOGRAM_MAX_HEIGHT = 38
-HISTOGRAM_MINI_MAX_HEIGHT = 18
+HISTOGRAM_MINI_MAX_HEIGHT = 20
 EARLY_BUCKET_COUNT = 2
 LATE_BUCKET_START = 8
 PARTIAL_TRIP_SCORE = 80
@@ -354,7 +354,7 @@ def get_stops(  # noqa: PLR0913
         for post in stop_posts:
             post["display_name"] = _stop_post_label(post["stop_id"], post["stop_group_id"])
             post["mode_groups"] = _stop_post_mode_groups(post["modes_served"])
-        stop_posts.sort(key=lambda post: _stop_post_sort_key(post["display_name"]))
+        stop_posts.sort(key=_stop_post_band_sort_key)
         post_line_stats = fetch_all(
             db_path,
             """
@@ -376,8 +376,10 @@ def get_stops(  # noqa: PLR0913
             [selected_stop_group_id, selected_date],
         )
         lines_by_post = _collapse_lines_by_post(post_line_stats)
+        line_groups_by_post = _group_lines_by_destination(post_line_stats)
         for post in stop_posts:
             post["lines"] = lines_by_post.get(post["stop_id"], [])
+            post["line_groups"] = line_groups_by_post.get(post["stop_id"], [])
         stop_post_groups = _group_stop_posts(stop_posts)
         selected_stop_id = _resolve_stop_post_id(stop_posts, selected_stop_id)
         if selected_stop_id is None and len(stop_posts) == 1:
@@ -655,6 +657,7 @@ def _stop_widgets(
                 "shape": _delay_shape(median, post_rate),
                 "hours": _hour_bars(post_seed, median),
                 "lines": post.get("lines", []),
+                "line_groups": post.get("line_groups", []),
             }
         )
 
@@ -992,6 +995,17 @@ def _stop_post_sort_key(label: str) -> tuple[int, str, int, str]:
     return (2, label, 0, label)
 
 
+def _stop_post_band_sort_key(post: dict[str, Any]) -> tuple[int, tuple[int, str, int, str]]:
+    groups = post["mode_groups"]
+    if "bus" in groups:
+        mode_order = 0
+    elif "tram" in groups:
+        mode_order = 1
+    else:
+        mode_order = 2
+    return (mode_order, _stop_post_sort_key(post["display_name"]))
+
+
 def _stop_post_mode_groups(modes_served: str) -> list[str]:
     modes = {mode.strip() for mode in modes_served.split(",") if mode.strip()}
     groups = [mode for mode in STOP_POST_PRIMARY_MODES if mode in modes]
@@ -1035,6 +1049,40 @@ def _collapse_lines_by_post(rows: list[dict[str, Any]]) -> dict[str, list[dict[s
         line["trip_headsign"] = ", ".join(line["destinations"])
         lines_by_post[line["stop_id"]].append(line)
     return dict(lines_by_post)
+
+
+def _group_lines_by_destination(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (row["stop_id"], row["trip_headsign"])
+        group = grouped.setdefault(
+            key,
+            {
+                "stop_id": row["stop_id"],
+                "trip_headsign": row["trip_headsign"],
+                "lines": [],
+                "line_keys": set(),
+            },
+        )
+        line_key = (row["line"], row["mode"])
+        if line_key in group["line_keys"]:
+            continue
+        group["line_keys"].add(line_key)
+        group["lines"].append(
+            {
+                "line": row["line"],
+                "mode": row["mode"],
+                "route_short_name": row["route_short_name"],
+            }
+        )
+
+    groups_by_post: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for group in grouped.values():
+        group.pop("line_keys")
+        groups_by_post[group["stop_id"]].append(group)
+    for groups in groups_by_post.values():
+        groups.sort(key=lambda group: group["trip_headsign"].casefold())
+    return dict(groups_by_post)
 
 
 def _resolve_stop_post_id(stop_posts: list[dict[str, Any]], selected_stop_id: str | None) -> str | None:
