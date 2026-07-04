@@ -4,6 +4,7 @@ import csv
 import re
 import tempfile
 import zipfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -135,19 +136,19 @@ GTFS_TABLES = (
 )
 
 
-def _selected_gtfs_snapshot(context: dict[str, object]) -> dict[str, object]:
+def _selected_gtfs_snapshot(context: Mapping[str, object]) -> dict[str, object]:
     manual_snapshot = _manual_gtfs_snapshot(context.get("dag_run"))
     if manual_snapshot is not None:
         return _snapshot_batch([manual_snapshot])
 
     triggering_asset_events = context.get("triggering_asset_events")
-    if not isinstance(triggering_asset_events, dict):
+    if not isinstance(triggering_asset_events, Mapping):
         raise TypeError("dag_gtfs_load requires a GTFS snapshot asset event or explicit dag_run.conf")
     try:
         asset_events = triggering_asset_events[GTFS_SNAPSHOT_ASSET]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("dag_gtfs_load requires a GTFS snapshot asset event or explicit dag_run.conf") from exc
-    if not isinstance(asset_events, list):
+    if not isinstance(asset_events, Sequence) or isinstance(asset_events, (str, bytes)):
         raise TypeError("dag_gtfs_load requires a GTFS snapshot asset event or explicit dag_run.conf")
 
     snapshots = [_validate_snapshot_context(getattr(event, "extra", None)) for event in asset_events]
