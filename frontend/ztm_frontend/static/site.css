@@ -239,6 +239,11 @@ td:nth-child(n + 2) {
   letter-spacing: 0.1em;
 }
 
+.tag.tram {
+  border-color: var(--border);
+  background: #262626;
+}
+
 .head-meta {
   display: flex;
   flex-direction: column;
@@ -250,6 +255,12 @@ td:nth-child(n + 2) {
 .head-meta .tag {
   align-self: flex-start;
   margin-top: 0;
+}
+
+.head-tags {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
 }
 
 .head-meta:has(.post-tabs) {
@@ -1201,15 +1212,18 @@ td:nth-child(n + 2) {
 .post-band-subline {
   display: flex;
   gap: 0.35rem;
-  align-items: baseline;
+  align-items: center;
   font-size: 0.74rem;
-  line-height: 1.05;
+  line-height: 1;
 }
 
 .post-band-modes .tag {
   align-self: auto;
+  display: inline-grid;
+  place-items: center;
+  height: 1rem;
   margin-top: 0;
-  padding: 0.08rem 0.25rem;
+  padding: 0 0.25rem;
   font-size: 0.48rem;
 }
 

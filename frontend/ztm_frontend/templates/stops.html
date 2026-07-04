@@ -36,7 +36,18 @@
         <header class="head">
           <h1 class="hero-title">{{ summary.stop_group_name }}</h1>
           <div class="head-meta">
-            <div class="tag">{% if selected_post %}STOP POST{% else %}STOP GROUP{% endif %}</div>
+            <div class="head-tags">
+              <div class="tag">{% if selected_post %}STOP POST{% else %}STOP GROUP{% endif %}</div>
+              {% if selected_post %}
+                {% for post in stop_widgets.posts %}
+                  {% if post.stop_id == selected_stop_id %}
+                    {% for mode in post.mode_groups %}
+                      {% if mode in ["bus", "tram"] %}<span class="tag {{ mode }}">{{ mode|upper }}</span>{% endif %}
+                    {% endfor %}
+                  {% endif %}
+                {% endfor %}
+              {% endif %}
+            </div>
             {% if selected_post and stop_widgets.posts|length > 1 %}
               <div class="post-tabs">
                 {% for post in stop_widgets.posts %}
@@ -61,7 +72,7 @@
                       <div class="post-band-subline">
                         <span class="post-band-modes">
                           {% for mode in post.mode_groups %}
-                            {% if mode in ["bus", "tram"] %}<span class="tag">{{ mode|upper }}</span>{% endif %}
+                            {% if mode in ["bus", "tram"] %}<span class="tag {{ mode }}">{{ mode|upper }}</span>{% endif %}
                           {% endfor %}
                         </span>
                         <span class="mono {{ post.on_time_rate|percent_class }}">{{ post.on_time_rate|percent }}</span>
