@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}ZTM delays{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='site.css') }}">
+  </head>
+  <body>
+    <div class="page">
+      <nav class="nav">
+        <a class="brand" href="{{ url_for('index') }}">ZTM<span>/delays</span></a>
+        <div class="nav-links" aria-label="Main navigation">
+          <a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">overview</a>
+          <a href="{{ url_for('lines') }}" class="{% if request.endpoint == 'lines' %}active{% endif %}">lines</a>
+          <a href="{{ url_for('stops') }}" class="{% if request.endpoint == 'stops' %}active{% endif %}">stops</a>
+          <a href="{{ url_for('schedule') }}" class="{% if request.endpoint in ['schedule', 'trip_detail'] %}active{% endif %}">trips</a>
+        </div>
+        <a class="status-link {% if request.endpoint == 'status' %}active{% endif %}" href="{{ url_for('status') }}">status</a>
+      </nav>
+
+      {% block body %}{% endblock %}
+
+      <footer class="foot">
+        <span>archive · {{ meta.source_row_count|integer if meta.source_row_count else "n/a" }} rows · built {{ meta.exported_at or "n/a" }}</span>
+      </footer>
+    </div>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

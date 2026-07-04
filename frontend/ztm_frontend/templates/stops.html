@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% import "_widgets.html" as ui %}
+
+{% block title %}stops · ZTM delays{% endblock %}
+
+{% block body %}
+  <div class="body">
+    <aside class="rail">
+      <form action="{{ url_for('stops') }}" method="get">
+        <input type="hidden" name="mode" value="{{ selected_mode }}">
+        <input type="hidden" name="date" value="{{ selected_date }}">
+        <input type="hidden" name="rank" value="{{ selected_rank }}">
+        <input class="find" type="search" name="q" value="{{ search }}" placeholder="find stop…">
+      </form>
+
+      <div class="mode">
+        <a href="{{ url_for('stops', mode='bus', q=search, date=selected_date, rank=selected_rank) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+        <a href="{{ url_for('stops', mode='tram', q=search, date=selected_date, rank=selected_rank) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+      </div>
+
+      {% if selected_post and stop_widgets.posts %}
+        <div class="railgroup">
+          <div class="label">Posts</div>
+          {% for post in stop_widgets.posts %}
+            <a class="railpost {% if post.stop_id == selected_stop_id %}active{% endif %}" href="{{ url_for('stops', stop_group_id=selected_stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">
+              <span class="n">{{ post.display_name }}</span><span class="d">{{ post.stop_name }}</span><span class="p mono {{ post.on_time_rate|percent_class }}">{{ post.on_time_rate|percent }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <div class="railgroup">
+        <div class="label">Nearby</div>
+        {% for row in stop_list[:12] %}
+          <a class="rail-link {% if row.stop_group_id == selected_stop_group_id %}active{% endif %}" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=selected_mode, q=search, date=selected_date) }}">{{ row.stop_group_name }}</a>
+        {% endfor %}
+      </div>
+    </aside>
+
+    <main class="main">
+      {% if selected_stop_group_id is none %}
+        <header class="head landing-head">
+          <h1 class="hero-title">stops</h1>
+          <div class="landing-meta">
+            <span><b>{{ (stop_landing_summary.stop_group_count or 0)|integer }}</b> groups</span>
+            <span><b class="{{ (stop_landing_summary.on_time_rate or none)|percent_class }}">{{ (stop_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
+            <span><b class="{{ (stop_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (stop_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
+          </div>
+          {{ ui.datebox(selected_date, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.next) if date_nav.next else none) }}
+        </header>
+
+        <div class="landing-rank-switch scope">
+          <span class="label">Sort</span>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='worst') }}" class="{% if selected_rank == 'worst' %}active{% endif %}">worst delay</a>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='busiest') }}" class="{% if selected_rank == 'busiest' %}active{% endif %}">busiest</a>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='best') }}" class="{% if selected_rank == 'best' %}active{% endif %}">best</a>
+        </div>
+
+        <section class="landing-rank">
+          <div class="landing-rank-head stop-rank-grid"><div>#</div><div>Stop group</div><div></div><div>Med</div><div>On t</div></div>
+          {% for row in stop_landing_rows %}
+            <a class="landing-rank-row stop-rank-grid" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=selected_mode, q=search, date=selected_date) }}">
+              <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
+              <span class="landing-stop-name" title="{{ row.stop_group_name }}">{{ row.stop_group_name }}</span>
+              {{ ui.hist(row.shape, true) }}
+              <span class="landing-value mono {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</span>
+              <span class="landing-percent mono {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</span>
+            </a>
+          {% endfor %}
+        </section>
+      {% elif summary %}
+        <header class="head">
+          <h1 class="hero-title">{{ summary.stop_group_name }}</h1>
+          <div class="head-meta">
+            <div class="head-tags">
+              <div class="tag">{% if selected_post %}STOP POST{% else %}STOP GROUP{% endif %}</div>
+              {% if selected_post %}
+                {% for post in stop_widgets.posts %}
+                  {% if post.stop_id == selected_stop_id %}
+                    {% for mode in post.mode_groups %}
+                      {% if mode in ["bus", "tram"] %}<span class="tag {{ mode }}">{{ mode|upper }}</span>{% endif %}
+                    {% endfor %}
+                  {% endif %}
+                {% endfor %}
+              {% endif %}
+            </div>
+            {% if selected_post and stop_widgets.posts|length > 1 %}
+              <div class="post-tabs">
+                {% for post in stop_widgets.posts %}
+                  <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}" class="post-tab {% if post.stop_id == selected_stop_id %}active{% endif %}">{{ post.display_name }}</a>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+          {{ ui.datebox(selected_date, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.previous) if date_nav.previous else none, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.next) if date_nav.next else none) }}
+        </header>
+
+        {% if not selected_post %}
+          <section class="section post-landing">
+            <div class="stop-view-switch scope">
+              <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=selected_mode, q=search, date=selected_date, view='post') }}" class="{% if selected_view == 'post' %}active{% endif %}">by post</a>
+              <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=selected_mode, q=search, date=selected_date, view='line') }}" class="{% if selected_view == 'line' %}active{% endif %}">by line</a>
+            </div>
+            {% if selected_view == 'post' %}
+              <div class="post-list">
+              {% for post in stop_widgets.posts %}
+                <div class="post-band">
+                  <a class="post-band-hit" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}" aria-label="open post {{ post.display_name }}"></a>
+                  <a class="post-band-meta" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">
+                    <div class="post-band-id">
+                      <div class="post-band-number mono">{{ post.display_name }}</div>
+                      <div class="post-band-subline">
+                        <span class="post-band-modes">
+                          {% for mode in post.mode_groups %}
+                            {% if mode in ["bus", "tram"] %}<span class="tag {{ mode }}">{{ mode|upper }}</span>{% endif %}
+                          {% endfor %}
+                        </span>
+                        <span class="mono {{ post.on_time_rate|percent_class }}">{{ post.on_time_rate|percent }}</span>
+                      </div>
+                    </div>
+                  </a>
+                  <a class="post-band-charts" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">
+                    <div class="post-band-chart">
+                      {{ ui.hist(post.shape, true) }}
+                      <div class="plot-axis mini-axis mini-delay-axis"><span>−1m</span><span>0</span><span>+5m</span></div>
+                    </div>
+                    <div class="post-band-chart">
+                      {{ ui.hour_bars(post.hours, true) }}
+                      <div class="plot-axis mini-axis mini-hour-axis"><span>04</span><span>16</span><span>03</span></div>
+                    </div>
+                  </a>
+                  <div class="post-band-lines">
+                    {% for group in post.line_groups %}
+                      <div class="post-band-destination">
+                        <span class="post-band-headsign" title="{{ group.trip_headsign }}">→ {{ group.trip_headsign }}</span>
+                        <span class="post-band-chips">
+                          {% for line in group.lines %}
+                            {{ ui.chip(line.route_short_name, line.mode, url_for('lines', line=line.line, mode=line.mode, date=selected_date)) }}
+                          {% endfor %}
+                        </span>
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endfor %}
+              </div>
+            {% else %}
+              <div class="stop-line-list">
+                {% for line in stop_line_groups %}
+                  <div class="stop-line-band">
+                    <a class="stop-line-main" href="{{ url_for('lines', line=line.line, mode=line.mode, date=selected_date) }}">
+                      <span class="stop-line-title mono">{{ line.route_short_name }}</span>
+                    </a>
+                    <div class="stop-line-destinations {% if line.destinations|length >= 3 %}split{% endif %}">
+                      {% for destination in line.destinations %}
+                        <div class="stop-line-destination">
+                          <span class="stop-line-headsign" title="{{ destination.trip_headsign }}">→ {{ destination.trip_headsign }}</span>
+                          <span class="stop-line-posts">
+                            {% for post in destination.posts %}
+                              <a class="stop-line-post" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">{{ post.display_name }}</a>
+                            {% endfor %}
+                          </span>
+                        </div>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </section>
+        {% else %}
+          <section class="widgets">
+            <div class="widget metric-widget">
+              <div class="label">On time</div>
+              <div class="metric-line"><span class="big {{ selected_post.on_time_rate|percent_class }}">{{ selected_post.on_time_rate|percent }}</span> <span>of {{ selected_post.arrival_count|integer }} arrivals</span></div>
+              {{ ui.stack(stop_widgets.segments) }}
+            </div>
+            <div class="widget chart-widget grow">
+              <div class="label">Delay distribution</div>
+              {{ ui.hist(stop_widgets.shape) }}
+            </div>
+            <div class="widget chart-widget">
+              <div class="label">Median delay by hour</div>
+              {{ ui.hour_bars(stop_widgets.hours) }}
+            </div>
+            <div class="widget chart-widget">
+              <div class="label">This week · mean</div>
+              {{ ui.week_bars(stop_widgets.week) }}
+            </div>
+          </section>
+
+          <section class="section">
+            <div class="label" style="margin-bottom: .6rem">Every departure</div>
+            {{ ui.timeline(stop_widgets.timeline) }}
+          </section>
+
+          <section class="section">
+            <div class="label" style="margin-bottom: .8rem">Worst departures</div>
+            {% for row in stop_widgets.worst %}
+              <div class="worst-row">
+                <span class="mono muted">{{ row.time }}</span>
+                <span>{{ ui.chip(row.line, row.mode, url_for('lines', line=row.line, mode=row.mode, date=selected_date)) }}</span>
+                <span class="data-link">{{ row.headsign }}</span>
+                <span class="sval {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
+              </div>
+            {% endfor %}
+          </section>
+
+          <section class="section">
+          <div class="label" style="margin-bottom: .6rem">Lines here · worst first</div>
+          <div class="two-up stop-lines" style="padding-top: 0; border-top: 0">
+            {% for chunk in [stop_widgets.line_rows[:(stop_widgets.line_rows|length + 1) // 2], stop_widgets.line_rows[(stop_widgets.line_rows|length + 1) // 2:]] %}
+              <div>
+                <div class="table-head line-head"><div>Line</div><div>Post</div><div>Towards</div><div></div><div style="text-align:right">Med</div><div style="text-align:right">On t</div></div>
+                {% for row in chunk %}
+                  <div class="data-row line-row">
+                    <div>{{ ui.chip(row.route_short_name, row.mode, url_for('lines', line=row.line, mode=row.mode, date=selected_date)) }}</div>
+                    <div class="mono muted">{{ row.post_label }}</div>
+                    <a class="data-link" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">{{ row.trip_headsign }}</a>
+                    {{ ui.hist(row.shape, true) }}
+                    <div class="sval {{ row.mean_delay_seconds|delay_class }}">{{ row.mean_delay_seconds|delay }}</div>
+                    <div class="spct {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endfor %}
+          </div>
+          </section>
+        {% endif %}
+      {% else %}
+        <div class="section muted">No stop data available.</div>
+      {% endif %}
+    </main>
+  </div>
+{% endblock %}

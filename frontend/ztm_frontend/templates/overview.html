@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% import "_widgets.html" as ui %}
+
+{% block title %}overview · ZTM delays{% endblock %}
+
+{% block body %}
+  <div class="body">
+    <aside class="rail"></aside>
+
+    <main class="main">
+      <header class="head">
+        <h1 class="hero-title">overview</h1>
+        {{ ui.datebox(selected_date, url_for('index', date=date_nav.previous) if date_nav.previous else none, url_for('index', date=date_nav.next) if date_nav.next else none) }}
+      </header>
+
+      <section class="overview-grid">
+        {% for mode in ["bus", "tram"] %}
+          {% set row = mode_stats.get(mode) %}
+          {% set widget = overview_widgets.get(mode) %}
+          <div class="widget metric-widget" id="{{ mode }}">
+            <div class="label">{{ mode }} on time</div>
+            <div class="metric-line"><span class="big {{ row.on_time_rate|percent_class if row else 'muted' }}">{{ row.on_time_rate|percent if row else "n/a" }}</span> <span>mean {{ row.mean_delay_seconds|delay if row else "n/a" }}</span></div>
+            {% if widget %}{{ ui.stack(widget.segments) }}{% endif %}
+          </div>
+        {% endfor %}
+        <div class="widget chart-widget">
+          <div class="label">Bus delay distribution</div>
+          {{ ui.hist(overview_widgets.bus.shape) }}
+        </div>
+        <div class="widget chart-widget">
+          <div class="label">Tram delay distribution</div>
+          {{ ui.hist(overview_widgets.tram.shape) }}
+        </div>
+        <div class="widget chart-widget">
+          <div class="label">Bus median by hour</div>
+          {{ ui.hour_bars(overview_widgets.bus.hours) }}
+        </div>
+        <div class="widget chart-widget">
+          <div class="label">Tram median by hour</div>
+          {{ ui.hour_bars(overview_widgets.tram.hours) }}
+        </div>
+        <div class="widget overview-empty" aria-hidden="true"></div>
+        <div class="widget chart-widget">
+          <div class="label">This week · network mean</div>
+          {{ ui.week_bars(overview_widgets.bus.week) }}
+        </div>
+      </section>
+
+      <section class="two-up" id="worst-lines">
+        {% for mode in ["bus", "tram"] %}
+          <div>
+            <div class="label" style="margin-bottom: .6rem">Worst {{ mode }} lines</div>
+            <div class="compact-cols">
+              {% for chunk in [worst_lines.get(mode, [])[:4], worst_lines.get(mode, [])[4:8]] %}
+                <div>
+                  <div class="table-head overview-line-row"><div>Line</div><div></div><div style="text-align:right">Med</div><div style="text-align:right">On t</div></div>
+                  {% for row in chunk %}
+                    <div class="data-row overview-line-row">
+                      <div>{{ ui.chip(row.route_short_name, row.mode, url_for('lines', line=row.line, mode=row.mode, date=selected_date)) }}</div>
+                      {{ ui.hist(row.shape, true) }}
+                      <div class="sval {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</div>
+                      <div class="spct {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</div>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% endfor %}
+      </section>
+
+      <section class="two-up" id="worst-stops" style="margin-top: 1.3rem">
+        {% for mode in ["bus", "tram"] %}
+          <div>
+            <div class="label" style="margin-bottom: .6rem">Worst {{ mode }} stops</div>
+            <div class="table-head overview-stop-row"><div>Stop</div><div></div><div style="text-align:right">Med</div><div style="text-align:right">On t</div></div>
+            {% for row in worst_stops.get(mode, []) %}
+              <div class="data-row overview-stop-row">
+                <a class="data-link" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=row.mode, date=selected_date) }}">{{ row.stop_group_name }} <span class="post-suffix">[{{ row.post_label }}]</span></a>
+                {{ ui.hist(row.shape, true) }}
+                <div class="sval {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</div>
+                <div class="spct {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</div>
+              </div>
+            {% endfor %}
+          </div>
+        {% endfor %}
+      </section>
+    </main>
+  </div>
+{% endblock %}

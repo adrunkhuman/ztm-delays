@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% import "_widgets.html" as ui %}
+
+{% block title %}lines · ZTM delays{% endblock %}
+
+{% block body %}
+  <div class="body">
+    <aside class="rail line-rail">
+      <div class="mode">
+        <a href="{{ url_for('lines', mode='bus', date=selected_date) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+        <a href="{{ url_for('lines', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+      </div>
+      <div class="line-rail-scroll">
+        <div class="linegrid">
+          {% for row in line_list %}
+            <a href="{{ url_for('lines', line=row.line, mode=selected_mode, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
+          {% endfor %}
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      {% if selected_line is none %}
+        <header class="head landing-head">
+          <h1 class="hero-title">lines</h1>
+          <div class="landing-meta">
+            <span><b>{{ (line_landing_summary.line_count or 0)|integer }}</b> lines</span>
+            <span><b class="{{ (line_landing_summary.on_time_rate or none)|percent_class }}">{{ (line_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
+            <span><b class="{{ (line_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (line_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
+          </div>
+          {{ ui.datebox(selected_date, url_for('lines', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('lines', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none) }}
+        </header>
+
+        <div class="landing-rank-switch scope">
+          <span class="label">Sort</span>
+          <a href="{{ url_for('lines', mode=selected_mode, date=selected_date, rank='worst') }}" class="{% if selected_rank == 'worst' %}active{% endif %}">worst delay</a>
+          <a href="{{ url_for('lines', mode=selected_mode, date=selected_date, rank='best') }}" class="{% if selected_rank == 'best' %}active{% endif %}">best</a>
+          <a href="{{ url_for('lines', mode=selected_mode, date=selected_date, rank='erratic') }}" class="{% if selected_rank == 'erratic' %}active{% endif %}">most erratic</a>
+        </div>
+
+        <section class="landing-rank">
+          <div class="landing-rank-head line-rank-grid"><div>#</div><div>Line</div><div>Route</div><div></div><div>Med</div><div>On t</div></div>
+          {% for row in line_landing_rows %}
+            <a class="landing-rank-row line-rank-grid" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">
+              <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
+              <span class="landing-line-pill mono {% if row.mode == 'tram' %}tram{% endif %}">{{ row.route_short_name }}</span>
+              <span class="landing-route" title="{{ row.route_label }}">{{ row.route_label }}</span>
+              {{ ui.hist(row.shape, true) }}
+              <span class="landing-value mono {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</span>
+              <span class="landing-percent mono {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</span>
+            </a>
+          {% endfor %}
+        </section>
+      {% elif summary %}
+        <header class="head line-headline">
+          <h1 class="hero-title mono">{{ summary.route_short_name }}</h1>
+          <div class="tag">{{ summary.mode|upper }}</div>
+          {{ ui.datebox(selected_date, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.previous) if date_nav.previous else none, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.next) if date_nav.next else none) }}
+        </header>
+
+        <section class="widgets">
+          <div class="widget metric-widget">
+            <div class="label">On time</div>
+            <div class="metric-line"><span class="big {{ summary.on_time_rate|percent_class }}">{{ summary.on_time_rate|percent }}</span> <span>of {{ summary.arrival_count|integer }} arrivals</span></div>
+            {{ ui.stack(line_widgets.segments) }}
+          </div>
+          <div class="widget chart-widget grow">
+            <div class="label">Delay distribution</div>
+            {{ ui.hist(line_widgets.shape) }}
+          </div>
+          <div class="widget chart-widget">
+            <div class="label">Median delay by hour</div>
+            {{ ui.hour_bars(line_widgets.hours) }}
+          </div>
+          <div class="widget chart-widget">
+            <div class="label">This week · mean</div>
+            {{ ui.week_bars(line_widgets.week) }}
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="label" style="margin-bottom: .6rem">Every departure</div>
+          {{ ui.timeline(line_widgets.timeline) }}
+        </section>
+
+        <section class="dirs">
+          {% for course in courses %}
+            <div>
+              <div class="dirhead">
+                <h2>→ {{ course.trip_headsign }}</h2>
+                <div class="dirstats"><span>trips <b>{{ course.trip_count|integer }}</b></span></div>
+              </div>
+              {% for stop in course.stops %}
+                <div class="stop-row">
+                  <div class="route">
+                    <div class="rline" style="top: {% if loop.first %}50%{% else %}0{% endif %}; bottom: {% if loop.last %}50%{% else %}0{% endif %}"></div>
+                    <div class="dot {% if loop.first or loop.last %}term{% endif %}"></div>
+                  </div>
+                  <a class="sname" href="{{ url_for('stops', stop_group_id=stop.stop_group_id, mode=summary.mode, date=selected_date) }}" style="font-weight: {% if loop.first or loop.last %}700{% else %}400{% endif %}">{{ stop.stop_name }}</a>
+                  {{ ui.hist(stop.shape, true) }}
+                  <div class="sval {{ stop.mean_delay_seconds|delay_class }}">{{ stop.mean_delay_seconds|delay }}</div>
+                  <div class="spct {{ stop.on_time_rate|percent_class }}">{{ stop.on_time_rate|percent }}</div>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </section>
+
+        <section class="bottom">
+          <div>
+            <div class="label" style="margin-bottom: .6rem">Worst departures</div>
+            <div class="line-worst-table">
+              <div class="table-head line-worst-row"><div>Time</div><div>Stop</div><div>Towards</div><div style="text-align:right">Delay</div></div>
+              {% for row in line_widgets.worst %}
+                <div class="worst-row line-worst-row">
+                  <span class="mono muted">{{ row.time }}</span>
+                  <a class="data-link" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=summary.mode, date=selected_date) }}" title="{{ row.stop_name }}">{{ row.stop_name }}</a>
+                  <span class="line-worst-direction muted" title="{{ row.direction }}">{{ row.direction }}</span>
+                  <span class="sval {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
+                </div>
+              {% endfor %}
+              </div>
+          </div>
+          <div>
+            <div class="label" style="margin-bottom: .6rem">Reliability strip</div>
+            {% for row in line_widgets.reliability %}
+              <div class="reliability-block">
+                <div class="reliability-head">
+                  <span>→ {{ row.direction }}</span>
+                  <span class="mono muted">{{ row.counts.clean }} clean · {{ row.counts.partial }} partial · {{ row.counts.broken }} broken</span>
+                </div>
+                <div class="reliability-squares" aria-label="trip outcomes">
+                  {% for trip in row.outcomes %}<span class="reliability-square {{ trip.outcome }}" title="{{ trip.label }}"></span>{% endfor %}
+                </div>
+              </div>
+            {% endfor %}
+            <div class="reliability-legend"><span><i class="clean"></i> clean</span><span><i class="partial"></i> partial</span><span><i class="broken"></i> broken</span></div>
+          </div>
+        </section>
+      {% else %}
+        <div class="section muted">No line data available.</div>
+      {% endif %}
+    </main>
+  </div>
+{% endblock %}

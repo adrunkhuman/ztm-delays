@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}status · ZTM delays{% endblock %}
+
+{% block body %}
+  <div class="body">
+    <aside class="rail"></aside>
+
+    <main class="main">
+      <header class="head">
+        <h1 class="hero-title">status</h1>
+        <div class="landing-meta">
+          <span>coverage</span>
+          <span>matching</span>
+          <span>recent days</span>
+        </div>
+      </header>
+
+      <section class="status-panels">
+        {% for mode in ["bus", "tram"] %}
+          {% set row = status_summary.get(mode) %}
+          <div class="status-panel" id="{{ mode }}">
+            <div class="status-panel-head">
+              <div>
+                <div class="tag {{ mode }}">{{ mode|upper }}</div>
+                <div class="mono muted">{{ row.first_date if row else "no data" }} → {{ row.last_date if row else "" }} · {{ row.day_count if row else 0 }} days</div>
+              </div>
+              <div class="status-label {{ row.health_ratio|percent_class if row else 'muted' }}">{{ row.health_label if row else "missing" }}</div>
+            </div>
+            {% if row %}
+              <div class="status-main-metric">
+                <span class="big {{ row.service_coverage_ratio|percent_class }}">{{ row.service_coverage_ratio|percent }}</span>
+                <span>service covered</span>
+              </div>
+              <div class="status-meter" aria-label="service coverage"><span style="width: {{ (row.service_coverage_ratio * 100)|round(1) if row.service_coverage_ratio is not none else 0 }}%"></span></div>
+              <div class="status-mini-grid">
+                <div><span class="label">raw day</span><b class="mono {{ row.completeness_ratio|percent_class }}">{{ row.completeness_ratio|percent }}</b></div>
+                <div><span class="label">matched</span><b class="mono {{ row.match_rate|percent_class }}">{{ row.match_rate|percent }}</b></div>
+                <div><span class="label">clean trips</span><b class="mono">{{ row.trips_complete|integer }}</b></div>
+                <div><span class="label">issues</span><b class="mono {% if row.trips_broken %}late-text{% else %}muted{% endif %}">{{ row.trips_broken|integer }}</b></div>
+              </div>
+            {% else %}
+              <div class="section muted">No recent status for {{ mode }}.</div>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </section>
+
+      <section class="status-history">
+        <div class="dirhead">
+          <h2>recent days</h2>
+          <div class="dirstats"><span>latest first</span></div>
+        </div>
+        <div class="status-table-head status-table-row">
+          <div>Date</div><div>Bus cover</div><div>Bus match</div><div>Bus trips</div><div>Bus issues</div><div>Tram cover</div><div>Tram match</div><div>Tram trips</div><div>Tram issues</div>
+        </div>
+        {% for day in status_days[:8] %}
+          {% set bus = day.bus %}
+          {% set tram = day.tram %}
+          <div class="status-table-row">
+            <span class="mono status-date">{{ day.service_date }}</span>
+            <span class="mono {{ bus.service_coverage_ratio|percent_class if bus else 'muted' }}">{{ bus.service_coverage_ratio|percent if bus else "n/a" }}</span>
+            <span class="mono {{ bus.match_rate|percent_class if bus else 'muted' }}">{{ bus.match_rate|percent if bus else "n/a" }}</span>
+            <span class="mono neutral-text">{{ bus.trips_complete|integer if bus else "n/a" }}</span>
+            <span class="mono {% if bus and bus.trips_broken %}late-text{% else %}muted{% endif %}">{{ bus.trips_broken|integer if bus else "n/a" }}</span>
+            <span class="mono {{ tram.service_coverage_ratio|percent_class if tram else 'muted' }}">{{ tram.service_coverage_ratio|percent if tram else "n/a" }}</span>
+            <span class="mono {{ tram.match_rate|percent_class if tram else 'muted' }}">{{ tram.match_rate|percent if tram else "n/a" }}</span>
+            <span class="mono neutral-text">{{ tram.trips_complete|integer if tram else "n/a" }}</span>
+            <span class="mono {% if tram and tram.trips_broken %}late-text{% else %}muted{% endif %}">{{ tram.trips_broken|integer if tram else "n/a" }}</span>
+          </div>
+        {% endfor %}
+      </section>
+    </main>
+  </div>
+{% endblock %}

@@ -1,0 +1,84 @@
+{% macro datebox(selected_date, previous_href=None, next_href=None) %}
+  <div class="datebox">
+    <div class="date">
+      <a href="{{ previous_href or '#' }}" class="{% if not previous_href %}disabled{% endif %}">‹</a>
+      <b>{{ selected_date or "n/a" }}</b>
+      <a href="{{ next_href or '#' }}" class="{% if not next_href %}disabled{% endif %}">›</a>
+    </div>
+    <div class="scope"><a class="active" href="#">day</a><a href="#">weekdays</a><a href="#">weekend</a><a href="#">month</a></div>
+  </div>
+{% endmacro %}
+
+{% macro stack(segments) %}
+  <div class="stack">
+    <div class="early" style="width: {{ (segments.early * 100)|round(1) }}%"></div>
+    <div class="ontime" style="width: {{ (segments.on_time * 100)|round(1) }}%"></div>
+    <div class="late" style="width: {{ (segments.late * 100)|round(1) }}%"></div>
+  </div>
+  <div class="plot-axis legend">
+    <span><i style="background: var(--early)"></i> early {{ segments.early|percent }}</span>
+    <span><i style="background: var(--ontime)"></i> on time {{ segments.on_time|percent }}</span>
+    <span><i style="background: var(--late)"></i> late {{ segments.late|percent }}</span>
+  </div>
+{% endmacro %}
+
+{% macro hist(shape, mini=False) %}
+  <div class="hist {% if mini %}mini{% endif %}">
+    <div class="plot {% if mini %}plot-mini{% endif %} hist-plot">
+      <div class="bars">
+        {% for bucket in shape.buckets %}
+          <div class="bar {{ bucket.tone }}" style="height: {{ bucket.mini_height if mini else bucket.height }}px"></div>
+        {% endfor %}
+      </div>
+      <div class="marker-med" style="left: {{ shape.median_x }}%"></div>
+      <div class="marker-p90" style="left: {{ shape.p90_x }}%"></div>
+    </div>
+    {% if not mini %}
+      <div class="plot-axis hist-axis"><span>−1m</span><span>0</span><span>+2m</span><span>+5m</span></div>
+    {% endif %}
+  </div>
+{% endmacro %}
+
+{% macro hour_bars(hours, small=False) %}
+  <div class="plot {% if small %}plot-mini{% endif %} hour-bars {% if small %}small{% endif %}">
+    {% for row in hours %}
+      <div class="bar {{ row.tone }}" style="height: {{ row.height }}px" title="{{ '%02d'|format(row.hour) }} · {{ row.delay|delay }}"></div>
+    {% endfor %}
+  </div>
+  {% if not small %}
+    <div class="plot-axis hour-axis"><span>04</span><span>08</span><span>12</span><span>16</span><span>20</span><span>00</span><span>03</span></div>
+  {% endif %}
+{% endmacro %}
+
+{% macro week_bars(week) %}
+  <div class="week">
+    <div class="plot week-plot">
+      {% for row in week %}
+        <span class="week-day {% if row.selected %}selected{% endif %}"><span class="daybar" style="height: {{ row.height }}px"></span></span>
+      {% endfor %}
+    </div>
+    <div class="plot-axis week-axis">
+      {% for row in week %}
+        <span class="lbl {% if row.selected %}selected{% endif %}">{{ row.label }}</span>
+      {% endfor %}
+    </div>
+  </div>
+{% endmacro %}
+
+{% macro timeline(points) %}
+  <div class="timeline">
+    <div class="base"></div>
+    {% for point in points %}
+      <div class="tick {{ point.tone }}" style="left: {{ point.x }}%; height: {{ point.height }}px" title="{{ point.delay|delay }}"></div>
+    {% endfor %}
+    <div class="t" style="left: 0">04:00</div>
+    <div class="t" style="left: 25%; transform: translateX(-50%)">09:00</div>
+    <div class="t" style="left: 50%; transform: translateX(-50%)">14:00</div>
+    <div class="t" style="left: 75%; transform: translateX(-50%)">19:00</div>
+    <div class="t" style="right: 0">24:00</div>
+  </div>
+{% endmacro %}
+
+{% macro chip(line, mode, href=None, active=False) %}
+  {% if href %}<a href="{{ href }}" class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</a>{% else %}<span class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</span>{% endif %}
+{% endmacro %}

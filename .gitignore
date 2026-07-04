@@ -22,6 +22,12 @@ dbt/target/
 dbt/dbt_packages/
 dbt/.user.yml
 
+# Local frontend serving data
+frontend/ztm/*.duckdb
+frontend/ztm/*.duckdb.wal
+frontend/ztm/*.duckdb.tmp
+frontend/ztm/*.meta.json
+
 # Tooling and OS noise
 .idea/
 .vscode/
