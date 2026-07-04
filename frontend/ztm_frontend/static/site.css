@@ -477,6 +477,115 @@ td:nth-child(n + 2) {
   width: auto;
 }
 
+.landing-head {
+  border-bottom: 1px solid var(--border);
+}
+
+.landing-meta {
+  display: flex;
+  gap: 0.8rem;
+  align-items: baseline;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+}
+
+.landing-meta b {
+  color: #e6e6e6;
+}
+
+.landing-rank-switch {
+  gap: 0.7rem;
+  align-items: baseline;
+  padding-top: 0.75rem;
+}
+
+.landing-rank {
+  padding: 0.7rem 0 1.4rem;
+}
+
+.landing-rank-head,
+.landing-rank-row {
+  display: grid;
+  column-gap: 14px;
+  align-items: center;
+}
+
+.line-rank-grid {
+  grid-template-columns: 24px 42px minmax(160px, 1fr) minmax(120px, 170px) 58px 48px;
+}
+
+.stop-rank-grid {
+  grid-template-columns: 24px minmax(180px, 1fr) minmax(120px, 170px) 58px 48px;
+}
+
+.trip-rank-grid {
+  grid-template-columns: 24px 44px 42px minmax(150px, 1fr) minmax(180px, 280px) 52px;
+}
+
+.landing-rank-head {
+  padding: 0 0 0.45rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.landing-rank-head > :nth-last-child(-n + 2) {
+  text-align: right;
+}
+
+.landing-rank-row {
+  min-height: 36px;
+  border-bottom: 1px solid var(--hair);
+}
+
+.landing-rank-row:hover {
+  background: var(--hover);
+}
+
+.landing-rank-index {
+  color: var(--dim);
+  font-size: 0.66rem;
+}
+
+.landing-line-pill {
+  display: inline-grid;
+  min-width: 32px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid var(--dim);
+  color: #f0f0f0;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.landing-line-pill.tram {
+  background: #222222;
+}
+
+.landing-route,
+.landing-stop-name {
+  overflow: hidden;
+  color: #e6e6e6;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.landing-value,
+.landing-percent {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-align: right;
+}
+
+.landing-rank-row .hist.mini {
+  width: 100%;
+}
+
 .widget {
   display: flex;
   flex-direction: column;
@@ -2014,6 +2123,30 @@ td:nth-child(n + 2) {
   .head {
     display: grid;
     gap: 0.8rem;
+  }
+
+  .landing-meta {
+    flex-wrap: wrap;
+  }
+
+  .line-rank-grid {
+    grid-template-columns: 24px 42px minmax(0, 1fr) 54px;
+  }
+
+  .stop-rank-grid {
+    grid-template-columns: 24px minmax(0, 1fr) 54px;
+  }
+
+  .trip-rank-grid {
+    grid-template-columns: 24px 42px 42px minmax(0, 1fr) 54px;
+  }
+
+  .line-rank-grid > :nth-child(4),
+  .line-rank-grid > :nth-child(6),
+  .stop-rank-grid > :nth-child(3),
+  .stop-rank-grid > :nth-child(5),
+  .trip-rank-grid > :nth-child(5) {
+    display: none;
   }
 
   .datebox {

@@ -9,8 +9,14 @@
       <form action="{{ url_for('stops') }}" method="get">
         <input type="hidden" name="mode" value="{{ selected_mode }}">
         <input type="hidden" name="date" value="{{ selected_date }}">
+        <input type="hidden" name="rank" value="{{ selected_rank }}">
         <input class="find" type="search" name="q" value="{{ search }}" placeholder="find stop…">
       </form>
+
+      <div class="mode">
+        <a href="{{ url_for('stops', mode='bus', q=search, date=selected_date, rank=selected_rank) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+        <a href="{{ url_for('stops', mode='tram', q=search, date=selected_date, rank=selected_rank) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+      </div>
 
       {% if selected_post and stop_widgets.posts %}
         <div class="railgroup">
@@ -32,7 +38,37 @@
     </aside>
 
     <main class="main">
-      {% if summary %}
+      {% if selected_stop_group_id is none %}
+        <header class="head landing-head">
+          <h1 class="hero-title">stops</h1>
+          <div class="landing-meta">
+            <span><b>{{ (stop_landing_summary.stop_group_count or 0)|integer }}</b> groups</span>
+            <span><b class="{{ (stop_landing_summary.on_time_rate or none)|percent_class }}">{{ (stop_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
+            <span><b class="{{ (stop_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (stop_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
+          </div>
+          {{ ui.datebox(selected_date, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.next) if date_nav.next else none) }}
+        </header>
+
+        <div class="landing-rank-switch scope">
+          <span class="label">Sort</span>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='worst') }}" class="{% if selected_rank == 'worst' %}active{% endif %}">worst delay</a>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='busiest') }}" class="{% if selected_rank == 'busiest' %}active{% endif %}">busiest</a>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='best') }}" class="{% if selected_rank == 'best' %}active{% endif %}">best</a>
+        </div>
+
+        <section class="landing-rank">
+          <div class="landing-rank-head stop-rank-grid"><div>#</div><div>Stop group</div><div></div><div>Med</div><div>On t</div></div>
+          {% for row in stop_landing_rows %}
+            <a class="landing-rank-row stop-rank-grid" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=selected_mode, q=search, date=selected_date) }}">
+              <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
+              <span class="landing-stop-name" title="{{ row.stop_group_name }}">{{ row.stop_group_name }}</span>
+              {{ ui.hist(row.shape, true) }}
+              <span class="landing-value mono {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</span>
+              <span class="landing-percent mono {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</span>
+            </a>
+          {% endfor %}
+        </section>
+      {% elif summary %}
         <header class="head">
           <h1 class="hero-title">{{ summary.stop_group_name }}</h1>
           <div class="head-meta">

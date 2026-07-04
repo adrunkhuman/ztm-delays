@@ -20,7 +20,38 @@
     </aside>
 
     <main class="main">
-      {% if summary %}
+      {% if selected_line is none %}
+        <header class="head landing-head">
+          <h1 class="hero-title">lines</h1>
+          <div class="landing-meta">
+            <span><b>{{ (line_landing_summary.line_count or 0)|integer }}</b> lines</span>
+            <span><b class="{{ (line_landing_summary.on_time_rate or none)|percent_class }}">{{ (line_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
+            <span><b class="{{ (line_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (line_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
+          </div>
+          {{ ui.datebox(selected_date, url_for('lines', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('lines', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none) }}
+        </header>
+
+        <div class="landing-rank-switch scope">
+          <span class="label">Sort</span>
+          <a href="{{ url_for('lines', mode=selected_mode, date=selected_date, rank='worst') }}" class="{% if selected_rank == 'worst' %}active{% endif %}">worst delay</a>
+          <a href="{{ url_for('lines', mode=selected_mode, date=selected_date, rank='best') }}" class="{% if selected_rank == 'best' %}active{% endif %}">best</a>
+          <a href="{{ url_for('lines', mode=selected_mode, date=selected_date, rank='erratic') }}" class="{% if selected_rank == 'erratic' %}active{% endif %}">most erratic</a>
+        </div>
+
+        <section class="landing-rank">
+          <div class="landing-rank-head line-rank-grid"><div>#</div><div>Line</div><div>Route</div><div></div><div>Med</div><div>On t</div></div>
+          {% for row in line_landing_rows %}
+            <a class="landing-rank-row line-rank-grid" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">
+              <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
+              <span class="landing-line-pill mono {% if row.mode == 'tram' %}tram{% endif %}">{{ row.route_short_name }}</span>
+              <span class="landing-route" title="{{ row.route_label }}">{{ row.route_label }}</span>
+              {{ ui.hist(row.shape, true) }}
+              <span class="landing-value mono {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</span>
+              <span class="landing-percent mono {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</span>
+            </a>
+          {% endfor %}
+        </section>
+      {% elif summary %}
         <header class="head line-headline">
           <h1 class="hero-title mono">{{ summary.route_short_name }}</h1>
           <div class="tag">{{ summary.mode|upper }}</div>

@@ -7,8 +7,8 @@
   <div class="body">
     <aside class="rail line-rail">
       <div class="mode">
-        <a href="{{ url_for('schedule', mode='bus', date=selected_date, sort=selected_sort) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
-        <a href="{{ url_for('schedule', mode='tram', date=selected_date, sort=selected_sort) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
+        <a href="{{ url_for('schedule', mode='bus', date=selected_date, sort=selected_sort, rank=selected_rank) }}" class="{% if selected_mode == 'bus' %}active{% endif %}">BUS</a>
+        <a href="{{ url_for('schedule', mode='tram', date=selected_date, sort=selected_sort, rank=selected_rank) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
       </div>
       <div class="line-rail-scroll">
         <div class="linegrid">
@@ -20,20 +20,62 @@
     </aside>
 
     <main class="main">
-      <header class="head line-headline">
-        <h1 class="hero-title mono">{{ selected_line or "trips" }}</h1>
-        <div class="tag {{ selected_mode }}">{{ selected_mode|upper }}</div>
-        {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.next) if date_nav.next else none) }}
-      </header>
+      {% if selected_line is none %}
+        <header class="head landing-head">
+          <h1 class="hero-title">trips</h1>
+          <div class="landing-meta">
+            <span><b>{{ (trip_landing_summary.trip_count or 0)|integer }}</b> trips</span>
+            <span><b class="{{ (trip_landing_summary.on_time_rate or none)|percent_class }}">{{ (trip_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
+            <span><b class="{{ (trip_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (trip_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
+          </div>
+          {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none) }}
+        </header>
 
-      <div class="trip-sort scope">
-        <span class="label">Sort</span>
-        <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='departure') }}" class="{% if selected_sort == 'departure' %}active{% endif %}">departure</a>
-        <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='delay') }}" class="{% if selected_sort == 'delay' %}active{% endif %}">worst end delay</a>
-        <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='erratic') }}" class="{% if selected_sort == 'erratic' %}active{% endif %}">most erratic</a>
-      </div>
+        <div class="landing-rank-switch scope">
+          <span class="label">Sort</span>
+          <a href="{{ url_for('schedule', mode=selected_mode, date=selected_date, rank='worst') }}" class="{% if selected_rank == 'worst' %}active{% endif %}">worst delay</a>
+          <a href="{{ url_for('schedule', mode=selected_mode, date=selected_date, rank='best') }}" class="{% if selected_rank == 'best' %}active{% endif %}">best</a>
+          <a href="{{ url_for('schedule', mode=selected_mode, date=selected_date, rank='erratic') }}" class="{% if selected_rank == 'erratic' %}active{% endif %}">most erratic</a>
+        </div>
 
-      {% if trip_groups %}
+        <section class="landing-rank">
+          <div class="landing-rank-head trip-rank-grid"><div>#</div><div>Time</div><div>Line</div><div>Route</div><div>Trace</div><div>End</div></div>
+          {% for trip in trip_landing_rows %}
+            <a class="landing-rank-row trip-rank-grid" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=selected_date, vehicle=trip.vehicle_number) }}">
+              <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
+              <span class="mono muted">{{ trip.scheduled_start_time|time }}</span>
+              <span class="landing-line-pill mono {% if trip.mode == 'tram' %}tram{% endif %}">{{ trip.route_short_name }}</span>
+              <span class="landing-route" title="{{ trip.route_label }}">{{ trip.route_label }}</span>
+              <span class="trip-trace" aria-label="per-stop delay trace">
+                <span class="trip-trace-base"></span>
+                <span class="trip-trace-stops">
+                  {% for point in trip.trace %}
+                    <span class="trip-trace-stop" title="{{ point.delay|delay }}">
+                      {% if point.has_stem %}<span class="trip-trace-stem {{ point.tone }}" style="top: {{ point.stem_top }}px; height: {{ point.stem_height }}px"></span>{% endif %}
+                      <span class="trip-trace-dot {{ point.tone }}" style="top: {{ point.dot_top }}px"></span>
+                    </span>
+                  {% endfor %}
+                </span>
+              </span>
+              <span class="landing-value mono {{ trip.end_delay_seconds|delay_class }}">{{ trip.end_delay_seconds|delay }}</span>
+            </a>
+          {% endfor %}
+        </section>
+      {% else %}
+        <header class="head line-headline">
+          <h1 class="hero-title mono">{{ selected_line }}</h1>
+          <div class="tag {{ selected_mode }}">{{ selected_mode|upper }}</div>
+          {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.next) if date_nav.next else none) }}
+        </header>
+
+        <div class="trip-sort scope">
+          <span class="label">Sort</span>
+          <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='departure') }}" class="{% if selected_sort == 'departure' %}active{% endif %}">departure</a>
+          <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='delay') }}" class="{% if selected_sort == 'delay' %}active{% endif %}">worst end delay</a>
+          <a href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort='erratic') }}" class="{% if selected_sort == 'erratic' %}active{% endif %}">most erratic</a>
+        </div>
+
+        {% if trip_groups %}
         <section class="trip-columns">
           {% for group in trip_groups %}
             <div class="trip-direction">
@@ -74,6 +116,7 @@
         </div>
       {% else %}
         <section class="section muted">No complete trips available for this line and date.</section>
+      {% endif %}
       {% endif %}
     </main>
   </div>

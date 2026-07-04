@@ -67,12 +67,12 @@
             <div class="compact-cols">
               {% for chunk in [worst_lines.get(mode, [])[:4], worst_lines.get(mode, [])[4:8]] %}
                 <div>
-                  <div class="table-head overview-line-row"><div>Line</div><div></div><div style="text-align:right">Mean</div><div style="text-align:right">On t</div></div>
+                  <div class="table-head overview-line-row"><div>Line</div><div></div><div style="text-align:right">Med</div><div style="text-align:right">On t</div></div>
                   {% for row in chunk %}
                     <div class="data-row overview-line-row">
                       <div>{{ ui.chip(row.route_short_name, row.mode, url_for('lines', line=row.line, mode=row.mode, date=selected_date)) }}</div>
                       {{ ui.hist(row.shape, true) }}
-                      <div class="sval {{ row.mean_delay_seconds|delay_class }}">{{ row.mean_delay_seconds|delay }}</div>
+                      <div class="sval {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</div>
                       <div class="spct {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</div>
                     </div>
                   {% endfor %}
@@ -87,12 +87,12 @@
         {% for mode in ["bus", "tram"] %}
           <div>
             <div class="label" style="margin-bottom: .6rem">Worst {{ mode }} stops</div>
-            <div class="table-head overview-stop-row"><div>Stop</div><div></div><div style="text-align:right">Mean</div><div style="text-align:right">On t</div></div>
+            <div class="table-head overview-stop-row"><div>Stop</div><div></div><div style="text-align:right">Med</div><div style="text-align:right">On t</div></div>
             {% for row in worst_stops.get(mode, []) %}
               <div class="data-row overview-stop-row">
                 <a class="data-link" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=row.mode, date=selected_date) }}">{{ row.stop_group_name }} <span class="post-suffix">[{{ row.post_label }}]</span></a>
                 {{ ui.hist(row.shape, true) }}
-                <div class="sval {{ row.mean_delay_seconds|delay_class }}">{{ row.mean_delay_seconds|delay }}</div>
+                <div class="sval {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</div>
                 <div class="spct {{ row.on_time_rate|percent_class }}">{{ row.on_time_rate|percent }}</div>
               </div>
             {% endfor %}
