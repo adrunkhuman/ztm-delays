@@ -20,6 +20,8 @@ STOP_POST_PRIMARY_MODES = ("bus", "tram")
 ON_TIME_EARLY_SECONDS = -60
 ON_TIME_LATE_SECONDS = 180
 LOW_ON_TIME_RATE = 0.6
+GOOD_STATUS_HEALTH_RATIO = 0.9
+USABLE_STATUS_HEALTH_RATIO = 0.7
 SERVICE_DAY_HOURS = (*range(4, 24), *range(4))
 NEXT_DAY_PLACEHOLDER_HOURS = frozenset(range(4))
 AM_RUSH_START_HOUR = 7
@@ -721,10 +723,81 @@ def get_status(db_path: Path) -> dict[str, Any]:
         limit 16
         """,
     )
+    for row in pipeline_status:
+        row["health_ratio"] = _status_health_ratio(row)
+        row["health_label"] = _status_health_label(row["health_ratio"])
+    pipeline_by_mode = _by_mode_list(pipeline_status)
     return {
         "metadata": get_export_metadata(db_path),
-        "pipeline_status": _by_mode_list(pipeline_status),
+        "pipeline_status": pipeline_by_mode,
+        "latest_status": {mode: rows[0] for mode, rows in pipeline_by_mode.items() if rows},
+        "status_summary": _status_summary_by_mode(pipeline_by_mode),
+        "status_days": _status_days(pipeline_status),
     }
+
+
+def _status_summary_by_mode(pipeline_by_mode: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+    summaries = {}
+    for mode, rows in pipeline_by_mode.items():
+        recent_rows = rows[:8]
+        if not recent_rows:
+            continue
+        total_trips = sum(row.get("trips_complete") or 0 for row in recent_rows)
+        total_issues = sum(row.get("trips_broken") or 0 for row in recent_rows)
+        summary = {
+            "mode": mode,
+            "day_count": len(recent_rows),
+            "first_date": recent_rows[-1]["service_date"],
+            "last_date": recent_rows[0]["service_date"],
+            "completeness_ratio": _weighted_status_ratio(recent_rows, "completeness_ratio", "stop_arrivals_count"),
+            "match_rate": _weighted_status_ratio(recent_rows, "match_rate", "stop_arrivals_count"),
+            "service_coverage_ratio": _weighted_status_ratio(recent_rows, "service_coverage_ratio", "trips_complete"),
+            "trips_complete": total_trips,
+            "trips_broken": total_issues,
+        }
+        summary["health_ratio"] = _status_health_ratio(summary)
+        summary["health_label"] = _status_health_label(summary["health_ratio"])
+        summaries[mode] = summary
+    return summaries
+
+
+def _weighted_status_ratio(rows: list[dict[str, Any]], ratio_key: str, weight_key: str) -> float | None:
+    weighted_values = [
+        (float(row[ratio_key]), row.get(weight_key) or 0) for row in rows if row.get(ratio_key) is not None
+    ]
+    total_weight = sum(weight for _, weight in weighted_values)
+    if total_weight == 0:
+        values = [value for value, _ in weighted_values]
+        return sum(values) / len(values) if values else None
+    return sum(value * weight for value, weight in weighted_values) / total_weight
+
+
+def _status_days(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    days: dict[Any, dict[str, Any]] = {}
+    for row in rows:
+        day = days.setdefault(row["service_date"], {"service_date": row["service_date"]})
+        day[row["mode"]] = row
+    return sorted(days.values(), key=lambda day: day["service_date"], reverse=True)
+
+
+def _status_health_ratio(row: dict[str, Any]) -> float | None:
+    ratios = [row.get("completeness_ratio"), row.get("service_coverage_ratio"), row.get("match_rate")]
+    known_ratios = [float(ratio) for ratio in ratios if ratio is not None]
+    if not known_ratios:
+        return None
+    return min(known_ratios)
+
+
+def _status_health_label(health_ratio: float | None) -> str:
+    if health_ratio is None:
+        return "no data"
+    if health_ratio >= GOOD_STATUS_HEALTH_RATIO:
+        return "good"
+    if health_ratio >= USABLE_STATUS_HEALTH_RATIO:
+        return "usable"
+    if health_ratio > 0:
+        return "patchy"
+    return "missing"
 
 
 def _line_landing_summary(db_path: Path, selected_date: str | None, selected_mode: str) -> dict[str, Any]:
