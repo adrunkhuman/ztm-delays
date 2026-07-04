@@ -651,10 +651,6 @@ td:nth-child(n + 2) {
   gap: 1px;
 }
 
-.hist.mini .bar {
-  max-height: 18px;
-}
-
 .bar {
   flex: 1;
   min-width: 2px;
@@ -989,50 +985,45 @@ td:nth-child(n + 2) {
 }
 
 .line-worst-row {
-  grid-template-columns: max-content max-content minmax(0, 1fr) max-content;
+  grid-template-columns: 5.4ch minmax(7rem, 0.85fr) minmax(0, 1.4fr) max-content;
   column-gap: 14px;
 }
 
 .line-worst-table {
-  display: table;
   width: 100%;
-  border-collapse: collapse;
-}
-
-.line-worst-table .line-worst-row {
-  display: table-row;
 }
 
 .line-worst-table .line-worst-row > * {
-  display: table-cell;
-  height: 29px;
-  padding: 0 14px 0 0;
-  border-bottom: 1px solid var(--hair);
-  vertical-align: middle;
-  white-space: nowrap;
+  min-width: 0;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 .line-worst-table .line-worst-row > :first-child {
   padding-left: 4px;
+  white-space: nowrap;
 }
 
+.line-worst-table .line-worst-row > :nth-child(2),
 .line-worst-table .line-worst-row > :nth-child(3) {
-  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .line-worst-table .line-worst-row > :last-child {
   padding-right: 4px;
   text-align: right;
+  white-space: nowrap;
 }
 
 .line-worst-table .table-head > * {
-  height: auto;
-  padding-bottom: 4px;
   border-bottom-color: var(--border);
 }
 
 .line-worst-table .table-head > :nth-child(3) {
   padding-left: 1.15em;
+  white-space: nowrap;
 }
 
 .worst-row > *,
@@ -1042,7 +1033,6 @@ td:nth-child(n + 2) {
   min-width: 0;
 }
 
-.line-worst-row .muted,
 .vehicle-row .muted,
 .trip-picker .data-link,
 .schedule-route .section-title,

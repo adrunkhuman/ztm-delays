@@ -27,7 +27,7 @@
     <div class="plot {% if mini %}plot-mini{% endif %} hist-plot">
       <div class="bars">
         {% for bucket in shape.buckets %}
-          <div class="bar {{ bucket.tone }}" style="height: {{ bucket.height }}px"></div>
+          <div class="bar {{ bucket.tone }}" style="height: {{ bucket.mini_height if mini else bucket.height }}px"></div>
         {% endfor %}
       </div>
       <div class="marker-med" style="left: {{ shape.median_x }}%"></div>

@@ -26,6 +26,8 @@ PM_RUSH_START_HOUR = 16
 PM_RUSH_END_HOUR = 18
 WEEKEND_START_INDEX = 5
 HISTOGRAM_BUCKET_COUNT = 12
+HISTOGRAM_MAX_HEIGHT = 38
+HISTOGRAM_MINI_MAX_HEIGHT = 18
 EARLY_BUCKET_COUNT = 2
 LATE_BUCKET_START = 8
 PARTIAL_TRIP_SCORE = 80
@@ -681,10 +683,16 @@ def _delay_shape(median_delay_seconds: float | None, on_time_rate: float | None)
     rate = on_time_rate if on_time_rate is not None else 0.75
     peak = round(_clamp(2 + ((median + 60) / 360 * 9), 1, 10))
     spread = 2 if rate >= LOW_ON_TIME_RATE else 3
-    buckets = [
-        {"height": max(3, 38 - abs(index - peak) * spread * 2), "tone": _bucket_tone(index)}
-        for index in range(HISTOGRAM_BUCKET_COUNT)
-    ]
+    buckets = []
+    for index in range(HISTOGRAM_BUCKET_COUNT):
+        height = max(3, HISTOGRAM_MAX_HEIGHT - abs(index - peak) * spread * 2)
+        buckets.append(
+            {
+                "height": height,
+                "mini_height": max(2, round(height / HISTOGRAM_MAX_HEIGHT * HISTOGRAM_MINI_MAX_HEIGHT)),
+                "tone": _bucket_tone(index),
+            }
+        )
     p90 = median + (130 if rate < LOW_ON_TIME_RATE else 90)
     return {
         "buckets": buckets,
