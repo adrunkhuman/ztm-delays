@@ -590,6 +590,88 @@ def get_schedule(  # noqa: PLR0913
     }
 
 
+def get_trip_detail(
+    db_path: Path,
+    trip_id: str,
+    selected_date: str | None,
+    selected_vehicle: str | None,
+) -> dict[str, Any]:
+    """Build the individual observed trip page data."""
+    date_options = _date_options(db_path)
+    selected_date = _selected_date(date_options, selected_date)
+    trip = fetch_one(
+        db_path,
+        """
+        select
+            gtfs_snapshot_id,
+            gps_date,
+            service_date,
+            trip_id,
+            vehicle_number,
+            line,
+            route_short_name,
+            mode,
+            brigade,
+            vehicle_type,
+            direction_id,
+            trip_headsign,
+            origin_stop_name,
+            destination_stop_name,
+            scheduled_start_time,
+            scheduled_end_time,
+            actual_start_time,
+            actual_end_time,
+            start_delay_seconds,
+            end_delay_seconds,
+            trip_quality
+        from fct_trip
+        where service_date = ?
+          and trip_id = ?
+          and (? is null or vehicle_number = ?)
+        order by
+            case trip_quality
+                when 'complete' then 3
+                when 'partial' then 2
+                when 'broken' then 1
+                else 0
+            end desc,
+            actual_end_time desc,
+            vehicle_number
+        limit 1
+        """,
+        [selected_date, trip_id, selected_vehicle, selected_vehicle],
+    )
+    trip_stops: list[dict[str, Any]] = []
+    if trip is not None:
+        trip_stops = fetch_all(
+            db_path,
+            """
+            select
+                stop_sequence,
+                stop_id,
+                stop_group_id,
+                stop_name,
+                scheduled_arrival_time,
+                delay_seconds
+            from fct_stop_arrival
+            where service_date = ?
+              and trip_id = ?
+              and vehicle_number = ?
+            order by stop_sequence
+            """,
+            [selected_date, trip["trip_id"], trip["vehicle_number"]],
+        )
+        for stop in trip_stops:
+            stop["post_label"] = _stop_post_label(stop["stop_id"], stop["stop_group_id"])
+        trip["trace"] = _trip_trace([stop["delay_seconds"] for stop in trip_stops])
+
+    return {
+        "selected_date": selected_date,
+        "trip": trip,
+        "trip_stops": trip_stops,
+    }
+
+
 def get_status(db_path: Path) -> dict[str, Any]:
     """Build the export and pipeline status page data."""
     pipeline_status = fetch_all(

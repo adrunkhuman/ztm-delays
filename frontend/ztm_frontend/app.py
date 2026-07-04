@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pytz
 from flask import Flask, current_app, render_template, request
 
 from ztm_frontend import queries
@@ -12,6 +14,7 @@ from ztm_frontend import queries
 EARLY_DELAY_SECONDS = -60
 LATE_DELAY_SECONDS = 180
 LOW_ON_TIME_RATE = 0.6
+WARSAW = pytz.timezone("Europe/Warsaw")
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -47,27 +50,26 @@ def create_app() -> Flask:
     @app.get("/lines/")
     @app.get("/lines/<line>")
     def lines(line: str | None = None) -> str:
-        mode = request.args.get("mode")
-        if mode not in {"bus", "tram"}:
-            mode = None
         return render_template(
             "lines.html",
-            **queries.get_lines(current_app.config["ZTM_DUCKDB_PATH"], line, mode, request.args.get("date")),
+            **queries.get_lines(
+                current_app.config["ZTM_DUCKDB_PATH"],
+                line,
+                _selected_mode(request.args.get("mode")),
+                request.args.get("date"),
+            ),
         )
 
     @app.get("/stops/")
     @app.get("/stops/<stop_group_id>")
     @app.get("/stops/<stop_group_id>/<post>")
     def stops(stop_group_id: str | None = None, post: str | None = None) -> str:
-        mode = request.args.get("mode")
-        if mode not in {"bus", "tram"}:
-            mode = None
         return render_template(
             "stops.html",
             **queries.get_stops(
                 current_app.config["ZTM_DUCKDB_PATH"],
                 stop_group_id,
-                mode,
+                _selected_mode(request.args.get("mode")),
                 request.args.get("q", ""),
                 post or request.args.get("post"),
                 request.args.get("date"),
@@ -78,19 +80,28 @@ def create_app() -> Flask:
     @app.get("/schedule/")
     @app.get("/trips/")
     def schedule() -> str:
-        mode = request.args.get("mode")
-        if mode not in {"bus", "tram"}:
-            mode = None
         return render_template(
             "schedule.html",
             **queries.get_schedule(
                 current_app.config["ZTM_DUCKDB_PATH"],
-                mode,
+                _selected_mode(request.args.get("mode")),
                 request.args.get("line"),
                 request.args.get("date"),
                 request.args.get("trip"),
                 request.args.get("vehicle"),
                 request.args.get("sort"),
+            ),
+        )
+
+    @app.get("/trips/<trip_id>")
+    def trip_detail(trip_id: str) -> str:
+        return render_template(
+            "trip_detail.html",
+            **queries.get_trip_detail(
+                current_app.config["ZTM_DUCKDB_PATH"],
+                trip_id,
+                request.args.get("date"),
+                request.args.get("vehicle"),
             ),
         )
 
@@ -111,6 +122,12 @@ def _format_delay(value: float | None) -> str:
     return f"{rounded}s"
 
 
+def _selected_mode(value: str | None) -> str | None:
+    if value in {"bus", "tram"}:
+        return value
+    return None
+
+
 def _format_integer(value: float | None) -> str:
     if value is None:
         return "n/a"
@@ -126,7 +143,9 @@ def _format_percent(value: float | None) -> str:
 def _format_time(value: datetime | None) -> str:
     if value is None:
         return ""
-    return value.strftime("%H:%M")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(WARSAW).strftime("%H:%M")
 
 
 def _delay_class(value: float | None) -> str:

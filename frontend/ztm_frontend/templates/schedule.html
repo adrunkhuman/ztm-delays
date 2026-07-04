@@ -47,7 +47,7 @@
                 <div>End</div>
               </div>
               {% for trip in group.trips %}
-                <a class="trip-run" href="{{ url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort=selected_sort, trip=trip.trip_id, vehicle=trip.vehicle_number) }}">
+                <a class="trip-run" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=selected_date, vehicle=trip.vehicle_number) }}">
                   <span class="trip-dep mono">{{ trip.scheduled_start_time|time }}</span>
                   <span class="trip-trace" aria-label="per-stop delay trace">
                     <span class="trip-trace-base"></span>
