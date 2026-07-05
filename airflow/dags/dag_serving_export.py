@@ -53,23 +53,10 @@ DUCKDB_TEMP_DIRECTORY_LIMIT = "2GB"
 DUCKDB_THREADS = 2
 MART_TABLES = (
     "agg_line_daily",
-    "agg_line_stop_period",
-    "agg_service_coverage",
-    "agg_stop_period",
-    "agg_time_period",
-    "dim_date",
-    "dim_line",
-    "dim_line_current",
-    "dim_schedule_date",
-    "dim_schedule_date_current",
-    "dim_schedule_version",
-    "dim_stop_group",
     "dim_stop_group_current",
-    "dim_stop_post",
     "dim_stop_post_current",
     "fct_stop_arrival",
     "fct_trip",
-    "mart_day_completeness",
     "mart_pipeline_status",
 )
 DERIVED_TABLES = (
@@ -87,10 +74,8 @@ DERIVED_TABLES = (
 EXPORTED_TABLES = MART_TABLES + DERIVED_TABLES
 DATE_RANGE_SQL_BY_TABLE = {
     "agg_line_daily": "service_date",
-    "agg_service_coverage": "scheduled_start_date",
     "fct_stop_arrival": "service_date",
     "fct_trip": "service_date",
-    "mart_day_completeness": "gps_date",
     "mart_pipeline_status": "service_date",
 }
 DERIVED_DATE_RANGE_SQL_BY_TABLE = {
@@ -860,8 +845,9 @@ def _validate_duckdb_export(duckdb_module: ModuleType, path: Path, source_stats:
             raise RuntimeError(f"DuckDB export missing tables: {', '.join(missing_tables)}")
 
         for table_name in [
-            "agg_line_stop_period",
-            "agg_stop_period",
+            "agg_line_daily",
+            "dim_stop_group_current",
+            "dim_stop_post_current",
             "fct_stop_arrival",
             "fct_trip",
             "mart_pipeline_status",
