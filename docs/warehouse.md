@@ -234,7 +234,7 @@ Distributional checks, low coverage, suspicious delays, and quality thresholds s
 
 ## BigQuery Cost Rules
 
-Large date-partitioned models use `insert_overwrite` with static `partitions` for the processed date. Cost scales with the source partition being rebuilt rather than accumulated table history, and rerunning a date replaces the partition without duplicates.
+Large date-partitioned models use `insert_overwrite` with bounded static `partitions` for the affected date or period-start partitions. Cost scales with the source partitions being rebuilt rather than accumulated table history, and rerunning the same window replaces partitions without duplicates.
 
 Large partitioned tables should set `require_partition_filter=true`. dbt models must filter upstream by the same partition they overwrite.
 
@@ -252,7 +252,7 @@ Schedule/version manual audits use singular contract tests for required fields a
 
 Nightly Airflow still tests `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`; only the four broad serving aggregate tests moved to manual audits.
 
-`mart_day_completeness`, `agg_service_coverage`, `agg_line_daily`, and `mart_pipeline_status` are incremental partition replacements over the inclusive `[aggregation_start_date, processing_date]` date window; normal Airflow runs use a two-day prior/current window because complete/partial observed trips can lag scheduled-start date by one GPS date and facts publish both current and prior service dates. A 2026-06-25-through-current check found no trip-summary lag beyond one day. The remaining partitioned period marts `agg_line_stop_period`, `agg_stop_period`, and `agg_time_period` currently remain table materializations over their configured source window. Treat that as intentional current behavior, not proof that partitioning limits rebuild bytes by itself.
+`mart_day_completeness`, `agg_service_coverage`, `agg_line_daily`, and `mart_pipeline_status` are incremental partition replacements over the inclusive `[aggregation_start_date, processing_date]` date window; normal Airflow runs use a two-day prior/current window because complete/partial observed trips can lag scheduled-start date by one GPS date and facts publish both current and prior service dates. A 2026-06-25-through-current check found no trip-summary lag beyond one day. The period marts `agg_line_stop_period`, `agg_stop_period`, and `agg_time_period` are incremental replacements for affected month-start and schedule-version-start `period_start_date` partitions. Airflow computes `period_source_start_date` from affected month starts and active schedule-version starts so rows include their required source range without rebuilding unrelated retained history.
 
 Nightly GPS runs log BigQuery dbt job cost metadata from `INFORMATION_SCHEMA.JOBS_BY_USER` after the dbt phases complete. The initial warning threshold is `100 GiB` billed bytes for the DAG-run window; treat it as an operational signal until it is calibrated from observed good runs. Attribution is best-effort because the query is scoped to the same BigQuery principal, project, and region, and filters on dbt query comments.
 

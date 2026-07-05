@@ -16,6 +16,7 @@ select
     stop_lon,
     hour_bracket
 from {{ ref('agg_line_stop_period') }}
+where {{ period_partition_filter() }}
 group by
     period_type,
     period_id,
