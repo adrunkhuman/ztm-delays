@@ -52,7 +52,8 @@ STOP_ARRIVAL_FACT_MODEL = "fct_stop_arrival"
 DAY_COMPLETENESS_MODEL = "mart_day_completeness"
 SERVICE_COVERAGE_MODEL = "agg_service_coverage"
 PIPELINE_STATUS_MODEL = "mart_pipeline_status"
-AGGREGATE_MODELS = "agg_line_stop_period agg_stop_period agg_time_period agg_line_daily"
+DAILY_AGGREGATE_MODEL = "agg_line_daily"
+PERIOD_AGGREGATE_MODELS = "agg_line_stop_period agg_stop_period agg_time_period"
 WAREHOUSE_HISTORY_START_DATE = "2026-06-25"
 BIGQUERY_DBT_COST_LOOKBACK_HOURS = 12
 BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD = 100 * 1024**3
@@ -72,6 +73,11 @@ FACT_PRIOR_DBT_VARS = dbt_vars(
     processing_date=PROCESSING_DATE,
     gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
     publish_service_date=PRIOR_SERVICE_DATE,
+    aggregation_start_date=PRIOR_SERVICE_DATE,
+)
+COMPLETENESS_COVERAGE_DBT_VARS = dbt_vars(
+    processing_date=PROCESSING_DATE,
+    gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
     aggregation_start_date=PRIOR_SERVICE_DATE,
 )
 MART_DBT_VARS = dbt_vars(
@@ -329,27 +335,36 @@ with DAG(
 
     dbt_run_completeness_and_coverage = BashOperator(
         task_id="dbt_run_completeness_and_coverage",
-        bash_command=dbt_command("run", f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}", MART_DBT_VARS),
+        bash_command=dbt_command(
+            "run", f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}", COMPLETENESS_COVERAGE_DBT_VARS
+        ),
     )
 
     dbt_test_completeness_and_coverage = BashOperator(
         task_id="dbt_test_completeness_and_coverage",
-        bash_command=dbt_command("test", f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}", MART_DBT_VARS),
+        bash_command=dbt_command(
+            "test", f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}", COMPLETENESS_COVERAGE_DBT_VARS
+        ),
     )
 
-    dbt_run_aggregate_marts = BashOperator(
-        task_id="dbt_run_aggregate_marts",
-        bash_command=dbt_command("run", AGGREGATE_MODELS, MART_DBT_VARS),
+    dbt_run_daily_aggregate_mart = BashOperator(
+        task_id="dbt_run_daily_aggregate_mart",
+        bash_command=dbt_command("run", DAILY_AGGREGATE_MODEL, COMPLETENESS_COVERAGE_DBT_VARS),
+    )
+
+    dbt_run_period_aggregate_marts = BashOperator(
+        task_id="dbt_run_period_aggregate_marts",
+        bash_command=dbt_command("run", PERIOD_AGGREGATE_MODELS, MART_DBT_VARS),
     )
 
     dbt_run_pipeline_status = BashOperator(
         task_id="dbt_run_pipeline_status",
-        bash_command=dbt_command("run", PIPELINE_STATUS_MODEL, MART_DBT_VARS),
+        bash_command=dbt_command("run", PIPELINE_STATUS_MODEL, COMPLETENESS_COVERAGE_DBT_VARS),
     )
 
     dbt_test_pipeline_status = BashOperator(
         task_id="dbt_test_pipeline_status",
-        bash_command=dbt_command("test", PIPELINE_STATUS_MODEL, MART_DBT_VARS),
+        bash_command=dbt_command("test", PIPELINE_STATUS_MODEL, COMPLETENESS_COVERAGE_DBT_VARS),
     )
 
     @task(do_xcom_push=False)
@@ -412,8 +427,13 @@ with DAG(
         dbt_test_int_gps_hourly_completeness,
     ]:
         upstream_task >> dbt_run_completeness_and_coverage
-    dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_aggregate_marts
-    dbt_run_aggregate_marts >> dbt_run_pipeline_status >> dbt_test_pipeline_status
+    dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_daily_aggregate_mart
+    (
+        dbt_run_daily_aggregate_mart
+        >> dbt_run_period_aggregate_marts
+        >> dbt_run_pipeline_status
+        >> dbt_test_pipeline_status
+    )
     cost_summary = log_bigquery_dbt_job_costs()
     gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE)
     dbt_test_pipeline_status >> cost_summary

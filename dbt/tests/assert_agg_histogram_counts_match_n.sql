@@ -37,5 +37,7 @@ from (
         n,
         (select sum(bucket.n) from unnest(delay_histogram) as bucket) as histogram_n
     from {{ ref('agg_line_daily') }}
+    where service_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
+        and date('{{ var("processing_date") }}')
 )
 where n != histogram_n

@@ -1,17 +1,17 @@
 {{
     config(
-        materialized='table',
+        materialized='incremental',
+        incremental_strategy='insert_overwrite',
         partition_by={"field": "gps_date", "data_type": "date"},
+        partitions=["date('" ~ var("processing_date") ~ "')"],
         cluster_by=["mode"],
+        require_partition_filter=true,
+        post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
 with date_spine as (
-    select gps_date
-    from unnest(generate_date_array(
-        date('{{ var("aggregation_start_date", var("processing_date")) }}'),
-        date('{{ var("processing_date") }}')
-    )) as gps_date
+    select date('{{ var("processing_date") }}') as gps_date
 ),
 
 expected_hours as (
@@ -44,8 +44,7 @@ hourly_source as (
         coverage_ratio,
         max_gap_seconds
     from {{ ref('int_gps_hourly_completeness') }}
-    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where gps_date = date('{{ var("processing_date") }}')
 ),
 
 hourly as (

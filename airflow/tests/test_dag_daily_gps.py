@@ -230,7 +230,6 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PROCESSING_DATE in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_fct_trip_prior.kwargs["bash_command"]
-    assert dag.AGGREGATE_MODELS in dag.dbt_run_aggregate_marts.kwargs["bash_command"]
     assert dag.PIPELINE_STATUS_MODEL in dag.dbt_run_pipeline_status.kwargs["bash_command"]
     assert dag.emit_gps_models_date_asset.kwargs == {"outlets": [dag.GPS_MODELS_DATE_ASSET]}
 
@@ -252,7 +251,9 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_fct_stop_arrival_prior.downstream
     assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_int_gps_hourly_completeness.downstream
     assert not hasattr(dag, "dbt_test_aggregate_marts")
-    assert dag.dbt_run_pipeline_status in dag.dbt_run_aggregate_marts.downstream
+    assert dag.dbt_run_daily_aggregate_mart in dag.dbt_test_completeness_and_coverage.downstream
+    assert dag.dbt_run_period_aggregate_marts in dag.dbt_run_daily_aggregate_mart.downstream
+    assert dag.dbt_run_pipeline_status in dag.dbt_run_period_aggregate_marts.downstream
     assert dag.log_bigquery_dbt_job_costs in dag.dbt_test_pipeline_status.downstream
     assert dag.emit_gps_models_date_asset in dag.dbt_test_pipeline_status.downstream
     assert dag.emit_gps_models_date_asset not in dag.log_bigquery_dbt_job_costs.downstream
@@ -260,19 +261,40 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.watcher in dag.dbt_test_pipeline_status.downstream
 
 
+def test_dag_uses_bounded_mart_windows() -> None:
+    dag = _load_dag_module()
+    expected_aggregation_vars = [
+        (dag.dbt_run_completeness_and_coverage, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_test_completeness_and_coverage, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_run_daily_aggregate_mart, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_run_period_aggregate_marts, dag.WAREHOUSE_HISTORY_START_DATE),
+        (dag.dbt_run_pipeline_status, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_test_pipeline_status, dag.PRIOR_SERVICE_DATE),
+    ]
+
+    for task, expected_start_date in expected_aggregation_vars:
+        assert '"aggregation_start_date": "' + expected_start_date in task.kwargs["bash_command"]
+    assert dag.DAILY_AGGREGATE_MODEL in dag.dbt_run_daily_aggregate_mart.kwargs["bash_command"]
+    assert dag.PERIOD_AGGREGATE_MODELS in dag.dbt_run_period_aggregate_marts.kwargs["bash_command"]
+
+
 def test_dag_excludes_broad_aggregate_tests_from_nightly_path() -> None:
     dag = _load_dag_module()
 
-    assert dag.dbt_run_aggregate_marts.kwargs["bash_command"].startswith(
-        f"cd /opt/airflow/dbt && dbt run --select {dag.AGGREGATE_MODELS}"
+    assert dag.dbt_run_daily_aggregate_mart.kwargs["bash_command"].startswith(
+        f"cd /opt/airflow/dbt && dbt run --select {dag.DAILY_AGGREGATE_MODEL}"
+    )
+    assert dag.dbt_run_period_aggregate_marts.kwargs["bash_command"].startswith(
+        f"cd /opt/airflow/dbt && dbt run --select {dag.PERIOD_AGGREGATE_MODELS}"
     )
     assert not hasattr(dag, "dbt_test_aggregate_marts")
+    aggregate_models = [dag.DAILY_AGGREGATE_MODEL, *dag.PERIOD_AGGREGATE_MODELS.split()]
     for value in vars(dag).values():
         if not isinstance(value, FakeOperator):
             continue
         bash_command = value.kwargs["bash_command"]
         is_aggregate_test = bash_command.startswith("cd /opt/airflow/dbt && dbt test") and any(
-            model_name in bash_command for model_name in dag.AGGREGATE_MODELS.split()
+            model_name in bash_command for model_name in aggregate_models
         )
         assert not is_aggregate_test
 

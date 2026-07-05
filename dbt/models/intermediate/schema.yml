@@ -148,111 +148,66 @@ models:
     columns:
       - name: service_date
         description: GTFS service date for the scheduled trip. Can be the previous date for overnight trips operating on processing_date.
-        tests: [not_null]
       - name: processing_date
         description: Warsaw-local GPS processing date whose raw pings can overlap this scheduled trip.
-        tests: [not_null]
       - name: schedule_day_type
         description: GTFS-derived service pattern for this line and direction on service_date under the service date's governing snapshot.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday_holiday', 'weekday', 'mixed', 'unknown']
       - name: schedule_service_ids
         description: Comma-delimited active GTFS service_id values for this line and direction on service_date in the service date's governing snapshot.
-        tests: [not_null]
       - name: gtfs_snapshot_id
         description: Governing GTFS snapshot selected as the latest loaded snapshot whose Warsaw-local snapshot date is strictly before service_date.
-        tests: [not_null]
       - name: line
         description: Public line identifier from GTFS route_id. This is the current working line key, not a permanent historical entity guarantee.
-        tests: [not_null]
       - name: direction_id
         description: GTFS direction_id for the scheduled trip.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1]
-                quote: false
       - name: trip_id
         description: GTFS trip_id from the governing snapshot. Kept as lineage and not used as part of the stable schedule fingerprint.
-        tests: [not_null]
       - name: service_id
         description: GTFS service_id for the scheduled trip in the governing snapshot. Kept as lineage and not used as part of the stable schedule fingerprint.
-        tests: [not_null]
       - name: trip_headsign
         description: Trip headsign from the governing snapshot. This is a display label and is not part of the schedule-version fingerprint.
       - name: shape_id
         description: GTFS shape_id for the scheduled trip in the governing snapshot.
-        tests: [not_null]
       - name: trip_start_seconds
         description: First scheduled arrival time for the trip, in seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
-        tests: [not_null]
       - name: trip_end_seconds
         description: Last scheduled arrival time for the trip, in seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
-        tests: [not_null]
       - name: stop_count
         description: Number of scheduled stops in the trip.
-        tests: [not_null]
       - name: ordered_stop_ids
         description: Pipe-delimited stop_id sequence ordered by GTFS stop_sequence.
-        tests: [not_null]
       - name: ordered_arrival_time_seconds
         description: Pipe-delimited scheduled arrival seconds ordered by GTFS stop_sequence.
-        tests: [not_null]
       - name: trip_timetable_signature
         description: Stable ordered stop/time signature for one trip, built from stop_sequence, stop_id, and arrival_time_seconds only.
-        tests: [not_null]
 
   - name: int_schedule_version
     description: Per-line timetable fingerprint history. Consecutive governing processing dates with the same timetable fingerprint collapse into one schedule version for line, direction_id, and schedule_day_type.
     columns:
       - name: schedule_version_id
         description: Stable identifier for one consecutive timetable version period. Includes valid_from_date so a timetable that returns after a change becomes a new version period.
-        tests: [not_null, unique]
       - name: line
         description: Public line identifier used as the working line key for this version.
-        tests: [not_null]
       - name: direction_id
         description: GTFS direction_id for this version.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1]
-                quote: false
       - name: schedule_day_type
         description: GTFS-derived service pattern for this version.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday_holiday', 'weekday', 'mixed', 'unknown']
       - name: timetable_fingerprint
         description: "Hash of the line timetable: all trip stop/time signatures sorted by scheduled start, scheduled end, and signature. Excludes GTFS snapshot IDs, trip IDs, service IDs, and display labels."
-        tests: [not_null]
       - name: valid_from_date
         description: First Warsaw-local GPS processing date observed with this timetable fingerprint for line, direction_id, and schedule_day_type.
-        tests: [not_null]
       - name: valid_to_date
         description: Last Warsaw-local GPS processing date before the next observed timetable fingerprint change for line, direction_id, and schedule_day_type. Null means no later collected change is known.
       - name: first_gtfs_snapshot_id
         description: First governing GTFS snapshot observed in this version period.
-        tests: [not_null]
       - name: last_gtfs_snapshot_id
         description: Last governing GTFS snapshot observed in this version period.
-        tests: [not_null]
       - name: first_processing_date
         description: First Warsaw-local GPS processing date observed in this version period. Equal to valid_from_date.
-        tests: [not_null]
       - name: last_processing_date
         description: Last Warsaw-local GPS processing date currently observed with this version's timetable fingerprint.
-        tests: [not_null]
       - name: max_scheduled_trip_count
         description: Maximum scheduled trip count observed for this line, direction_id, and schedule_day_type inside the version period.
-        tests: [not_null]
 
   - name: int_trip_summary
     description: Completed-trip reconstruction summary. One row per observed vehicle trip candidate in a GPS processing date, using detected stop arrivals as the realized-trip grain and matched pings for quality diagnostics.

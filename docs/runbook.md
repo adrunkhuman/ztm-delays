@@ -70,7 +70,8 @@ Normal Airflow cadence must stay bounded and deliberate:
 
 - Hourly raw GPS loading only loads immutable GCS parts into raw BigQuery.
 - Nightly GPS warehouse work runs one processing date and its prior service-date fact publication.
-- Aggregate/status marts still rebuild their configured history window until they are made incremental or windowed.
+- `mart_day_completeness` replaces only the processed GPS date partition; `agg_service_coverage`, `agg_line_daily`, and `mart_pipeline_status` replace the prior/current date partitions during normal nightly runs.
+- The remaining aggregate/status marts still rebuild their configured history window until they are made incremental or windowed.
 - Nightly aggregate marts build but their broad tests are manual audit jobs.
 - GTFS load runs raw load, staging, dimensions, and cheap/default dimension tests.
 
@@ -86,6 +87,8 @@ dbt test --select int_gtfs_trip_schedule int_schedule_version \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
 ```
 
+The schedule audit intentionally uses compact singular contract tests for required fields and accepted values, plus uniqueness/range/relationship tests. Do not re-add repeated generic column tests to these expensive views without a fresh byte estimate.
+
 Manual aggregate/fact audit for an aggregate build window. Run this before aggregate contract changes, serving-impacting changes, or periodic manual audits; do not put this selector back in the normal nightly path without a fresh byte estimate. The vars should match the aggregate mart build window. For a smaller audit window, rebuild the aggregates in a dev or dedicated audit dataset first.
 
 ```bash
@@ -93,6 +96,8 @@ dbt test --select fct_trip fct_stop_arrival mart_day_completeness agg_service_co
   --indirect-selection cautious --exclude test_type:unit \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"YYYY-MM-DD","aggregation_start_date":"YYYY-MM-DD"}'
 ```
+
+For `agg_service_coverage`, `agg_line_daily`, and `mart_pipeline_status`, normal recovery should rerun each affected processing date so the prior/current partition pair is replaced. Wider manual backfills can pass a wider `aggregation_start_date`, but dry-run first because every date in that inclusive range becomes an overwrite partition.
 
 The `Audit Required` GitHub workflow only reports changed-path risk. It does not run billable dbt/BigQuery audits. If it reports an audit tier, choose the smallest explicit manual command that covers the changed contract.
 

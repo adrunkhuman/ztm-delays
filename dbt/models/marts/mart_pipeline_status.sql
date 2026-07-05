@@ -1,8 +1,21 @@
+{% set processing_date = var("processing_date", "1970-01-01") %}
+{% set aggregation_start_date = var("aggregation_start_date", processing_date) %}
+{% set start_date = modules.datetime.datetime.strptime(aggregation_start_date, "%Y-%m-%d").date() %}
+{% set end_date = modules.datetime.datetime.strptime(processing_date, "%Y-%m-%d").date() %}
+{% set partition_dates = [] %}
+{% for day_offset in range((end_date - start_date).days + 1) %}
+    {% do partition_dates.append("date('" ~ (start_date + modules.datetime.timedelta(days=day_offset)).isoformat() ~ "')") %}
+{% endfor %}
+
 {{
     config(
-        materialized='table',
+        materialized='incremental',
+        incremental_strategy='insert_overwrite',
         partition_by={"field": "service_date", "data_type": "date"},
+        partitions=partition_dates,
         cluster_by=["mode"],
+        require_partition_filter=true,
+        post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
@@ -24,8 +37,8 @@ with status_spine as (
         min_hourly_coverage_ratio,
         max_gap_seconds
     from {{ ref('mart_day_completeness') }}
-    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
 ),
 
 staged_pings as (
@@ -38,8 +51,8 @@ staged_pings as (
         end as mode,
         count(*) as pings_total
     from {{ ref('stg_gps__pings') }}
-    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
     group by service_date, vehicle_type, mode
 ),
 
@@ -53,8 +66,8 @@ matched_pings as (
         end as mode,
         count(*) as pings_matched
     from {{ ref('int_ping_trip') }}
-    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
     group by service_date, vehicle_type, mode
 ),
 
@@ -68,8 +81,8 @@ trips as (
         countif(trip_quality = 'partial') as trips_partial,
         countif(trip_quality = 'broken') as trips_broken
     from {{ ref('int_trip_summary') }}
-    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
     group by service_date, vehicle_type, mode
 ),
 
@@ -83,8 +96,8 @@ service_coverage as (
         sum(observed_service_minutes) as observed_service_minutes,
         count(distinct schedule_version_id) as schedule_versions_active
     from {{ ref('agg_service_coverage') }}
-    where scheduled_start_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where scheduled_start_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
       and is_settled_hour
     group by service_date, mode
 ),
@@ -99,8 +112,8 @@ stop_arrivals as (
         end as mode,
         count(*) as stop_arrivals_count
     from {{ ref('int_stop_arrivals') }}
-    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
     group by service_date, vehicle_type, mode
 ),
 

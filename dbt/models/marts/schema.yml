@@ -539,7 +539,7 @@ models:
         description: Duration in seconds between segment_start_time and segment_end_time.
 
   - name: mart_day_completeness
-    description: Daily GPS ingestion completeness by Warsaw-local GPS date and mode. This is raw-ingestion coverage metadata, not schedule-aware service coverage; complete and partial trip facts remain usable even when a day is incomplete.
+    description: Daily GPS ingestion completeness by Warsaw-local GPS date and mode. The normal build replaces only the processing-date partition. This is raw-ingestion coverage metadata, not schedule-aware service coverage; complete and partial trip facts remain usable even when a day is incomplete.
     columns:
       - name: gps_date
         description: Warsaw-local GPS processing date summarized by this row.
@@ -573,7 +573,7 @@ models:
         description: Largest gap reported by present hourly buckets. Missing hours are represented through missing_hours, not as 3600-second gaps.
 
   - name: agg_service_coverage
-    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Expected service comes from the governing GTFS bus/tram schedule; observed service counts distinct complete/partial scheduled trip_id values from int_trip_summary after best-quality dedupe and excludes broken trips. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
+    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the governing GTFS bus/tram schedule; observed service counts distinct complete/partial scheduled trip_id values from int_trip_summary after best-quality dedupe and excludes broken trips. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
     columns:
       - name: service_date
         description: GTFS service date assigned to the scheduled trips. Overnight service can have service_hour on the next calendar date.
@@ -619,7 +619,7 @@ models:
         description: True when service_hour_end is more than 90 minutes before current_timestamp, allowing delayed trips to appear before coverage is judged.
 
   - name: mart_pipeline_status
-    description: Daily operational-health status by Warsaw-local status date and mode. The service_date field is aligned to the GPS processing date and scheduled-start date so ingestion, matching, trip quality, arrivals, and service coverage use one operational-day grain. Near-real-time poller liveness comes from the private poller heartbeat, not this historical mart.
+    description: Daily operational-health status by Warsaw-local status date and mode. Normal builds replace the inclusive aggregation_start_date-through-processing_date service-date partitions. The service_date field is aligned to the GPS processing date and scheduled-start date so ingestion, matching, trip quality, arrivals, and service coverage use one operational-day grain. Near-real-time poller liveness comes from the private poller heartbeat, not this historical mart.
     columns:
       - name: service_date
         description: Warsaw-local operational status date. This aligns raw GPS processing date with scheduled-start date for coverage metrics; it is not necessarily the GTFS service_date for overnight trips.
@@ -877,7 +877,7 @@ models:
         description: Distinct governing GTFS snapshot IDs contributing source rows to this aggregate cell.
 
   - name: agg_line_daily
-    description: Daily strict-quality line, direction, and archive-safe headsign summary for trend browsing. Delay statistics are computed from fct_stop_arrival rows where trip_quality = 'complete'; trip_count counts distinct observed trips in those rows. Daily rows keep every observed schedule_version_id because there is no separate daily schedule-version period fallback.
+    description: Daily strict-quality line, direction, and archive-safe headsign summary for trend browsing. Normal builds replace the inclusive aggregation_start_date-through-processing_date service-date partitions. Delay statistics are computed from fct_stop_arrival rows where trip_quality = 'complete'; trip_count counts distinct observed trips in those rows. Daily rows keep every observed schedule_version_id because there is no separate daily schedule-version period fallback.
     columns:
       - name: service_date
         description: GTFS service date for this daily aggregate row.

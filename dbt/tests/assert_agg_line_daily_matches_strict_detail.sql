@@ -9,7 +9,7 @@ with expected as (
         arrivals.trip_headsign,
         count(*) as n
     from {{ ref('fct_stop_arrival') }} as arrivals
-    where arrivals.service_date between date('{{ var("aggregation_start_date", "1970-01-01") }}')
+    where arrivals.service_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
         and date('{{ var("processing_date") }}')
       and arrivals.trip_quality = 'complete'
     group by
@@ -33,6 +33,8 @@ actual as (
         trip_headsign,
         n
     from {{ ref('agg_line_daily') }}
+    where service_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
+        and date('{{ var("processing_date") }}')
 )
 
 (select * from expected
