@@ -42,7 +42,7 @@ Default Airflow runs exclude the expensive full-history tests on `int_gtfs_trip_
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt test --select int_gtfs_trip_schedule int_schedule_version --indirect-selection cautious --exclude test_type:unit --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
 ```
 
-For bounded aggregate/fact audits, pass `aggregation_start_date` and `publish_service_date` explicitly. Do not run unbounded full-history tests casually.
+Default Airflow runs also exclude broad aggregate mart tests over `agg_line_stop_period`, `agg_stop_period`, `agg_time_period`, and `agg_line_daily`. Nightly Airflow still tests `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`; only the four broad serving aggregate tests moved to manual audits. For aggregate/fact audits, pass `aggregation_start_date` and `publish_service_date` explicitly and keep those vars aligned with the aggregate mart build window. Do not run unbounded full-history tests casually.
 
 The local `profiles.yml` uses environment variables for BigQuery connection settings and credentials.
 

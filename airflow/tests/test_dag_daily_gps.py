@@ -127,6 +127,86 @@ def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.
         dag._selected_gtfs_snapshot_id("2026-06-27")
 
 
+def test_bigquery_dbt_job_cost_summary_queries_jobs_by_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    started_at = dag.datetime(2026, 7, 5, 4, 0, tzinfo=dag.UTC)
+    cost_row = FakeCostRow(
+        job_count=2,
+        total_bytes_processed=123,
+        total_bytes_billed=100,
+        top_jobs=[{"job_id": "job-1", "total_bytes_billed": 100}],
+    )
+    client = FakeBigQueryClient(cost_rows=[cost_row])
+    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
+
+    summary = dag._bigquery_dbt_job_cost_summary(started_at)
+
+    assert summary == {
+        "job_count": 2,
+        "total_bytes_processed": 123,
+        "total_bytes_billed": 100,
+        "top_jobs": [{"job_id": "job-1", "total_bytes_billed": 100}],
+    }
+    assert client.query_call is not None
+    assert "INFORMATION_SCHEMA.JOBS_BY_USER" in client.query_call.query
+    assert 'starts_with(query, \'/* {"app": "dbt"\')' in client.query_call.query
+    assert client.query_call.job_config.query_parameters == [
+        dag.bigquery.ScalarQueryParameter("started_at", "TIMESTAMP", started_at)
+    ]
+
+
+def test_log_bigquery_dbt_job_costs_returns_error_when_metadata_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dag = _load_dag_module()
+
+    def raise_metadata_error(_started_at: object) -> dict[str, object]:
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr(dag, "_bigquery_dbt_job_cost_summary", raise_metadata_error)
+
+    result = dag.log_bigquery_dbt_job_costs.function()
+
+    assert result["error"] == "metadata unavailable"
+
+
+def test_log_bigquery_dbt_job_costs_warns_when_billed_bytes_cross_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    dag = _load_dag_module()
+    summary = {
+        "job_count": 1,
+        "total_bytes_processed": 200,
+        "total_bytes_billed": dag.BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD + 1,
+        "top_jobs": [],
+    }
+    monkeypatch.setattr(dag, "_bigquery_dbt_job_cost_summary", lambda _started_at: summary)
+    caplog.set_level("WARNING")
+
+    assert dag.log_bigquery_dbt_job_costs.function()["total_bytes_billed"] == summary["total_bytes_billed"]
+    assert "exceeded warning threshold" in caplog.text
+
+
+def test_log_bigquery_dbt_job_costs_uses_dag_run_start_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    started_at = dag.datetime(2026, 7, 5, 4, 0, tzinfo=dag.UTC)
+    captured_started_at = None
+
+    def summarize_costs(received_started_at: object) -> dict[str, object]:
+        nonlocal captured_started_at
+        captured_started_at = received_started_at
+        return {"job_count": 0, "total_bytes_processed": 0, "total_bytes_billed": 0, "top_jobs": []}
+
+    monkeypatch.setattr(dag, "get_current_context", lambda: {"dag_run": types.SimpleNamespace(start_date=started_at)})
+    monkeypatch.setattr(dag, "_bigquery_dbt_job_cost_summary", summarize_costs)
+
+    result = dag.log_bigquery_dbt_job_costs.function()
+
+    assert captured_started_at == started_at
+    assert result["started_at"] == started_at.isoformat()
+
+
 def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     dag = _load_dag_module()
 
@@ -171,8 +251,30 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_fct_stop_arrival_current.downstream
     assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_fct_stop_arrival_prior.downstream
     assert dag.dbt_run_completeness_and_coverage in dag.dbt_test_int_gps_hourly_completeness.downstream
-    assert dag.dbt_run_pipeline_status in dag.dbt_test_aggregate_marts.downstream
+    assert not hasattr(dag, "dbt_test_aggregate_marts")
+    assert dag.dbt_run_pipeline_status in dag.dbt_run_aggregate_marts.downstream
+    assert dag.log_bigquery_dbt_job_costs in dag.dbt_test_pipeline_status.downstream
+    assert dag.emit_gps_models_date_asset in dag.dbt_test_pipeline_status.downstream
+    assert dag.emit_gps_models_date_asset not in dag.log_bigquery_dbt_job_costs.downstream
+    assert dag.log_bigquery_dbt_job_costs.kwargs == {"do_xcom_push": False}
     assert dag.watcher in dag.dbt_test_pipeline_status.downstream
+
+
+def test_dag_excludes_broad_aggregate_tests_from_nightly_path() -> None:
+    dag = _load_dag_module()
+
+    assert dag.dbt_run_aggregate_marts.kwargs["bash_command"].startswith(
+        f"cd /opt/airflow/dbt && dbt run --select {dag.AGGREGATE_MODELS}"
+    )
+    assert not hasattr(dag, "dbt_test_aggregate_marts")
+    for value in vars(dag).values():
+        if not isinstance(value, FakeOperator):
+            continue
+        bash_command = value.kwargs["bash_command"]
+        is_aggregate_test = bash_command.startswith("cd /opt/airflow/dbt && dbt test") and any(
+            model_name in bash_command for model_name in dag.AGGREGATE_MODELS.split()
+        )
+        assert not is_aggregate_test
 
 
 @dataclass
@@ -218,6 +320,14 @@ class FakeRow:
     gtfs_snapshot_id: str
 
 
+@dataclass(frozen=True)
+class FakeCostRow:
+    job_count: int
+    total_bytes_processed: int
+    total_bytes_billed: int
+    top_jobs: list[dict[str, object]]
+
+
 class FakeJob:
     def __init__(self) -> None:
         self.result_called = False
@@ -227,10 +337,10 @@ class FakeJob:
 
 
 class FakeQueryJob:
-    def __init__(self, rows: list[FakeRow]) -> None:
+    def __init__(self, rows: list[Any]) -> None:
         self.rows = rows
 
-    def result(self) -> list[FakeRow]:
+    def result(self) -> list[Any]:
         return self.rows
 
 
@@ -240,9 +350,11 @@ class FakeBigQueryClient:
         *,
         conflict_job_ids: set[str] | None = None,
         snapshot_rows: list[FakeRow] | None = None,
+        cost_rows: list[FakeCostRow] | None = None,
     ) -> None:
         self.conflict_job_ids = conflict_job_ids or set()
         self.snapshot_rows = snapshot_rows or []
+        self.cost_rows = cost_rows or []
         self.load_calls: list[LoadCall] = []
         self.existing_job = FakeJob()
         self.get_job_call: tuple[str, str, str] | None = None
@@ -271,6 +383,8 @@ class FakeBigQueryClient:
 
     def query(self, query: str, *, job_config: Any) -> FakeQueryJob:
         self.query_call = QueryCall(query, job_config)
+        if "INFORMATION_SCHEMA.JOBS_BY_USER" in query:
+            return FakeQueryJob(self.cost_rows)
         return FakeQueryJob(self.snapshot_rows)
 
 
@@ -307,6 +421,7 @@ def _install_airflow_stubs() -> None:
     airflow_sdk_module.PartitionedAssetTimetable = FakePartitionedAssetTimetable
     airflow_sdk_module.StartOfDayMapper = FakeStartOfDayMapper
     airflow_sdk_module.TriggerRule = types.SimpleNamespace(ONE_FAILED="one_failed")
+    airflow_sdk_module.get_current_context = lambda: {"dag_run": FakeDagRun()}
     airflow_sdk_module.task = FakeTaskDecorator()
     bash_module.BashOperator = FakeOperator
 
@@ -362,6 +477,10 @@ class FakeDAG:
 
     def __exit__(self, *_args: object) -> None:
         return None
+
+
+class FakeDagRun:
+    start_date = None
 
 
 class FakeOperator:

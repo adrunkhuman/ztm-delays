@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import logging
+from datetime import UTC, datetime, timedelta
 from hashlib import sha1
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ from airflow.sdk import (
     CronPartitionTimetable,
     Metadata,
     TriggerRule,
+    get_current_context,
     task,
 )
 from google.api_core.exceptions import Conflict
@@ -29,6 +31,8 @@ from ztm_airflow_common import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+LOGGER = logging.getLogger(__name__)
 
 GCS_GPS_PREFIX = "raw/gps"
 VEHICLE_TYPES = ("bus", "tram")
@@ -50,6 +54,8 @@ SERVICE_COVERAGE_MODEL = "agg_service_coverage"
 PIPELINE_STATUS_MODEL = "mart_pipeline_status"
 AGGREGATE_MODELS = "agg_line_stop_period agg_stop_period agg_time_period agg_line_daily"
 WAREHOUSE_HISTORY_START_DATE = "2026-06-25"
+BIGQUERY_DBT_COST_LOOKBACK_HOURS = 12
+BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD = 100 * 1024**3
 
 RAW_GPS_PROCESSING_DATE = "{{ (dag_run.partition_key or dag_run.conf.get('processing_date'))[:10] }}"
 PROCESSING_DATE = "{{ dag_run.conf.get('processing_date') or dag_run.partition_key or data_interval_start.in_timezone('Europe/Warsaw').to_date_string() }}"
@@ -143,6 +149,43 @@ def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     if not rows:
         raise AirflowException(f"No built GTFS schedule dimension available for GPS processing date {processing_date}")
     return str(rows[0].gtfs_snapshot_id)
+
+
+def _bigquery_dbt_job_cost_summary(started_at: datetime) -> dict[str, object]:
+    client = bigquery.Client(project=GCP_PROJECT)
+    query = f"""
+        select
+          count(*) as job_count,
+          coalesce(sum(total_bytes_processed), 0) as total_bytes_processed,
+          coalesce(sum(total_bytes_billed), 0) as total_bytes_billed,
+          array_agg(struct(
+            creation_time,
+            job_id,
+            statement_type,
+            coalesce(total_bytes_processed, 0) as total_bytes_processed,
+            coalesce(total_bytes_billed, 0) as total_bytes_billed,
+            substr(query, 1, 500) as query_prefix
+          ) order by coalesce(total_bytes_billed, total_bytes_processed, 0) desc limit 10) as top_jobs
+        from `region-{BIGQUERY_LOCATION}`.INFORMATION_SCHEMA.JOBS_BY_USER
+        where creation_time >= @started_at
+          and job_type = 'QUERY'
+          and starts_with(query, '/* {{"app": "dbt"')
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("started_at", "TIMESTAMP", started_at)]
+    )
+    rows = list(client.query(query, job_config=job_config).result())
+    if not rows:
+        return {"job_count": 0, "total_bytes_processed": 0, "total_bytes_billed": 0, "top_jobs": []}
+
+    row = rows[0]
+    top_jobs = [dict(job.items()) if hasattr(job, "items") else dict(job) for job in row.top_jobs or []]
+    return {
+        "job_count": int(row.job_count or 0),
+        "total_bytes_processed": int(row.total_bytes_processed or 0),
+        "total_bytes_billed": int(row.total_bytes_billed or 0),
+        "top_jobs": top_jobs,
+    }
 
 
 with DAG(
@@ -299,11 +342,6 @@ with DAG(
         bash_command=dbt_command("run", AGGREGATE_MODELS, MART_DBT_VARS),
     )
 
-    dbt_test_aggregate_marts = BashOperator(
-        task_id="dbt_test_aggregate_marts",
-        bash_command=dbt_command("test", AGGREGATE_MODELS, MART_DBT_VARS),
-    )
-
     dbt_run_pipeline_status = BashOperator(
         task_id="dbt_run_pipeline_status",
         bash_command=dbt_command("run", PIPELINE_STATUS_MODEL, MART_DBT_VARS),
@@ -313,6 +351,40 @@ with DAG(
         task_id="dbt_test_pipeline_status",
         bash_command=dbt_command("test", PIPELINE_STATUS_MODEL, MART_DBT_VARS),
     )
+
+    @task(do_xcom_push=False)
+    def log_bigquery_dbt_job_costs() -> dict[str, object]:
+        """Log BigQuery dbt job bytes for the current DAG run without blocking publication."""
+        context = get_current_context()
+        dag_run = context.get("dag_run")
+        started_at = getattr(dag_run, "start_date", None)
+        if not isinstance(started_at, datetime):
+            started_at = datetime.now(UTC) - timedelta(hours=BIGQUERY_DBT_COST_LOOKBACK_HOURS)
+        elif started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+
+        try:
+            summary = _bigquery_dbt_job_cost_summary(started_at)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to collect BigQuery dbt cost metadata: %s", exc)
+            return {"error": str(exc), "started_at": started_at.isoformat()}
+
+        LOGGER.info(
+            "BigQuery dbt cost summary since %s: jobs=%s bytes_processed=%s bytes_billed=%s top_jobs=%s",
+            started_at.isoformat(),
+            summary["job_count"],
+            summary["total_bytes_processed"],
+            summary["total_bytes_billed"],
+            summary["top_jobs"],
+        )
+        total_bytes_billed = summary["total_bytes_billed"]
+        if isinstance(total_bytes_billed, int) and total_bytes_billed > BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD:
+            LOGGER.warning(
+                "BigQuery dbt billed bytes exceeded warning threshold: billed=%s threshold=%s",
+                total_bytes_billed,
+                BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD,
+            )
+        return summary | {"started_at": started_at.isoformat()}
 
     @task(outlets=[GPS_MODELS_DATE_ASSET])
     def emit_gps_models_date_asset(processing_date: str) -> Iterator[Metadata]:
@@ -341,8 +413,11 @@ with DAG(
     ]:
         upstream_task >> dbt_run_completeness_and_coverage
     dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_aggregate_marts
-    dbt_run_aggregate_marts >> dbt_test_aggregate_marts >> dbt_run_pipeline_status >> dbt_test_pipeline_status
-    dbt_test_pipeline_status >> emit_gps_models_date_asset(PROCESSING_DATE)
+    dbt_run_aggregate_marts >> dbt_run_pipeline_status >> dbt_test_pipeline_status
+    cost_summary = log_bigquery_dbt_job_costs()
+    gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE)
+    dbt_test_pipeline_status >> cost_summary
+    dbt_test_pipeline_status >> gps_models_date
     watcher = fail_on_any_task_failure()
     dbt_test_pipeline_status >> watcher
 

@@ -71,9 +71,12 @@ Normal Airflow cadence must stay bounded and deliberate:
 - Hourly raw GPS loading only loads immutable GCS parts into raw BigQuery.
 - Nightly GPS warehouse work runs one processing date and its prior service-date fact publication.
 - Aggregate/status marts still rebuild their configured history window until they are made incremental or windowed.
+- Nightly aggregate marts build but their broad tests are manual audit jobs.
 - GTFS load runs raw load, staging, dimensions, and cheap/default dimension tests.
 
 Expensive tests are manual audit jobs until operational maturity is higher. Do not add them back to default Airflow DAG paths.
+
+Nightly Airflow still tests `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`; only the four broad serving aggregate tests moved to manual audits.
 
 Manual GTFS schedule audit:
 
@@ -83,7 +86,7 @@ dbt test --select int_gtfs_trip_schedule int_schedule_version \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
 ```
 
-Manual aggregate/fact audit for a bounded window:
+Manual aggregate/fact audit for an aggregate build window. Run this before aggregate contract changes, serving-impacting changes, or periodic manual audits; do not put this selector back in the normal nightly path without a fresh byte estimate. The vars should match the aggregate mart build window. For a smaller audit window, rebuild the aggregates in a dev or dedicated audit dataset first.
 
 ```bash
 dbt test --select fct_trip fct_stop_arrival mart_day_completeness agg_service_coverage agg_line_daily agg_line_stop_period agg_stop_period agg_time_period mart_pipeline_status \
@@ -92,6 +95,8 @@ dbt test --select fct_trip fct_stop_arrival mart_day_completeness agg_service_co
 ```
 
 The `Audit Required` GitHub workflow only reports changed-path risk. It does not run billable dbt/BigQuery audits. If it reports an audit tier, choose the smallest explicit manual command that covers the changed contract.
+
+After `dag_daily_gps` finishes its normal dbt phases, it logs a BigQuery dbt cost summary from `INFORMATION_SCHEMA.JOBS_BY_USER`: job count, total bytes processed, total bytes billed, and top jobs by bytes. This is visibility only. Metadata collection failure is logged but does not block asset publication. Attribution is best-effort: it is scoped to the same BigQuery principal, project, and region, and filters on dbt query comments, so concurrent dbt jobs from the same principal can be included while jobs from another principal or without dbt comments can be missed.
 
 ## Manual Serving Export
 
