@@ -131,13 +131,19 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     dag = _load_dag_module()
 
     assert isinstance(dag.raw_gps_dag.kwargs["schedule"], FakeCronPartitionTimetable)
-    assert dag.raw_gps_dag.kwargs["schedule"].cron == "20 * * * *"
+    assert dag.raw_gps_dag.kwargs["schedule"].cron == dag.GPS_RAW_LOAD_CRON
     assert dag.raw_gps_dag.kwargs["schedule"].timezone == "Europe/Warsaw"
     assert "dag_run.partition_key" in dag.RAW_GPS_PROCESSING_DATE
     assert "data_interval_start" not in dag.RAW_GPS_PROCESSING_DATE
     assert dag.load_raw_gps_pings.kwargs == {"outlets": [dag.RAW_GPS_DATE_ASSET]}
-    assert isinstance(dag.dag.kwargs["schedule"], FakePartitionedAssetTimetable)
+    assert isinstance(dag.dag.kwargs["schedule"], FakeCronPartitionTimetable)
+    assert dag.dag.kwargs["schedule"].cron == dag.GPS_WAREHOUSE_CRON
+    assert dag.dag.kwargs["schedule"].timezone == "Europe/Warsaw"
+    assert dag.dag.kwargs["schedule"].run_offset == -1
+    assert dag.dag.kwargs["schedule"].key_format == "%Y-%m-%d"
     assert dag.selected_gtfs_snapshot_id.kwargs == {}
+    assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PROCESSING_DATE
+    assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PRIOR_SERVICE_DATE
     assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
     assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_ping_trip.kwargs["bash_command"]
     assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_trip_summary.kwargs["bash_command"]
@@ -414,9 +420,18 @@ class FakeAsset:
 
 
 class FakeCronPartitionTimetable:
-    def __init__(self, cron: str, *, timezone: str) -> None:
+    def __init__(
+        self,
+        cron: str,
+        *,
+        timezone: str,
+        run_offset: int = 0,
+        key_format: str = "%Y-%m-%dT%H:%M:%S",
+    ) -> None:
         self.cron = cron
         self.timezone = timezone
+        self.run_offset = run_offset
+        self.key_format = key_format
 
 
 class FakeStartOfDayMapper:

@@ -278,15 +278,23 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
         "dim_schedule_date_current",
     }
     assert set(dag.GTFS_DIMENSION_MODELS.split()) == expected_dimension_models
+    assert set(dag.GTFS_DAILY_DIMENSION_TEST_MODELS.split()) == expected_dimension_models - {
+        "int_gtfs_trip_schedule",
+        "int_schedule_version",
+    }
+    assert set(dag.GTFS_EXPENSIVE_AUDIT_TEST_MODELS.split()) == {"int_gtfs_trip_schedule", "int_schedule_version"}
     _assert_dbt_command(dag.dbt_run_gtfs_staging.bash_command, "run", dag.GTFS_STAGING_MODELS)
     _assert_dbt_command(dag.dbt_test_gtfs_staging.bash_command, "test", dag.GTFS_STAGING_MODELS)
     assert dag.GTFS_RAW_SOURCES in dag.dbt_test_gtfs_staging.bash_command
     _assert_dbt_command(dag.dbt_run_gtfs_dimensions.bash_command, "run", dag.GTFS_DIMENSION_MODELS)
-    _assert_dbt_command(dag.dbt_test_gtfs_dimensions.bash_command, "test", dag.GTFS_DIMENSION_MODELS)
+    _assert_dbt_command(dag.dbt_test_gtfs_dimensions.bash_command, "test", dag.GTFS_DAILY_DIMENSION_TEST_MODELS)
     assert "--indirect-selection cautious" in dag.dbt_test_gtfs_dimensions.bash_command
     for model_name in expected_dimension_models:
         assert model_name in dag.dbt_run_gtfs_dimensions.bash_command
+    for model_name in expected_dimension_models - {"int_gtfs_trip_schedule", "int_schedule_version"}:
         assert model_name in dag.dbt_test_gtfs_dimensions.bash_command
+    assert "int_gtfs_trip_schedule" not in dag.dbt_test_gtfs_dimensions.bash_command
+    assert "int_schedule_version" not in dag.dbt_test_gtfs_dimensions.bash_command
     assert dag.dbt_run_gtfs_staging in dag.loaded_gtfs_snapshot.downstream
     assert dag.dbt_test_gtfs_staging in dag.dbt_run_gtfs_staging.downstream
     assert dag.dbt_run_gtfs_dimensions in dag.dbt_test_gtfs_staging.downstream

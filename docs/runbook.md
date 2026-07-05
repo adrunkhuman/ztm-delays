@@ -55,14 +55,43 @@ For each GPS processing date, rebuild the GPS/intermediate models, then publish 
 
 After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each `service_date` by running the governing-snapshot tests on `fct_trip` and `fct_stop_arrival`. Also verify `schedule_version_id` resolves to a version covering the row's GPS processing date. A successful run is not enough; matching every historical date against the newest snapshot is silent corruption. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
 
-## Airflow Asset Graph
+## Airflow Cadence And Asset Graph
 
 - `dag_gtfs_poll` produces `gtfs_snapshot` only when the GTFS ZIP hash changes.
 - `dag_gtfs_load` consumes `gtfs_snapshot` and loads/tests the exact emitted snapshot.
 - `dag_gps_raw_load` produces partitioned `raw_gps_date` events keyed by Warsaw-local GPS date. This records an hourly raw-load attempt, not a complete-day guarantee; completeness/status marts determine health.
-- `dag_daily_gps` consumes `raw_gps_date`, rebuilds that date's warehouse graph, and emits `gps_models_date` after marts/status succeed.
+- `dag_daily_gps` runs nightly at `04:00 Europe/Warsaw`, rebuilds one GPS processing date, and emits `gps_models_date` after marts/status succeed. The DAG ID is historical; hourly raw GPS asset events no longer trigger full warehouse rebuilds.
 
 Manual recovery remains explicit: trigger `dag_gtfs_load` with `snapshot_id`, `gcs_path`, and `processing_date`, or trigger `dag_daily_gps` with `processing_date` / partition key for the failed date. GTFS manual config must use `snapshot_id=YYYY-MM-DDTHH:MM:SSZ_<12 hex>`, `gcs_path=gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip`, and `processing_date=YYYY-MM-DD`. Rerun failed date partitions rather than clearing unrelated dates.
+
+## dbt Test Tiers
+
+Normal Airflow cadence must stay bounded and deliberate:
+
+- Hourly raw GPS loading only loads immutable GCS parts into raw BigQuery.
+- Nightly GPS warehouse work runs one processing date and its prior service-date fact publication.
+- Aggregate/status marts still rebuild their configured history window until they are made incremental or windowed.
+- GTFS load runs raw load, staging, dimensions, and cheap/default dimension tests.
+
+Expensive tests are manual audit jobs until operational maturity is higher. Do not add them back to default Airflow DAG paths.
+
+Manual GTFS schedule audit:
+
+```bash
+dbt test --select int_gtfs_trip_schedule int_schedule_version \
+  --indirect-selection cautious --exclude test_type:unit \
+  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
+```
+
+Manual aggregate/fact audit for a bounded window:
+
+```bash
+dbt test --select fct_trip fct_stop_arrival mart_day_completeness agg_service_coverage agg_line_daily agg_line_stop_period agg_stop_period agg_time_period mart_pipeline_status \
+  --indirect-selection cautious --exclude test_type:unit \
+  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"YYYY-MM-DD","aggregation_start_date":"YYYY-MM-DD"}'
+```
+
+The `Audit Required` GitHub workflow only reports changed-path risk. It does not run billable dbt/BigQuery audits. If it reports an audit tier, choose the smallest explicit manual command that covers the changed contract.
 
 ## Manual Serving Export
 
@@ -115,4 +144,5 @@ The stable DuckDB file and sidecar JSON are not swapped transactionally as one u
 - Raw load retries are safe because job IDs are deterministic.
 - One malformed GPS coordinate should be filtered at staging and must not fail stop-arrival reconstruction.
 - Large ad-hoc BigQuery work should be dry-run and bounded by `maximum_bytes_billed`.
+- Default Airflow dbt tests must stay cheap enough for normal cadence; full-history schedule/version tests are manual audit work.
 - Keep old `ztm_bq` objects until v2 validation passes.
