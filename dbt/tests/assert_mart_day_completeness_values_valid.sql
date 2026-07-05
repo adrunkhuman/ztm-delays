@@ -1,6 +1,7 @@
 select *
 from {{ ref('mart_day_completeness') }}
-where gps_date = date('{{ var("processing_date") }}')
+where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
+    and date('{{ var("processing_date") }}')
   and (
       vehicle_type not in (1, 2)
       or mode not in ('bus', 'tram')

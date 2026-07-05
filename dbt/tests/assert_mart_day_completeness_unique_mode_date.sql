@@ -2,7 +2,10 @@ with expected as (
     select
         gps_date,
         mode
-    from unnest([date('{{ var("processing_date") }}')]) as gps_date
+    from unnest(generate_date_array(
+        date('{{ var("aggregation_start_date", var("processing_date")) }}'),
+        date('{{ var("processing_date") }}')
+    )) as gps_date
     cross join unnest(['bus', 'tram']) as mode
 ),
 
@@ -11,7 +14,8 @@ actual as (
         gps_date,
         mode
     from {{ ref('mart_day_completeness') }}
-    where gps_date = date('{{ var("processing_date") }}')
+    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
+        and date('{{ var("processing_date") }}')
 ),
 
 duplicate_rows as (

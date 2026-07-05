@@ -539,7 +539,7 @@ models:
         description: Duration in seconds between segment_start_time and segment_end_time.
 
   - name: mart_day_completeness
-    description: Daily GPS ingestion completeness by Warsaw-local GPS date and mode. The normal build replaces only the processing-date partition. This is raw-ingestion coverage metadata, not schedule-aware service coverage; complete and partial trip facts remain usable even when a day is incomplete.
+    description: Daily GPS ingestion completeness by Warsaw-local GPS date and mode. Normal builds replace the inclusive aggregation_start_date-through-processing_date GPS-date partitions. This is raw-ingestion coverage metadata, not schedule-aware service coverage; complete and partial trip facts remain usable even when a day is incomplete.
     columns:
       - name: gps_date
         description: Warsaw-local GPS processing date summarized by this row.
