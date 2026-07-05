@@ -20,8 +20,6 @@ One container polls Warsaw ZTM buses and trams every 10 seconds and writes appen
 - `FLUSH_LAG_SECONDS`: defaults to `MAX_PING_AGE_SECONDS`; rows are uploaded only after this age unless the poller is shutting down.
 - `POLLER_HEARTBEAT_GCS_PATH`: defaults to `health/poller/latest.json`; private GCS JSON heartbeat for backend-served poller liveness checks.
 - `POLLER_HEARTBEAT_INTERVAL_SECONDS`: defaults to `60`.
-- `POLLER_REQUIRE_POLISH_EGRESS`: defaults to `false`; when true, the poller verifies Polish egress through `ZTM_API_PROXY` before polling.
-- `POLLER_EGRESS_CHECK_URL`: defaults to `https://ipinfo.io/json`; must return JSON with `country: "PL"` when the egress check is enabled.
 - `LOG_LEVEL`: defaults to `INFO`.
 - `TS_EXIT_NODE`: defaults to `100.103.142.113` (`pl-waw-wg-101.mullvad.ts.net`, Warsaw).
 - `TS_HOSTNAME`: defaults to `ztm-poller`.
@@ -53,8 +51,6 @@ Rows are buffered in memory and uploaded in append-safe `part-*.parquet` files. 
 On graceful shutdown, all currently buffered rows are flushed, including rows newer than the lag window. If an upload fails, those rows stay buffered and are retried on the next flush attempt. A hard crash, forced container kill, or host restart can still lose rows that were not yet successfully uploaded, including rows younger than `FLUSH_LAG_SECONDS`. With defaults and healthy GCS, normal exposure is up to roughly `FLUSH_LAG_SECONDS + PARTIAL_FLUSH_INTERVAL_SECONDS`; there is no durable local spool.
 
 The city API can return stale or future-dated pings. The poller drops rows outside the configured freshness window before buffering.
-
-Set `POLLER_REQUIRE_POLISH_EGRESS=true` in production to fail fast when the Tailscale/Mullvad route is not providing Polish egress. The check runs once during startup, before GCS is initialized or API polling begins, and uses the same `ZTM_API_PROXY` SOCKS proxy as city API requests. Leave it disabled for local development unless a proxy is configured.
 
 ## Healthcheck
 
@@ -104,7 +100,7 @@ uv run python poller.py --once --no-upload
 
 ## Docker
 
-The Docker image runs `tailscaled` in userspace networking mode and exposes a local SOCKS5 proxy. City API requests and the optional Polish egress check use that proxy; GCS uploads stay on direct container networking.
+The Docker image runs `tailscaled` in userspace networking mode and exposes a local SOCKS5 proxy. Only ZTM API requests use that proxy; GCS uploads stay on direct container networking.
 
 Userspace mode does not require `NET_ADMIN` or `/dev/net/tun`. If Tailscale auth or exit-node setup fails, the container exits.
 
@@ -117,8 +113,6 @@ Persist `/var/lib/tailscale` across redeploys so the container keeps the same Ta
 If `tailscaled.state` exists in that mounted directory, `TS_AUTHKEY` is optional and the existing device identity is reused. If `TS_AUTHKEY` is present, it is still passed to `tailscale up`; after bootstrap, prefer removing it to prove redeploys use only persisted state. If the state file is missing, `TS_AUTHKEY` is required to bootstrap a new device.
 
 If a new container node must be manually approved for Mullvad VPN access, the poller usually stays alive by retrying API failures. `STARTUP_GRACE_SECONDS` also prevents an early poller crash from immediately removing the container before approval can be completed. Startup grace does not apply to failures before `poller.py` starts, including `tailscaled` readiness or `tailscale up` failures.
-
-Recommended Coolify production settings include the persisted Tailscale state mount, a Warsaw/Poland `TS_EXIT_NODE`, and `POLLER_REQUIRE_POLISH_EGRESS=true`. If the egress assertion fails, the poller exits during startup instead of silently running with an unusable city API route.
 
 ```bash
 docker build -t ztm-gps-poller ./poller
