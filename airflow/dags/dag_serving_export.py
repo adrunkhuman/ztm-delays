@@ -310,8 +310,7 @@ def _validate_source_stats(stats: Sequence[TableStats], max_source_bytes: int) -
     empty_required_tables = sorted(
         stat.table_name
         for stat in stats
-        if stat.table_name
-        in {"agg_line_stop_period", "agg_stop_period", "fct_stop_arrival", "fct_trip", "mart_pipeline_status"}
+        if stat.table_name in {"agg_line_daily", "fct_stop_arrival", "fct_trip", "mart_pipeline_status"}
         and stat.row_count == 0
     )
     if empty_required_tables:

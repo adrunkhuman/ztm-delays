@@ -104,7 +104,7 @@ The current frontend routes are backed as follows:
 - `/lines/<line>`: `agg_line_daily`, `agg_line_hour_daily`, `agg_line_stop_daily`, `fct_stop_arrival`, `mart_delay_events`, `mart_trip_reliability`.
 - `/stops/`: `dim_stop_group_current`, `agg_stop_group_daily`.
 - `/stops/<group>` and `/stops/<group>/<post>`: `dim_stop_post_current`, `agg_stop_post_daily`, `agg_stop_line_daily`, `agg_stop_hour_daily`, `fct_stop_arrival`, `mart_delay_events`.
-- `/trips/`: `fct_trip`, with traces from `fct_stop_arrival`.
+- `/trips/` and `/schedule/`: `fct_trip`, with traces from `fct_stop_arrival`; `/trips/` is canonical and `/schedule/` is the compatibility alias.
 - `/trips/<trip_id>`: `fct_trip` and observed stop rows from `fct_stop_arrival`.
 - `/status`: `mart_pipeline_status` plus `export_metadata` footer freshness.
 

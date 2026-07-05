@@ -2,7 +2,7 @@
 
 Server-rendered Flask frontend for the ZTM DuckDB serving artifact.
 
-This is an alpha archive prototype. It intentionally validates the page structure and DuckDB query contract before every visual widget is backed by final aggregate data.
+This is an alpha archive prototype backed by the DuckDB serving artifact. Some archive facts are still provisional current-pipeline outputs rather than settled nightly matcher results.
 
 ## Runtime Contract
 
@@ -16,7 +16,7 @@ Required data:
 Important quirks:
 
 - DuckDB timestamps from BigQuery are treated as UTC and displayed in `Europe/Warsaw`.
-- Some widgets are still deterministic frontend placeholders until the serving contract is finalized.
+- Widgets are backed by exported DuckDB rows or derived frontend-serving tables; some presentation transforms still reshape those rows for compact charts.
 - Current facts are alpha/current-pipeline facts, not settled nightly matcher output.
 
 ## Environment Variables
