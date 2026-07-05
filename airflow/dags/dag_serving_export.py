@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from airflow.sdk import DAG, get_current_context, task
 from google.api_core.exceptions import Conflict
@@ -30,11 +30,18 @@ if TYPE_CHECKING:
     from types import ModuleType
     from typing import Protocol
 
+    class DuckdbResult(Protocol):
+        """Minimal DuckDB result protocol used by build-time validation."""
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            """Return one query row."""
+            ...
+
     class DuckdbConnection(Protocol):
         """Minimal DuckDB connection protocol used by build-time settings."""
 
-        def execute(self, query: str) -> object:
-            """DuckDB-compatible execute; return value is ignored."""
+        def execute(self, query: str) -> DuckdbResult:
+            """DuckDB-compatible execute."""
             ...
 
 
@@ -65,6 +72,19 @@ MART_TABLES = (
     "mart_day_completeness",
     "mart_pipeline_status",
 )
+DERIVED_TABLES = (
+    "agg_line_hour_daily",
+    "agg_line_stop_daily",
+    "agg_mode_daily",
+    "agg_mode_hour_daily",
+    "agg_stop_group_daily",
+    "agg_stop_hour_daily",
+    "agg_stop_line_daily",
+    "agg_stop_post_daily",
+    "mart_delay_events",
+    "mart_trip_reliability",
+)
+EXPORTED_TABLES = MART_TABLES + DERIVED_TABLES
 DATE_RANGE_SQL_BY_TABLE = {
     "agg_line_daily": "service_date",
     "agg_service_coverage": "scheduled_start_date",
@@ -72,6 +92,18 @@ DATE_RANGE_SQL_BY_TABLE = {
     "fct_trip": "service_date",
     "mart_day_completeness": "gps_date",
     "mart_pipeline_status": "service_date",
+}
+DERIVED_DATE_RANGE_SQL_BY_TABLE = {
+    "agg_line_hour_daily": "service_date",
+    "agg_line_stop_daily": "service_date",
+    "agg_mode_daily": "service_date",
+    "agg_mode_hour_daily": "service_date",
+    "agg_stop_group_daily": "service_date",
+    "agg_stop_hour_daily": "service_date",
+    "agg_stop_line_daily": "service_date",
+    "agg_stop_post_daily": "service_date",
+    "mart_delay_events": "service_date",
+    "mart_trip_reliability": "service_date",
 }
 
 
@@ -429,7 +461,7 @@ def _publish_duckdb(
         duckdb_size_bytes=duckdb_size_bytes,
         source_size_bytes=sum(stat.size_bytes for stat in source_stats),
         source_row_count=sum(stat.row_count for stat in source_stats),
-        exported_table_count=len(MART_TABLES),
+        exported_table_count=len(EXPORTED_TABLES),
     )
 
 
@@ -457,6 +489,8 @@ def _build_duckdb_file(
             connection.execute(
                 f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
+        _create_derived_serving_tables(connection)
+        table_stats = [*build_input.source_stats, *_derived_table_stats(connection)]
         connection.execute(
             """
             create table export_table_stats (
@@ -473,7 +507,7 @@ def _build_duckdb_file(
             "insert into export_table_stats values (?, ?, ?, ?, ?, ?)",
             [
                 (stat.table_name, stat.row_count, stat.size_bytes, stat.min_date, stat.max_date, stat.date_count)
-                for stat in build_input.source_stats
+                for stat in table_stats
             ],
         )
         connection.execute(
@@ -503,7 +537,7 @@ def _build_duckdb_file(
                 BIGQUERY_MARTS_DATASET,
                 sum(stat.size_bytes for stat in build_input.source_stats),
                 sum(stat.row_count for stat in build_input.source_stats),
-                len(MART_TABLES),
+                len(EXPORTED_TABLES),
                 0,
             ],
         )
@@ -520,6 +554,295 @@ def _configure_duckdb_build_connection(connection: DuckdbConnection, temp_direct
     connection.execute("set preserve_insertion_order = false")
 
 
+def _create_derived_serving_tables(connection: DuckdbConnection) -> None:
+    connection.execute(
+        """
+        create temp view complete_stop_arrivals as
+        select *
+        from (
+            select
+                *,
+                floor(
+                    (epoch_ms(scheduled_arrival_time + interval '2 hours')
+                    - epoch_ms(service_date::timestamp + interval '4 hours')) / 3600000
+                ) as service_hour_index,
+                ((4 + floor(
+                    (epoch_ms(scheduled_arrival_time + interval '2 hours')
+                    - epoch_ms(service_date::timestamp + interval '4 hours')) / 3600000
+                )) % 24)::bigint as local_hour
+            from fct_stop_arrival
+            where trip_quality = 'complete'
+        )
+        where service_hour_index between 0 and 23
+        """
+    )
+    _create_daily_derived_tables(connection)
+    _create_hourly_derived_tables(connection)
+    _create_event_derived_tables(connection)
+
+
+def _create_daily_derived_tables(connection: DuckdbConnection) -> None:
+    metrics = _duckdb_delay_distribution_sql()
+    trip_key = "concat(gtfs_snapshot_id, '|', trip_id, '|', coalesce(vehicle_number, ''))"
+    connection.execute(
+        f"""
+        create table agg_mode_daily as
+        select
+            service_date,
+            mode,
+            {metrics},
+            count(distinct {trip_key}) as trip_count,
+            count(distinct stop_group_id) as stop_group_count
+        from complete_stop_arrivals
+        group by service_date, mode
+        """
+    )
+    connection.execute(
+        f"""
+        create table agg_stop_group_daily as
+        select
+            service_date,
+            mode,
+            stop_group_id,
+            any_value(stop_group_name) as stop_group_name,
+            {metrics},
+            count(distinct stop_id) as stop_post_count,
+            count(distinct line) as line_count
+        from complete_stop_arrivals
+        group by service_date, mode, stop_group_id
+        """
+    )
+    connection.execute(
+        f"""
+        create table agg_stop_post_daily as
+        select
+            service_date,
+            mode,
+            stop_group_id,
+            any_value(stop_group_name) as stop_group_name,
+            stop_id,
+            any_value(stop_name) as stop_name,
+            {metrics},
+            count(distinct line) as line_count
+        from complete_stop_arrivals
+        group by service_date, mode, stop_group_id, stop_id
+        """
+    )
+    connection.execute(
+        f"""
+        create table agg_stop_line_daily as
+        select
+            service_date,
+            mode,
+            stop_group_id,
+            any_value(stop_group_name) as stop_group_name,
+            stop_id,
+            any_value(stop_name) as stop_name,
+            line,
+            any_value(route_short_name) as route_short_name,
+            direction_id,
+            any_value(trip_headsign) as trip_headsign,
+            {metrics},
+            count(distinct {trip_key}) as trip_count
+        from complete_stop_arrivals
+        group by service_date, mode, stop_group_id, stop_id, line, direction_id
+        """
+    )
+    connection.execute(
+        f"""
+        create table agg_line_stop_daily as
+        select
+            service_date,
+            mode,
+            line,
+            any_value(route_short_name) as route_short_name,
+            direction_id,
+            any_value(trip_headsign) as trip_headsign,
+            stop_group_id,
+            any_value(stop_group_name) as stop_group_name,
+            stop_id,
+            any_value(stop_name) as stop_name,
+            min(stop_sequence) as min_stop_sequence,
+            {metrics},
+            count(distinct {trip_key}) as trip_count
+        from complete_stop_arrivals
+        group by service_date, mode, line, direction_id, stop_group_id, stop_id
+        """
+    )
+
+
+def _create_hourly_derived_tables(connection: DuckdbConnection) -> None:
+    metrics = _duckdb_delay_distribution_sql()
+    trip_key = "concat(gtfs_snapshot_id, '|', trip_id, '|', coalesce(vehicle_number, ''))"
+    connection.execute(
+        f"""
+        create table agg_mode_hour_daily as
+        select
+            service_date,
+            mode,
+            any_value(hour_bracket) as hour_bracket,
+            local_hour,
+            {metrics},
+            count(distinct {trip_key}) as trip_count,
+            count(distinct stop_group_id) as stop_group_count
+        from complete_stop_arrivals
+        group by service_date, mode, service_hour_index, local_hour
+        """
+    )
+    connection.execute(
+        f"""
+        create table agg_line_hour_daily as
+        select
+            service_date,
+            mode,
+            line,
+            any_value(route_short_name) as route_short_name,
+            any_value(hour_bracket) as hour_bracket,
+            local_hour,
+            {metrics},
+            count(distinct {trip_key}) as trip_count,
+            count(distinct stop_group_id) as stop_group_count
+        from complete_stop_arrivals
+        group by service_date, mode, line, service_hour_index, local_hour
+        """
+    )
+    connection.execute(
+        f"""
+        create table agg_stop_hour_daily as
+        select
+            service_date,
+            mode,
+            stop_group_id,
+            any_value(stop_group_name) as stop_group_name,
+            stop_id,
+            any_value(stop_name) as stop_name,
+            any_value(hour_bracket) as hour_bracket,
+            local_hour,
+            {metrics},
+            count(distinct line) as line_count
+        from complete_stop_arrivals
+        group by service_date, mode, stop_group_id, stop_id, service_hour_index, local_hour
+        """
+    )
+
+
+def _create_event_derived_tables(connection: DuckdbConnection) -> None:
+    connection.execute(
+        """
+        create table mart_delay_events as
+        with ranked as (
+            select
+                service_date,
+                mode,
+                line,
+                route_short_name,
+                trip_headsign,
+                scheduled_arrival_time,
+                stop_group_id,
+                stop_id,
+                stop_name,
+                delay_seconds,
+                row_number() over (partition by service_date, line order by delay_seconds desc) as line_delay_rank,
+                row_number() over (
+                    partition by service_date, mode, stop_group_id order by delay_seconds desc
+                ) as stop_group_delay_rank,
+                row_number() over (
+                    partition by service_date, mode, stop_id order by delay_seconds desc
+                ) as stop_post_delay_rank
+            from complete_stop_arrivals
+        )
+        select *
+        from ranked
+        where line_delay_rank <= 20
+           or stop_group_delay_rank <= 20
+           or stop_post_delay_rank <= 20
+        """
+    )
+    connection.execute(
+        """
+        create table mart_trip_reliability as
+        select
+            service_date,
+            mode,
+            line,
+            route_short_name,
+            direction_id,
+            trip_headsign,
+            trip_quality,
+            row_number() over (
+                partition by service_date, line, direction_id, trip_headsign
+                order by scheduled_start_time, trip_id, vehicle_number
+            ) as trip_order
+        from fct_trip
+        """
+    )
+
+
+def _duckdb_delay_distribution_sql(delay_column: str = "delay_seconds") -> str:
+    return f"""
+        count(*) as n,
+        avg({delay_column}) as mean_delay_seconds,
+        quantile_cont({delay_column}, 0.10) as p10_delay_seconds,
+        quantile_cont({delay_column}, 0.50) as median_delay_seconds,
+        quantile_cont({delay_column}, 0.50) as p50_delay_seconds,
+        quantile_cont({delay_column}, 0.90) as p90_delay_seconds,
+        stddev_samp({delay_column}) as stddev_delay_seconds,
+        count(*) filter (where {delay_column} between -60 and 180)::double / nullif(count(*), 0) as on_time_rate,
+        count(*) filter (where {delay_column} < -60) as early_count,
+        count(*) filter (where {delay_column} between -60 and 180) as on_time_count,
+        count(*) filter (where {delay_column} > 180) as late_count,
+        {_duckdb_delay_histogram_sql(delay_column)}
+    """
+
+
+def _duckdb_delay_histogram_sql(delay_column: str) -> str:
+    return f"""
+        [
+          struct_pack(bucket_label := 'early_over_5m', min_delay_seconds := null::bigint, max_delay_seconds := -301::bigint, n := count(*) filter (where {delay_column} < -300)),
+          struct_pack(bucket_label := 'early_2_to_5m', min_delay_seconds := -300::bigint, max_delay_seconds := -121::bigint, n := count(*) filter (where {delay_column} between -300 and -121)),
+          struct_pack(bucket_label := 'early_1_to_2m', min_delay_seconds := -120::bigint, max_delay_seconds := -61::bigint, n := count(*) filter (where {delay_column} between -120 and -61)),
+          struct_pack(bucket_label := 'on_time_early_30_60s', min_delay_seconds := -60::bigint, max_delay_seconds := -31::bigint, n := count(*) filter (where {delay_column} between -60 and -31)),
+          struct_pack(bucket_label := 'on_time_early_0_30s', min_delay_seconds := -30::bigint, max_delay_seconds := -1::bigint, n := count(*) filter (where {delay_column} between -30 and -1)),
+          struct_pack(bucket_label := 'on_time_late_0_30s', min_delay_seconds := 0::bigint, max_delay_seconds := 30::bigint, n := count(*) filter (where {delay_column} between 0 and 30)),
+          struct_pack(bucket_label := 'on_time_late_30_60s', min_delay_seconds := 31::bigint, max_delay_seconds := 60::bigint, n := count(*) filter (where {delay_column} between 31 and 60)),
+          struct_pack(bucket_label := 'on_time_late_1_to_3m', min_delay_seconds := 61::bigint, max_delay_seconds := 180::bigint, n := count(*) filter (where {delay_column} between 61 and 180)),
+          struct_pack(bucket_label := 'late_3_to_5m', min_delay_seconds := 181::bigint, max_delay_seconds := 300::bigint, n := count(*) filter (where {delay_column} between 181 and 300)),
+          struct_pack(bucket_label := 'late_5_to_10m', min_delay_seconds := 301::bigint, max_delay_seconds := 600::bigint, n := count(*) filter (where {delay_column} between 301 and 600)),
+          struct_pack(bucket_label := 'late_10_to_20m', min_delay_seconds := 601::bigint, max_delay_seconds := 1200::bigint, n := count(*) filter (where {delay_column} between 601 and 1200)),
+          struct_pack(bucket_label := 'late_over_20m', min_delay_seconds := 1201::bigint, max_delay_seconds := null::bigint, n := count(*) filter (where {delay_column} > 1200))
+        ] as delay_histogram
+    """
+
+
+def _derived_table_stats(connection: DuckdbConnection) -> list[TableStats]:
+    stats = []
+    for table_name in DERIVED_TABLES:
+        date_column = DERIVED_DATE_RANGE_SQL_BY_TABLE[table_name]
+        row = connection.execute(
+            f"""
+            select
+                count(*) as row_count,
+                min({date_column})::varchar as min_date,
+                max({date_column})::varchar as max_date,
+                count(distinct {date_column}) as date_count
+            from {_identifier(table_name)}
+            """
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Failed to collect DuckDB stats for derived table: {table_name}")
+        stats.append(
+            TableStats(
+                table_name=table_name,
+                row_count=int(row[0]),
+                size_bytes=0,
+                min_date=str(row[1]) if row[1] is not None else None,
+                max_date=str(row[2]) if row[2] is not None else None,
+                date_count=int(row[3]) if row[3] is not None else None,
+            )
+        )
+    return stats
+
+
 def _update_duckdb_file_size(duckdb_module: ModuleType, path: Path, duckdb_size_bytes: int) -> None:
     with duckdb_module.connect(str(path)) as connection:
         connection.execute("update export_metadata set duckdb_file_size_bytes = ?", [duckdb_size_bytes])
@@ -531,7 +854,7 @@ def _validate_duckdb_export(duckdb_module: ModuleType, path: Path, source_stats:
             "select table_name from information_schema.tables where table_schema = 'main'"
         ).fetchall()
         actual_tables = {row[0] for row in table_rows}
-        required_tables = set(MART_TABLES) | {"export_metadata", "export_table_stats"}
+        required_tables = set(EXPORTED_TABLES) | {"export_metadata", "export_table_stats"}
         missing_tables = sorted(required_tables - actual_tables)
         if missing_tables:
             raise RuntimeError(f"DuckDB export missing tables: {', '.join(missing_tables)}")
@@ -542,6 +865,11 @@ def _validate_duckdb_export(duckdb_module: ModuleType, path: Path, source_stats:
             "fct_stop_arrival",
             "fct_trip",
             "mart_pipeline_status",
+            "agg_mode_daily",
+            "agg_line_hour_daily",
+            "agg_stop_hour_daily",
+            "mart_delay_events",
+            "mart_trip_reliability",
         ]:
             row_count = connection.execute(f"select count(*) from {_identifier(table_name)}").fetchone()[0]
             if row_count == 0:
@@ -572,7 +900,7 @@ def _export_metadata(
         "duckdb_file_size_bytes": duckdb_size_bytes,
         "source_size_bytes": sum(stat.size_bytes for stat in source_stats),
         "source_row_count": sum(stat.row_count for stat in source_stats),
-        "exported_table_count": len(MART_TABLES),
+        "exported_table_count": len(EXPORTED_TABLES),
         "tables": [asdict(stat) for stat in source_stats],
     }
 

@@ -15,16 +15,46 @@
             countif({{ delay_column }} < -300) as n
         ),
         struct(
-            'early_1_to_5m' as bucket_label,
+            'early_2_to_5m' as bucket_label,
             -300 as min_delay_seconds,
-            -61 as max_delay_seconds,
-            countif({{ delay_column }} between -300 and -61) as n
+            -121 as max_delay_seconds,
+            countif({{ delay_column }} between -300 and -121) as n
         ),
         struct(
-            'on_time' as bucket_label,
+            'early_1_to_2m' as bucket_label,
+            -120 as min_delay_seconds,
+            -61 as max_delay_seconds,
+            countif({{ delay_column }} between -120 and -61) as n
+        ),
+        struct(
+            'on_time_early_30_60s' as bucket_label,
             -60 as min_delay_seconds,
+            -31 as max_delay_seconds,
+            countif({{ delay_column }} between -60 and -31) as n
+        ),
+        struct(
+            'on_time_early_0_30s' as bucket_label,
+            -30 as min_delay_seconds,
+            -1 as max_delay_seconds,
+            countif({{ delay_column }} between -30 and -1) as n
+        ),
+        struct(
+            'on_time_late_0_30s' as bucket_label,
+            0 as min_delay_seconds,
+            30 as max_delay_seconds,
+            countif({{ delay_column }} between 0 and 30) as n
+        ),
+        struct(
+            'on_time_late_30_60s' as bucket_label,
+            31 as min_delay_seconds,
+            60 as max_delay_seconds,
+            countif({{ delay_column }} between 31 and 60) as n
+        ),
+        struct(
+            'on_time_late_1_to_3m' as bucket_label,
+            61 as min_delay_seconds,
             180 as max_delay_seconds,
-            countif({{ delay_column }} between -60 and 180) as n
+            countif({{ delay_column }} between 61 and 180) as n
         ),
         struct(
             'late_3_to_5m' as bucket_label,

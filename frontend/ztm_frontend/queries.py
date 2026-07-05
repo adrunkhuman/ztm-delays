@@ -23,25 +23,33 @@ LOW_ON_TIME_RATE = 0.6
 GOOD_STATUS_HEALTH_RATIO = 0.9
 USABLE_STATUS_HEALTH_RATIO = 0.7
 SERVICE_DAY_HOURS = (*range(4, 24), *range(4))
-NEXT_DAY_PLACEHOLDER_HOURS = frozenset(range(4))
-AM_RUSH_START_HOUR = 7
-AM_RUSH_END_HOUR = 9
-PM_RUSH_START_HOUR = 16
-PM_RUSH_END_HOUR = 18
-WEEKEND_START_INDEX = 5
 HISTOGRAM_BUCKET_COUNT = 12
 HISTOGRAM_MAX_HEIGHT = 38
 HISTOGRAM_MINI_MAX_HEIGHT = 20
 EARLY_BUCKET_COUNT = 2
 LATE_BUCKET_START = 8
-PARTIAL_TRIP_SCORE = 80
-BROKEN_TRIP_SCORE = 92
+HISTOGRAM_BUCKET_LABELS = (
+    "early_over_5m",
+    "early_2_to_5m",
+    "early_1_to_2m",
+    "on_time_early_30_60s",
+    "on_time_early_0_30s",
+    "on_time_late_0_30s",
+    "on_time_late_30_60s",
+    "on_time_late_1_to_3m",
+    "late_3_to_5m",
+    "late_5_to_10m",
+    "late_10_to_20m",
+    "late_over_20m",
+)
 TRIP_TRACE_BASELINE = 16
 TRIP_TRACE_LATE_SCALE_SECONDS = 18
 TRIP_TRACE_EARLY_SCALE_SECONDS = 24
 TRIP_TRACE_LATE_MAX_PX = 20
 TRIP_TRACE_EARLY_MAX_PX = 7
 MIN_TRIP_TRACE_POINTS = 2
+TIMELINE_MIN_GAP_PERCENT = 0.55
+MIN_HOUR_SAMPLE_SIZE = 3
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -74,11 +82,16 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
         """
         select
             mode,
-            sum(mean_delay_seconds * n) / nullif(sum(n), 0) as mean_delay_seconds,
-            sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate
-        from agg_line_daily
+            mean_delay_seconds,
+            median_delay_seconds,
+            p90_delay_seconds,
+            on_time_rate,
+            early_count,
+            on_time_count,
+            late_count,
+            delay_histogram
+        from agg_mode_daily
         where service_date = ?
-        group by mode
         order by mode
         """,
         [selected_date],
@@ -92,7 +105,9 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
                 mode,
                 route_short_name,
                 sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
+                sum(p90_delay_seconds * n) / nullif(sum(n), 0) as p90_delay_seconds,
                 sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate,
+                flatten(list(delay_histogram)) as delay_histogram,
                 row_number() over (
                     partition by mode
                     order by sum(median_delay_seconds * n) / nullif(sum(n), 0) desc
@@ -102,7 +117,7 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
             group by line, mode, route_short_name
             having sum(n) >= 100
         )
-        select line, mode, route_short_name, median_delay_seconds, on_time_rate
+        select line, mode, route_short_name, median_delay_seconds, p90_delay_seconds, on_time_rate, delay_histogram
         from ranked
         where row_number <= 8
         order by mode, median_delay_seconds desc
@@ -110,27 +125,32 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
         [selected_date],
     )
     for line in worst_lines:
-        line["shape"] = _delay_shape(line.get("median_delay_seconds"), line.get("on_time_rate"))
+        line["shape"] = _delay_shape(
+            line.get("median_delay_seconds"),
+            line.get("on_time_rate"),
+            line.get("delay_histogram"),
+            line.get("p90_delay_seconds"),
+        )
 
     worst_stops = fetch_all(
         db_path,
         """
         with ranked as (
             select
-                stop_id,
                 stop_group_id,
                 mode,
                 stop_group_name,
-                quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate,
-                row_number() over (partition by mode order by quantile_cont(delay_seconds, 0.5) desc) as row_number
-            from fct_stop_arrival
+                stop_id,
+                median_delay_seconds,
+                p90_delay_seconds,
+                on_time_rate,
+                delay_histogram,
+                row_number() over (partition by mode order by median_delay_seconds desc) as row_number
+            from agg_stop_post_daily
             where service_date = ?
-              and trip_quality = 'complete'
-            group by stop_id, stop_group_id, mode, stop_group_name
-            having count(*) >= 10
+              and n >= 10
         )
-        select stop_id, stop_group_id, mode, stop_group_name, median_delay_seconds, on_time_rate
+        select stop_id, stop_group_id, mode, stop_group_name, median_delay_seconds, p90_delay_seconds, on_time_rate, delay_histogram
         from ranked
         where row_number <= 8
         order by mode, median_delay_seconds desc
@@ -140,7 +160,12 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
     for stop in worst_stops:
         stop["post_label"] = _stop_post_label(stop["stop_id"], stop["stop_group_id"])
         stop["display_name"] = f"{stop['stop_group_name']} [{stop['post_label']}]"
-        stop["shape"] = _delay_shape(stop.get("median_delay_seconds"), stop.get("on_time_rate"))
+        stop["shape"] = _delay_shape(
+            stop.get("median_delay_seconds"),
+            stop.get("on_time_rate"),
+            stop.get("delay_histogram"),
+            stop.get("p90_delay_seconds"),
+        )
 
     mode_stats_by_mode = _by_mode(mode_stats)
     return {
@@ -148,7 +173,7 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
         "selected_date": selected_date,
         "date_nav": _date_nav(date_options, selected_date),
         "mode_stats": mode_stats_by_mode,
-        "overview_widgets": _overview_widgets(mode_stats_by_mode, selected_date),
+        "overview_widgets": _overview_widgets(db_path, mode_stats_by_mode, selected_date),
         "worst_lines": _by_mode_list(worst_lines),
         "worst_stops": _by_mode_list(worst_stops),
         "delay_plots": {
@@ -209,7 +234,8 @@ def get_lines(
                 sum(mean_delay_seconds * n) / nullif(sum(n), 0) as mean_delay_seconds,
                 sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
                 sum(p90_delay_seconds * n) / nullif(sum(n), 0) as p90_delay_seconds,
-                sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate
+                sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate,
+                flatten(list(delay_histogram)) as delay_histogram
             from agg_line_daily
             where line = ?
               and service_date = ?
@@ -223,11 +249,10 @@ def get_lines(
             select
                 direction_id,
                 trip_headsign,
-                count(distinct trip_id) as trip_count
-            from fct_stop_arrival
+                sum(trip_count) as trip_count
+            from agg_line_stop_daily
             where line = ?
               and service_date = ?
-              and trip_quality = 'complete'
             group by direction_id, trip_headsign
             order by trip_count desc, direction_id, trip_headsign
             limit 2
@@ -240,19 +265,21 @@ def get_lines(
                 """
                 select
                     any_value(stop_group_id) as stop_group_id,
-                    stop_sequence,
+                    min_stop_sequence as stop_sequence,
                     any_value(stop_name) as stop_name,
-                    avg(delay_seconds) as mean_delay_seconds,
-                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
-                from fct_stop_arrival
+                    sum(mean_delay_seconds * n) / nullif(sum(n), 0) as mean_delay_seconds,
+                    sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
+                    sum(p90_delay_seconds * n) / nullif(sum(n), 0) as p90_delay_seconds,
+                    sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate,
+                    flatten(list(delay_histogram)) as delay_histogram
+                from agg_line_stop_daily
                 where line = ?
                   and service_date = ?
                   and direction_id = ?
                   and trip_headsign = ?
-                  and trip_quality = 'complete'
-                group by stop_sequence
-                having count(*) >= 3
-                order by stop_sequence
+                group by min_stop_sequence
+                having sum(n) >= 3
+                order by min_stop_sequence
                 limit ?
                 """,
                 [selected_line, selected_date, course["direction_id"], course["trip_headsign"], STOP_ROWS_PER_COURSE],
@@ -260,7 +287,7 @@ def get_lines(
     else:
         line_landing_summary = _line_landing_summary(db_path, selected_date, selected_mode)
         line_landing_rows = _line_landing_rows(db_path, selected_date, selected_mode, selected_rank)
-    line_widgets = _line_widgets(selected_line, selected_date, summary, courses)
+    line_widgets = _line_widgets(db_path, selected_line, selected_date, summary, courses)
     return {
         "date_options": date_options,
         "selected_date": selected_date,
@@ -327,55 +354,51 @@ def get_stops(  # noqa: PLR0913
             select
                 stop_group_id,
                 any_value(stop_group_name) as stop_group_name,
-                avg(delay_seconds) as mean_delay_seconds,
-                quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
-                quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
-            from fct_stop_arrival
+                sum(mean_delay_seconds * n) / nullif(sum(n), 0) as mean_delay_seconds,
+                sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
+                sum(p90_delay_seconds * n) / nullif(sum(n), 0) as p90_delay_seconds,
+                sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate,
+                sum(n) as arrival_count,
+                sum(early_count) as early_count,
+                sum(on_time_count) as on_time_count,
+                sum(late_count) as late_count,
+                flatten(list(delay_histogram)) as delay_histogram
+            from agg_stop_group_daily
             where stop_group_id = ?
               and service_date = ?
-              and trip_quality = 'complete'
+              and mode = ?
             group by stop_group_id
             """,
-            [selected_stop_group_id, selected_date],
+            [selected_stop_group_id, selected_date, selected_mode],
         )
         stop_posts = fetch_all(
             db_path,
             """
-            with observed_posts as (
-                select
-                    stop_id,
-                    string_agg(distinct mode, ', ' order by mode) as observed_modes,
-                    avg(delay_seconds) as mean_delay_seconds,
-                    quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
-                    quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate,
-                    count(*) as arrival_count
-                from fct_stop_arrival
-                where stop_group_id = ?
-                  and service_date = ?
-                  and trip_quality = 'complete'
-                group by stop_id
-            )
             select
                 post.stop_id,
                 post.stop_name,
                 post.stop_lat,
                 post.stop_lon,
                 post.stop_group_id,
-                observed_posts.observed_modes as modes_served,
-                observed_posts.mean_delay_seconds,
-                observed_posts.median_delay_seconds,
-                observed_posts.p90_delay_seconds,
-                observed_posts.on_time_rate,
-                observed_posts.arrival_count
+                agg.mode as modes_served,
+                agg.mean_delay_seconds,
+                agg.median_delay_seconds,
+                agg.p90_delay_seconds,
+                agg.on_time_rate,
+                agg.n as arrival_count,
+                agg.early_count,
+                agg.on_time_count,
+                agg.late_count,
+                agg.delay_histogram
             from dim_stop_post_current as post
-            inner join observed_posts
-                on post.stop_id = observed_posts.stop_id
+            inner join agg_stop_post_daily as agg
+                on post.stop_id = agg.stop_id
             where post.stop_group_id = ?
+              and agg.service_date = ?
+              and agg.mode = ?
             order by post.stop_id
             """,
-            [selected_stop_group_id, selected_date, selected_stop_group_id],
+            [selected_stop_group_id, selected_date, selected_mode],
         )
         for post in stop_posts:
             post["display_name"] = _stop_post_label(post["stop_id"], post["stop_group_id"])
@@ -390,16 +413,19 @@ def get_stops(  # noqa: PLR0913
                 mode,
                 route_short_name,
                 trip_headsign,
-                avg(delay_seconds) as mean_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
-            from fct_stop_arrival
+                mean_delay_seconds,
+                median_delay_seconds,
+                p90_delay_seconds,
+                on_time_rate,
+                delay_histogram,
+                n as arrival_count
+            from agg_stop_line_daily
             where stop_group_id = ?
               and service_date = ?
-              and trip_quality = 'complete'
-            group by stop_id, line, mode, route_short_name, trip_headsign
+              and mode = ?
             order by stop_id, try_cast(line as integer), line, trip_headsign
             """,
-            [selected_stop_group_id, selected_date],
+            [selected_stop_group_id, selected_date, selected_mode],
         )
         lines_by_post = _collapse_lines_by_post(post_line_stats)
         line_groups_by_post = _group_lines_by_destination(post_line_stats)
@@ -422,18 +448,22 @@ def get_stops(  # noqa: PLR0913
                     stop_group_id,
                     any_value(stop_group_name) as stop_group_name,
                     any_value(stop_name) as stop_name,
-                    avg(delay_seconds) as mean_delay_seconds,
-                    quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
-                    quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                    count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate,
-                    count(*) as arrival_count
-                from fct_stop_arrival
+                    sum(mean_delay_seconds * n) / nullif(sum(n), 0) as mean_delay_seconds,
+                    sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
+                    sum(p90_delay_seconds * n) / nullif(sum(n), 0) as p90_delay_seconds,
+                    sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate,
+                    sum(n) as arrival_count,
+                    sum(early_count) as early_count,
+                    sum(on_time_count) as on_time_count,
+                    sum(late_count) as late_count,
+                    flatten(list(delay_histogram)) as delay_histogram
+                from agg_stop_post_daily
                 where stop_id = ?
                   and service_date = ?
-                  and trip_quality = 'complete'
+                  and mode = ?
                 group by stop_id, stop_group_id
                 """,
-                [selected_stop_id, selected_date],
+                [selected_stop_id, selected_date, selected_mode],
             )
             if selected_post is not None:
                 selected_post["display_name"] = _stop_post_label(
@@ -448,23 +478,39 @@ def get_stops(  # noqa: PLR0913
                 route_short_name,
                 direction_id,
                 trip_headsign,
-                avg(delay_seconds) as mean_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
-            from fct_stop_arrival
+                mean_delay_seconds,
+                median_delay_seconds,
+                p90_delay_seconds,
+                on_time_rate,
+                delay_histogram,
+                n as arrival_count
+            from agg_stop_line_daily
             where ((? is not null and stop_id = ?) or (? is null and stop_group_id = ?))
               and service_date = ?
-              and trip_quality = 'complete'
-            group by line, mode, route_short_name, direction_id, trip_headsign
-            having count(*) >= 3
+              and mode = ?
+              and n >= 3
             order by mean_delay_seconds desc
             limit 30
             """,
-            [selected_stop_id, selected_stop_id, selected_stop_id, selected_stop_group_id, selected_date],
+            [
+                selected_stop_id,
+                selected_stop_id,
+                selected_stop_id,
+                selected_stop_group_id,
+                selected_date,
+                selected_mode,
+            ],
         )
     else:
         stop_landing_summary = _stop_landing_summary(db_path, selected_date, selected_mode)
         stop_landing_rows = _stop_landing_rows(db_path, selected_date, selected_mode, selected_rank)
-    stop_widgets = _stop_widgets(stop_posts, selected_post or summary, line_stats)
+    stop_widgets = _stop_widgets(
+        db_path,
+        stop_posts,
+        selected_post or summary,
+        line_stats,
+        {"selected_date": selected_date, "selected_mode": selected_mode},
+    )
     return {
         "date_options": date_options,
         "selected_date": selected_date,
@@ -840,6 +886,7 @@ def _line_landing_rows(
                 sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
                 sum(p90_delay_seconds * n) / nullif(sum(n), 0) as p90_delay_seconds,
                 sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate,
+                flatten(list(delay_histogram)) as delay_histogram,
                 sum((p90_delay_seconds - median_delay_seconds) * n) / nullif(sum(n), 0) as delay_spread_seconds
             from agg_line_daily
             where service_date = ?
@@ -849,11 +896,10 @@ def _line_landing_rows(
         ),
 
         headsign_counts as (
-            select line, mode, trip_headsign, count(*) as arrival_count
-            from fct_stop_arrival
+            select line, mode, trip_headsign, sum(n) as arrival_count
+            from agg_line_stop_daily
             where service_date = ?
               and mode = ?
-              and trip_quality = 'complete'
             group by line, mode, trip_headsign
         ),
 
@@ -884,6 +930,7 @@ def _line_landing_rows(
             line_stats.median_delay_seconds,
             line_stats.p90_delay_seconds,
             line_stats.on_time_rate,
+            line_stats.delay_histogram,
             line_stats.delay_spread_seconds
         from line_stats
         left join route_labels
@@ -893,7 +940,12 @@ def _line_landing_rows(
         [selected_date, selected_mode, selected_date, selected_mode],
     )
     for row in rows:
-        row["shape"] = _delay_shape(row.get("median_delay_seconds"), row.get("on_time_rate"))
+        row["shape"] = _delay_shape(
+            row.get("median_delay_seconds"),
+            row.get("on_time_rate"),
+            row.get("delay_histogram"),
+            row.get("p90_delay_seconds"),
+        )
     return sorted(rows, key=lambda row: _line_landing_sort_key(row, selected_rank))[:LANDING_ROW_LIMIT]
 
 
@@ -904,13 +956,12 @@ def _stop_landing_summary(db_path: Path, selected_date: str | None, selected_mod
             """
             select
                 count(distinct stop_group_id) as stop_group_count,
-                count(*) as arrival_count,
-                quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate
-            from fct_stop_arrival
+                sum(n) as arrival_count,
+                sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds,
+                sum(on_time_rate * n) / nullif(sum(n), 0) as on_time_rate
+            from agg_stop_group_daily
             where service_date = ?
               and mode = ?
-              and trip_quality = 'complete'
             """,
             [selected_date, selected_mode],
         )
@@ -930,19 +981,18 @@ def _stop_landing_rows(
         with stop_stats as (
             select
                 stop_group_id,
-                any_value(stop_group_name) as stop_group_name,
-                avg(delay_seconds) as mean_delay_seconds,
-                quantile_cont(delay_seconds, 0.5) as median_delay_seconds,
-                quantile_cont(delay_seconds, 0.9) as p90_delay_seconds,
-                count(*) filter (where delay_seconds between -60 and 180) / count(*) as on_time_rate,
-                count(*) as arrival_count,
-                count(distinct line) as line_count
-            from fct_stop_arrival
+                stop_group_name,
+                mean_delay_seconds,
+                median_delay_seconds,
+                p90_delay_seconds,
+                on_time_rate,
+                n as arrival_count,
+                line_count,
+                delay_histogram
+            from agg_stop_group_daily
             where service_date = ?
               and mode = ?
-              and trip_quality = 'complete'
-            group by stop_group_id
-            having count(*) >= 10
+              and n >= 10
         )
 
         select
@@ -954,13 +1004,19 @@ def _stop_landing_rows(
             stop_stats.on_time_rate,
             stop_stats.arrival_count,
             stop_stats.line_count,
+            stop_stats.delay_histogram,
             stop_stats.p90_delay_seconds - stop_stats.median_delay_seconds as delay_spread_seconds
         from stop_stats
         """,
         [selected_date, selected_mode],
     )
     for row in rows:
-        row["shape"] = _delay_shape(row.get("median_delay_seconds"), row.get("on_time_rate"))
+        row["shape"] = _delay_shape(
+            row.get("median_delay_seconds"),
+            row.get("on_time_rate"),
+            row.get("delay_histogram"),
+            row.get("p90_delay_seconds"),
+        )
     return sorted(rows, key=lambda row: _stop_landing_sort_key(row, selected_rank))[:LANDING_ROW_LIMIT]
 
 
@@ -1121,23 +1177,53 @@ def _date_nav(date_options: list[str], selected_date: str | None) -> dict[str, s
     }
 
 
-def _overview_widgets(mode_stats: dict[str, dict[str, Any]], selected_date: str | None) -> dict[str, dict[str, Any]]:
+def _overview_widgets(
+    db_path: Path, mode_stats: dict[str, dict[str, Any]], selected_date: str | None
+) -> dict[str, dict[str, Any]]:
     widgets = {}
     for mode in ("bus", "tram"):
         row = mode_stats.get(mode, {})
         baseline = row.get("mean_delay_seconds") or 45
         on_time_rate = row.get("on_time_rate") or 0.75
-        seed = _seed(mode, selected_date)
+        hour_rows = fetch_all(
+            db_path,
+            """
+            select local_hour, median_delay_seconds, n
+            from agg_mode_hour_daily
+            where service_date = ?
+              and mode = ?
+            order by local_hour
+            """,
+            [selected_date, mode],
+        )
+        week_rows = fetch_all(
+            db_path,
+            """
+            select cast(service_date as varchar) as service_date, median_delay_seconds
+            from agg_mode_daily
+            where mode = ?
+            order by service_date
+            """,
+            [mode],
+        )
         widgets[mode] = {
-            "shape": _delay_shape(baseline, on_time_rate),
-            "hours": _hour_bars(seed, baseline),
-            "week": _week_bars(seed, selected_date, baseline),
-            "segments": _on_time_segments(on_time_rate),
+            "shape": _delay_shape(
+                row.get("median_delay_seconds") or baseline,
+                on_time_rate,
+                row.get("delay_histogram"),
+                row.get("p90_delay_seconds"),
+            ),
+            "hours": _hour_bars_from_rows(hour_rows),
+            "week": _week_bars_from_rows(week_rows, selected_date),
+            "segments": _on_time_segments(
+                on_time_rate, row.get("early_count"), row.get("on_time_count"), row.get("late_count")
+            ),
         }
     return widgets
 
 
 def _line_widgets(
+    db_path: Path,
     selected_line: str | None,
     selected_date: str | None,
     summary: dict[str, Any] | None,
@@ -1148,46 +1234,162 @@ def _line_widgets(
 
     baseline = summary.get("median_delay_seconds") or summary.get("mean_delay_seconds") or 45
     on_time_rate = summary.get("on_time_rate") or 0.75
-    seed = _seed(selected_line, selected_date)
     stops = []
     for course in courses:
         for stop in course["stops"]:
-            stop["shape"] = _delay_shape(stop.get("mean_delay_seconds"), stop.get("on_time_rate"))
+            stop["shape"] = _delay_shape(
+                stop.get("median_delay_seconds") or stop.get("mean_delay_seconds"),
+                stop.get("on_time_rate"),
+                stop.get("delay_histogram"),
+                stop.get("p90_delay_seconds"),
+            )
             stop["direction"] = course["trip_headsign"]
             stops.append(stop)
 
+    hour_rows = fetch_all(
+        db_path,
+        """
+        select local_hour, median_delay_seconds, n
+        from agg_line_hour_daily
+        where service_date = ?
+          and line = ?
+        order by local_hour
+        """,
+        [selected_date, selected_line],
+    )
+    week_rows = fetch_all(
+        db_path,
+        """
+        select
+            cast(service_date as varchar) as service_date,
+            sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds
+        from agg_line_daily
+        where line = ?
+        group by service_date
+        order by service_date
+        """,
+        [selected_line],
+    )
+    timeline_rows = fetch_all(
+        db_path,
+        """
+        with trip_delays as (
+            select
+                trip_id,
+                vehicle_number,
+                quantile_cont(delay_seconds, 0.5) as delay_seconds,
+                service_date,
+                (
+                    epoch_ms(min(scheduled_arrival_time))
+                    + epoch_ms(max(scheduled_arrival_time))
+                ) / 2 as middle_ms
+            from fct_stop_arrival
+            where service_date = ?
+              and line = ?
+              and trip_quality = 'complete'
+            group by service_date, trip_id, vehicle_number
+        ),
+
+        positioned as (
+            select
+                delay_seconds,
+                middle_ms,
+                epoch_ms(service_date::timestamp + interval '4 hours') as service_day_start_ms,
+                epoch_ms(service_date::timestamp + interval '28 hours') as service_day_end_ms
+            from trip_delays
+        )
+
+        select
+            delay_seconds,
+            (middle_ms - service_day_start_ms) / (service_day_end_ms - service_day_start_ms) * 100 as x
+        from positioned
+        order by middle_ms
+        limit 140
+        """,
+        [selected_date, selected_line],
+    )
+    worst_rows = fetch_all(
+        db_path,
+        """
+        select
+            strftime(scheduled_arrival_time + interval '2 hours', '%H:%M') as time,
+            trip_headsign as direction,
+            stop_name,
+            stop_group_id,
+            delay_seconds
+        from mart_delay_events
+        where service_date = ?
+          and line = ?
+          and line_delay_rank <= 6
+        order by line_delay_rank
+        """,
+        [selected_date, selected_line],
+    )
+    reliability_rows = fetch_all(
+        db_path,
+        """
+        select direction_id, trip_headsign, trip_quality
+        from mart_trip_reliability
+        where service_date = ?
+          and line = ?
+        order by direction_id, trip_headsign, trip_order
+        """,
+        [selected_date, selected_line],
+    )
+
     return {
-        "shape": _delay_shape(baseline, on_time_rate),
-        "hours": _hour_bars(seed, baseline),
-        "week": _week_bars(seed, selected_date, baseline),
-        "timeline": _timeline(seed, baseline, 100),
-        "segments": _on_time_segments(on_time_rate),
-        "worst": _line_worst_departures(stops, seed),
-        "reliability": _reliability_strip(courses, seed),
+        "shape": _delay_shape(
+            summary.get("median_delay_seconds") or baseline,
+            on_time_rate,
+            summary.get("delay_histogram"),
+            summary.get("p90_delay_seconds"),
+        ),
+        "hours": _hour_bars_from_rows(hour_rows),
+        "week": _week_bars_from_rows(week_rows, selected_date),
+        "timeline": _timeline_from_rows(timeline_rows),
+        "segments": _on_time_segments(on_time_rate, delay_histogram=summary.get("delay_histogram")),
+        "worst": worst_rows,
+        "reliability": _reliability_strip_from_rows(reliability_rows),
     }
 
 
 def _stop_widgets(
-    stop_posts: list[dict[str, Any]], summary: dict[str, Any] | None, line_stats: list[dict[str, Any]]
+    db_path: Path,
+    stop_posts: list[dict[str, Any]],
+    summary: dict[str, Any] | None,
+    line_stats: list[dict[str, Any]],
+    context: dict[str, str | None],
 ) -> dict[str, Any]:
     if summary is None:
         return {"posts": [], "worst": [], "line_rows": []}
 
+    selected_date = context["selected_date"]
+    selected_mode = context["selected_mode"] or "bus"
     baseline = summary.get("median_delay_seconds") or summary.get("mean_delay_seconds") or 45
     on_time_rate = summary.get("on_time_rate") or 0.75
-    seed = _seed(summary.get("stop_group_id"), summary.get("stop_id"))
     posts = []
-    for index, post in enumerate(stop_posts):
-        post_seed = _seed(post["stop_id"], index)
-        median = post.get("median_delay_seconds") or baseline + ((post_seed % 90) - 35)
-        post_rate = post.get("on_time_rate") or _clamp(on_time_rate + ((post_seed % 25) - 12) / 100, 0.35, 0.98)
+    for post in stop_posts:
+        median = post.get("median_delay_seconds") or baseline
+        post_rate = post.get("on_time_rate") or on_time_rate
+        post_hour_rows = fetch_all(
+            db_path,
+            """
+            select local_hour, median_delay_seconds, n
+            from agg_stop_hour_daily
+            where service_date = ?
+              and mode = ?
+              and stop_id = ?
+            order by local_hour
+            """,
+            [selected_date, selected_mode, post["stop_id"]],
+        )
         posts.append(
             {
                 **post,
                 "median_delay_seconds": median,
                 "on_time_rate": post_rate,
-                "shape": _delay_shape(median, post_rate),
-                "hours": _hour_bars(post_seed, median),
+                "shape": _delay_shape(median, post_rate, post.get("delay_histogram"), post.get("p90_delay_seconds")),
+                "hours": _hour_bars_from_rows(post_hour_rows),
                 "lines": post.get("lines", []),
                 "line_groups": post.get("line_groups", []),
             }
@@ -1197,30 +1399,135 @@ def _stop_widgets(
     fallback_post = stop_posts[0]["display_name"] if stop_posts else ""
     for row in line_stats:
         line_row = {**row}
-        line_row["shape"] = _delay_shape(row.get("mean_delay_seconds"), row.get("on_time_rate"))
+        line_row["shape"] = _delay_shape(
+            row.get("median_delay_seconds") or row.get("mean_delay_seconds"),
+            row.get("on_time_rate"),
+            row.get("delay_histogram"),
+            row.get("p90_delay_seconds"),
+        )
         line_row["post_label"] = fallback_post
         line_rows.append(line_row)
 
+    selected_stop_id = summary.get("stop_id")
+    selected_stop_group_id = summary.get("stop_group_id")
+    hour_rows = fetch_all(
+        db_path,
+        """
+        select local_hour, median_delay_seconds, n
+        from agg_stop_hour_daily
+        where service_date = ?
+          and mode = ?
+          and ((? is not null and stop_id = ?) or (? is null and stop_group_id = ?))
+        order by local_hour
+        """,
+        [selected_date, selected_mode, selected_stop_id, selected_stop_id, selected_stop_id, selected_stop_group_id],
+    )
+    week_rows = fetch_all(
+        db_path,
+        """
+        select
+            cast(service_date as varchar) as service_date,
+            sum(median_delay_seconds * n) / nullif(sum(n), 0) as median_delay_seconds
+        from agg_stop_post_daily
+        where mode = ?
+          and ((? is not null and stop_id = ?) or (? is null and stop_group_id = ?))
+        group by service_date
+        order by service_date
+        """,
+        [selected_mode, selected_stop_id, selected_stop_id, selected_stop_id, selected_stop_group_id],
+    )
+    event_value = selected_stop_id if selected_stop_id is not None else selected_stop_group_id
+    event_scope = "stop_id" if selected_stop_id is not None else "stop_group_id"
+    timeline_rows = fetch_all(
+        db_path,
+        """
+        with arrivals as (
+            select
+                delay_seconds,
+                service_date,
+                epoch_ms(scheduled_arrival_time) as scheduled_ms
+            from fct_stop_arrival
+            where service_date = ?
+              and mode = ?
+              and case when ? = 'stop_id' then stop_id else stop_group_id end = ?
+              and trip_quality = 'complete'
+        ),
+
+        positioned as (
+            select
+                delay_seconds,
+                scheduled_ms,
+                epoch_ms(service_date::timestamp + interval '4 hours') as service_day_start_ms,
+                epoch_ms(service_date::timestamp + interval '28 hours') as service_day_end_ms
+            from arrivals
+        )
+
+        select
+            delay_seconds,
+            (scheduled_ms - service_day_start_ms) / (service_day_end_ms - service_day_start_ms) * 100 as x
+        from positioned
+        order by scheduled_ms
+        limit 140
+        """,
+        [selected_date, selected_mode, event_scope, event_value],
+    )
+    worst_rows = fetch_all(
+        db_path,
+        """
+        select
+            strftime(scheduled_arrival_time + interval '2 hours', '%H:%M') as time,
+            line,
+            mode,
+            trip_headsign as headsign,
+            delay_seconds
+        from mart_delay_events
+        where service_date = ?
+          and mode = ?
+          and case when ? = 'stop_id' then stop_id else stop_group_id end = ?
+          and case when ? = 'stop_id' then stop_post_delay_rank else stop_group_delay_rank end <= 8
+        order by case when ? = 'stop_id' then stop_post_delay_rank else stop_group_delay_rank end
+        """,
+        [selected_date, selected_mode, event_scope, event_value, event_scope, event_scope],
+    )
+
     return {
         "posts": posts,
-        "shape": _delay_shape(baseline, on_time_rate),
-        "hours": _hour_bars(seed, baseline),
-        "week": _week_bars(seed, None, baseline),
-        "timeline": _timeline(seed, baseline, 130),
-        "segments": _on_time_segments(on_time_rate),
-        "worst": _stop_worst_departures(line_stats, seed),
+        "shape": _delay_shape(baseline, on_time_rate, summary.get("delay_histogram"), summary.get("p90_delay_seconds")),
+        "hours": _hour_bars_from_rows(hour_rows),
+        "week": _week_bars_from_rows(week_rows, selected_date),
+        "timeline": _timeline_from_rows(timeline_rows),
+        "segments": _on_time_segments(
+            on_time_rate, summary.get("early_count"), summary.get("on_time_count"), summary.get("late_count")
+        ),
+        "worst": worst_rows,
         "line_rows": line_rows,
     }
 
 
-def _delay_shape(median_delay_seconds: float | None, on_time_rate: float | None) -> dict[str, Any]:
+def _delay_shape(
+    median_delay_seconds: float | None,
+    _on_time_rate: float | None,
+    delay_histogram: list[dict[str, Any]] | None = None,
+    p90_delay_seconds: float | None = None,
+) -> dict[str, Any]:
     median = round(median_delay_seconds or 0)
-    rate = on_time_rate if on_time_rate is not None else 0.75
-    peak = round(_clamp(2 + ((median + 60) / 360 * 9), 1, 10))
-    spread = 2 if rate >= LOW_ON_TIME_RATE else 3
+    p90 = round(p90_delay_seconds if p90_delay_seconds is not None else median)
+    return {
+        "buckets": _histogram_buckets(delay_histogram or []),
+        "median_x": _delay_axis_x(median),
+        "p90_x": _delay_axis_x(p90),
+    }
+
+
+def _histogram_buckets(delay_histogram: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts_by_label = {str(bucket.get("bucket_label") or ""): int(bucket.get("n") or 0) for bucket in delay_histogram}
+    visual_counts = [counts_by_label.get(label, 0) for label in HISTOGRAM_BUCKET_LABELS]
+    max_count = max(visual_counts, default=0)
+    if max_count <= 0:
+        return [{"height": 3, "mini_height": 2, "tone": _bucket_tone(index)} for index in range(HISTOGRAM_BUCKET_COUNT)]
     buckets = []
-    for index in range(HISTOGRAM_BUCKET_COUNT):
-        height = max(3, HISTOGRAM_MAX_HEIGHT - abs(index - peak) * spread * 2)
+    for index, count in enumerate(visual_counts):
+        height = max(3, round(count / max_count * HISTOGRAM_MAX_HEIGHT)) if count else 3
         buckets.append(
             {
                 "height": height,
@@ -1228,136 +1535,153 @@ def _delay_shape(median_delay_seconds: float | None, on_time_rate: float | None)
                 "tone": _bucket_tone(index),
             }
         )
-    p90 = median + (130 if rate < LOW_ON_TIME_RATE else 90)
-    return {
-        "buckets": buckets,
-        "median_x": _clamp((median + 60) / 360 * 100, 2, 98),
-        "p90_x": _clamp((p90 + 60) / 360 * 100, 5, 99),
+    return buckets
+
+
+def _delay_axis_x(delay_seconds: float) -> float:
+    return _clamp((delay_seconds + 60) / 360 * 100, 2, 98)
+
+
+def _hour_bars_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    delays_by_hour = {
+        int(row["local_hour"]): row.get("median_delay_seconds")
+        for row in rows
+        if int(row.get("n") or 0) >= MIN_HOUR_SAMPLE_SIZE
     }
-
-
-def _hour_bars(seed: int, baseline: float) -> list[dict[str, Any]]:
     bars = []
-    for index, hour in enumerate(SERVICE_DAY_HOURS):
-        if hour in NEXT_DAY_PLACEHOLDER_HOURS:
+    for hour in SERVICE_DAY_HOURS:
+        delay = delays_by_hour.get(hour)
+        if delay is None:
             bars.append({"hour": hour, "delay": None, "height": 0, "tone": "empty"})
             continue
-        rush = 55 if AM_RUSH_START_HOUR <= hour <= AM_RUSH_END_HOUR else 0
-        if PM_RUSH_START_HOUR <= hour <= PM_RUSH_END_HOUR:
-            rush = 70
-        wobble = ((seed + index * 37) % 90) - 35
-        delay = round(baseline + rush + wobble)
+        delay = round(delay)
         bars.append({"hour": hour, "delay": delay, "height": _bar_height(delay), "tone": _delay_tone(delay)})
     return bars
 
 
-def _week_bars(seed: int, selected_date: str | None, baseline: float) -> list[dict[str, Any]]:
-    selected_weekday = _selected_weekday(selected_date)
-    labels = ["M", "T", "W", "T", "F", "S", "S"]
+def _week_bars_from_rows(rows: list[dict[str, Any]], selected_date: str | None) -> list[dict[str, Any]]:
+    if not rows:
+        return []
     bars = []
-    for index, label in enumerate(labels):
-        weekend_offset = -25 if index >= WEEKEND_START_INDEX else 0
-        delay = round(baseline + weekend_offset + ((seed + index * 29) % 70) - 25)
+    for row in rows[-7:]:
+        service_date = str(row["service_date"])
+        delay = row.get("median_delay_seconds")
+        height = 0 if delay is None else max(4, min(38, round(abs(delay) * 0.35)))
         bars.append(
             {
-                "label": label,
+                "label": date.fromisoformat(service_date).strftime("%a")[:1],
                 "delay": delay,
-                "height": max(4, min(38, round(abs(delay) * 0.35))),
-                "selected": index == selected_weekday,
+                "height": height,
+                "selected": service_date == selected_date,
             }
         )
     return bars
 
 
-def _timeline(seed: int, baseline: float, count: int) -> list[dict[str, Any]]:
+def _timeline_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    delay_rows = [row for row in rows if row.get("delay_seconds") is not None]
+    if not delay_rows:
+        return []
     points = []
-    for index in range(count):
-        rush = 85 if index % 31 in range(8, 13) else 75 if index % 47 in range(32, 39) else 0
-        delay = round(baseline + rush + ((seed + index * 41) % 150) - 55)
+    for index, row in enumerate(delay_rows):
+        raw_delay = float(row["delay_seconds"])
+        delay = round(raw_delay)
+        x = float(row["x"]) if row.get("x") is not None else index / max(1, len(delay_rows) - 1) * 100
         points.append(
             {
-                "x": index / max(1, count - 1) * 100,
+                "x": _clamp(x, 0, 100),
                 "delay": delay,
                 "height": max(2, min(30, round(abs(delay) / 8))),
                 "tone": _delay_tone(delay),
             }
         )
-    return points
+    return _spread_timeline_points(points)
 
 
-def _line_worst_departures(stops: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
-    worst_stops = sorted(stops, key=lambda row: row.get("mean_delay_seconds") or 0, reverse=True)[:6]
-    rows = []
-    for index, stop in enumerate(worst_stops):
-        rows.append(
-            {
-                "time": _fake_time(seed, index),
-                "direction": stop.get("direction", ""),
-                "stop_name": stop.get("stop_name"),
-                "stop_group_id": stop.get("stop_group_id"),
-                "delay_seconds": (stop.get("mean_delay_seconds") or 0) + 120 + index * 17,
-            }
+def _spread_timeline_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(points) <= 1:
+        return points
+
+    gap = min(TIMELINE_MIN_GAP_PERCENT, 100 / max(1, len(points) - 1))
+    packed = [{**point} for point in points]
+    for index in range(1, len(packed)):
+        packed[index]["x"] = max(float(packed[index]["x"]), float(packed[index - 1]["x"]) + gap)
+
+    overflow = float(packed[-1]["x"]) - 100
+    if overflow > 0:
+        for point in packed:
+            point["x"] = float(point["x"]) - overflow
+
+    for index in range(len(packed) - 2, -1, -1):
+        packed[index]["x"] = min(float(packed[index]["x"]), float(packed[index + 1]["x"]) - gap)
+
+    underflow = -float(packed[0]["x"])
+    if underflow > 0:
+        for point in packed:
+            point["x"] = float(point["x"]) + underflow
+
+    for point in packed:
+        point["x"] = _clamp(float(point["x"]), 0, 100)
+    return packed
+
+
+def _reliability_strip_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    grouped: dict[tuple[int | None, str | None], dict[str, Any]] = {}
+    for row in rows:
+        key = (row.get("direction_id"), row.get("trip_headsign"))
+        group = grouped.setdefault(
+            key,
+            {"direction": row.get("trip_headsign"), "outcomes": [], "counts": {"clean": 0, "partial": 0, "broken": 0}},
         )
-    return sorted(rows, key=lambda row: row["delay_seconds"], reverse=True)
+        outcome = _trip_quality_outcome(row.get("trip_quality"))
+        group["counts"][outcome] += 1
+        group["outcomes"].append({"outcome": outcome, "label": outcome.replace("clean", "ran clean")})
+    return list(grouped.values())
 
 
-def _stop_worst_departures(line_stats: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
-    rows = []
-    for index, row in enumerate(line_stats[:8]):
-        rows.append(
-            {
-                "time": _fake_time(seed, index),
-                "line": row.get("route_short_name") or row.get("line"),
-                "mode": row.get("mode"),
-                "headsign": row.get("trip_headsign"),
-                "delay_seconds": (row.get("mean_delay_seconds") or 0) + 150 + index * 13,
-            }
+def _trip_quality_outcome(trip_quality: str | None) -> str:
+    if trip_quality == "complete":
+        return "clean"
+    if trip_quality == "broken":
+        return "broken"
+    return "partial"
+
+
+def _on_time_segments(
+    on_time_rate: float,
+    early_count: int | None = None,
+    on_time_count: int | None = None,
+    late_count: int | None = None,
+    delay_histogram: list[dict[str, Any]] | None = None,
+) -> dict[str, float]:
+    if early_count is not None and on_time_count is not None and late_count is not None:
+        total = early_count + on_time_count + late_count
+        if total > 0:
+            return {"early": early_count / total, "on_time": on_time_count / total, "late": late_count / total}
+
+    if delay_histogram:
+        early = sum(
+            int(bucket.get("n") or 0)
+            for bucket in delay_histogram
+            if str(bucket.get("bucket_label") or "").startswith("early")
         )
-    return rows
-
-
-def _reliability_strip(courses: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
-    rows = []
-    for direction_index, course in enumerate(courses):
-        direction_seed = _seed(seed, course.get("trip_headsign"), direction_index)
-        outcomes = []
-        counts = {"clean": 0, "partial": 0, "broken": 0}
-        sample_count = min(max(round((course.get("trip_count") or 18) / 2), 14), 28)
-        for trip_index in range(sample_count):
-            score = (direction_seed + trip_index * 37) % 100
-            outcome = "broken" if score >= BROKEN_TRIP_SCORE else "partial" if score >= PARTIAL_TRIP_SCORE else "clean"
-            counts[outcome] += 1
-            outcomes.append({"outcome": outcome, "label": outcome.replace("clean", "ran clean")})
-
-        rows.append(
-            {
-                "direction": course.get("trip_headsign"),
-                "outcomes": outcomes,
-                "counts": counts,
-            }
+        on_time = sum(
+            int(bucket.get("n") or 0)
+            for bucket in delay_histogram
+            if str(bucket.get("bucket_label") or "").startswith("on_time")
         )
-    return rows
+        late = sum(
+            int(bucket.get("n") or 0)
+            for bucket in delay_histogram
+            if str(bucket.get("bucket_label") or "").startswith("late")
+        )
+        total = early + on_time + late
+        if total > 0:
+            return {"early": early / total, "on_time": on_time / total, "late": late / total}
 
-
-def _on_time_segments(on_time_rate: float) -> dict[str, float]:
-    missed = max(0, 1 - on_time_rate)
-    early = missed * 0.28
-    late = missed - early
-    return {"early": early, "on_time": on_time_rate, "late": late}
-
-
-def _selected_weekday(selected_date: str | None) -> int:
-    if selected_date is None:
-        return 2
-    try:
-        return date.fromisoformat(selected_date).weekday()
-    except ValueError:
-        return 2
-
-
-def _fake_time(seed: int, index: int) -> str:
-    minutes = 4 * 60 + ((seed + index * 73) % (20 * 60))
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+    return {"early": 0, "on_time": on_time_rate, "late": 0}
 
 
 def _bar_height(delay: float) -> int:
@@ -1382,11 +1706,6 @@ def _delay_tone(delay: float) -> str:
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
-
-
-def _seed(*parts: object) -> int:
-    text = "|".join(str(part) for part in parts if part is not None)
-    return sum((index + 1) * ord(char) for index, char in enumerate(text)) or 1
 
 
 def _date_options(db_path: Path) -> list[str]:

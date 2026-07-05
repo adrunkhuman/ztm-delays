@@ -6,7 +6,7 @@ The alpha frontend reads a local DuckDB file produced manually by `dag_serving_e
 ztm.duckdb
 ```
 
-The export includes the fixed `MART_TABLES` allowlist, currently intended to mirror all current serving marts in `ztm_marts`, plus `export_metadata` and `export_table_stats`. When a new serving mart is added, update the Airflow allowlist, export tests, and this contract together. The file is built to a temporary path and atomically swapped into the stable path, so frontend containers do not need to restart after a rebuild. Frontend code should avoid one permanent DuckDB connection; open per request or reopen cached connections when `export_metadata.export_id` changes.
+The export includes the fixed `MART_TABLES` allowlist, currently intended to mirror all current serving marts in `ztm_marts`, plus DuckDB-derived frontend serving tables, `export_metadata`, and `export_table_stats`. When a new serving mart or derived serving table is added, update the Airflow allowlist, export tests, and this contract together. The file is built to a temporary path and atomically swapped into the stable path, so frontend containers do not need to restart after a rebuild. Frontend code should avoid one permanent DuckDB connection; open per request or reopen cached connections when `export_metadata.export_id` changes.
 
 If the frontend watches the serving directory, it should react only to `ztm.duckdb` and `ztm.duckdb.meta.json`. Ignore hidden export build artifacts such as `.duckdb-tmp-*`, `.*.tmp`, and `*.wal`.
 
@@ -36,10 +36,25 @@ Exported mart tables:
 - `agg_time_period`
 - `agg_line_daily`
 
+DuckDB-derived frontend tables:
+
+- `agg_mode_daily`
+- `agg_mode_hour_daily`
+- `agg_line_hour_daily`
+- `agg_line_stop_daily`
+- `agg_stop_group_daily`
+- `agg_stop_post_daily`
+- `agg_stop_line_daily`
+- `agg_stop_hour_daily`
+- `mart_delay_events`
+- `mart_trip_reliability`
+
 Export metadata tables:
 
 - `export_metadata`: one row with `export_id`, `export_version`, `source_mode`, `exported_at`, source dataset identifiers, source row/byte totals, exported table count, and DuckDB file size.
-- `export_table_stats`: one row per exported mart with source row count, source bytes, and date range where the mart has a primary date field.
+- `export_table_stats`: one row per exported mart or derived serving table with row count, source bytes where applicable, and date range where the table has a primary date field.
+
+Delay histograms use 12 ordered buckets: `early_over_5m`, `early_2_to_5m`, `early_1_to_2m`, `on_time_early_30_60s`, `on_time_early_0_30s`, `on_time_late_0_30s`, `on_time_late_30_60s`, `on_time_late_1_to_3m`, `late_3_to_5m`, `late_5_to_10m`, `late_10_to_20m`, and `late_over_20m`. Hourly derived tables use the service-day window `04:00..03:59`; next-day `04:xx` rows are excluded from the selected service date's hourly widgets.
 
 The frontend should display `export_metadata.exported_at` and the available service-date range from `export_table_stats` so alpha users can see the archive freshness explicitly. The optional sidecar JSON is named `ztm.duckdb.meta.json` by default and mirrors the export summary for operations. It is written after the DuckDB swap, so the database metadata is the source of truth if the two briefly disagree.
 

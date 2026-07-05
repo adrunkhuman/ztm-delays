@@ -37,6 +37,24 @@ def test_mart_table_list_exports_all_current_marts() -> None:
     }
 
 
+def test_derived_table_list_exports_frontend_serving_tables() -> None:
+    dag = _load_dag_module()
+
+    assert set(dag.DERIVED_TABLES) == {
+        "agg_line_hour_daily",
+        "agg_line_stop_daily",
+        "agg_mode_daily",
+        "agg_mode_hour_daily",
+        "agg_stop_group_daily",
+        "agg_stop_hour_daily",
+        "agg_stop_line_daily",
+        "agg_stop_post_daily",
+        "mart_delay_events",
+        "mart_trip_reliability",
+    }
+    assert dag.EXPORTED_TABLES == dag.MART_TABLES + dag.DERIVED_TABLES
+
+
 def test_export_config_uses_safe_defaults() -> None:
     dag = _load_dag_module()
 
@@ -377,7 +395,31 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
     with duckdb.connect(result.duckdb_path, read_only=True) as connection:
         assert connection.execute("select count(*) from fct_trip").fetchone()[0] == 1
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "export-1"
-        assert connection.execute("select count(*) from export_table_stats").fetchone()[0] == len(dag.MART_TABLES)
+        assert connection.execute("select exported_table_count from export_metadata").fetchone()[0] == len(
+            dag.EXPORTED_TABLES
+        )
+        assert connection.execute("select count(*) from export_table_stats").fetchone()[0] == len(dag.EXPORTED_TABLES)
+        assert connection.execute("select count(*) from agg_mode_daily").fetchone()[0] == 1
+        assert connection.execute("select count(*) from agg_line_hour_daily").fetchone()[0] == 1
+        assert connection.execute("select count(*) from mart_delay_events").fetchone()[0] == 1
+        assert connection.execute("select count(*) from mart_trip_reliability").fetchone()[0] == 1
+        histogram_labels = connection.execute(
+            "select list_transform(delay_histogram, bucket -> bucket.bucket_label) from agg_mode_daily"
+        ).fetchone()[0]
+        assert histogram_labels == [
+            "early_over_5m",
+            "early_2_to_5m",
+            "early_1_to_2m",
+            "on_time_early_30_60s",
+            "on_time_early_0_30s",
+            "on_time_late_0_30s",
+            "on_time_late_30_60s",
+            "on_time_late_1_to_3m",
+            "late_3_to_5m",
+            "late_5_to_10m",
+            "late_10_to_20m",
+            "late_over_20m",
+        ]
 
 
 def test_publish_duckdb_keeps_previous_file_when_validation_fails(tmp_path: Path) -> None:
@@ -708,11 +750,60 @@ def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], d
             table_dir.mkdir(parents=True, exist_ok=True)
             path = table_dir / "part-000.parquet"
             escaped_path = path.as_posix().replace("'", "''")
-            connection.execute(
-                f"copy (select 1 as id, ? as table_name) to '{escaped_path}' (format parquet)", [table_name]
-            )
+            if table_name == "fct_stop_arrival":
+                connection.execute(_copy_minimal_stop_arrival_sql(escaped_path))
+            elif table_name == "fct_trip":
+                connection.execute(_copy_minimal_trip_sql(escaped_path))
+            else:
+                connection.execute(
+                    f"copy (select 1 as id, ? as table_name) to '{escaped_path}' (format parquet)", [table_name]
+                )
             paths_by_table[table_name] = [path]
     return paths_by_table
+
+
+def _copy_minimal_stop_arrival_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select
+                'gtfs-1' as gtfs_snapshot_id,
+                date '2026-07-02' as service_date,
+                'trip-1' as trip_id,
+                '1001' as vehicle_number,
+                '190' as line,
+                '190' as route_short_name,
+                'bus' as mode,
+                0 as direction_id,
+                'Centrum' as trip_headsign,
+                '7002' as stop_group_id,
+                'Centrum' as stop_group_name,
+                '700201' as stop_id,
+                'Centrum 01' as stop_name,
+                0 as stop_sequence,
+                timestamp '2026-07-02 06:00:00' as scheduled_arrival_time,
+                timestamp '2026-07-02 06:00:00' as hour_bracket,
+                45 as delay_seconds,
+                'complete' as trip_quality
+        ) to '{escaped_path}' (format parquet)
+    """
+
+
+def _copy_minimal_trip_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select
+                date '2026-07-02' as service_date,
+                'trip-1' as trip_id,
+                '1001' as vehicle_number,
+                '190' as line,
+                '190' as route_short_name,
+                'bus' as mode,
+                0 as direction_id,
+                'Centrum' as trip_headsign,
+                timestamp '2026-07-02 06:00:00' as scheduled_start_time,
+                'complete' as trip_quality
+        ) to '{escaped_path}' (format parquet)
+    """
 
 
 class FailingDuckdbModule:
