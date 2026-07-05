@@ -1,8 +1,21 @@
+{% set processing_date = var("processing_date", "1970-01-01") %}
+{% set aggregation_start_date = var("aggregation_start_date", processing_date) %}
+{% set start_date = modules.datetime.datetime.strptime(aggregation_start_date, "%Y-%m-%d").date() %}
+{% set end_date = modules.datetime.datetime.strptime(processing_date, "%Y-%m-%d").date() %}
+{% set partition_dates = [] %}
+{% for day_offset in range((end_date - start_date).days + 1) %}
+    {% do partition_dates.append("date('" ~ (start_date + modules.datetime.timedelta(days=day_offset)).isoformat() ~ "')") %}
+{% endfor %}
+
 {{
     config(
-        materialized='table',
+        materialized='incremental',
+        incremental_strategy='insert_overwrite',
         partition_by={"field": "scheduled_start_date", "data_type": "date"},
+        partitions=partition_dates,
         cluster_by=["line", "direction_id", "service_hour"],
+        require_partition_filter=true,
+        post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
@@ -27,8 +40,8 @@ with raw_scheduled_trips as (
     left join {{ ref('stg_gtfs__routes') }} as routes
         on schedule.line = routes.route_id
         and schedule.gtfs_snapshot_id = routes.gtfs_snapshot_id
-    where schedule.processing_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where schedule.processing_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
       and routes.mode in ('bus', 'tram')
 ),
 
@@ -44,8 +57,8 @@ scheduled_trips as (
         and raw_scheduled_trips.processing_date between schedule_version.valid_from_date
         and coalesce(schedule_version.valid_to_date, date '9999-12-31')
     where raw_scheduled_trips.processing_date = date(raw_scheduled_trips.scheduled_start_time, 'Europe/Warsaw')
-      and raw_scheduled_trips.processing_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+      and raw_scheduled_trips.processing_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
 ),
 
 expected_by_hour as (
@@ -102,10 +115,10 @@ observed_trips as (
             when 'partial' then 1
         end as trip_quality_rank
     from {{ ref('int_trip_summary') }}
-    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
-      and date(scheduled_start_time, 'Europe/Warsaw') between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
+      and date(scheduled_start_time, 'Europe/Warsaw') between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
       and trip_quality in ('complete', 'partial')
 ),
 

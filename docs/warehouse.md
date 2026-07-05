@@ -248,9 +248,11 @@ Airflow cadence is cost-gated: hourly raw GPS loading does not trigger the wareh
 
 dbt tests are tiered. Default Airflow paths exclude known expensive schedule/version tests and broad aggregate mart tests for `agg_line_stop_period`, `agg_stop_period`, `agg_time_period`, and `agg_line_daily` while keeping test selection explicit. Full-history schedule/version tests on `int_gtfs_trip_schedule` and `int_schedule_version`, aggregate mart contract tests for those broad serving aggregates, broader contract audits, and serving export schema audits are explicit manual jobs until weekly/manual audit operations are mature.
 
+Schedule/version manual audits use singular contract tests for required fields and accepted values instead of repeated generic column tests over the expensive views.
+
 Nightly Airflow still tests `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`; only the four broad serving aggregate tests moved to manual audits.
 
-The partitioned aggregate/status marts `agg_service_coverage`, `agg_line_daily`, `agg_line_stop_period`, `agg_stop_period`, `agg_time_period`, `mart_day_completeness`, and `mart_pipeline_status` currently remain table materializations over their configured source window. Treat that as intentional current behavior, not proof that partitioning limits rebuild bytes by itself.
+`mart_day_completeness`, `agg_service_coverage`, `agg_line_daily`, and `mart_pipeline_status` are incremental partition replacements over the inclusive `[aggregation_start_date, processing_date]` date window; normal Airflow runs use a two-day prior/current window because complete/partial observed trips can lag scheduled-start date by one GPS date and facts publish both current and prior service dates. A 2026-06-25-through-current check found no trip-summary lag beyond one day. The remaining partitioned period marts `agg_line_stop_period`, `agg_stop_period`, and `agg_time_period` currently remain table materializations over their configured source window. Treat that as intentional current behavior, not proof that partitioning limits rebuild bytes by itself.
 
 Nightly GPS runs log BigQuery dbt job cost metadata from `INFORMATION_SCHEMA.JOBS_BY_USER` after the dbt phases complete. The initial warning threshold is `100 GiB` billed bytes for the DAG-run window; treat it as an operational signal until it is calibrated from observed good runs. Attribution is best-effort because the query is scoped to the same BigQuery principal, project, and region, and filters on dbt query comments.
 

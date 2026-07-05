@@ -1,33 +1,36 @@
 select *
 from {{ ref('mart_pipeline_status') }}
-where service_date is null
-   or vehicle_type is null
-   or mode is null
-   or expected_hours is null
-   or present_hours is null
-   or missing_hours is null
-   or completeness_ratio is null
-   or is_complete_day is null
-   or gps_row_count is null
-   or max_vehicle_count is null
-   or mean_hourly_coverage_ratio is null
-   or min_hourly_coverage_ratio is null
-   or max_gap_seconds is null
-   or pings_total is null
-   or pings_matched is null
-   or match_rate is null
-   or trips_observed is null
-   or trips_complete is null
-   or trips_partial is null
-   or trips_broken is null
-   or broken_rate is null
-   or expected_trips is null
-   or observed_trips is null
-   or expected_service_minutes is null
-   or observed_service_minutes is null
-   or stop_arrivals_count is null
-   or latest_gtfs_snapshot_id is null
-   or latest_gtfs_snapshot_at is null
-   or gtfs_snapshot_age_hours is null
-   or schedule_versions_active is null
-   or status_generated_at is null
+where service_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
+    and date('{{ var("processing_date") }}')
+  and (
+      vehicle_type is null
+      or mode is null
+      or expected_hours is null
+      or present_hours is null
+      or missing_hours is null
+      or completeness_ratio is null
+      or is_complete_day is null
+      or gps_row_count is null
+      or max_vehicle_count is null
+      or mean_hourly_coverage_ratio is null
+      or min_hourly_coverage_ratio is null
+      or max_gap_seconds is null
+      or pings_total is null
+      or pings_matched is null
+      or match_rate is null
+      or trips_observed is null
+      or trips_complete is null
+      or trips_partial is null
+      or trips_broken is null
+      or broken_rate is null
+      or expected_trips is null
+      or observed_trips is null
+      or expected_service_minutes is null
+      or observed_service_minutes is null
+      or stop_arrivals_count is null
+      or latest_gtfs_snapshot_id is null
+      or latest_gtfs_snapshot_at is null
+      or gtfs_snapshot_age_hours is null
+      or schedule_versions_active is null
+      or status_generated_at is null
+  )

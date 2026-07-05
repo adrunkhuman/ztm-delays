@@ -9,13 +9,22 @@ with expected as (
     cross join unnest(['bus', 'tram']) as mode
 ),
 
+actual as (
+    select
+        gps_date,
+        mode
+    from {{ ref('mart_day_completeness') }}
+    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
+        and date('{{ var("processing_date") }}')
+),
+
 duplicate_rows as (
     select
         'duplicate' as issue_type,
         gps_date,
         mode,
         count(*) as row_count
-    from {{ ref('mart_day_completeness') }}
+    from actual
     group by gps_date, mode
     having count(*) > 1
 ),
@@ -27,7 +36,7 @@ missing_rows as (
         expected.mode,
         0 as row_count
     from expected
-    left join {{ ref('mart_day_completeness') }} as actual
+    left join actual
         on expected.gps_date = actual.gps_date
         and expected.mode = actual.mode
     where actual.gps_date is null

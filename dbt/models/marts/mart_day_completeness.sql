@@ -1,16 +1,29 @@
+{% set processing_date = var("processing_date", "1970-01-01") %}
+{% set aggregation_start_date = var("aggregation_start_date", processing_date) %}
+{% set start_date = modules.datetime.datetime.strptime(aggregation_start_date, "%Y-%m-%d").date() %}
+{% set end_date = modules.datetime.datetime.strptime(processing_date, "%Y-%m-%d").date() %}
+{% set partition_dates = [] %}
+{% for day_offset in range((end_date - start_date).days + 1) %}
+    {% do partition_dates.append("date('" ~ (start_date + modules.datetime.timedelta(days=day_offset)).isoformat() ~ "')") %}
+{% endfor %}
+
 {{
     config(
-        materialized='table',
+        materialized='incremental',
+        incremental_strategy='insert_overwrite',
         partition_by={"field": "gps_date", "data_type": "date"},
+        partitions=partition_dates,
         cluster_by=["mode"],
+        require_partition_filter=true,
+        post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
 with date_spine as (
     select gps_date
     from unnest(generate_date_array(
-        date('{{ var("aggregation_start_date", var("processing_date")) }}'),
-        date('{{ var("processing_date") }}')
+        date('{{ aggregation_start_date }}'),
+        date('{{ processing_date }}')
     )) as gps_date
 ),
 
@@ -44,8 +57,8 @@ hourly_source as (
         coverage_ratio,
         max_gap_seconds
     from {{ ref('int_gps_hourly_completeness') }}
-    where gps_date between date('{{ var("aggregation_start_date", var("processing_date")) }}')
-        and date('{{ var("processing_date") }}')
+    where gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
 ),
 
 hourly as (

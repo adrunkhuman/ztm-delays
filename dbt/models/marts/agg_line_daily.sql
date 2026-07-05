@@ -1,8 +1,21 @@
+{% set processing_date = var("processing_date", "1970-01-01") %}
+{% set aggregation_start_date = var("aggregation_start_date", processing_date) %}
+{% set start_date = modules.datetime.datetime.strptime(aggregation_start_date, "%Y-%m-%d").date() %}
+{% set end_date = modules.datetime.datetime.strptime(processing_date, "%Y-%m-%d").date() %}
+{% set partition_dates = [] %}
+{% for day_offset in range((end_date - start_date).days + 1) %}
+    {% do partition_dates.append("date('" ~ (start_date + modules.datetime.timedelta(days=day_offset)).isoformat() ~ "')") %}
+{% endfor %}
+
 {{
     config(
-        materialized='table',
+        materialized='incremental',
+        incremental_strategy='insert_overwrite',
         partition_by={"field": "service_date", "data_type": "date"},
+        partitions=partition_dates,
         cluster_by=["line", "direction_id"],
+        require_partition_filter=true,
+        post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
@@ -27,8 +40,8 @@ with detail as (
     from {{ ref('fct_stop_arrival') }} as arrivals
     inner join {{ ref('dim_date') }} as dates
         on arrivals.service_date = dates.service_date
-    where arrivals.service_date between date('{{ var("aggregation_start_date", "1970-01-01") }}')
-        and date('{{ var("processing_date") }}')
+    where arrivals.service_date between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
       and arrivals.trip_quality = 'complete'
 )
 
