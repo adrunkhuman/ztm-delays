@@ -12,7 +12,7 @@ Runtime contract:
 - Service account can write `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/query/insert `ztm-data.ztm_raw.raw_gtfs_snapshots`.
 - Service account can read `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/load/append GTFS raw tables in `ztm-data.ztm_raw`.
 - Service account can create/query/update dbt models in `ztm-data.ztm_stg`, `ztm-data.ztm_int`, and `ztm-data.ztm_marts`.
-- Service account can query `ztm-data.ztm_marts` table metadata/date ranges and extract the fixed serving mart allowlist to `gs://ztm-analytics-bucket/serving/duckdb/staging/...` for manual serving exports.
+- Service account can query `ztm-data.ztm_marts` table metadata/date ranges and extract the fixed frontend serving source-table allowlist to `gs://ztm-analytics-bucket/serving/duckdb/staging/...` for manual serving exports.
 - Service account can list/read GCS serving export staging objects, and can delete them when `cleanup_gcs_staging=true`.
 - `/opt/airflow/serving` or the configured `SERVING_EXPORT_DIR` is writable by the Airflow task and mounted to a stable VPS host path when the frontend will read the artifact.
 
@@ -22,7 +22,7 @@ The manual serving export DAG is:
 dag_serving_export
 ```
 
-It has no schedule. Trigger it on demand after the marts are in the state you want to serve. The DAG exports the fixed `MART_TABLES` allowlist, currently intended to mirror all serving marts in `ztm_marts`, to GCS Parquet. It downloads those Parquet files into the Airflow worker temp directory, builds a DuckDB file, validates expected tables and size guardrails, then atomically swaps the configured stable serving path.
+It has no schedule. Trigger it on demand after the marts are in the state you want to serve. The DAG exports the fixed frontend source-table allowlist to GCS Parquet, downloads those Parquet files into the Airflow worker temp directory, builds page-shaped DuckDB serving tables, validates expected tables and size guardrails, then atomically swaps the configured stable serving path.
 
 DuckDB build resource profile is hard-coded for the current VPS: `memory_limit='1GB'`, `max_temp_directory_size='2GB'`, `threads=2`, and `preserve_insertion_order=false`. The source/download temp files use worker temp storage, while DuckDB spill files use `.duckdb-tmp-<export_id>` under `SERVING_EXPORT_DIR`. Keep enough free space on the serving mount for the final database, the temporary database, WAL sidecars, and up to the DuckDB temp-directory limit. `SERVING_EXPORT_MAX_DUCKDB_BYTES` is an output-size guardrail, not the DuckDB memory limit.
 
@@ -37,6 +37,8 @@ SERVING_EXPORT_MAX_DUCKDB_BYTES=21474836480
 ```
 
 Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`, `max_source_bytes`, `max_duckdb_bytes`, and `cleanup_gcs_staging`. Use a fresh `export_id` for every run because BigQuery extract job IDs are reserved permanently. Keep `output_dir` mounted to a VPS host path if another frontend container will read the resulting file.
+
+Local Windows/minimal-Python test environments need `tzdata` for `ZoneInfo("Europe/Warsaw")`; use `uv run --with pytest --with duckdb --with tzdata pytest airflow/tests` when running the Airflow test suite outside the Linux container.
 
 The GPS raw-load DAG is:
 
