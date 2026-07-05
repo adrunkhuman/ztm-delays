@@ -66,7 +66,7 @@ Manual recovery remains explicit: trigger `dag_gtfs_load` with `snapshot_id`, `g
 
 ## Manual Serving Export
 
-`dag_serving_export` is manual-only for the alpha serving path. Run it after the mart tables are built and validated for the archive window you want to expose. It exports the fixed `MART_TABLES` allowlist, currently intended to mirror all serving marts in `ztm_marts`, to GCS Parquet under `gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds a local DuckDB file, validates it, and atomically swaps the stable serving file. When adding a new serving mart, update the DAG allowlist, its test, and `docs/serving_contract.md` together.
+`dag_serving_export` is manual-only for the alpha serving path. Run it after the mart tables are built and validated for the archive window you want to expose. It exports the fixed frontend source-table allowlist to GCS Parquet under `gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds page-shaped DuckDB serving tables locally, validates the artifact, and atomically swaps the stable serving file. When changing the frontend serving surface, update the DAG source allowlist, derived-table SQL, tests, and `docs/serving_contract.md` together.
 
 Default output path inside the Airflow container:
 

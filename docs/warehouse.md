@@ -164,11 +164,11 @@ Trip facts are the analytics validity grain. A day can be incomplete while indiv
 
 ## Serving Export
 
-`dag_serving_export` is a manual alpha export that publishes the current mart layer to a single DuckDB file for the separate frontend. It exports the fixed `MART_TABLES` allowlist, currently intended to mirror all serving marts in `ztm_marts`, to GCS Parquet. It downloads the Parquet files in the Airflow worker, builds a local DuckDB file, validates row/table guardrails, then atomically swaps the stable file path. Adding a new serving mart requires updating the DAG allowlist, tests, and serving contract together.
+`dag_serving_export` is a manual alpha export that publishes one frontend-serving DuckDB file. It exports only the BigQuery marts needed directly by the current frontend or by DuckDB-derived page tables, stages those source tables as GCS Parquet, downloads them in the Airflow worker, builds derived serving tables locally, validates row/table guardrails, then atomically swaps the stable file path. Changing the frontend serving surface requires updating the DAG source allowlist, derived-table SQL, tests, and serving contract together.
 
 The export is intentionally serving-only. It does not change mart semantics, does not implement the future settled nightly matcher, and does not remove the current hourly BigQuery/modeling path. Its `export_metadata.source_mode` is `current_pipeline_provisional` until the backend is redesigned around settled nightly archive processing.
 
-The serving artifact includes all mart tables plus `export_metadata` and `export_table_stats`. Current-snapshot `_current` tables are exported for present-day filters/maps only; archive views should still render labels from label-bearing facts and aggregates. The frontend should reopen DuckDB connections when `export_metadata.export_id` changes instead of restarting the container.
+The serving artifact is not a generic mirror of `ztm_marts`. It includes the current frontend source tables, derived DuckDB aggregate/event tables, `export_metadata`, and `export_table_stats`. Current-snapshot `_current` tables are exported only where the frontend needs present-day stop lookup surfaces; archive views should still render labels from label-bearing facts and aggregates. The frontend should reopen DuckDB connections when `export_metadata.export_id` changes instead of restarting the container.
 
 ## Aggregate Marts
 
