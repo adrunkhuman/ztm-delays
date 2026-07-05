@@ -14,7 +14,6 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from socket import gethostname
 from typing import TYPE_CHECKING, TypedDict, cast
-from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -72,8 +71,6 @@ class Config:
     flush_lag_seconds: float
     heartbeat_gcs_path: str
     heartbeat_interval_seconds: float
-    require_polish_egress: bool
-    egress_check_url: str
     run_once: bool
     no_upload: bool
 
@@ -141,9 +138,6 @@ def main() -> int:
     )
 
     session = requests.Session()
-    if config.require_polish_egress:
-        _assert_polish_egress(session, config)
-
     bucket = None if config.no_upload else storage.Client().bucket(config.gcs_bucket)
     buffers: dict[str, dict[datetime, list[GpsRow]]] = {
         vehicle_type.name: defaultdict(list) for vehicle_type in config.vehicle_types
@@ -216,12 +210,6 @@ def _load_config(args: Namespace) -> Config:
     heartbeat_interval_seconds = _positive_float_env("POLLER_HEARTBEAT_INTERVAL_SECONDS", "60")
     api_proxy = os.getenv("ZTM_API_PROXY", "").strip() or None
     heartbeat_gcs_path = os.getenv("POLLER_HEARTBEAT_GCS_PATH", "health/poller/latest.json").strip("/")
-    require_polish_egress = _bool_env("POLLER_REQUIRE_POLISH_EGRESS", default=False)
-    egress_check_url = _egress_check_url_env()
-    if require_polish_egress and not api_proxy:
-        raise RuntimeError("POLLER_REQUIRE_POLISH_EGRESS requires ZTM_API_PROXY")
-    if require_polish_egress and not egress_check_url:
-        raise RuntimeError("POLLER_EGRESS_CHECK_URL is required when POLLER_REQUIRE_POLISH_EGRESS is enabled")
 
     return Config(
         api_token=api_token,
@@ -237,8 +225,6 @@ def _load_config(args: Namespace) -> Config:
         flush_lag_seconds=flush_lag_seconds,
         heartbeat_gcs_path=heartbeat_gcs_path,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
-        require_polish_egress=require_polish_egress,
-        egress_check_url=egress_check_url,
         run_once=args.once,
         no_upload=args.no_upload,
     )
@@ -252,28 +238,6 @@ def _positive_float_env(name: str, default: str) -> float:
 
     if value <= 0:
         raise RuntimeError(f"{name} must be a positive number")
-    return value
-
-
-def _bool_env(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "y", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "n", "off"}:
-        return False
-    raise RuntimeError(f"{name} must be a boolean")
-
-
-def _egress_check_url_env() -> str:
-    value = os.getenv("POLLER_EGRESS_CHECK_URL", "https://ipinfo.io/json").strip()
-    parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise RuntimeError("POLLER_EGRESS_CHECK_URL must be an HTTPS URL with a hostname")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise RuntimeError("POLLER_EGRESS_CHECK_URL must not contain credentials, query, or fragment")
     return value
 
 
@@ -339,25 +303,6 @@ def _update_poll_state(state: PollState, result: PollResult) -> None:
         return
     state.consecutive_failures += 1
     state.last_error_type = result.error_type
-
-
-def _assert_polish_egress(session: requests.Session, config: Config) -> None:
-    proxies = {"http": config.api_proxy, "https": config.api_proxy} if config.api_proxy else None
-    try:
-        response = session.get(config.egress_check_url, timeout=config.api_timeout_seconds, proxies=proxies)
-        response.raise_for_status()
-        payload: object = response.json()
-    except (requests.RequestException, json.JSONDecodeError) as exc:
-        raise RuntimeError("failed to verify Polish egress before polling") from exc
-
-    if not isinstance(payload, dict):
-        raise TypeError("egress check returned invalid payload")
-
-    country = str(payload.get("country", "")).strip().upper()
-    if country != "PL":
-        raise RuntimeError(f"poller egress country is {country or 'unknown'}, expected PL")
-
-    LOGGER.info("verified Polish egress hostname=%s country=%s", urlsplit(config.egress_check_url).hostname, country)
 
 
 def _poll_api(session: requests.Session, config: Config, vehicle_type: VehicleType) -> list[GpsRow]:
