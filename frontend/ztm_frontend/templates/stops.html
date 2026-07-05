@@ -6,11 +6,26 @@
 {% block body %}
   <div class="body">
     <aside class="rail">
-      <form action="{{ url_for('stops') }}" method="get">
+      <form action="{{ url_for('stops') }}" method="get" hx-push-url="true">
         <input type="hidden" name="mode" value="{{ selected_mode }}">
         <input type="hidden" name="date" value="{{ selected_date }}">
         <input type="hidden" name="rank" value="{{ selected_rank }}">
-        <input class="find" type="search" name="q" value="{{ search }}" placeholder="find stop…">
+        <input
+          class="find"
+          id="stop-search"
+          type="search"
+          name="q"
+          value="{{ search }}"
+          placeholder="find stop…"
+          hx-get="{{ url_for('stops') }}"
+          hx-trigger="input changed delay:250ms, search"
+          hx-include="closest form"
+          hx-target="#page"
+          hx-select="#page"
+          hx-swap="outerSync"
+          hx-replace-url="true"
+          hx-sync="closest form:replace"
+        >
       </form>
 
       <div class="mode">
