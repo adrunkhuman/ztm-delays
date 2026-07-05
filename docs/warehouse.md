@@ -244,6 +244,12 @@ The dbt BigQuery profile sets `maximum_bytes_billed`, defaulting to 100 GB per q
 
 Intermediate models are materialized as incremental tables when the work is expensive and reused downstream. That is deliberate; the trip/arrival reconstruction should not be recomputed repeatedly as ephemeral SQL.
 
+Airflow cadence is cost-gated: hourly raw GPS loading does not trigger the warehouse graph. `dag_daily_gps` runs at `04:00 Europe/Warsaw` by default and can still be manually triggered for one `processing_date`.
+
+dbt tests are tiered. Default Airflow paths exclude known expensive schedule/version tests and keep test selection explicit. Full-history schedule/version tests on `int_gtfs_trip_schedule` and `int_schedule_version`, broad contract audits, and serving export schema audits are explicit manual jobs until weekly/manual audit operations are mature.
+
+The partitioned aggregate/status marts `agg_service_coverage`, `agg_line_daily`, `agg_line_stop_period`, `agg_stop_period`, `agg_time_period`, `mart_day_completeness`, and `mart_pipeline_status` currently remain table materializations over their configured source window. Treat that as intentional current behavior, not proof that partitioning limits rebuild bytes by itself.
+
 ## Current Cutover
 
 The new datasets are built in parallel with the old `ztm_bq` dataset. `ztm_bq` is confirmed disposable, but it is dropped only after `ztm_raw`, `ztm_stg`, `ztm_int`, and `ztm_marts` are validated.

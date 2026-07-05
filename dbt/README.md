@@ -34,6 +34,16 @@ Aggregate marts are table materializations over the inclusive `[aggregation_star
 
 Completeness, service-coverage, and pipeline-status marts are also table materializations over the inclusive `[aggregation_start_date, processing_date]` source window. If `aggregation_start_date` is omitted, they build only `processing_date`. `mart_day_completeness` summarizes raw GPS presence by GPS date and mode. `agg_service_coverage` compares governed scheduled trips to complete/partial observed trip candidates from `int_trip_summary` by scheduled service hour and partitions rows by `scheduled_start_date`; overnight rows can keep the prior GTFS `service_date`. `mart_pipeline_status` combines completeness, matching, trip quality, settled service coverage, stop-arrival output counts, and GTFS freshness by operational status date and mode; its `service_date` field is aligned to GPS processing date and scheduled-start date, not necessarily GTFS service_date for overnight trips.
 
+## Test Tiers
+
+Default Airflow runs exclude the expensive full-history tests on `int_gtfs_trip_schedule` and `int_schedule_version`. Run them manually before schedule/matcher/audit-sensitive releases:
+
+```bash
+uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt test --select int_gtfs_trip_schedule int_schedule_version --indirect-selection cautious --exclude test_type:unit --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
+```
+
+For bounded aggregate/fact audits, pass `aggregation_start_date` and `publish_service_date` explicitly. Do not run unbounded full-history tests casually.
+
 The local `profiles.yml` uses environment variables for BigQuery connection settings and credentials.
 
 In Airflow, `GOOGLE_APPLICATION_CREDENTIALS` defaults to `/opt/airflow/gcp-key.json` if the environment variable is not set explicitly.

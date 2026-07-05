@@ -6,7 +6,7 @@ Runtime contract:
 
 - `dbt/` is mounted at `/opt/airflow/dbt`.
 - Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, and `duckdb`.
-- Airflow image supports Airflow 3.2 partitioned asset APIs used by these DAGs: `Asset`, asset-event `Metadata`, `CronPartitionTimetable`, `PartitionedAssetTimetable`, and `StartOfDayMapper`.
+- Airflow image supports Airflow 3.2 APIs used by these DAGs: `Asset`, asset-event `Metadata`, and `CronPartitionTimetable`.
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
 - Service account can list/read `gs://ztm-analytics-bucket/raw/gps/...` and load/query `ztm-data.ztm_raw`.
 - Service account can write `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/query/insert `ztm-data.ztm_raw.raw_gtfs_snapshots`.
@@ -54,9 +54,11 @@ The GPS warehouse build DAG is:
 dag_daily_gps
 ```
 
-The DAG ID is historical. It is now scheduled by the partitioned `raw_gps_date` asset and rebuilds the emitted partition key's Warsaw-local processing date.
+The DAG ID is historical. It now runs on a nightly cron and rebuilds one Warsaw-local processing date per run.
 
-It verifies that at least one GTFS snapshot exists before the processing date, then runs `stg_gps__pings`, `int_ping_trip`, `int_gps_hourly_completeness`, `int_stop_arrivals`, `int_trip_summary`, `fct_trip`, `fct_stop_arrival`, `mart_day_completeness`, `agg_service_coverage`, aggregate marts, and `mart_pipeline_status`. Schedule matching resolves the governing snapshot per GTFS `service_date`: latest loaded snapshot whose Warsaw-local timestamp date is strictly before that service date. Facts publish both the current service date and the prior service date so after-midnight GPS can complete overnight trips without overwriting unrelated partitions. Aggregate/status marts currently rebuild from the collected-history start date through the processing date.
+It runs at `04:00 Europe/Warsaw` by default via `GPS_WAREHOUSE_CRON`. The DAG still accepts a manual `processing_date` for recovery/backfill reruns. Hourly `raw_gps_date` asset events are retained as raw-load metadata, but no longer trigger the full warehouse graph.
+
+It verifies that at least one GTFS snapshot exists before the processing date, then runs `stg_gps__pings`, `int_ping_trip`, `int_gps_hourly_completeness`, `int_stop_arrivals`, `int_trip_summary`, `fct_trip`, `fct_stop_arrival`, `mart_day_completeness`, `agg_service_coverage`, aggregate marts, and `mart_pipeline_status`. Schedule matching resolves the governing snapshot per GTFS `service_date`: latest loaded snapshot whose Warsaw-local timestamp date is strictly before that service date. Facts publish both the current service date and the prior service date so after-midnight GPS can complete overnight trips without overwriting unrelated partitions. Aggregate/status marts currently rebuild the configured history window from the collected-history start date through the processing date.
 
 Expected input layout:
 
@@ -80,7 +82,9 @@ The GTFS raw loader DAG is:
 dag_gtfs_load
 ```
 
-It is scheduled by the `gtfs_snapshot` asset. It loads every GTFS snapshot event that triggered the run into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, runs and tests GTFS staging models, then refreshes and tests archive-safe dimensions, schedule-version models, and current-snapshot convenience lookups for the latest event in the run.
+It is scheduled by the `gtfs_snapshot` asset. It loads every GTFS snapshot event that triggered the run into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, runs and tests GTFS staging models, then refreshes archive-safe dimensions, schedule-version models, and current-snapshot convenience lookups for the latest event in the run. The default dimension test task covers the cheap/default dimension tier, not full-history schedule/version audits.
+
+The default GTFS dimension test phase intentionally excludes `int_gtfs_trip_schedule` and `int_schedule_version`. Those full-history schedule/version tests are manual audit jobs until weekly/manual operations are mature.
 
 Manual recovery is still available by triggering it with explicit `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`. Validation is strict: `snapshot_id` must match `YYYY-MM-DDTHH:MM:SSZ_<12 hex>`, `gcs_path` must equal `gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip`, and `processing_date` must be `YYYY-MM-DD`.
 

@@ -10,8 +10,6 @@ from airflow.sdk import (
     DAG,
     CronPartitionTimetable,
     Metadata,
-    PartitionedAssetTimetable,
-    StartOfDayMapper,
     TriggerRule,
     task,
 )
@@ -34,6 +32,8 @@ if TYPE_CHECKING:
 
 GCS_GPS_PREFIX = "raw/gps"
 VEHICLE_TYPES = ("bus", "tram")
+GPS_RAW_LOAD_CRON = "20 * * * *"
+GPS_WAREHOUSE_CRON = "0 4 * * *"
 
 RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gps_pings"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
@@ -52,8 +52,8 @@ AGGREGATE_MODELS = "agg_line_stop_period agg_stop_period agg_time_period agg_lin
 WAREHOUSE_HISTORY_START_DATE = "2026-06-25"
 
 RAW_GPS_PROCESSING_DATE = "{{ (dag_run.partition_key or dag_run.conf.get('processing_date'))[:10] }}"
-PROCESSING_DATE = "{{ dag_run.partition_key or dag_run.conf.get('processing_date') or data_interval_start.in_timezone('Europe/Warsaw').to_date_string() }}"
-PRIOR_SERVICE_DATE = "{{ macros.ds_add(dag_run.partition_key or dag_run.conf.get('processing_date') or data_interval_start.in_timezone('Europe/Warsaw').to_date_string(), -1) }}"
+PROCESSING_DATE = "{{ dag_run.conf.get('processing_date') or dag_run.partition_key or data_interval_start.in_timezone('Europe/Warsaw').to_date_string() }}"
+PRIOR_SERVICE_DATE = "{{ macros.ds_add(dag_run.conf.get('processing_date') or dag_run.partition_key or data_interval_start.in_timezone('Europe/Warsaw').to_date_string(), -1) }}"
 SELECTED_GTFS_SNAPSHOT_ID = "{{ ti.xcom_pull(task_ids='selected_gtfs_snapshot_id') }}"
 GPS_DBT_VARS = dbt_vars(processing_date=PROCESSING_DATE)
 GPS_TRIP_DBT_VARS = dbt_vars(processing_date=PROCESSING_DATE, gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID)
@@ -149,7 +149,7 @@ with DAG(
     dag_id="dag_gps_raw_load",
     description="Load available GPS parts hourly and emit a partitioned raw GPS date asset.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
-    schedule=CronPartitionTimetable("20 * * * *", timezone="Europe/Warsaw"),
+    schedule=CronPartitionTimetable(GPS_RAW_LOAD_CRON, timezone="Europe/Warsaw"),
     catchup=False,
     tags=["ztm", "gps"],
 ) as raw_gps_dag:
@@ -168,9 +168,14 @@ with DAG(
 
 with DAG(
     dag_id="dag_daily_gps",
-    description="Consume raw GPS date assets and rebuild warehouse models for one processing date.",
+    description="Nightly warehouse rebuild for one GPS processing date.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
-    schedule=PartitionedAssetTimetable(assets=RAW_GPS_DATE_ASSET, default_partition_mapper=StartOfDayMapper()),
+    schedule=CronPartitionTimetable(
+        GPS_WAREHOUSE_CRON,
+        timezone="Europe/Warsaw",
+        run_offset=-1,
+        key_format="%Y-%m-%d",
+    ),
     catchup=False,
     max_active_runs=1,
     tags=["ztm", "gps", "warehouse"],

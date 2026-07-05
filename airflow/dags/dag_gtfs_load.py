@@ -36,6 +36,11 @@ GTFS_DIMENSION_MODELS = (
     "dim_schedule_version "
     "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
 )
+GTFS_DAILY_DIMENSION_TEST_MODELS = (
+    "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_schedule_version "
+    "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
+)
+GTFS_EXPENSIVE_AUDIT_TEST_MODELS = "int_gtfs_trip_schedule int_schedule_version"
 GTFS_RAW_SOURCES = (
     "source:raw.raw_gtfs_snapshots "
     "source:raw.raw_gtfs_trips "
@@ -322,7 +327,9 @@ with DAG(
 
     dbt_test_gtfs_dimensions = BashOperator(
         task_id="dbt_test_gtfs_dimensions",
-        bash_command=dbt_command("test", GTFS_DIMENSION_MODELS, GTFS_DBT_VARS, "--indirect-selection cautious"),
+        bash_command=dbt_command(
+            "test", GTFS_DAILY_DIMENSION_TEST_MODELS, GTFS_DBT_VARS, "--indirect-selection cautious"
+        ),
     )
 
     @task(trigger_rule=TriggerRule.ONE_FAILED, retries=0)
