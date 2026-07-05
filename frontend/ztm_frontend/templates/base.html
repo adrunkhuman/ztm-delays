@@ -3,14 +3,17 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"]}'>
     <title>{% block title %}ZTM delays{% endblock %}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='site.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0-beta5/dist/htmx.min.js" integrity="sha384-5dnhUXCt1hXGvYrjAnKwgNX3I8xtIJiW6eIHIbeo7oWyXv2XpWYC/rl+ZiWfuYO5" crossorigin="anonymous"></script>
   </head>
   <body>
-    <div class="page">
+    <div id="page" class="page" hx-history-elt hx-boost:inherited="swap:outerSync select:#page target:#page" hx-indicator:inherited=".loadline">
+      <div class="loadline" aria-hidden="true"></div>
       <nav class="nav">
         <a class="brand" href="{{ url_for('index') }}">ZTM<span>/delays</span></a>
         <div class="nav-links" aria-label="Main navigation">
