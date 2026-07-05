@@ -693,7 +693,7 @@ models:
         description: Timestamp when this status mart table was generated.
 
   - name: agg_line_stop_period
-    description: Precomputed strict-quality delay distribution by line, direction, archive-safe headsign, stop post, scheduled Warsaw-local hour, period, and day class. Built only from fct_stop_arrival rows where trip_quality = 'complete'.
+    description: Precomputed strict-quality delay distribution by line, direction, archive-safe headsign, stop post, scheduled Warsaw-local hour, period, and day class. Normal builds replace affected month and schedule-version period_start_date partitions. Built only from fct_stop_arrival rows where trip_quality = 'complete'.
     columns:
       - name: period_type
         description: Aggregate period family. Values are month and schedule_version. Month rows use only the latest schedule_version_id observed in that month for each line, direction_id, and schedule_day_type, ordered by dim_schedule_version.valid_from_date.
@@ -761,7 +761,7 @@ models:
         description: Distinct governing GTFS snapshot IDs contributing source rows to this aggregate cell.
 
   - name: agg_stop_period
-    description: Precomputed strict-quality delay distribution by stop group, line, direction, archive-safe headsign, scheduled Warsaw-local hour, period, and day class. Direction stays explicit because schedule versions are per line and direction.
+    description: Precomputed strict-quality delay distribution by stop group, line, direction, archive-safe headsign, scheduled Warsaw-local hour, period, and day class. Normal builds replace affected month and schedule-version period_start_date partitions. Direction stays explicit because schedule versions are per line and direction.
     columns:
       - name: period_type
         description: Aggregate period family. Values are month and schedule_version. Month rows use only the latest schedule_version_id observed in that month for each line, direction_id, and schedule_day_type, ordered by dim_schedule_version.valid_from_date.
@@ -821,7 +821,7 @@ models:
         description: Distinct governing GTFS snapshot IDs contributing source rows to this aggregate cell.
 
   - name: agg_time_period
-    description: Precomputed strict-quality time-of-day delay distribution by scheduled Warsaw-local hour, day class, period, and mode. Month rows are network-wide within mode; schedule-version rows are line/direction/headsign-scoped because schedule_version_id is a per-line concept.
+    description: Precomputed strict-quality time-of-day delay distribution by scheduled Warsaw-local hour, day class, period, and mode. Normal builds replace affected month and schedule-version period_start_date partitions. Month rows are network-wide within mode; schedule-version rows are line/direction/headsign-scoped because schedule_version_id is a per-line concept.
     columns:
       - name: period_type
         description: Aggregate period family. Values are month and schedule_version. Month rows use only the latest schedule_version_id observed in that month for each line, direction_id, and schedule_day_type, ordered by dim_schedule_version.valid_from_date, before network-wide grouping.

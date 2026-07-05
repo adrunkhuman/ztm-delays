@@ -1,4 +1,12 @@
-with latest_versions as (
+with affected_months as (
+    select distinct date_trunc(service_date, month) as period_start_date
+    from unnest(generate_date_array(
+        date('{{ var("aggregation_start_date", var("processing_date")) }}'),
+        date('{{ var("processing_date") }}')
+    )) as service_date
+),
+
+latest_versions as (
     select
         date_trunc(arrivals.service_date, month) as period_start_date,
         arrivals.line,
@@ -8,9 +16,10 @@ with latest_versions as (
     from {{ ref('fct_stop_arrival') }} as arrivals
     inner join {{ ref('dim_schedule_version') }} as versions
         on arrivals.schedule_version_id = versions.schedule_version_id
-    where arrivals.service_date between date('{{ var("aggregation_start_date", "1970-01-01") }}')
+    where arrivals.service_date between date('{{ var("period_source_start_date", var("aggregation_start_date", var("processing_date"))) }}')
         and date('{{ var("processing_date") }}')
       and arrivals.trip_quality = 'complete'
+      and date_trunc(arrivals.service_date, month) in (select period_start_date from affected_months)
     group by
         period_start_date,
         arrivals.line,
@@ -37,6 +46,8 @@ line_stop_month_rows as (
         and agg.day_class_type = 'schedule_day_type'
         and agg.day_class = latest_versions.schedule_day_type
     where agg.period_type = 'month'
+      and {{ period_partition_filter('agg.period_start_date') }}
+      and agg.period_start_date in (select period_start_date from affected_months)
 ),
 
 stop_month_rows as (
@@ -58,6 +69,8 @@ stop_month_rows as (
         and agg.day_class_type = 'schedule_day_type'
         and agg.day_class = latest_versions.schedule_day_type
     where agg.period_type = 'month'
+      and {{ period_partition_filter('agg.period_start_date') }}
+      and agg.period_start_date in (select period_start_date from affected_months)
 )
 
 select *

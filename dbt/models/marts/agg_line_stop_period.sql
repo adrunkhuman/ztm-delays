@@ -1,12 +1,51 @@
+{% set processing_date = var("processing_date", "1970-01-01") %}
+{% set aggregation_start_date = var("aggregation_start_date", processing_date) %}
+{% set period_source_start_date = var("period_source_start_date", aggregation_start_date) %}
+{% set period_partition_dates = var("period_partition_dates", "") %}
+{% set partitions_to_replace = [] %}
+{% if period_partition_dates %}
+    {% for partition_date in period_partition_dates.split('|') %}
+        {% do partitions_to_replace.append("date('" ~ partition_date ~ "')") %}
+    {% endfor %}
+{% endif %}
+
 {{
     config(
-        materialized='table',
+        materialized='incremental',
+        incremental_strategy='insert_overwrite',
         partition_by={"field": "period_start_date", "data_type": "date"},
+        partitions=partitions_to_replace if partitions_to_replace else none,
         cluster_by=["line", "stop_group_id", "hour_bracket"],
+        require_partition_filter=true,
+        post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
-with detail as (
+with affected_service_dates as (
+    select service_date
+    from unnest(generate_date_array(
+        date('{{ aggregation_start_date }}'),
+        date('{{ processing_date }}')
+    )) as service_date
+),
+
+affected_periods as (
+    select distinct
+        'month' as period_type,
+        date_trunc(service_date, month) as period_start_date
+    from affected_service_dates
+
+    union distinct
+
+    select distinct
+        'schedule_version' as period_type,
+        valid_from_date as period_start_date
+    from {{ ref('dim_schedule_version') }}
+    where valid_from_date <= date('{{ processing_date }}')
+      and coalesce(valid_to_date, date '9999-12-31') >= date('{{ aggregation_start_date }}')
+),
+
+detail as (
     select
         arrivals.service_date,
         arrivals.gtfs_snapshot_id,
@@ -38,8 +77,8 @@ with detail as (
         on arrivals.service_date = dates.service_date
     left join {{ ref('dim_schedule_version') }} as versions
         on arrivals.schedule_version_id = versions.schedule_version_id
-    where arrivals.service_date between date('{{ var("aggregation_start_date", "1970-01-01") }}')
-        and date('{{ var("processing_date") }}')
+    where arrivals.service_date between date('{{ period_source_start_date }}')
+        and date('{{ processing_date }}')
       and arrivals.trip_quality = 'complete'
 ),
 
@@ -70,12 +109,33 @@ period_rows as (
     from detail
 ),
 
+affected_partition_dates as (
+    {% if period_partition_dates %}
+        select distinct period_start_date
+        from unnest([
+            {%- for partition_date in period_partition_dates.split('|') -%}
+                date('{{ partition_date }}'){% if not loop.last %}, {% endif %}
+            {%- endfor -%}
+        ]) as period_start_date
+    {% else %}
+    select distinct period_start_date
+    from affected_periods
+    {% endif %}
+),
+
+affected_period_rows as (
+    select period_rows.*
+    from period_rows
+    inner join affected_partition_dates
+        on period_rows.period_start_date = affected_partition_dates.period_start_date
+),
+
 day_class_rows as (
-    select *, 'day_type' as day_class_type, day_type as day_class from period_rows
+    select *, 'day_type' as day_class_type, day_type as day_class from affected_period_rows
     union all
-    select *, 'weekday' as day_class_type, weekday_name as day_class from period_rows
+    select *, 'weekday' as day_class_type, weekday_name as day_class from affected_period_rows
     union all
-    select *, 'schedule_day_type' as day_class_type, schedule_day_type as day_class from period_rows
+    select *, 'schedule_day_type' as day_class_type, schedule_day_type as day_class from affected_period_rows
 )
 
 select

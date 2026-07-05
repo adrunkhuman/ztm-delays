@@ -10,6 +10,7 @@ select
     trip_headsign,
     hour_bracket
 from {{ ref('agg_stop_period') }}
+where {{ period_partition_filter() }}
 group by
     period_type,
     period_id,

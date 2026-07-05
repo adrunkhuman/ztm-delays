@@ -1,4 +1,12 @@
-with detail as (
+with affected_months as (
+    select distinct date_trunc(service_date, month) as period_start_date
+    from unnest(generate_date_array(
+        date('{{ var("aggregation_start_date", var("processing_date")) }}'),
+        date('{{ var("processing_date") }}')
+    )) as service_date
+),
+
+detail as (
     select
         arrivals.service_date,
         arrivals.gtfs_snapshot_id,
@@ -20,7 +28,7 @@ with detail as (
         on arrivals.service_date = dates.service_date
     inner join {{ ref('dim_schedule_version') }} as versions
         on arrivals.schedule_version_id = versions.schedule_version_id
-    where arrivals.service_date between date('{{ var("aggregation_start_date", "1970-01-01") }}')
+    where arrivals.service_date between date('{{ var("period_source_start_date", var("aggregation_start_date", var("processing_date"))) }}')
         and date('{{ var("processing_date") }}')
       and arrivals.trip_quality = 'complete'
 ),
@@ -40,6 +48,7 @@ expected as (
         hour_bracket,
         count(*) as n
     from latest_month_detail
+    where month_start_date in (select period_start_date from affected_months)
     group by period_id, day_class_type, day_class, mode, hour_bracket
 
     union all
@@ -52,6 +61,7 @@ expected as (
         hour_bracket,
         count(*) as n
     from latest_month_detail
+    where month_start_date in (select period_start_date from affected_months)
     group by period_id, day_class_type, day_class, mode, hour_bracket
 
     union all
@@ -64,6 +74,7 @@ expected as (
         hour_bracket,
         count(*) as n
     from latest_month_detail
+    where month_start_date in (select period_start_date from affected_months)
     group by period_id, day_class_type, day_class, mode, hour_bracket
 ),
 
@@ -77,6 +88,8 @@ actual as (
         n
     from {{ ref('agg_time_period') }}
     where period_type = 'month'
+      and {{ period_partition_filter() }}
+      and period_start_date in (select period_start_date from affected_months)
       and line is null
       and direction_id is null
       and schedule_version_id is null

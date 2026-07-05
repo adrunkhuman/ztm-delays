@@ -7,6 +7,7 @@ from (
         n,
         (select sum(bucket.n) from unnest(delay_histogram) as bucket) as histogram_n
     from {{ ref('agg_line_stop_period') }}
+    where {{ period_partition_filter() }}
 
     union all
 
@@ -17,6 +18,7 @@ from (
         n,
         (select sum(bucket.n) from unnest(delay_histogram) as bucket) as histogram_n
     from {{ ref('agg_stop_period') }}
+    where {{ period_partition_filter() }}
 
     union all
 
@@ -27,6 +29,7 @@ from (
         n,
         (select sum(bucket.n) from unnest(delay_histogram) as bucket) as histogram_n
     from {{ ref('agg_time_period') }}
+    where {{ period_partition_filter() }}
 
     union all
 

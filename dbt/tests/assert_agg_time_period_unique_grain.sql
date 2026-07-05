@@ -11,6 +11,7 @@ select
     schedule_version_id,
     hour_bracket
 from {{ ref('agg_time_period') }}
+where {{ period_partition_filter() }}
 group by
     period_type,
     period_id,

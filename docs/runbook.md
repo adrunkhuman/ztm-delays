@@ -71,7 +71,7 @@ Normal Airflow cadence must stay bounded and deliberate:
 - Hourly raw GPS loading only loads immutable GCS parts into raw BigQuery.
 - Nightly GPS warehouse work runs one processing date and its prior service-date fact publication.
 - `mart_day_completeness`, `agg_service_coverage`, `agg_line_daily`, and `mart_pipeline_status` replace the prior/current date partitions during normal nightly runs.
-- The remaining aggregate/status marts still rebuild their configured history window until they are made incremental or windowed.
+- Period aggregate marts replace affected month-start and schedule-version-start `period_start_date` partitions; Airflow computes the required source start date from affected month starts and active schedule-version starts.
 - Nightly aggregate marts build but their broad tests are manual audit jobs.
 - GTFS load runs raw load, staging, dimensions, and cheap/default dimension tests.
 
@@ -94,10 +94,12 @@ Manual aggregate/fact audit for an aggregate build window. Run this before aggre
 ```bash
 dbt test --select fct_trip fct_stop_arrival mart_day_completeness agg_service_coverage agg_line_daily agg_line_stop_period agg_stop_period agg_time_period mart_pipeline_status \
   --indirect-selection cautious --exclude test_type:unit \
-  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"YYYY-MM-DD","aggregation_start_date":"YYYY-MM-DD"}'
+  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"YYYY-MM-DD","aggregation_start_date":"YYYY-MM-DD","period_source_start_date":"YYYY-MM-DD","period_partition_dates":"YYYY-MM-DD|YYYY-MM-DD"}'
 ```
 
 For `mart_day_completeness`, `agg_service_coverage`, `agg_line_daily`, and `mart_pipeline_status`, normal recovery should rerun each affected processing date so the prior/current partition pair is replaced. Wider manual backfills can pass a wider `aggregation_start_date`, but dry-run first because every date in that inclusive range becomes an overwrite partition.
+
+For period aggregates, `aggregation_start_date` is the affected processing-date window, while `period_source_start_date` is the earliest affected month start or active schedule-version `valid_from_date` needed to recompute those affected rows. `period_partition_dates` is a pipe-delimited list of target `period_start_date` partitions. Omit `period_partition_dates` only for explicit dynamic/full-window rebuilds after a dry-run.
 
 The `Audit Required` GitHub workflow only reports changed-path risk. It does not run billable dbt/BigQuery audits. If it reports an audit tier, choose the smallest explicit manual command that covers the changed contract.
 

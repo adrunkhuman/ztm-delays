@@ -8,6 +8,7 @@ from (
         source_start_date,
         source_end_date
     from {{ ref('agg_line_stop_period') }}
+    where {{ period_partition_filter() }}
 
     union all
 
@@ -19,6 +20,7 @@ from (
         source_start_date,
         source_end_date
     from {{ ref('agg_stop_period') }}
+    where {{ period_partition_filter() }}
 
     union all
 
@@ -30,6 +32,7 @@ from (
         source_start_date,
         source_end_date
     from {{ ref('agg_time_period') }}
+    where {{ period_partition_filter() }}
 )
 where period_type not in ('month', 'schedule_version')
    or day_class_type not in ('day_type', 'weekday', 'schedule_day_type')
