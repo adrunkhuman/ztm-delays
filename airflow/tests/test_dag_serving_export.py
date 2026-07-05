@@ -11,28 +11,15 @@ from typing import Any
 import pytest
 
 
-def test_mart_table_list_exports_all_current_marts() -> None:
+def test_mart_table_list_exports_frontend_source_tables() -> None:
     dag = _load_dag_module()
 
     assert set(dag.MART_TABLES) == {
         "agg_line_daily",
-        "agg_line_stop_period",
-        "agg_service_coverage",
-        "agg_stop_period",
-        "agg_time_period",
-        "dim_date",
-        "dim_line",
-        "dim_line_current",
-        "dim_schedule_date",
-        "dim_schedule_date_current",
-        "dim_schedule_version",
-        "dim_stop_group",
         "dim_stop_group_current",
-        "dim_stop_post",
         "dim_stop_post_current",
         "fct_stop_arrival",
         "fct_trip",
-        "mart_day_completeness",
         "mart_pipeline_status",
     }
 
@@ -129,7 +116,7 @@ def test_validate_source_stats_enforces_size_guardrail() -> None:
     stats = [dag.TableStats(table_name=table_name, row_count=1, size_bytes=10) for table_name in dag.MART_TABLES]
 
     with pytest.raises(RuntimeError, match="exceeds configured limit"):
-        dag._validate_source_stats(stats, 100)
+        dag._validate_source_stats(stats, 50)
 
 
 def test_source_table_stats_merges_date_ranges() -> None:
@@ -149,7 +136,7 @@ def test_source_table_stats_merges_date_ranges() -> None:
 
 
 @pytest.mark.parametrize(
-    ("table_name", "date_column"), [("fct_stop_arrival", "service_date"), ("mart_day_completeness", "gps_date")]
+    ("table_name", "date_column"), [("fct_stop_arrival", "service_date"), ("mart_pipeline_status", "service_date")]
 )
 def test_date_range_select_keeps_required_partition_filter(table_name: str, date_column: str) -> None:
     dag = _load_dag_module()

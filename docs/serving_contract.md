@@ -1,42 +1,50 @@
 # Serving Contract
 
-The alpha frontend reads a local DuckDB file produced manually by `dag_serving_export`:
+The alpha frontend reads one local DuckDB file:
 
 ```text
 ztm.duckdb
 ```
 
-The export includes the fixed `MART_TABLES` allowlist, currently intended to mirror all current serving marts in `ztm_marts`, plus DuckDB-derived frontend serving tables, `export_metadata`, and `export_table_stats`. When a new serving mart or derived serving table is added, update the Airflow allowlist, export tests, and this contract together. The file is built to a temporary path and atomically swapped into the stable path, so frontend containers do not need to restart after a rebuild. Frontend code should avoid one permanent DuckDB connection; open per request or reopen cached connections when `export_metadata.export_id` changes.
+The file is a frontend-serving artifact, not a generic mirror of every warehouse mart. `dag_serving_export` builds the file from a small source-table allowlist, derives page-shaped aggregate tables inside DuckDB, validates the result, then atomically swaps the stable file path. The frontend mounts the serving directory read-only and opens DuckDB connections per query, so daily/manual file replacement does not require a frontend container restart.
 
-If the frontend watches the serving directory, it should react only to `ztm.duckdb` and `ztm.duckdb.meta.json`. Ignore hidden export build artifacts such as `.duckdb-tmp-*`, `.*.tmp`, and `*.wal`.
+Current alpha source mode is `current_pipeline_provisional`. These facts come from the current matcher pipeline and are not the future settled nightly archive. The frontend should surface this as an alpha/provisional archive when explanatory copy is needed.
 
-Alpha export source mode is `current_pipeline_provisional`: the serving file reflects the current marts as built by the existing pipeline. It is not yet the later settled nightly matcher/export design.
+## Runtime Files
 
-The frontend should read historical labels from facts and aggregate marts by default. Do not join historical rows to `_current` dimensions for display labels.
+The serving directory contains:
 
-Exported mart tables:
+```text
+ztm.duckdb
+ztm.duckdb.meta.json
+```
 
-- `dim_line`
-- `dim_line_current`
-- `dim_stop_post`
-- `dim_stop_post_current`
-- `dim_stop_group`
-- `dim_stop_group_current`
-- `dim_date`
-- `dim_schedule_date`
-- `dim_schedule_date_current`
-- `dim_schedule_version`
-- `fct_trip`
-- `fct_stop_arrival`
-- `mart_day_completeness`
-- `agg_service_coverage`
-- `mart_pipeline_status`
-- `agg_line_stop_period`
-- `agg_stop_period`
-- `agg_time_period`
+The database is the source of truth. The JSON sidecar mirrors export metadata for operations and may briefly lag during file swaps. Frontend file watchers, if added later, should react only to `ztm.duckdb` and `ztm.duckdb.meta.json`; ignore hidden build artifacts such as `.duckdb-tmp-*`, `.*.tmp`, `*.tmp`, and `*.wal`.
+
+Current VPS path convention:
+
+```text
+host:      /home/ubuntu/ztm-pipeline/serving
+frontend:  /app/serving
+env:       ZTM_DUCKDB_PATH=/app/serving/ztm.duckdb
+```
+
+## Source Tables
+
+`dag_serving_export` exports only the BigQuery marts needed directly by the current frontend or by derived DuckDB tables:
+
 - `agg_line_daily`
+- `dim_stop_group_current`
+- `dim_stop_post_current`
+- `fct_stop_arrival`
+- `fct_trip`
+- `mart_pipeline_status`
 
-DuckDB-derived frontend tables:
+These tables should keep archive-safe display labels on facts/aggregates. Historical frontend views must not relabel facts by joining to `_current` dimensions unless the view is explicitly present-day/current-state oriented.
+
+## Derived Tables
+
+The export derives these DuckDB tables for the current website contract:
 
 - `agg_mode_daily`
 - `agg_mode_hour_daily`
@@ -49,52 +57,84 @@ DuckDB-derived frontend tables:
 - `mart_delay_events`
 - `mart_trip_reliability`
 
-Export metadata tables:
+All aggregate delay tables expose the same core metric shape where applicable:
 
-- `export_metadata`: one row with `export_id`, `export_version`, `source_mode`, `exported_at`, source dataset identifiers, source row/byte totals, exported table count, and DuckDB file size.
-- `export_table_stats`: one row per exported mart or derived serving table with row count, source bytes where applicable, and date range where the table has a primary date field.
+- `n`
+- `mean_delay_seconds`
+- `median_delay_seconds`
+- `p90_delay_seconds`
+- `on_time_rate`
+- `early_count`
+- `on_time_count`
+- `late_count`
+- `delay_histogram`
 
-Delay histograms use 12 ordered buckets: `early_over_5m`, `early_2_to_5m`, `early_1_to_2m`, `on_time_early_30_60s`, `on_time_early_0_30s`, `on_time_late_0_30s`, `on_time_late_30_60s`, `on_time_late_1_to_3m`, `late_3_to_5m`, `late_5_to_10m`, `late_10_to_20m`, and `late_over_20m`. Hourly derived tables use the service-day window `04:00..03:59`; next-day `04:xx` rows are excluded from the selected service date's hourly widgets.
-
-The frontend should display `export_metadata.exported_at` and the available service-date range from `export_table_stats` so alpha users can see the archive freshness explicitly. The optional sidecar JSON is named `ztm.duckdb.meta.json` by default and mirrors the export summary for operations. It is written after the DuckDB swap, so the database metadata is the source of truth if the two briefly disagree.
-
-Fallback rule: every chart backed by `agg_line_stop_period`, `agg_stop_period`, `agg_time_period`, or `agg_line_daily` must be able to render from `fct_stop_arrival` when an aggregate cell is absent or stale. For now, stale means the aggregate's `source_end_date` is older than the requested detail range or `is_partial_period` is not acceptable for the comparison being shown. `mart_pipeline_status` provides day/mode archive-health context but does not replace detail fallback checks. Aggregates are serving accelerators, not the source of truth.
-
-Strict public analytics default to `trip_quality = 'complete'`. Exploratory views may include `partial`; debug views may include `broken` and surface `quality_flags`.
-
-## Status Panel
-
-Historical/archive health comes from `mart_pipeline_status`, keyed by `service_date` and `mode`. The frontend should use it for ingestion completeness, GPS match rate, trip quality counts, settled service coverage, stop-arrival output counts, and GTFS snapshot freshness. The manual DuckDB export does not update `mart_pipeline_status.last_export_at`; use `export_metadata.exported_at` or the sidecar JSON for export freshness until a status-watermark update is added.
-
-Near-real-time poller liveness comes from the private GCS heartbeat object written by the poller:
+Delay histograms use 12 ordered buckets:
 
 ```text
-gs://ztm-analytics-bucket/health/poller/latest.json
+early_over_5m
+early_2_to_5m
+early_1_to_2m
+on_time_early_30_60s
+on_time_early_0_30s
+on_time_late_0_30s
+on_time_late_30_60s
+on_time_late_1_to_3m
+late_3_to_5m
+late_5_to_10m
+late_10_to_20m
+late_over_20m
 ```
 
-The browser should not read that object directly. The serving/export layer should read it with backend credentials and expose a sanitized `poller_status` object to the frontend. Treat the poller as stale when `updated_at` is older than 180 seconds. Use the heartbeat `status` field directly when the object is fresh: `ok`, `degraded`, `down`, or `starting`.
+Hourly tables use the service-day display window `04:00..03:59`; next-day `04:xx` rows are excluded from the selected service date's hourly widgets.
 
-Frontend shape:
+## Metadata Tables
 
-```json
-{
-  "status": "ok | degraded | down | starting | stale",
-  "updated_at": "2026-01-15T12:00:00Z",
-  "is_stale": false,
-  "stale_after_seconds": 180,
-  "modes": {
-    "bus": {
-      "last_success_at": "2026-01-15T11:59:50Z",
-      "consecutive_failures": 0,
-      "last_error_type": null
-    },
-    "tram": {
-      "last_success_at": "2026-01-15T11:59:50Z",
-      "consecutive_failures": 0,
-      "last_error_type": null
-    }
-  }
-}
-```
+- `export_metadata`: one row with `export_id`, `export_version`, `source_mode`, `exported_at`, source project/dataset identifiers, source row/byte totals, exported table count, and DuckDB file size.
+- `export_table_stats`: one row per source or derived serving table with row count, source bytes where applicable, and date range where the table has a primary date field.
 
-If the heartbeat is stale, expose `status = "stale"` and `is_stale = true` regardless of the raw heartbeat status.
+The current frontend footer displays `export_metadata.exported_at` and source row count. Showing the full available service-date range from `export_table_stats` is a frontend refinement, not a blocker for the alpha serving artifact.
+
+## Page Coverage
+
+The current frontend routes are backed as follows:
+
+- `/`: `agg_mode_daily`, `agg_mode_hour_daily`, `agg_line_daily`, `agg_stop_post_daily`.
+- `/lines/`: `agg_line_daily`.
+- `/lines/<line>`: `agg_line_daily`, `agg_line_hour_daily`, `agg_line_stop_daily`, `fct_stop_arrival`, `mart_delay_events`, `mart_trip_reliability`.
+- `/stops/`: `dim_stop_group_current`, `agg_stop_group_daily`.
+- `/stops/<group>` and `/stops/<group>/<post>`: `dim_stop_post_current`, `agg_stop_post_daily`, `agg_stop_line_daily`, `agg_stop_hour_daily`, `fct_stop_arrival`, `mart_delay_events`.
+- `/trips/` and `/schedule/`: `fct_trip`, with traces from `fct_stop_arrival`; `/trips/` is canonical and `/schedule/` is the compatibility alias.
+- `/trips/<trip_id>`: `fct_trip` and observed stop rows from `fct_stop_arrival`.
+- `/status`: `mart_pipeline_status` plus `export_metadata` footer freshness.
+
+The frontend transforms exported rows into CSS-friendly widget shapes such as histogram bars, timeline ticks, and reliability strips. Those transforms are presentation logic. They should not be treated as fake data when the underlying exported rows are real.
+
+## Current Alpha Gaps
+
+These are intentionally not blockers for the alpha DuckDB artifact:
+
+- Scheduled-but-unobserved trips are not yet represented. `/trips/` shows observed trips from `fct_trip`.
+- Trip detail shows observed stop arrivals only. A complete scheduled-vs-observed stop-event surface is tracked separately by #73.
+- The export does not yet include sanitized private poller heartbeat status. Live poller status should be added separately from the archive-serving baseline.
+- The file is not scheduled for daily unattended export yet. Daily export cadence should wait for the cost and matcher-hardening passes.
+- Current facts remain provisional until #71, #72, #73, and #20 land the settled matching path and confidence diagnostics.
+
+## Matcher Caveats
+
+Until settled matching lands, frontend analytics must keep these caveats in mind:
+
+- `int_ping_trip` assigns pings only inside the scheduled trip start/end window.
+- Early origin departures before scheduled start can be unobservable in `fct_stop_arrival`.
+- First-stop delay distributions are censored and must not be interpreted as proof that vehicles never depart early.
+- Very delayed trip tails after scheduled end can degrade to partial/broken or be confused with the next scheduled trip before quality flags exclude them.
+
+Strict public analytics should default to `trip_quality = 'complete'`. Exploratory/debug views may include `partial` or `broken` only when they expose quality caveats clearly.
+
+## Follow-Up Ownership
+
+Keep these out of the alpha closure unless explicitly pulled in:
+
+- Daily cost/cadence hardening: #63 and #68.
+- Settled matching and expected scheduled events: #71, #72, #73, and #20.
+- Poller heartbeat exposure in the frontend-serving layer: follow-up from #37/#40.
