@@ -1022,6 +1022,7 @@ def _duckdb_path_list(paths: Iterable[Path]) -> str:
 
 with DAG(
     dag_id="dag_serving_export",
+    dag_display_name="Serving DuckDB export",
     description="Manually export all mart tables to an atomically swapped DuckDB serving file.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule=None,

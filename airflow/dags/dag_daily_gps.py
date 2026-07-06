@@ -248,6 +248,7 @@ def _bigquery_dbt_job_cost_summary(started_at: datetime) -> dict[str, object]:
 
 with DAG(
     dag_id="dag_gps_raw_load",
+    dag_display_name="GPS raw ingest",
     description="Load available GPS parts hourly and emit a partitioned raw GPS date asset.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule=CronPartitionTimetable(GPS_RAW_LOAD_CRON, timezone="Europe/Warsaw"),
@@ -271,6 +272,7 @@ with DAG(
 
 with DAG(
     dag_id="dag_daily_gps",
+    dag_display_name="GPS nightly warehouse",
     description="Nightly warehouse rebuild for one GPS processing date.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule=CronPartitionTimetable(

@@ -81,6 +81,7 @@ def test_gtfs_staging_processing_date_uses_next_warsaw_local_date() -> None:
 def test_dag_emits_gtfs_snapshot_asset_on_changed_snapshot() -> None:
     dag = _load_dag_module()
 
+    assert dag.dag.kwargs["dag_display_name"] == "GTFS snapshot poll"
     assert dag.dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
     assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
     assert dag.emit_gtfs_snapshot_asset.kwargs == {"outlets": [dag.GTFS_SNAPSHOT_ASSET]}

@@ -173,6 +173,7 @@ def _gtfs_snapshot_asset_extra(poll_result: dict[str, str]) -> dict[str, str]:
 
 with DAG(
     dag_id="dag_gtfs_poll",
+    dag_display_name="GTFS snapshot poll",
     description="Download GTFS ZIP when changed and emit a GTFS snapshot asset event.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule="0 * * * *",
