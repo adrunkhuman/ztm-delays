@@ -9,6 +9,7 @@ TAILSCALED_PID_FILE="${TAILSCALED_PID_FILE:-/tmp/tailscaled.pid}"
 POLLER_PID_FILE="${POLLER_PID_FILE:-/tmp/ztm-poller.pid}"
 STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-300}"
 STARTED_AT=$(date +%s)
+TERMINATE_REQUESTED=0
 
 if [ -z "${TS_HOSTNAME:-}" ]; then
   TS_HOSTNAME="ztm-poller"
@@ -29,10 +30,10 @@ TAILSCALED_PID=$!
 echo "${TAILSCALED_PID}" >"${TAILSCALED_PID_FILE}"
 
 terminate() {
+  TERMINATE_REQUESTED=1
   if [ -n "${POLLER_PID:-}" ]; then
     kill -TERM "${POLLER_PID}" 2>/dev/null || true
   fi
-  kill -TERM "${TAILSCALED_PID}" 2>/dev/null || true
 }
 
 trap terminate INT TERM
@@ -66,11 +67,17 @@ uv run --locked --no-dev python poller.py "$@" &
 POLLER_PID=$!
 echo "${POLLER_PID}" >"${POLLER_PID_FILE}"
 set +e
-wait "${POLLER_PID}"
-POLLER_STATUS=$?
+while true; do
+  wait "${POLLER_PID}"
+  POLLER_STATUS=$?
+  if kill -0 "${POLLER_PID}" 2>/dev/null; then
+    continue
+  fi
+  break
+done
 set -e
 
-if [ "${POLLER_STATUS}" -ne 0 ]; then
+if [ "${POLLER_STATUS}" -ne 0 ] && [ "${TERMINATE_REQUESTED}" -eq 0 ]; then
   NOW=$(date +%s)
   RUNTIME_SECONDS=$((NOW - STARTED_AT))
   if [ "${RUNTIME_SECONDS}" -lt "${STARTUP_GRACE_SECONDS}" ]; then
@@ -80,6 +87,6 @@ if [ "${POLLER_STATUS}" -ne 0 ]; then
   fi
 fi
 
-terminate
+kill -TERM "${TAILSCALED_PID}" 2>/dev/null || true
 wait "${TAILSCALED_PID}" 2>/dev/null || true
 exit "${POLLER_STATUS}"

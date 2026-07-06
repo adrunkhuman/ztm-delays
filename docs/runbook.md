@@ -55,6 +55,17 @@ For each GPS processing date, rebuild the GPS/intermediate models, then publish 
 
 After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each `service_date` by running the governing-snapshot tests on `fct_trip` and `fct_stop_arrival`. Also verify `schedule_version_id` resolves to a version covering the row's GPS processing date. A successful run is not enough; matching every historical date against the newest snapshot is silent corruption. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
 
+## Raw GPS Volume
+
+Measure raw GPS object volume from GCS metadata before changing poller flush cadence or adding a local durable spool:
+
+```bash
+cd poller
+uv run python measure_raw_gps_volume.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+```
+
+The command defaults to `gs://ztm-analytics-bucket/raw/gps`; pass `--bucket` and `--prefix` for other environments. It does not query BigQuery. Use `--include-row-counts` only for a small bounded window when row counts are needed, because it downloads each matched Parquet object to read file metadata. Production durability uses periodic append-safe GCS flushes plus a bounded local JSON spool at `/var/lib/ztm-poller-spool`; compressed GCS volume is only a lower-bound sizing proxy. Revisit the default 100 MiB cap only with measured object/byte volume, expected outage duration, flush cadence, explicit disk budget, and crash-loss tolerance.
+
 ## Airflow Cadence And Asset Graph
 
 - `dag_gtfs_poll` produces `gtfs_snapshot` only when the GTFS ZIP hash changes.

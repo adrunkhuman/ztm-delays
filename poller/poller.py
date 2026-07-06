@@ -12,8 +12,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 from socket import gethostname
 from typing import TYPE_CHECKING, TypedDict, cast
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -28,6 +30,8 @@ if TYPE_CHECKING:
 API_URL = "https://dane.um.warszawa.pl/api/action/get_ztm_lokalizacja_pojazdow"
 WARSAW_TZ = ZoneInfo("Europe/Warsaw")
 LOGGER = logging.getLogger(__name__)
+DEFAULT_SPOOL_MAX_BYTES = 100 * 1024 * 1024
+SPOOL_FILE_NAME = "buffers.json"
 
 SCHEMA = pa.schema(
     [
@@ -71,6 +75,10 @@ class Config:
     flush_lag_seconds: float
     heartbeat_gcs_path: str
     heartbeat_interval_seconds: float
+    require_polish_egress: bool
+    egress_check_url: str
+    spool_dir: Path
+    spool_max_bytes: int
     run_once: bool
     no_upload: bool
 
@@ -123,6 +131,20 @@ class GpsRow(TypedDict):
     vehicle_type: int
 
 
+@dataclass
+class RuntimeState:
+    """Mutable state shared across poll loop iterations."""
+
+    session: requests.Session
+    bucket: storage.Bucket | None
+    config: Config
+    buffers: dict[str, dict[datetime, list[GpsRow]]]
+    poll_states: dict[str, PollState]
+    stop_requested: Callable[[], bool]
+    last_partial_flush: float = 0.0
+    last_heartbeat: float = 0.0
+
+
 def main() -> int:
     """Run until signaled unless --once is set."""
     _configure_logging()
@@ -138,44 +160,32 @@ def main() -> int:
     )
 
     session = requests.Session()
+    if config.require_polish_egress:
+        _assert_polish_egress(session, config)
+
     bucket = None if config.no_upload else storage.Client().bucket(config.gcs_bucket)
-    buffers: dict[str, dict[datetime, list[GpsRow]]] = {
-        vehicle_type.name: defaultdict(list) for vehicle_type in config.vehicle_types
-    }
+    buffers = _empty_buffers(config) if config.no_upload else _load_spool(config)
+    if not config.no_upload:
+        _prepare_spool(config)
     poll_states = {vehicle_type.name: PollState(vehicle_type.name) for vehicle_type in config.vehicle_types}
-    last_partial_flush = 0.0
-    last_heartbeat = -config.heartbeat_interval_seconds
+    runtime = RuntimeState(
+        session=session,
+        bucket=cast("storage.Bucket | None", bucket),
+        config=config,
+        buffers=buffers,
+        poll_states=poll_states,
+        stop_requested=stop_requested,
+        last_heartbeat=-config.heartbeat_interval_seconds,
+    )
 
-    while not stop_requested():
-        loop_started = time.monotonic()
+    try:
+        _run_poll_loop(runtime)
+    except Exception:
+        if not config.no_upload:
+            _flush_shutdown(cast("storage.Bucket", bucket), config, buffers)
+        raise
 
-        for vehicle_type in config.vehicle_types:
-            result = _poll_vehicle_type(session, config, vehicle_type, buffers[vehicle_type.name])
-            _update_poll_state(poll_states[vehicle_type.name], result)
-
-        if config.no_upload:
-            buffered_rows = sum(len(rows) for vehicle_buffers in buffers.values() for rows in vehicle_buffers.values())
-            LOGGER.info("upload disabled buffered_rows=%d", buffered_rows)
-        else:
-            now = datetime.now(WARSAW_TZ)
-            if loop_started - last_partial_flush >= config.partial_flush_interval_seconds:
-                flush_before = now - timedelta(seconds=config.flush_lag_seconds)
-                if _flush_vehicle_buffers(cast("storage.Bucket", bucket), config, buffers, flush_before=flush_before):
-                    last_partial_flush = loop_started
-            if loop_started - last_heartbeat >= config.heartbeat_interval_seconds and _write_heartbeat(
-                cast("storage.Bucket", bucket), config, poll_states
-            ):
-                last_heartbeat = loop_started
-
-        if config.run_once:
-            break
-
-        _sleep_remaining(config.poll_interval_seconds, loop_started, stop_requested)
-
-    if not config.no_upload and not _flush_vehicle_buffers(
-        cast("storage.Bucket", bucket), config, buffers, flush_all=True
-    ):
-        LOGGER.error("poller stopped with buffered rows after failed shutdown flush")
+    if not config.no_upload and not _flush_shutdown(cast("storage.Bucket", bucket), config, buffers):
         return 1
     LOGGER.info("poller stopped")
     return 0
@@ -210,6 +220,14 @@ def _load_config(args: Namespace) -> Config:
     heartbeat_interval_seconds = _positive_float_env("POLLER_HEARTBEAT_INTERVAL_SECONDS", "60")
     api_proxy = os.getenv("ZTM_API_PROXY", "").strip() or None
     heartbeat_gcs_path = os.getenv("POLLER_HEARTBEAT_GCS_PATH", "health/poller/latest.json").strip("/")
+    require_polish_egress = _bool_env("POLLER_REQUIRE_POLISH_EGRESS", default=False)
+    egress_check_url = os.getenv("POLLER_EGRESS_CHECK_URL", "https://ipinfo.io/json").strip()
+    spool_dir = Path(os.getenv("POLLER_SPOOL_DIR", "/var/lib/ztm-poller-spool")).expanduser()
+    spool_max_bytes = _positive_int_env("POLLER_SPOOL_MAX_BYTES", str(DEFAULT_SPOOL_MAX_BYTES))
+    if require_polish_egress and not api_proxy:
+        raise RuntimeError("POLLER_REQUIRE_POLISH_EGRESS requires ZTM_API_PROXY")
+    if require_polish_egress:
+        egress_check_url = _validate_egress_check_url(egress_check_url)
 
     return Config(
         api_token=api_token,
@@ -225,6 +243,10 @@ def _load_config(args: Namespace) -> Config:
         flush_lag_seconds=flush_lag_seconds,
         heartbeat_gcs_path=heartbeat_gcs_path,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
+        require_polish_egress=require_polish_egress,
+        egress_check_url=egress_check_url,
+        spool_dir=spool_dir,
+        spool_max_bytes=spool_max_bytes,
         run_once=args.once,
         no_upload=args.no_upload,
     )
@@ -238,6 +260,38 @@ def _positive_float_env(name: str, default: str) -> float:
 
     if value <= 0:
         raise RuntimeError(f"{name} must be a positive number")
+    return value
+
+
+def _positive_int_env(name: str, default: str) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer") from exc
+
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return value
+
+
+def _bool_env(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be a boolean")
+
+
+def _validate_egress_check_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise RuntimeError("POLLER_EGRESS_CHECK_URL must be an HTTPS URL with a hostname")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise RuntimeError("POLLER_EGRESS_CHECK_URL must not contain credentials, query, or fragment")
     return value
 
 
@@ -291,6 +345,56 @@ def _poll_vehicle_type(
         return PollResult(vehicle_type.name, attempted_at, succeeded=False, error_type="invalid_payload")
 
 
+def _poll_vehicle_types(
+    session: requests.Session,
+    config: Config,
+    buffers: dict[str, dict[datetime, list[GpsRow]]],
+    poll_states: dict[str, PollState],
+) -> int:
+    accepted_rows = 0
+    for vehicle_type in config.vehicle_types:
+        result = _poll_vehicle_type(session, config, vehicle_type, buffers[vehicle_type.name])
+        _update_poll_state(poll_states[vehicle_type.name], result)
+        accepted_rows += result.accepted_rows
+        if result.accepted_rows and not config.no_upload:
+            _save_spool(config, buffers)
+    return accepted_rows
+
+
+def _run_poll_loop(runtime: RuntimeState) -> None:
+    config = runtime.config
+    while not runtime.stop_requested():
+        loop_started = time.monotonic()
+        _poll_vehicle_types(runtime.session, config, runtime.buffers, runtime.poll_states)
+        if config.no_upload:
+            buffered_rows = sum(
+                len(rows) for vehicle_buffers in runtime.buffers.values() for rows in vehicle_buffers.values()
+            )
+            LOGGER.info("upload disabled buffered_rows=%d", buffered_rows)
+        else:
+            _handle_uploads(runtime, loop_started)
+
+        if config.run_once:
+            return
+        _sleep_remaining(config.poll_interval_seconds, loop_started, runtime.stop_requested)
+
+
+def _handle_uploads(runtime: RuntimeState, loop_started: float) -> None:
+    config = runtime.config
+    bucket = cast("storage.Bucket", runtime.bucket)
+    now = datetime.now(WARSAW_TZ)
+    if loop_started - runtime.last_partial_flush >= config.partial_flush_interval_seconds:
+        flush_before = now - timedelta(seconds=config.flush_lag_seconds)
+        flush_succeeded = _flush_vehicle_buffers(bucket, config, runtime.buffers, flush_before=flush_before)
+        _save_spool(config, runtime.buffers)
+        if flush_succeeded:
+            runtime.last_partial_flush = loop_started
+    if loop_started - runtime.last_heartbeat >= config.heartbeat_interval_seconds and _write_heartbeat(
+        bucket, config, runtime.poll_states
+    ):
+        runtime.last_heartbeat = loop_started
+
+
 def _update_poll_state(state: PollState, result: PollResult) -> None:
     state.last_attempt_at = result.attempted_at
     if result.succeeded:
@@ -303,6 +407,28 @@ def _update_poll_state(state: PollState, result: PollResult) -> None:
         return
     state.consecutive_failures += 1
     state.last_error_type = result.error_type
+
+
+def _assert_polish_egress(session: requests.Session, config: Config) -> None:
+    proxies = {"http": config.api_proxy, "https": config.api_proxy} if config.api_proxy else None
+    try:
+        response = session.get(config.egress_check_url, timeout=config.api_timeout_seconds, proxies=proxies)
+        response.raise_for_status()
+        payload: object = response.json()
+    except (requests.RequestException, json.JSONDecodeError) as exc:
+        raise RuntimeError("failed to verify Polish egress before polling") from exc
+
+    match payload:
+        case {"country": str(country_value)}:
+            pass
+        case _:
+            raise RuntimeError("egress check returned invalid payload")
+
+    country = country_value.strip().upper()
+    if country != "PL":
+        raise RuntimeError(f"poller egress country is {country or 'unknown'}, expected PL")
+
+    LOGGER.info("verified Polish egress hostname=%s country=%s", urlsplit(config.egress_check_url).hostname, country)
 
 
 def _poll_api(session: requests.Session, config: Config, vehicle_type: VehicleType) -> list[GpsRow]:
@@ -328,6 +454,118 @@ def _poll_api(session: requests.Session, config: Config, vehicle_type: VehicleTy
         if row is not None:
             parsed_rows.append(row)
     return parsed_rows
+
+
+def _empty_buffers(config: Config) -> dict[str, dict[datetime, list[GpsRow]]]:
+    return {vehicle_type.name: defaultdict(list) for vehicle_type in config.vehicle_types}
+
+
+def _spool_path(config: Config) -> Path:
+    return config.spool_dir / SPOOL_FILE_NAME
+
+
+def _prepare_spool(config: Config) -> None:
+    config.spool_dir.mkdir(parents=True, exist_ok=True)
+    if not os.access(config.spool_dir, os.W_OK):
+        raise RuntimeError(f"poller spool directory is not writable path={config.spool_dir}")
+
+
+def _load_spool(config: Config) -> dict[str, dict[datetime, list[GpsRow]]]:
+    buffers = _empty_buffers(config)
+    spool_path = _spool_path(config)
+    if not spool_path.exists():
+        return buffers
+    if spool_path.stat().st_size > config.spool_max_bytes:
+        raise RuntimeError(f"poller spool exceeds POLLER_SPOOL_MAX_BYTES path={spool_path}")
+
+    payload = json.loads(spool_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise RuntimeError("poller spool has unsupported format")
+    vehicle_payload = payload.get("vehicle_types")
+    if not isinstance(vehicle_payload, dict):
+        raise TypeError("poller spool is missing vehicle_types")
+
+    vehicle_names = {vehicle_type.name for vehicle_type in config.vehicle_types}
+    restored_rows = 0
+    for vehicle_type_name, hour_payload in vehicle_payload.items():
+        if vehicle_type_name not in vehicle_names or not isinstance(hour_payload, dict):
+            continue
+        for hour_value, rows_payload in hour_payload.items():
+            if not isinstance(rows_payload, list):
+                raise TypeError("poller spool hour payload must be a list")
+            hour = datetime.fromisoformat(hour_value)
+            rows = [_gps_row_from_spool(row_payload) for row_payload in rows_payload]
+            buffers[vehicle_type_name][hour].extend(rows)
+            restored_rows += len(rows)
+    LOGGER.info("loaded poller spool path=%s rows=%d", spool_path, restored_rows)
+    return buffers
+
+
+def _save_spool(config: Config, buffers: dict[str, dict[datetime, list[GpsRow]]]) -> None:
+    spool_path = _spool_path(config)
+    buffered_rows = sum(len(rows) for vehicle_buffers in buffers.values() for rows in vehicle_buffers.values())
+    if buffered_rows == 0:
+        if spool_path.exists():
+            spool_path.unlink()
+            LOGGER.info("removed empty poller spool path=%s", spool_path)
+        return
+
+    payload = {
+        "version": 1,
+        "vehicle_types": {
+            vehicle_type_name: {
+                hour.isoformat(): [_gps_row_to_spool(row) for row in rows]
+                for hour, rows in sorted(vehicle_buffers.items())
+                if rows
+            }
+            for vehicle_type_name, vehicle_buffers in sorted(buffers.items())
+        },
+    }
+    data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    if len(data) > config.spool_max_bytes:
+        raise RuntimeError("poller spool snapshot exceeds POLLER_SPOOL_MAX_BYTES")
+
+    config.spool_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = spool_path.with_suffix(".tmp")
+    tmp_path.write_bytes(data)
+    tmp_path.replace(spool_path)
+    LOGGER.info("saved poller spool path=%s rows=%d bytes=%d", spool_path, buffered_rows, len(data))
+
+
+def _flush_shutdown(bucket: storage.Bucket, config: Config, buffers: dict[str, dict[datetime, list[GpsRow]]]) -> bool:
+    if not _flush_vehicle_buffers(bucket, config, buffers, flush_all=True):
+        _save_spool(config, buffers)
+        LOGGER.error("poller stopped with buffered rows after failed shutdown flush")
+        return False
+    _save_spool(config, buffers)
+    return True
+
+
+def _gps_row_to_spool(row: GpsRow) -> dict[str, object]:
+    return {
+        "Lines": row["Lines"],
+        "Brigade": row["Brigade"],
+        "Lat": row["Lat"],
+        "Lon": row["Lon"],
+        "Time": row["Time"].astimezone(UTC).isoformat(),
+        "VehicleNumber": row["VehicleNumber"],
+        "vehicle_type": row["vehicle_type"],
+    }
+
+
+def _gps_row_from_spool(payload: object) -> GpsRow:
+    if not isinstance(payload, dict):
+        raise TypeError("poller spool row must be an object")
+    row_payload = cast("dict[str, object]", payload)
+    return {
+        "Lines": str(row_payload["Lines"]),
+        "Brigade": str(row_payload["Brigade"]),
+        "Lat": float(cast("str | float", row_payload["Lat"])),
+        "Lon": float(cast("str | float", row_payload["Lon"])),
+        "Time": datetime.fromisoformat(str(row_payload["Time"])).astimezone(UTC),
+        "VehicleNumber": str(row_payload["VehicleNumber"]),
+        "vehicle_type": int(cast("str | int", row_payload["vehicle_type"])),
+    }
 
 
 def _filter_fresh_rows(rows: list[GpsRow], now: datetime, config: Config) -> tuple[list[GpsRow], int, int]:

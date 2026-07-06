@@ -27,9 +27,16 @@ CUSTOM_FLUSH_LAG_SECONDS = 120
 CUSTOM_HEARTBEAT_SECONDS = 30
 HEARTBEAT_ACCEPTED_ROWS = 10
 EXPECTED_RETRY_FLUSH_CALLS = 2
+EGRESS_CHECK_URL = "https://example.test/egress"
+CUSTOM_SPOOL_MAX_BYTES = 12345
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "entrypoint.sh"
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
 HEALTHCHECK = Path(__file__).resolve().parents[1] / "healthcheck.sh"
+
+
+@pytest.fixture(autouse=True)
+def _poller_spool_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("POLLER_SPOOL_DIR", str(tmp_path / "spool"))
 
 
 def test_extract_records_keeps_only_dict_records() -> None:
@@ -210,6 +217,17 @@ def test_load_config_uses_partial_flush_env(monkeypatch: pytest.MonkeyPatch) -> 
     assert config.flush_lag_seconds == CUSTOM_FLUSH_LAG_SECONDS
 
 
+def test_load_config_uses_spool_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("POLLER_SPOOL_DIR", str(tmp_path))
+    monkeypatch.setenv("POLLER_SPOOL_MAX_BYTES", str(CUSTOM_SPOOL_MAX_BYTES))
+
+    config = poller._load_config(Namespace(once=True, no_upload=True))
+
+    assert config.spool_dir == tmp_path
+    assert config.spool_max_bytes == CUSTOM_SPOOL_MAX_BYTES
+
+
 def test_load_config_uses_heartbeat_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZTM_API_TOKEN", "token")
     monkeypatch.setenv("POLLER_HEARTBEAT_GCS_PATH", "/private/heartbeat.json")
@@ -237,6 +255,65 @@ def test_load_config_ignores_blank_api_proxy_env(monkeypatch: pytest.MonkeyPatch
     config = poller._load_config(Namespace(once=True, no_upload=True))
 
     assert config.api_proxy is None
+
+
+def test_load_config_uses_polish_egress_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("ZTM_API_PROXY", "socks5h://127.0.0.1:1055")
+    monkeypatch.setenv("POLLER_REQUIRE_POLISH_EGRESS", "true")
+    monkeypatch.setenv("POLLER_EGRESS_CHECK_URL", EGRESS_CHECK_URL)
+
+    config = poller._load_config(Namespace(once=True, no_upload=True))
+
+    assert config.require_polish_egress is True
+    assert config.egress_check_url == EGRESS_CHECK_URL
+
+
+def test_load_config_rejects_polish_egress_without_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("POLLER_REQUIRE_POLISH_EGRESS", "true")
+
+    with pytest.raises(RuntimeError, match="ZTM_API_PROXY"):
+        poller._load_config(Namespace(once=True, no_upload=True))
+
+
+def test_load_config_rejects_unsafe_egress_check_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("ZTM_API_PROXY", "socks5h://127.0.0.1:1055")
+    monkeypatch.setenv("POLLER_REQUIRE_POLISH_EGRESS", "true")
+    monkeypatch.setenv("POLLER_EGRESS_CHECK_URL", "http://user:secret@example.test/egress?token=secret")
+
+    with pytest.raises(RuntimeError, match="HTTPS URL"):
+        poller._load_config(Namespace(once=True, no_upload=True))
+
+
+@pytest.mark.parametrize(
+    "egress_check_url",
+    [
+        "https://user:secret@example.test/egress",
+        "https://example.test/egress?token=secret",
+        "https://example.test/egress#fragment",
+    ],
+)
+def test_load_config_rejects_secret_bearing_egress_check_url(
+    monkeypatch: pytest.MonkeyPatch, egress_check_url: str
+) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("ZTM_API_PROXY", "socks5h://127.0.0.1:1055")
+    monkeypatch.setenv("POLLER_REQUIRE_POLISH_EGRESS", "true")
+    monkeypatch.setenv("POLLER_EGRESS_CHECK_URL", egress_check_url)
+
+    with pytest.raises(RuntimeError, match="credentials, query, or fragment"):
+        poller._load_config(Namespace(once=True, no_upload=True))
+
+
+def test_load_config_ignores_unsafe_egress_check_url_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("POLLER_EGRESS_CHECK_URL", "http://user:secret@example.test/egress?token=secret")
+
+    config = poller._load_config(Namespace(once=True, no_upload=True))
+
+    assert config.require_polish_egress is False
 
 
 def test_filter_fresh_rows_keeps_current_and_drops_stale_and_future() -> None:
@@ -282,6 +359,57 @@ def test_poll_api_uses_configured_proxy() -> None:
     assert len(rows) == 1
 
 
+def test_assert_polish_egress_uses_configured_proxy() -> None:
+    proxy = "socks5h://127.0.0.1:1055"
+    session = FakeSession()
+    FakeSession.expected_egress_proxies = {"http": proxy, "https": proxy}
+
+    try:
+        poller._assert_polish_egress(
+            cast("requests.Session", session),
+            _config(api_proxy=proxy, require_polish_egress=True, egress_check_url=EGRESS_CHECK_URL),
+        )
+        assert session.requested_egress_url == EGRESS_CHECK_URL
+    finally:
+        FakeSession.expected_egress_proxies = None
+
+
+def test_assert_polish_egress_rejects_non_polish_country() -> None:
+    proxy = "socks5h://127.0.0.1:1055"
+    session = FakeSession()
+    session.egress_country = "DE"
+    FakeSession.expected_egress_proxies = {"http": proxy, "https": proxy}
+
+    try:
+        with pytest.raises(RuntimeError, match="expected PL"):
+            poller._assert_polish_egress(
+                cast("requests.Session", session),
+                _config(api_proxy=proxy, require_polish_egress=True),
+            )
+    finally:
+        FakeSession.expected_egress_proxies = None
+
+
+@pytest.mark.parametrize("payload", [{"country": 123}, ["PL"], "PL"])
+def test_assert_polish_egress_rejects_malformed_payload(payload: object) -> None:
+    class MalformedEgressResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return payload
+
+    class MalformedEgressSession:
+        def get(self, *_args: object, **_kwargs: object) -> MalformedEgressResponse:
+            return MalformedEgressResponse()
+
+    with pytest.raises(RuntimeError, match="invalid payload"):
+        poller._assert_polish_egress(
+            cast("requests.Session", MalformedEgressSession()),
+            _config(api_proxy="socks5h://127.0.0.1:1055", require_polish_egress=True),
+        )
+
+
 def test_load_config_rejects_non_positive_timing_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZTM_API_TOKEN", "token")
     monkeypatch.setenv("POLL_INTERVAL_SECONDS", "0")
@@ -302,6 +430,41 @@ def test_main_once_no_upload_does_not_initialize_gcs(monkeypatch: pytest.MonkeyP
         assert FakeSession.seen_vehicle_type_ids == [1, 2]
     finally:
         FakeSession.seen_vehicle_type_ids = []
+
+
+def test_main_checks_polish_egress_before_gcs_initialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    proxy = "socks5h://127.0.0.1:1055"
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("ZTM_API_PROXY", proxy)
+    monkeypatch.setenv("POLLER_REQUIRE_POLISH_EGRESS", "true")
+    monkeypatch.setattr("sys.argv", ["poller.py", "--once"])
+    monkeypatch.setattr(poller.requests, "Session", FakeSession)
+    monkeypatch.setattr(poller.storage, "Client", _fail_if_called)
+    FakeSession.egress_country = "DE"
+    FakeSession.expected_egress_proxies = {"http": proxy, "https": proxy}
+
+    try:
+        with pytest.raises(RuntimeError, match="expected PL"):
+            poller.main()
+    finally:
+        FakeSession.egress_country = "PL"
+        FakeSession.expected_egress_proxies = None
+
+
+def test_main_once_no_upload_skips_polish_egress_check_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setattr("sys.argv", ["poller.py", "--once", "--no-upload"])
+    FakeSession.seen_vehicle_type_ids = []
+    FakeSession.egress_country = "DE"
+    monkeypatch.setattr(poller.requests, "Session", FakeSession)
+    monkeypatch.setattr(poller.storage, "Client", _fail_if_called)
+
+    try:
+        assert poller.main() == 0
+        assert FakeSession.seen_vehicle_type_ids == [1, 2]
+    finally:
+        FakeSession.seen_vehicle_type_ids = []
+        FakeSession.egress_country = "PL"
 
 
 def test_main_once_uploads_bus_and_tram_to_separate_partitions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,6 +494,61 @@ def test_main_once_uploads_bus_and_tram_to_separate_partitions(monkeypatch: pyte
     assert pq.read_table(io.BytesIO(bucket.blobs[bus_path].data)).to_pylist()[0]["vehicle_type"] == EXPECTED_BUS_TYPE
     assert pq.read_table(io.BytesIO(bucket.blobs[tram_path].data)).to_pylist()[0]["vehicle_type"] == EXPECTED_TRAM_TYPE
     assert bucket.blobs[heartbeat_path].content_type == "application/json"
+
+
+def test_main_uploads_seeded_spool_and_removes_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bucket = FakeBucket()
+    spool_dir = tmp_path / "seeded-spool"
+    config = _config(spool_dir=spool_dir)
+    buffers = poller._empty_buffers(config)
+    buffers["bus"][datetime(2026, 1, 15, 11, tzinfo=poller.WARSAW_TZ)].append(
+        _gps_row(time=datetime(2026, 1, 15, 10, 5, tzinfo=UTC))
+    )
+    poller._save_spool(config, buffers)
+
+    class FakeClient:
+        def bucket(self, name: str) -> FakeBucket:
+            assert name == "ztm-analytics-bucket"
+            return bucket
+
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("POLLER_SPOOL_DIR", str(spool_dir))
+    monkeypatch.setattr("sys.argv", ["poller.py", "--once"])
+    monkeypatch.setattr(poller, "_poll_api", lambda *_args: [])
+    monkeypatch.setattr(poller.storage, "Client", FakeClient)
+
+    assert poller.main() == 0
+
+    bus_path = next(path for path in bucket.blobs if "/vehicle_type=bus/" in path)
+    assert pq.read_table(io.BytesIO(bucket.blobs[bus_path].data)).num_rows == 1
+    assert not (spool_dir / poller.SPOOL_FILE_NAME).exists()
+
+
+def test_main_flushes_after_spool_cap_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bucket = FakeBucket()
+
+    def fake_poll_api(
+        _session: object, _config: poller.Config, vehicle_type: poller.VehicleType
+    ) -> list[poller.GpsRow]:
+        return [_gps_row(time=datetime.now(UTC), vehicle_type=vehicle_type.id)]
+
+    class FakeClient:
+        def bucket(self, name: str) -> FakeBucket:
+            assert name == "ztm-analytics-bucket"
+            return bucket
+
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.setenv("POLLER_SPOOL_DIR", str(tmp_path / "tiny-spool"))
+    monkeypatch.setenv("POLLER_SPOOL_MAX_BYTES", "1")
+    monkeypatch.setattr("sys.argv", ["poller.py", "--once"])
+    monkeypatch.setattr(poller, "_poll_api", fake_poll_api)
+    monkeypatch.setattr(poller.storage, "Client", FakeClient)
+
+    with pytest.raises(RuntimeError, match="POLLER_SPOOL_MAX_BYTES"):
+        poller.main()
+
+    assert any("/vehicle_type=bus/" in path for path in bucket.blobs)
+    assert not any("/vehicle_type=tram/" in path for path in bucket.blobs)
 
 
 def test_heartbeat_payload_reports_degraded_and_down_states() -> None:
@@ -491,6 +709,63 @@ def test_poll_vehicle_type_buffers_only_fresh_rows(monkeypatch: pytest.MonkeyPat
     assert [row for buffered_rows in buffers.values() for row in buffered_rows] == [rows[1]]
 
 
+def test_spool_round_trips_buffered_rows(tmp_path: Path) -> None:
+    config = _config(spool_dir=tmp_path)
+    buffer_hour = datetime(2026, 1, 15, 11, tzinfo=poller.WARSAW_TZ)
+    row = _gps_row(time=datetime(2026, 1, 15, 10, 5, tzinfo=UTC))
+    buffers = poller._empty_buffers(config)
+    buffers["bus"][buffer_hour].append(row)
+
+    poller._save_spool(config, buffers)
+
+    restored = poller._load_spool(config)
+    assert restored["bus"] == {buffer_hour: [row]}
+    assert restored["tram"] == {}
+
+
+def test_save_spool_removes_file_when_buffers_empty(tmp_path: Path) -> None:
+    config = _config(spool_dir=tmp_path)
+    buffers = poller._empty_buffers(config)
+    buffers["bus"][datetime(2026, 1, 15, 11, tzinfo=poller.WARSAW_TZ)].append(_gps_row())
+    poller._save_spool(config, buffers)
+
+    buffers["bus"].clear()
+    poller._save_spool(config, buffers)
+
+    assert not (tmp_path / poller.SPOOL_FILE_NAME).exists()
+
+
+def test_save_spool_rejects_snapshots_over_cap(tmp_path: Path) -> None:
+    config = _config(spool_dir=tmp_path, spool_max_bytes=1)
+    buffers = poller._empty_buffers(config)
+    buffers["bus"][datetime(2026, 1, 15, 11, tzinfo=poller.WARSAW_TZ)].append(_gps_row())
+
+    with pytest.raises(RuntimeError, match="POLLER_SPOOL_MAX_BYTES"):
+        poller._save_spool(config, buffers)
+
+
+def test_flush_shutdown_keeps_spool_after_upload_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _config(spool_dir=tmp_path)
+    buffers = poller._empty_buffers(config)
+    buffer_hour = datetime(2026, 1, 15, 11, tzinfo=poller.WARSAW_TZ)
+    row = _gps_row(time=datetime(2026, 1, 15, 10, 5, tzinfo=UTC))
+    buffers["bus"][buffer_hour].append(row)
+
+    def fake_upload_hour(
+        _upload_context: poller.UploadContext,
+        _buffer_hour: datetime,
+        _rows: list[poller.GpsRow],
+    ) -> None:
+        raise GoogleAPIError("transient failure")
+
+    monkeypatch.setattr(poller, "_upload_hour", fake_upload_hour)
+
+    assert poller._flush_shutdown(cast("storage.Bucket", FakeBucket()), config, buffers) is False
+
+    restored = poller._load_spool(config)
+    assert restored["bus"] == {buffer_hour: [row]}
+
+
 def test_entrypoint_runs_tailscale_userspace_proxy_before_poller() -> None:
     script = ENTRYPOINT.read_text()
 
@@ -526,9 +801,20 @@ def test_entrypoint_keeps_container_alive_after_early_poller_failure() -> None:
     script = ENTRYPOINT.read_text()
 
     assert 'STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-300}"' in script
-    assert 'if [ "${POLLER_STATUS}" -ne 0 ]; then' in script
+    assert 'if [ "${POLLER_STATUS}" -ne 0 ] && [ "${TERMINATE_REQUESTED}" -eq 0 ]; then' in script
     assert 'if [ "${RUNTIME_SECONDS}" -lt "${STARTUP_GRACE_SECONDS}" ]; then' in script
     assert 'sleep "${REMAINING_SECONDS}"' in script
+
+
+def test_entrypoint_waits_for_poller_after_forwarding_shutdown_signal() -> None:
+    script = ENTRYPOINT.read_text()
+    terminate_function = "terminate() {"
+    forward_poll_term = 'kill -TERM "${POLLER_PID}" 2>/dev/null || true'
+    wait_loop = "while true; do"
+    stop_tailscaled = 'kill -TERM "${TAILSCALED_PID}" 2>/dev/null || true'
+
+    assert script.index(terminate_function) < script.index(forward_poll_term) < script.index(wait_loop)
+    assert script.index(wait_loop) < script.index(stop_tailscaled)
 
 
 def test_dockerfile_defines_local_worker_healthcheck() -> None:
@@ -552,7 +838,14 @@ def test_healthcheck_uses_local_process_and_tailscale_state_only() -> None:
     assert "dane.um.warszawa.pl" not in script
 
 
-def _config(api_proxy: str | None = None) -> poller.Config:
+def _config(
+    api_proxy: str | None = None,
+    *,
+    require_polish_egress: bool = False,
+    egress_check_url: str = "https://ipinfo.io/json",
+    spool_dir: Path | None = None,
+    spool_max_bytes: int = poller.DEFAULT_SPOOL_MAX_BYTES,
+) -> poller.Config:
     return poller.Config(
         api_token="token",
         vehicle_types=poller.VEHICLE_TYPES,
@@ -567,6 +860,10 @@ def _config(api_proxy: str | None = None) -> poller.Config:
         flush_lag_seconds=300,
         heartbeat_gcs_path="health/poller/latest.json",
         heartbeat_interval_seconds=60,
+        require_polish_egress=require_polish_egress,
+        egress_check_url=egress_check_url,
+        spool_dir=spool_dir or Path("ztm-poller-spool-test"),
+        spool_max_bytes=spool_max_bytes,
         run_once=False,
         no_upload=False,
     )
@@ -626,6 +923,9 @@ class FakeBucket:
 
 
 class FakeResponse:
+    def __init__(self, country: str = "PL") -> None:
+        self.country = country
+
     def raise_for_status(self) -> None:
         return None
 
@@ -644,9 +944,32 @@ class FakeResponse:
         }
 
 
+class FakeEgressResponse:
+    def __init__(self, country: str) -> None:
+        self.country = country
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, str]:
+        return {"country": self.country}
+
+
 class FakeSession:
     expected_proxies: ClassVar[dict[str, str] | None] = None
+    expected_egress_proxies: ClassVar[dict[str, str] | None] = None
     seen_vehicle_type_ids: ClassVar[list[int]] = []
+    egress_country: ClassVar[str] = "PL"
+
+    def __init__(self) -> None:
+        self.requested_egress_url: str | None = None
+
+    def get(self, url: str, *, timeout: float, proxies: dict[str, str] | None) -> FakeEgressResponse:
+        self.requested_egress_url = url
+        assert url in {"https://ipinfo.io/json", EGRESS_CHECK_URL}
+        assert timeout == EXPECTED_TIMEOUT_SECONDS
+        assert proxies == self.expected_egress_proxies
+        return FakeEgressResponse(self.egress_country)
 
     def post(
         self,
