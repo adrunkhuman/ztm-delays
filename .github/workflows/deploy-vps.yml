@@ -1,0 +1,59 @@
+name: Deploy VPS
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Sync Airflow/dbt to VPS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Join tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:github-actions
+          ping: ${{ vars.VPS_DEPLOY_HOST || 'vps' }}
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.VPS_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_SSH_KEY"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [[ -n "$DEPLOY_KNOWN_HOSTS" ]]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+            chmod 600 ~/.ssh/known_hosts
+          fi
+
+      - name: Pull and smoke-check VPS repo
+        env:
+          DEPLOY_HOST: ${{ vars.VPS_DEPLOY_HOST || 'vps' }}
+          DEPLOY_USER: ${{ vars.VPS_DEPLOY_USER || 'ubuntu' }}
+          DEPLOY_REPO_DIR: ${{ vars.VPS_REPO_DIR || '/home/ubuntu/ztm-pipeline' }}
+          DEPLOY_BRANCH: master
+          AIRFLOW_CONTAINER_PREFIX: ${{ vars.AIRFLOW_CONTAINER_PREFIX || 'l11t1z4fvjlunhohvau5w8gc' }}
+        run: |
+          set -euo pipefail
+          ssh_args=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+          ssh "${ssh_args[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -s -- '$DEPLOY_REPO_DIR' '$DEPLOY_BRANCH' '$AIRFLOW_CONTAINER_PREFIX'" \
+            < .github/scripts/deploy_vps.sh
