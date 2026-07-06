@@ -11,6 +11,7 @@ from airflow.sdk import (
     DAG,
     CronPartitionTimetable,
     Metadata,
+    TaskGroup,
     TriggerRule,
     get_current_context,
     task,
@@ -246,6 +247,23 @@ def _bigquery_dbt_job_cost_summary(started_at: datetime) -> dict[str, object]:
     }
 
 
+def _dbt_task(task_id: str, command: str, selector: str, vars_json: str, extra_args: str = "") -> BashOperator:
+    return BashOperator(task_id=task_id, bash_command=dbt_command(command, selector, vars_json, extra_args))
+
+
+def _dbt_run_test_pair(
+    task_name: str,
+    run_selector: str,
+    test_selector: str,
+    vars_json: str,
+    test_extra_args: str = "",
+) -> tuple[BashOperator, BashOperator]:
+    run_task = _dbt_task(f"dbt_run_{task_name}", "run", run_selector, vars_json)
+    test_task = _dbt_task(f"dbt_test_{task_name}", "test", test_selector, vars_json, test_extra_args)
+    run_task >> test_task
+    return run_task, test_task
+
+
 with DAG(
     dag_id="dag_gps_raw_load",
     dag_display_name="GPS raw ingest",
@@ -302,135 +320,105 @@ with DAG(
 
     period_aggregate = period_aggregate_window(PRIOR_SERVICE_DATE, PROCESSING_DATE)
 
-    dbt_run_stg_gps_pings = BashOperator(
-        task_id="dbt_run_stg_gps_pings",
-        bash_command=dbt_command("run", "stg_gps__pings", GPS_DBT_VARS),
-    )
+    with TaskGroup("staging", group_display_name="Staging", prefix_group_id=False) as staging_group:
+        dbt_run_stg_gps_pings, dbt_test_stg_gps_pings = _dbt_run_test_pair(
+            "stg_gps_pings",
+            "stg_gps__pings",
+            "source:raw.raw_gps_pings stg_gps__pings",
+            GPS_DBT_VARS,
+        )
 
-    dbt_run_int_ping_trip = BashOperator(
-        task_id="dbt_run_int_ping_trip",
-        bash_command=dbt_command(
-            "run",
+    with TaskGroup(
+        "trip_reconstruction", group_display_name="Trip reconstruction", prefix_group_id=False
+    ) as trip_group:
+        dbt_run_int_ping_trip, dbt_test_int_ping_trip = _dbt_run_test_pair(
+            "int_ping_trip",
             f"{GTFS_TRIP_MATCHING_STAGING_MODELS} {TRIP_MATCHING_SCHEDULE_MODELS} int_ping_trip",
+            "int_ping_trip",
             GPS_TRIP_DBT_VARS,
-        ),
-    )
+        )
+        dbt_run_int_stop_arrivals, dbt_test_int_stop_arrivals = _dbt_run_test_pair(
+            "int_stop_arrivals",
+            f"{GTFS_STOP_ARRIVAL_STAGING_MODELS} int_stop_arrivals",
+            "int_stop_arrivals",
+            GPS_TRIP_DBT_VARS,
+        )
+        dbt_run_int_trip_summary, dbt_test_int_trip_summary = _dbt_run_test_pair(
+            "int_trip_summary",
+            f"{TRIP_MATCHING_SCHEDULE_MODELS} {TRIP_SUMMARY_MODEL}",
+            TRIP_SUMMARY_MODEL,
+            GPS_TRIP_DBT_VARS,
+        )
 
-    dbt_run_int_gps_hourly_completeness = BashOperator(
-        task_id="dbt_run_int_gps_hourly_completeness",
-        bash_command=dbt_command("run", GPS_COMPLETENESS_MODEL, GPS_DBT_VARS),
-    )
+    with TaskGroup("current_facts", group_display_name="Current facts", prefix_group_id=False) as current_facts_group:
+        dbt_run_fct_trip_current, dbt_test_fct_trip_current = _dbt_run_test_pair(
+            "fct_trip_current",
+            TRIP_FACT_MODEL,
+            TRIP_FACT_MODEL,
+            FACT_CURRENT_DBT_VARS,
+        )
+        dbt_run_fct_stop_arrival_current, dbt_test_fct_stop_arrival_current = _dbt_run_test_pair(
+            "fct_stop_arrival_current",
+            STOP_ARRIVAL_FACT_MODEL,
+            STOP_ARRIVAL_FACT_MODEL,
+            FACT_CURRENT_DBT_VARS,
+            "--indirect-selection cautious",
+        )
 
-    dbt_test_stg_gps_pings = BashOperator(
-        task_id="dbt_test_stg_gps_pings",
-        bash_command=dbt_command("test", "source:raw.raw_gps_pings stg_gps__pings", GPS_DBT_VARS),
-    )
+    with TaskGroup("prior_facts", group_display_name="Prior facts", prefix_group_id=False) as prior_facts_group:
+        dbt_run_fct_trip_prior, dbt_test_fct_trip_prior = _dbt_run_test_pair(
+            "fct_trip_prior",
+            TRIP_FACT_MODEL,
+            TRIP_FACT_MODEL,
+            FACT_PRIOR_DBT_VARS,
+        )
+        dbt_run_fct_stop_arrival_prior, dbt_test_fct_stop_arrival_prior = _dbt_run_test_pair(
+            "fct_stop_arrival_prior",
+            STOP_ARRIVAL_FACT_MODEL,
+            STOP_ARRIVAL_FACT_MODEL,
+            FACT_PRIOR_DBT_VARS,
+            "--indirect-selection cautious",
+        )
 
-    dbt_test_int_ping_trip = BashOperator(
-        task_id="dbt_test_int_ping_trip",
-        bash_command=dbt_command("test", "int_ping_trip", GPS_TRIP_DBT_VARS),
-    )
+    with TaskGroup(
+        "completeness_coverage",
+        group_display_name="Completeness and coverage",
+        prefix_group_id=False,
+    ) as completeness_group:
+        dbt_run_int_gps_hourly_completeness, dbt_test_int_gps_hourly_completeness = _dbt_run_test_pair(
+            "int_gps_hourly_completeness",
+            GPS_COMPLETENESS_MODEL,
+            GPS_COMPLETENESS_MODEL,
+            GPS_DBT_VARS,
+        )
+        dbt_run_completeness_and_coverage, dbt_test_completeness_and_coverage = _dbt_run_test_pair(
+            "completeness_and_coverage",
+            f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
+            f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
+            COMPLETENESS_COVERAGE_DBT_VARS,
+        )
 
-    dbt_test_int_gps_hourly_completeness = BashOperator(
-        task_id="dbt_test_int_gps_hourly_completeness",
-        bash_command=dbt_command("test", GPS_COMPLETENESS_MODEL, GPS_DBT_VARS),
-    )
+    with TaskGroup("aggregate_marts", group_display_name="Aggregate marts", prefix_group_id=False) as aggregate_group:
+        dbt_run_daily_aggregate_mart = _dbt_task(
+            "dbt_run_daily_aggregate_mart",
+            "run",
+            DAILY_AGGREGATE_MODEL,
+            COMPLETENESS_COVERAGE_DBT_VARS,
+        )
+        dbt_run_period_aggregate_marts = _dbt_task(
+            "dbt_run_period_aggregate_marts",
+            "run",
+            PERIOD_AGGREGATE_MODELS,
+            PERIOD_AGGREGATE_DBT_VARS,
+        )
 
-    dbt_run_int_stop_arrivals = BashOperator(
-        task_id="dbt_run_int_stop_arrivals",
-        bash_command=dbt_command("run", f"{GTFS_STOP_ARRIVAL_STAGING_MODELS} int_stop_arrivals", GPS_TRIP_DBT_VARS),
-    )
-
-    dbt_test_int_stop_arrivals = BashOperator(
-        task_id="dbt_test_int_stop_arrivals",
-        bash_command=dbt_command("test", "int_stop_arrivals", GPS_TRIP_DBT_VARS),
-    )
-
-    dbt_run_int_trip_summary = BashOperator(
-        task_id="dbt_run_int_trip_summary",
-        bash_command=dbt_command("run", f"{TRIP_MATCHING_SCHEDULE_MODELS} {TRIP_SUMMARY_MODEL}", GPS_TRIP_DBT_VARS),
-    )
-
-    dbt_test_int_trip_summary = BashOperator(
-        task_id="dbt_test_int_trip_summary",
-        bash_command=dbt_command("test", TRIP_SUMMARY_MODEL, GPS_TRIP_DBT_VARS),
-    )
-
-    dbt_run_fct_trip_current = BashOperator(
-        task_id="dbt_run_fct_trip_current",
-        bash_command=dbt_command("run", TRIP_FACT_MODEL, FACT_CURRENT_DBT_VARS),
-    )
-
-    dbt_test_fct_trip_current = BashOperator(
-        task_id="dbt_test_fct_trip_current",
-        bash_command=dbt_command("test", TRIP_FACT_MODEL, FACT_CURRENT_DBT_VARS),
-    )
-
-    dbt_run_fct_stop_arrival_current = BashOperator(
-        task_id="dbt_run_fct_stop_arrival_current",
-        bash_command=dbt_command("run", STOP_ARRIVAL_FACT_MODEL, FACT_CURRENT_DBT_VARS),
-    )
-
-    dbt_test_fct_stop_arrival_current = BashOperator(
-        task_id="dbt_test_fct_stop_arrival_current",
-        bash_command=dbt_command(
-            "test", STOP_ARRIVAL_FACT_MODEL, FACT_CURRENT_DBT_VARS, "--indirect-selection cautious"
-        ),
-    )
-
-    dbt_run_fct_trip_prior = BashOperator(
-        task_id="dbt_run_fct_trip_prior",
-        bash_command=dbt_command("run", TRIP_FACT_MODEL, FACT_PRIOR_DBT_VARS),
-    )
-
-    dbt_test_fct_trip_prior = BashOperator(
-        task_id="dbt_test_fct_trip_prior",
-        bash_command=dbt_command("test", TRIP_FACT_MODEL, FACT_PRIOR_DBT_VARS),
-    )
-
-    dbt_run_fct_stop_arrival_prior = BashOperator(
-        task_id="dbt_run_fct_stop_arrival_prior",
-        bash_command=dbt_command("run", STOP_ARRIVAL_FACT_MODEL, FACT_PRIOR_DBT_VARS),
-    )
-
-    dbt_test_fct_stop_arrival_prior = BashOperator(
-        task_id="dbt_test_fct_stop_arrival_prior",
-        bash_command=dbt_command("test", STOP_ARRIVAL_FACT_MODEL, FACT_PRIOR_DBT_VARS, "--indirect-selection cautious"),
-    )
-
-    dbt_run_completeness_and_coverage = BashOperator(
-        task_id="dbt_run_completeness_and_coverage",
-        bash_command=dbt_command(
-            "run", f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}", COMPLETENESS_COVERAGE_DBT_VARS
-        ),
-    )
-
-    dbt_test_completeness_and_coverage = BashOperator(
-        task_id="dbt_test_completeness_and_coverage",
-        bash_command=dbt_command(
-            "test", f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}", COMPLETENESS_COVERAGE_DBT_VARS
-        ),
-    )
-
-    dbt_run_daily_aggregate_mart = BashOperator(
-        task_id="dbt_run_daily_aggregate_mart",
-        bash_command=dbt_command("run", DAILY_AGGREGATE_MODEL, COMPLETENESS_COVERAGE_DBT_VARS),
-    )
-
-    dbt_run_period_aggregate_marts = BashOperator(
-        task_id="dbt_run_period_aggregate_marts",
-        bash_command=dbt_command("run", PERIOD_AGGREGATE_MODELS, PERIOD_AGGREGATE_DBT_VARS),
-    )
-
-    dbt_run_pipeline_status = BashOperator(
-        task_id="dbt_run_pipeline_status",
-        bash_command=dbt_command("run", PIPELINE_STATUS_MODEL, COMPLETENESS_COVERAGE_DBT_VARS),
-    )
-
-    dbt_test_pipeline_status = BashOperator(
-        task_id="dbt_test_pipeline_status",
-        bash_command=dbt_command("test", PIPELINE_STATUS_MODEL, COMPLETENESS_COVERAGE_DBT_VARS),
-    )
+    with TaskGroup("pipeline_status", group_display_name="Pipeline status", prefix_group_id=False) as status_group:
+        dbt_run_pipeline_status, dbt_test_pipeline_status = _dbt_run_test_pair(
+            "pipeline_status",
+            PIPELINE_STATUS_MODEL,
+            PIPELINE_STATUS_MODEL,
+            COMPLETENESS_COVERAGE_DBT_VARS,
+        )
 
     @task(do_xcom_push=False)
     def log_bigquery_dbt_job_costs() -> dict[str, object]:
