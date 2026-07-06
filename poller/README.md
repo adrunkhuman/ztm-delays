@@ -18,6 +18,8 @@ One container polls Warsaw ZTM buses and trams every 10 seconds and writes appen
 - `FUTURE_PING_TOLERANCE_SECONDS`: defaults to `60`; farther-future API rows are dropped.
 - `PARTIAL_FLUSH_INTERVAL_SECONDS`: defaults to `900`; flushes buffered rows every 15 minutes to bound hard-crash loss.
 - `FLUSH_LAG_SECONDS`: defaults to `MAX_PING_AGE_SECONDS`; rows are uploaded only after this age unless the poller is shutting down.
+- `POLLER_SPOOL_DIR`: defaults to `/var/lib/ztm-poller-spool`; local snapshot of accepted rows not yet flushed to GCS.
+- `POLLER_SPOOL_MAX_BYTES`: defaults to `104857600` (100 MiB); fail-fast cap for the local spool snapshot.
 - `POLLER_HEARTBEAT_GCS_PATH`: defaults to `health/poller/latest.json`; private GCS JSON heartbeat for backend-served poller liveness checks.
 - `POLLER_HEARTBEAT_INTERVAL_SECONDS`: defaults to `60`.
 - `POLLER_REQUIRE_POLISH_EGRESS`: defaults to `false`; when true, the poller verifies Polish egress through `ZTM_API_PROXY` before polling.
@@ -48,13 +50,23 @@ Multiple part files per hour are expected. Part names are deterministic from the
 
 Run exactly one poller instance. Older split deployments must be removed before deploying this version; running both old `poller-bus` and `poller-tram` services after this change duplicates bus and tram raw files.
 
-Rows are buffered in memory and uploaded in append-safe `part-*.parquet` files. By default, the poller flushes rows every 15 minutes, but only after they are older than `FLUSH_LAG_SECONDS`. This batches late-but-valid API rows while bounding hard-crash loss under normal GCS availability.
+Rows are buffered in memory, snapshotted to `POLLER_SPOOL_DIR`, and uploaded in append-safe `part-*.parquet` files. By default, the poller flushes rows every 15 minutes, but only after they are older than `FLUSH_LAG_SECONDS`. This batches late-but-valid API rows while bounding hard-crash loss under normal GCS availability.
 
-On graceful shutdown, all currently buffered rows are flushed, including rows newer than the lag window. If an upload fails, those rows stay buffered and are retried on the next flush attempt. A hard crash, forced container kill, or host restart can still lose rows that were not yet successfully uploaded, including rows younger than `FLUSH_LAG_SECONDS`. With defaults and healthy GCS, normal exposure is up to roughly `FLUSH_LAG_SECONDS + PARTIAL_FLUSH_INTERVAL_SECONDS`; there is no durable local spool.
+On graceful shutdown, all currently buffered rows are flushed, including rows newer than the lag window. If an upload fails, those rows stay buffered and are retried on the next flush attempt. A hard crash, forced container kill, or host restart reloads snapshotted rows on the next start if `POLLER_SPOOL_DIR` is persisted. Without a host-mounted spool directory, a container replacement can still lose rows that were accepted but not uploaded.
+
+Keep the spool cap explicit. The default 100 MiB cap applies to the local JSON snapshot, not compressed Parquet objects in GCS. It is intentionally large enough for normal short outages, but small enough to fail loudly before disk use can grow unnoticed. Measure current GCS volume for representative dates before increasing it:
+
+```bash
+uv run python measure_raw_gps_volume.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+```
+
+That command defaults to `gs://ztm-analytics-bucket/raw/gps` and uses only GCS object metadata by default. Pass `--bucket` and `--prefix` for non-production environments. It does not query BigQuery. Add `--include-row-counts` only for a small bounded window when row counts are needed; it downloads each matched Parquet object to read file metadata. Compressed GCS volume is only a lower-bound proxy for spool sizing; account for JSON serialization overhead, outage duration, flush lag, and poll cadence.
 
 The city API can return stale or future-dated pings. The poller drops rows outside the configured freshness window before buffering.
 
 Set `POLLER_REQUIRE_POLISH_EGRESS=true` in production to fail fast when the Tailscale/Mullvad route is not providing Polish egress. The check runs once during startup, before GCS is initialized or API polling begins, and uses the same `ZTM_API_PROXY` SOCKS proxy as city API requests. Leave it disabled for local development unless a proxy is configured.
+
+The egress check is a startup guard, not continuous route monitoring. After startup, watch heartbeat `last_success_at`, `consecutive_failures`, and poller logs for API or route failures; the Docker healthcheck intentionally stays local-only.
 
 ## Healthcheck
 
@@ -112,13 +124,16 @@ Persist `/var/lib/tailscale` across redeploys so the container keeps the same Ta
 
 ```text
 /home/ubuntu/ztm-poller-tailscale -> /var/lib/tailscale
+/home/ubuntu/ztm-poller-spool -> /var/lib/ztm-poller-spool
 ```
 
-If `tailscaled.state` exists in that mounted directory, `TS_AUTHKEY` is optional and the existing device identity is reused. If `TS_AUTHKEY` is present, it is still passed to `tailscale up`; after bootstrap, prefer removing it to prove redeploys use only persisted state. If the state file is missing, `TS_AUTHKEY` is required to bootstrap a new device.
+If `tailscaled.state` exists in that mounted directory, `TS_AUTHKEY` is optional and the existing device identity is reused. If `TS_AUTHKEY` is present, it is still passed to `tailscale up`; after bootstrap, prefer removing it to prove redeploys use only persisted state. If the state file is missing, `TS_AUTHKEY` is required to bootstrap a new device. The spool mount preserves snapshotted rows across container replacement until they are uploaded to GCS.
 
 If a new container node must be manually approved for Mullvad VPN access, the poller usually stays alive by retrying API failures. `STARTUP_GRACE_SECONDS` also prevents an early poller crash from immediately removing the container before approval can be completed. Startup grace does not apply to failures before `poller.py` starts, including `tailscaled` readiness or `tailscale up` failures.
 
 Recommended Coolify production settings include the persisted Tailscale state mount, a Warsaw/Poland `TS_EXIT_NODE`, and `POLLER_REQUIRE_POLISH_EGRESS=true`. If the egress assertion fails, the poller exits during startup instead of silently running with an unusable city API route.
+
+Run one poller replica. The persisted `/var/lib/tailscale` mount must not be shared by two live `tailscaled` processes during rolling deployment. Stop the old poller container before starting the replacement, or use a deployment mode that guarantees no overlap.
 
 ```bash
 docker build -t ztm-gps-poller ./poller
@@ -128,6 +143,7 @@ docker run --rm \
     -e GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-key.json \
     -v /secure/path/service-account-key.json:/run/secrets/gcp-key.json:ro \
     -v /home/ubuntu/ztm-poller-tailscale:/var/lib/tailscale \
+    -v /home/ubuntu/ztm-poller-spool:/var/lib/ztm-poller-spool \
     ztm-gps-poller
 ```
 
