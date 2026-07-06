@@ -34,7 +34,8 @@ GTFS_STAGING_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates"
 )
 GTFS_DIMENSION_MODELS = (
-    "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_trip_schedule int_schedule_version "
+    "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_trip_schedule int_gtfs_duty_chain "
+    "int_schedule_version "
     "dim_schedule_version "
     "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
 )
@@ -42,7 +43,6 @@ GTFS_DAILY_DIMENSION_TEST_MODELS = (
     "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_schedule_version "
     "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
 )
-GTFS_EXPENSIVE_AUDIT_TEST_MODELS = "int_gtfs_trip_schedule int_schedule_version"
 GTFS_RAW_SOURCES = (
     "source:raw.raw_gtfs_snapshots "
     "source:raw.raw_gtfs_trips "

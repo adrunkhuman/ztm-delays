@@ -70,6 +70,10 @@ models:
               arguments:
                 values: [0, 1]
                 quote: false
+      - name: block_id
+        description: GTFS block_id when provided by the feed. This is the preferred duty-chain identity for schedule-spine models.
+      - name: block_short_name
+        description: Public block or brigade short name from GTFS before normalization.
       - name: brigade
         tests: [not_null]
       - name: shape_id
@@ -227,11 +231,13 @@ unit_tests:
           select 'trip-old' as trip_id, '187' as route_id, 'svc-old' as service_id, 'Old' as trip_headsign, 0 as direction_id, 'block-old' as block_id, '10' as block_short_name, 'shape-old' as shape_id, 'snapshot-old' as gtfs_snapshot_id
           union all select 'trip-valid', '187', 'svc-valid', 'Valid', 1, 'block-valid', '0012', 'shape-valid', 'snapshot-valid'
           union all select 'trip-future', '187', 'svc-future', 'Future', 0, 'block-future', '14', 'shape-future', 'snapshot-future'
+          union all select 'trip-empty-block', '187', 'svc-empty', 'Empty Block', 0, '', '', 'shape-empty', 'snapshot-valid'
     expect:
       rows:
-        - {trip_id: 'trip-old', line: '187', service_id: 'svc-old', trip_headsign: 'Old', direction_id: 0, brigade: '10', shape_id: 'shape-old', gtfs_snapshot_id: 'snapshot-old'}
-        - {trip_id: 'trip-valid', line: '187', service_id: 'svc-valid', trip_headsign: 'Valid', direction_id: 1, brigade: '12', shape_id: 'shape-valid', gtfs_snapshot_id: 'snapshot-valid'}
-        - {trip_id: 'trip-future', line: '187', service_id: 'svc-future', trip_headsign: 'Future', direction_id: 0, brigade: '14', shape_id: 'shape-future', gtfs_snapshot_id: 'snapshot-future'}
+        - {trip_id: 'trip-old', line: '187', service_id: 'svc-old', trip_headsign: 'Old', direction_id: 0, block_id: 'block-old', block_short_name: '10', brigade: '10', shape_id: 'shape-old', gtfs_snapshot_id: 'snapshot-old'}
+        - {trip_id: 'trip-valid', line: '187', service_id: 'svc-valid', trip_headsign: 'Valid', direction_id: 1, block_id: 'block-valid', block_short_name: '0012', brigade: '12', shape_id: 'shape-valid', gtfs_snapshot_id: 'snapshot-valid'}
+        - {trip_id: 'trip-future', line: '187', service_id: 'svc-future', trip_headsign: 'Future', direction_id: 0, block_id: 'block-future', block_short_name: '14', brigade: '14', shape_id: 'shape-future', gtfs_snapshot_id: 'snapshot-future'}
+        - {trip_id: 'trip-empty-block', line: '187', service_id: 'svc-empty', trip_headsign: 'Empty Block', direction_id: 0, block_id: null, block_short_name: null, brigade: '0', shape_id: 'shape-empty', gtfs_snapshot_id: 'snapshot-valid'}
 
   - name: stg_gtfs__stop_times_converts_overnight_times_to_seconds
     model: stg_gtfs__stop_times

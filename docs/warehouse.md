@@ -65,6 +65,7 @@ Nightly GPS runs publish facts for the current processing date and the prior ser
 | `stg_gps__pings` | One processing-date slice of cleaned GPS pings; deduped by vehicle and GPS timestamp. |
 | `stg_gtfs__*` | Snapshot-aware GTFS staging across all loaded snapshots. |
 | `int_gtfs_trip_schedule` | Scheduled trips under the governing snapshot, scoped to processing/service-date overlap. |
+| `int_gtfs_duty_chain` | Ordered scheduled duty segments by snapshot, service date, and duty identity. |
 | `int_schedule_version` | Timetable-version ranges by `line`, `direction_id`, and `schedule_day_type`. |
 | `int_stop_arrivals` | Reconstructed scheduled stop arrivals from GPS movement. |
 | `int_trip_summary` | Observed vehicle trip candidates with quality flags. |
@@ -123,6 +124,14 @@ The fingerprint uses ordered scheduled stop/time content. It intentionally exclu
 `schedule_version_id` includes `valid_from_date`. If a timetable changes away and later returns, it is a new version period.
 
 The mkuran GTFS feed is a rolling window. Schedule versions are known only from collected snapshots onward. A null `valid_to_date` means no later collected change is known.
+
+## Duty Chains
+
+`int_gtfs_duty_chain` uses GTFS `block_id` as the duty identity. `block_short_name`/`brigade` is only a display and GPS-matching field; it is not unique enough to identify a whole duty chain.
+
+Rows are ordered by scheduled trip time within one `gtfs_snapshot_id`, `service_date`, and duty identity. The model exposes line-change, layover, overlap, negative-duration, and missing-stop diagnostics for matcher work.
+
+When `block_id` is missing, the model falls back to `line:brigade`. Treat fallback rows as weaker lineage.
 
 ## Completeness And Coverage
 

@@ -181,6 +181,120 @@ models:
       - name: trip_timetable_signature
         description: Stable ordered stop/time signature for one trip, built from stop_sequence, stop_id, and arrival_time_seconds only.
 
+  - name: int_gtfs_duty_chain
+    description: Ordered GTFS duty-chain schedule spine. One row per service_date, processing_date, governing snapshot, duty_chain_id, and trip_order. Uses GTFS block_id as the preferred duty identity and falls back to line plus normalized brigade only when block_id is missing.
+    columns:
+      - name: service_date
+        description: GTFS service date for the scheduled duty segment.
+        tests: [not_null]
+      - name: processing_date
+        description: Warsaw-local GPS processing date whose raw pings can overlap this duty segment.
+        tests: [not_null]
+      - name: schedule_day_type
+        description: GTFS-derived service pattern for this line and direction on service_date.
+      - name: schedule_service_ids
+        description: Comma-delimited active GTFS service_id values for this line and direction on service_date.
+      - name: gtfs_snapshot_id
+        description: Governing GTFS snapshot selected for the service date.
+        tests: [not_null]
+      - name: duty_chain_id
+        description: Stable hash of gtfs_snapshot_id, service_date, duty_chain_source, and duty_chain_source_id.
+        tests: [not_null]
+      - name: duty_chain_source
+        description: Identity source. block_id is preferred; line_brigade is used only when GTFS block_id is missing.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['block_id', 'line_brigade']
+      - name: duty_chain_source_id
+        description: Raw chain identity value before hashing. Usually GTFS block_id; fallback is line:brigade.
+        tests: [not_null]
+      - name: trip_order
+        description: Scheduled trip order within the duty chain.
+        tests: [not_null]
+      - name: line
+        description: Public line identifier for the duty segment.
+        tests: [not_null]
+      - name: route_short_name
+        description: Public GTFS route short name.
+      - name: mode
+        description: Route mode from GTFS routes.
+      - name: block_id
+        description: GTFS block_id, when provided.
+      - name: block_short_name
+        description: GTFS block_short_name before normalization.
+      - name: brigade
+        description: Normalized block_short_name used by GPS matching.
+        tests: [not_null]
+      - name: trip_id
+        description: GTFS trip_id for this duty segment.
+        tests: [not_null]
+      - name: service_id
+        description: GTFS service_id for this scheduled trip.
+        tests: [not_null]
+      - name: direction_id
+        description: GTFS direction_id for this scheduled trip.
+      - name: shape_id
+        description: GTFS shape_id for this scheduled trip.
+      - name: trip_headsign
+        description: Trip headsign from the governing snapshot.
+      - name: trip_start_seconds
+        description: First scheduled stop time in seconds since GTFS service-day midnight.
+        tests: [not_null]
+      - name: trip_end_seconds
+        description: Last scheduled stop time in seconds since GTFS service-day midnight.
+        tests: [not_null]
+      - name: scheduled_start_time
+        description: Scheduled start timestamp in UTC.
+        tests: [not_null]
+      - name: scheduled_end_time
+        description: Scheduled end timestamp in UTC.
+        tests: [not_null]
+      - name: stop_count
+        description: Number of scheduled stops in the trip.
+        tests: [not_null]
+      - name: origin_stop_id
+        description: First scheduled stop_id.
+      - name: origin_stop_name
+        description: First scheduled stop name.
+      - name: destination_stop_id
+        description: Last scheduled stop_id.
+      - name: destination_stop_name
+        description: Last scheduled stop name.
+      - name: first_stop_sequence
+        description: Minimum GTFS stop_sequence for the trip.
+      - name: last_stop_sequence
+        description: Maximum GTFS stop_sequence for the trip.
+      - name: scheduled_distance_meters
+        description: Reserved for shape-derived scheduled distance. Null until the feed exposes shape distance or a cheap distance derivation is added.
+      - name: previous_trip_id
+        description: Previous trip_id in the same duty chain by scheduled time.
+      - name: next_trip_id
+        description: Next trip_id in the same duty chain by scheduled time.
+      - name: layover_from_previous_seconds
+        description: Seconds between previous trip end and this trip start. Negative values indicate overlap.
+      - name: layover_to_next_seconds
+        description: Seconds between this trip end and next trip start. Negative values indicate overlap.
+      - name: line_changed_from_previous
+        description: True when this segment's line differs from the previous segment in the duty chain.
+        tests: [not_null]
+      - name: line_changes_to_next
+        description: True when the next segment's line differs within the same duty chain.
+        tests: [not_null]
+      - name: overlaps_previous_trip
+        description: True when this segment starts before the previous segment ends.
+        tests: [not_null]
+      - name: has_negative_duration
+        description: True when trip_end_seconds is before trip_start_seconds.
+        tests: [not_null]
+      - name: has_missing_stops
+        description: True when the trip has fewer than two stops or missing terminal stop IDs.
+        tests: [not_null]
+      - name: is_malformed_duty_segment
+        description: Combined diagnostic for overlap, negative duration, or missing-stop conditions.
+        tests: [not_null]
+
   - name: int_schedule_version
     description: Per-line timetable fingerprint history. Consecutive governing processing dates with the same timetable fingerprint collapse into one schedule version for line, direction_id, and schedule_day_type.
     columns:
@@ -335,6 +449,237 @@ models:
         tests: [not_null]
 
 unit_tests:
+  - name: int_gtfs_duty_chain_orders_segments_and_flags_diagnostics
+    model: int_gtfs_duty_chain
+    given:
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '10' as line, 0 as direction_id, 'simple-a' as trip_id, 'svc' as service_id, 'Simple A' as trip_headsign, 'shape-simple-a' as shape_id, 3600 as trip_start_seconds, 3900 as trip_end_seconds, 2 as stop_count, 'S1 | S2' as ordered_stop_ids, '3600 | 3900' as ordered_arrival_time_seconds, 'simple-a-signature' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'simple-b', 'svc', 'Simple B', 'shape-simple-b', 4200, 4500, 2, 'S2 | S3', '4200 | 4500', 'simple-b-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'cross-a', 'svc', 'Cross A', 'shape-cross-a', 3600, 3900, 2, 'S1 | S2', '3600 | 3900', 'cross-a-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '20', 1, 'cross-b', 'svc', 'Cross B', 'shape-cross-b', 4200, 4500, 2, 'S2 | S3', '4200 | 4500', 'cross-b-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '30', 0, 'overlap-a', 'svc', 'Overlap A', 'shape-overlap-a', 3600, 5000, 2, 'S1 | S2', '3600 | 5000', 'overlap-a-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '30', 0, 'overlap-b', 'svc', 'Overlap B', 'shape-overlap-b', 4800, 5400, 2, 'S2 | S3', '4800 | 5400', 'overlap-b-signature'
+      - input: ref('stg_gtfs__trips')
+        format: sql
+        rows: |
+          select 'simple-a' as trip_id, '10' as line, 'svc' as service_id, 'Simple A' as trip_headsign, 0 as direction_id, 'block-simple' as block_id, '001' as block_short_name, '1' as brigade, 'shape-simple-a' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'simple-b', '10', 'svc', 'Simple B', 0, 'block-simple', '001', '1', 'shape-simple-b', 'snapshot-valid'
+          union all select 'cross-a', '10', 'svc', 'Cross A', 0, 'block-cross', '002', '2', 'shape-cross-a', 'snapshot-valid'
+          union all select 'cross-b', '20', 'svc', 'Cross B', 1, 'block-cross', '002', '2', 'shape-cross-b', 'snapshot-valid'
+          union all select 'overlap-a', '30', 'svc', 'Overlap A', 0, 'block-overlap', '003', '3', 'shape-overlap-a', 'snapshot-valid'
+          union all select 'overlap-b', '30', 'svc', 'Overlap B', 0, 'block-overlap', '003', '3', 'shape-overlap-b', 'snapshot-valid'
+      - input: ref('stg_gtfs__routes')
+        format: sql
+        rows: |
+          select '10' as route_id, '10' as route_short_name, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '20', '20', 'bus', 'snapshot-valid'
+          union all select '30', '30', 'bus', 'snapshot-valid'
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'simple-a' as trip_id, 'S1' as stop_id, 1 as stop_sequence, 3600 as arrival_time_seconds, 3600 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'simple-a', 'S2', 2, 3900, 3900, 'snapshot-valid'
+          union all select 'simple-b', 'S2', 1, 4200, 4200, 'snapshot-valid'
+          union all select 'simple-b', 'S3', 2, 4500, 4500, 'snapshot-valid'
+          union all select 'cross-a', 'S1', 1, 3600, 3600, 'snapshot-valid'
+          union all select 'cross-a', 'S2', 2, 3900, 3900, 'snapshot-valid'
+          union all select 'cross-b', 'S2', 1, 4200, 4200, 'snapshot-valid'
+          union all select 'cross-b', 'S3', 2, 4500, 4500, 'snapshot-valid'
+          union all select 'overlap-a', 'S1', 1, 3600, 3600, 'snapshot-valid'
+          union all select 'overlap-a', 'S2', 2, 5000, 5000, 'snapshot-valid'
+          union all select 'overlap-b', 'S2', 1, 4800, 4800, 'snapshot-valid'
+          union all select 'overlap-b', 'S3', 2, 5400, 5400, 'snapshot-valid'
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'S1' as stop_id, 'Stop 1' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'S2', 'Stop 2', 52.1, 21.1, 'snapshot-valid'
+          union all select 'S3', 'Stop 3', 52.2, 21.2, 'snapshot-valid'
+    expect:
+      rows:
+        - trip_id: 'simple-a'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-simple'
+          trip_order: 1
+          previous_trip_id: null
+          next_trip_id: 'simple-b'
+          layover_from_previous_seconds: null
+          layover_to_next_seconds: 300
+          line_changed_from_previous: false
+          line_changes_to_next: false
+          overlaps_previous_trip: false
+          is_malformed_duty_segment: false
+          origin_stop_id: 'S1'
+          destination_stop_id: 'S2'
+        - trip_id: 'simple-b'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-simple'
+          trip_order: 2
+          previous_trip_id: 'simple-a'
+          next_trip_id: null
+          layover_from_previous_seconds: 300
+          layover_to_next_seconds: null
+          line_changed_from_previous: false
+          line_changes_to_next: false
+          overlaps_previous_trip: false
+          is_malformed_duty_segment: false
+          origin_stop_id: 'S2'
+          destination_stop_id: 'S3'
+        - trip_id: 'cross-a'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-cross'
+          trip_order: 1
+          previous_trip_id: null
+          next_trip_id: 'cross-b'
+          layover_from_previous_seconds: null
+          layover_to_next_seconds: 300
+          line_changed_from_previous: false
+          line_changes_to_next: true
+          overlaps_previous_trip: false
+          is_malformed_duty_segment: false
+          origin_stop_id: 'S1'
+          destination_stop_id: 'S2'
+        - trip_id: 'cross-b'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-cross'
+          trip_order: 2
+          previous_trip_id: 'cross-a'
+          next_trip_id: null
+          layover_from_previous_seconds: 300
+          layover_to_next_seconds: null
+          line_changed_from_previous: true
+          line_changes_to_next: false
+          overlaps_previous_trip: false
+          is_malformed_duty_segment: false
+          origin_stop_id: 'S2'
+          destination_stop_id: 'S3'
+        - trip_id: 'overlap-a'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-overlap'
+          trip_order: 1
+          previous_trip_id: null
+          next_trip_id: 'overlap-b'
+          layover_from_previous_seconds: null
+          layover_to_next_seconds: -200
+          line_changed_from_previous: false
+          line_changes_to_next: false
+          overlaps_previous_trip: false
+          is_malformed_duty_segment: false
+          origin_stop_id: 'S1'
+          destination_stop_id: 'S2'
+        - trip_id: 'overlap-b'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-overlap'
+          trip_order: 2
+          previous_trip_id: 'overlap-a'
+          next_trip_id: null
+          layover_from_previous_seconds: -200
+          layover_to_next_seconds: null
+          line_changed_from_previous: false
+          line_changes_to_next: false
+          overlaps_previous_trip: true
+          is_malformed_duty_segment: true
+          origin_stop_id: 'S2'
+          destination_stop_id: 'S3'
+  - name: int_gtfs_duty_chain_orders_service_day_before_processing_date_expansion
+    model: int_gtfs_duty_chain
+    given:
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, 'N1' as line, 0 as direction_id, 'overnight-a' as trip_id, 'svc' as service_id, 'Overnight A' as trip_headsign, 'shape-overnight-a' as shape_id, 85000 as trip_start_seconds, 87000 as trip_end_seconds, 2 as stop_count, 'S1 | S2' as ordered_stop_ids, '85000 | 87000' as ordered_arrival_time_seconds, 'overnight-a-signature' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-16', 'weekday', 'svc', 'snapshot-valid', 'N1', 0, 'overnight-a', 'svc', 'Overnight A', 'shape-overnight-a', 85000, 87000, 2, 'S1 | S2', '85000 | 87000', 'overnight-a-signature'
+          union all select date '2026-01-15', date '2026-01-16', 'weekday', 'svc', 'snapshot-valid', 'N1', 0, 'overnight-b', 'svc', 'Overnight B', 'shape-overnight-b', 88000, 89000, 2, 'S2 | S3', '88000 | 89000', 'overnight-b-signature'
+      - input: ref('stg_gtfs__trips')
+        format: sql
+        rows: |
+          select 'overnight-a' as trip_id, 'N1' as line, 'svc' as service_id, 'Overnight A' as trip_headsign, 0 as direction_id, 'block-overnight' as block_id, '001' as block_short_name, '1' as brigade, 'shape-overnight-a' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'overnight-b', 'N1', 'svc', 'Overnight B', 0, 'block-overnight', '001', '1', 'shape-overnight-b', 'snapshot-valid'
+      - input: ref('stg_gtfs__routes')
+        format: sql
+        rows: |
+          select 'N1' as route_id, 'N1' as route_short_name, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'unused' as trip_id, 'unused-stop' as stop_id, 1 as stop_sequence, 0 as arrival_time_seconds, 0 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'unused-stop' as stop_id, 'Unused Stop' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+    expect:
+      rows:
+        - processing_date: '2026-01-15'
+          trip_id: 'overnight-a'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-overnight'
+          trip_order: 1
+          previous_trip_id: null
+          next_trip_id: 'overnight-b'
+          layover_from_previous_seconds: null
+          layover_to_next_seconds: 1000
+        - processing_date: '2026-01-16'
+          trip_id: 'overnight-a'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-overnight'
+          trip_order: 1
+          previous_trip_id: null
+          next_trip_id: 'overnight-b'
+          layover_from_previous_seconds: null
+          layover_to_next_seconds: 1000
+        - processing_date: '2026-01-16'
+          trip_id: 'overnight-b'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: 'block-overnight'
+          trip_order: 2
+          previous_trip_id: 'overnight-a'
+          next_trip_id: null
+          layover_from_previous_seconds: 1000
+          layover_to_next_seconds: null
+
+  - name: int_gtfs_duty_chain_namespaces_block_and_fallback_identities
+    model: int_gtfs_duty_chain
+    given:
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '99' as line, 0 as direction_id, 'block-literal' as trip_id, 'svc' as service_id, 'Block Literal' as trip_headsign, 'shape-block-literal' as shape_id, 3600 as trip_start_seconds, 3900 as trip_end_seconds, 2 as stop_count, 'S1 | S2' as ordered_stop_ids, '3600 | 3900' as ordered_arrival_time_seconds, 'block-literal-signature' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '40', 0, 'fallback-collision', 'svc', 'Fallback Collision', 'shape-fallback-collision', 4200, 4500, 2, 'S2 | S3', '4200 | 4500', 'fallback-collision-signature'
+      - input: ref('stg_gtfs__trips')
+        format: sql
+        rows: |
+          select 'block-literal' as trip_id, '99' as line, 'svc' as service_id, 'Block Literal' as trip_headsign, 0 as direction_id, '40:7' as block_id, '001' as block_short_name, '1' as brigade, 'shape-block-literal' as shape_id, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'fallback-collision', '40', 'svc', 'Fallback Collision', 0, cast(null as string), '007', '7', 'shape-fallback-collision', 'snapshot-valid'
+      - input: ref('stg_gtfs__routes')
+        format: sql
+        rows: |
+          select '99' as route_id, '99' as route_short_name, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '40', '40', 'bus', 'snapshot-valid'
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'unused' as trip_id, 'unused-stop' as stop_id, 1 as stop_sequence, 0 as arrival_time_seconds, 0 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'unused-stop' as stop_id, 'Unused Stop' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+    expect:
+      rows:
+        - trip_id: 'block-literal'
+          duty_chain_source: 'block_id'
+          duty_chain_source_id: '40:7'
+          trip_order: 1
+          previous_trip_id: null
+          next_trip_id: null
+        - trip_id: 'fallback-collision'
+          duty_chain_source: 'line_brigade'
+          duty_chain_source_id: '40:7'
+          trip_order: 1
+          previous_trip_id: null
+          next_trip_id: null
+
   - name: int_trip_summary_classifies_quality_and_derives_delays
     model: int_trip_summary
     overrides:
