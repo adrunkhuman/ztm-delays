@@ -4,6 +4,8 @@ select
     cast(service_id as string) as service_id,
     cast(trip_headsign as string) as trip_headsign,
     cast(direction_id as int64) as direction_id,
+    nullif(cast(block_id as string), '') as block_id,
+    nullif(cast(block_short_name as string), '') as block_short_name,
     coalesce(nullif(regexp_replace(cast(block_short_name as string), r'^0+', ''), ''), '0') as brigade,
     cast(shape_id as string) as shape_id,
     cast(gtfs_snapshot_id as string) as gtfs_snapshot_id
