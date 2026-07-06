@@ -1,27 +1,82 @@
 # Warehouse
 
-The warehouse is BigQuery-first. Raw inputs live in GCS, raw/staging/intermediate/mart layers live in separate datasets, and the frontend reads a serving DuckDB export built from selected marts.
+The warehouse turns immutable ZTM inputs into an archive that can be rebuilt, audited, and exported for the frontend. Keep it boring: raw data stays recoverable, historical labels are baked at build time, and expensive work is explicit.
 
-## Layers
+## Current Shape
 
-| Layer | Default dataset | Purpose |
-| --- | --- | --- |
-| Raw | `ztm_raw` | Rebuildable BigQuery loads from immutable GCS objects. |
-| Staging | `ztm_stg` | Type cleanup, renaming, dedupe, and structural guards. |
-| Intermediate | `ztm_int` | Reusable trip, schedule, and stop-arrival reconstruction. |
-| Marts | `ztm_marts` | Frontend/export-facing dimensions, facts, aggregates, and status. |
+Production BigQuery datasets:
 
-Airflow and dbt use the same runtime env names: `GCP_PROJECT`, `BIGQUERY_RAW_DATASET`, `BIGQUERY_STG_DATASET`, `BIGQUERY_INT_DATASET`, `BIGQUERY_MARTS_DATASET`, and `BIGQUERY_LOCATION`. Defaults match the current VPS.
+| Dataset | Role |
+| --- | --- |
+| `ztm_raw` | Raw BigQuery loads from GCS. |
+| `ztm_stg` | Cleaned and typed staging models. |
+| `ztm_int` | Reusable schedule, trip, and arrival reconstruction. |
+| `ztm_marts` | Facts, dimensions, aggregates, status, and export inputs. |
 
-dbt uses `generate_schema_name` to route model layers to exact dataset names. Raw sources use `BIGQUERY_RAW_DATASET`, defaulting to `ztm_raw`.
+The old `ztm_bq` dataset has been removed.
 
-## Naming
+Airflow and dbt share the same runtime env names: `GCP_PROJECT`, `BIGQUERY_RAW_DATASET`, `BIGQUERY_STG_DATASET`, `BIGQUERY_INT_DATASET`, `BIGQUERY_MARTS_DATASET`, and `BIGQUERY_LOCATION`. Defaults match the current VPS.
 
-Staging uses `stg_<source>__<entity>`, for example `stg_gps__pings` and `stg_gtfs__stop_times`.
+dbt routes model layers through `generate_schema_name`. Raw sources use `BIGQUERY_RAW_DATASET`, defaulting to `ztm_raw`.
 
-Intermediate models use `int_<purpose>`. Marts use `dim_`, `fct_`, `agg_`, or `mart_`. Raw loader tables keep source names such as `raw_gps_pings` and `raw_gtfs_trips`.
+## Hard Rules
 
-Archive-safe dimensions:
+- Raw GCS objects are the recovery source. BigQuery raw tables are reloadable.
+- GTFS history is snapshot-based. Never silently match old GPS against the newest GTFS snapshot.
+- Historical facts and aggregates carry their own labels. Do not relabel history through `_current` dimensions.
+- Public `line` is not a durable historical entity by itself. Use snapshot or schedule-version lineage for historical comparison.
+- Large tables require partition filters. Rebuild bounded partitions, not whole history.
+- Normal Airflow paths stay cheap. Broad audits are manual jobs.
+
+## Inputs
+
+Raw GPS objects use the configured `GCS_BUCKET` and `RAW_GPS_PREFIX`, defaulting to `gs://ztm-analytics-bucket/raw/gps`.
+
+Raw GTFS snapshots use `RAW_GTFS_PREFIX`, defaulting to `raw/gtfs`. Snapshot IDs are immutable: `{snapshot_timestamp}_{sha256[:12]}`.
+
+`dag_gtfs_poll` stores changed GTFS ZIPs and emits the snapshot asset. `dag_gtfs_load` loads raw GTFS tables and rebuilds GTFS staging/dimensions. `dag_daily_gps` loads raw GPS parts and rebuilds one GPS processing date plus its required prior-service-date facts.
+
+## Snapshot Semantics
+
+The governing GTFS snapshot for a `service_date` is the latest loaded snapshot whose Warsaw-local snapshot date is strictly before that service date.
+
+Same-day GTFS snapshots do not govern that same service day. Intraday schedule changes are out of scope.
+
+GTFS staging spans all loaded snapshots. Downstream models must choose and carry `gtfs_snapshot_id` explicitly.
+
+## Time Semantics
+
+Use these names carefully:
+
+| Field | Meaning |
+| --- | --- |
+| `gps_date` | Warsaw-local date of raw GPS processing. |
+| `service_date` | GTFS service date. Overnight trips can differ from `gps_date`. |
+| `processing_date` | Airflow/dbt run date, normally the GPS date being rebuilt. |
+| `scheduled_start_date` | Date of scheduled trip start, used by coverage marts. |
+| `publish_service_date` | Fact partition being published by the DAG. |
+
+Nightly GPS runs publish facts for the current processing date and the prior service date. That is deliberate: after-midnight GPS can complete previous-service-date trips.
+
+## Core Tables
+
+| Model | Contract |
+| --- | --- |
+| `stg_gps__pings` | One processing-date slice of cleaned GPS pings; deduped by vehicle and GPS timestamp. |
+| `stg_gtfs__*` | Snapshot-aware GTFS staging across all loaded snapshots. |
+| `int_gtfs_trip_schedule` | Scheduled trips under the governing snapshot, scoped to processing/service-date overlap. |
+| `int_schedule_version` | Timetable-version ranges by `line`, `direction_id`, and `schedule_day_type`. |
+| `int_stop_arrivals` | Reconstructed scheduled stop arrivals from GPS movement. |
+| `int_trip_summary` | Observed vehicle trip candidates with quality flags. |
+| `fct_trip` | Serving fact for observed trips, partitioned by `service_date`. |
+| `fct_stop_arrival` | Serving detail fact for detected stop arrivals, partitioned by `service_date`. |
+| `mart_day_completeness` | Raw GPS ingestion coverage by GPS date and mode. |
+| `agg_service_coverage` | Schedule-aware observed-service coverage by scheduled start date/hour. |
+| `mart_pipeline_status` | Historical archive health by operational date and mode. |
+
+## Dimensions
+
+Archive-safe dimensions are date-ranged where history matters:
 
 - `dim_line`
 - `dim_stop_group`
@@ -30,151 +85,104 @@ Archive-safe dimensions:
 - `dim_schedule_date`
 - `dim_schedule_version`
 
-Current convenience dimensions:
+Current convenience dimensions are present-day lookup surfaces only:
 
 - `dim_line_current`
 - `dim_stop_group_current`
 - `dim_stop_post_current`
 - `dim_schedule_date_current`
 
-Use `_current` tables for present-day filters/maps only. Do not join historical facts or aggregates to `_current` tables for labels.
+`dim_stop_group` groups by the first four characters of `stop_id`. Warsaw bus/tram posts often use six-digit IDs, but the feed also contains metro, rail, depots, entrances, and platforms. Do not assume every stop ID is a six-digit passenger post.
 
-## Lineage Rules
+`dim_date` is calendar-only. `dim_schedule_date` is GTFS-service-aware. Use `schedule_day_type` for transit schedule grouping.
 
-GTFS staging spans all loaded snapshots. It exposes `gtfs_snapshot_id`; downstream models must choose the governing snapshot explicitly.
+## Facts
 
-The governing snapshot for a GTFS `service_date` is the latest loaded snapshot whose Warsaw-local snapshot date is strictly before that service date. Same-day snapshots do not govern that same service day.
+`fct_trip` grain is one observed vehicle trip candidate. It carries archive-safe mode, route, headsign, origin, destination, schedule-version, and quality fields.
 
-Intermediate schedule joins must include `gtfs_snapshot_id` and carry it forward. Historical facts must bake labels from the governing snapshot at build time.
+`fct_stop_arrival` grain is one detected scheduled stop arrival per trip candidate and stop sequence. It carries stop labels, line labels, schedule-version lineage, `source_gps_date`, and `delay_seconds`.
 
-Public `line` is not a durable historical entity by itself. The same line label can later point to different stop sets or schedules. Compare history through GTFS snapshot or schedule-version lineage.
+`delay_seconds = actual_arrival_time - scheduled_arrival_time`. Positive means late. Negative means early.
 
-## Staging
+`hour_bracket` is based on scheduled arrival time in Warsaw local time. Use scheduled hour for leaderboards and distributions so delayed vehicles stay attached to the service they were scheduled to provide.
 
-`stg_gps__pings` processes one Warsaw-local `processing_date`. It deduplicates by `vehicle_number` and `gps_time`, normalizes numeric identifiers, and drops structurally impossible coordinates before geography functions run.
-
-GTFS staging keeps snapshot lineage and does not filter to one snapshot. Downstream models decide which snapshot governs each date.
-
-Structural garbage should be removed in staging only when it cannot be analyzed safely. Suspicious but analyzable behavior belongs in quality flags, not hard failures.
-
-## Dimensions
-
-`dim_line`, `dim_stop_group`, and `dim_stop_post` are date-ranged dictionaries. Consecutive governing snapshots collapse into one row when display attributes do not change. If an entity disappears, the prior row closes the day before disappearance.
-
-`dim_stop_group` groups stops by the first four characters of `stop_id`. Warsaw bus/tram posts usually use six-digit IDs, but the feed also includes metro, rail, depot, entrance, and platform records. The durable grouping rule is the prefix, not universal six-digit shape.
-
-`dim_date` is calendar-only. `day_type` is weekday/weekend, and `is_holiday` is the Polish public-holiday flag.
-
-`dim_schedule_date` is schedule-aware. It exposes `schedule_day_type` from active GTFS service IDs in the governing snapshot. A calendar weekday can have holiday/Sunday service when GTFS says so.
-
-Intermediate GPS/trip models still carry calendar `day_type` from staging. Do not use it as a schedule-pattern field; use `schedule_day_type` from `dim_schedule_date` or baked fact columns.
-
-`route_long_name` is currently null in line dimensions because the raw route loader does not retain that optional field.
-
-## Schedule Versions
-
-`int_gtfs_trip_schedule` denormalizes scheduled trips under each service date's governing snapshot. It carries both `processing_date` and `service_date` because overnight GPS matching can use the prior service date.
-
-`int_schedule_version` and `dim_schedule_version` define the "since last timetable change" baseline. Grain: `line`, `direction_id`, and `schedule_day_type` over a consecutive validity range.
-
-The timetable fingerprint uses scheduled stop/time content only. It excludes snapshot IDs, trip IDs, service IDs, labels, and other display fields so republishing the same timetable does not create false version changes.
-
-`schedule_version_id` changes when the timetable fingerprint changes. If a timetable changes away and later returns, it becomes a new version period because the ID includes `valid_from_date`.
-
-The mkuran GTFS feed is a rolling window. Schedule versions are known only from collected snapshots onward. A null `valid_to_date` means no later collected change is known.
-
-## Trip Facts
-
-`int_trip_summary` is one observed vehicle trip candidate per `gps_date`, `gtfs_snapshot_id`, `service_date`, `trip_id`, and `vehicle_number`. It starts from reconstructed stop arrivals. Pings are diagnostics, not standalone trip facts.
-
-`fct_trip` is partitioned by `service_date`, requires a partition filter, and is clustered by `line` and `direction_id`. Airflow publishes both the current and prior service-date partitions for each GPS processing date so overnight trips can complete without deleting prior-day daytime rows.
-
-`fct_trip` carries archive-safe labels from the governing snapshot: mode, route short name, trip headsign, origin stop, and destination stop.
-
-Trip quality policy:
+Quality policy:
 
 - `complete`: default for strict analytics.
 - `partial`: acceptable for exploration and drill-down.
-- `broken`: debug only; likely wrong or too incomplete for analytics.
+- `broken`: debug only.
 
-Quality thresholds are provisional constants in `int_trip_summary`. Change them only with real-data validation.
+Quality thresholds are implementation constants, not transport truth. Change them only after real-data validation.
 
-## Stop Arrivals
+## Schedule Versions
 
-`fct_stop_arrival` is one detected scheduled stop arrival per `gtfs_snapshot_id`, `service_date`, `trip_id`, `vehicle_number`, and `stop_sequence`. It is built from `int_stop_arrivals` and inherits trip lineage from `fct_trip`.
+Schedule versions answer: "same line, same direction, same service pattern, same timetable?"
 
-The fact carries labels directly: stop name, stop coordinates, stop-group name, route short name, mode, and trip headsign. Historical pages should render those baked labels.
+The fingerprint uses ordered scheduled stop/time content. It intentionally excludes snapshot IDs, trip IDs, service IDs, labels, and other display fields, so republishing the same timetable does not create a fake schedule change.
 
-`delay_seconds = actual_arrival_time - scheduled_arrival_time`. Positive is late; negative is early.
+`schedule_version_id` includes `valid_from_date`. If a timetable changes away and later returns, it is a new version period.
 
-`hour_bracket` is the Warsaw-local scheduled-arrival hour. Leaderboards and time-of-day charts should use scheduled hour, not actual-arrival hour.
+The mkuran GTFS feed is a rolling window. Schedule versions are known only from collected snapshots onward. A null `valid_to_date` means no later collected change is known.
 
-The table is partitioned by `service_date`, requires a partition filter, and is clustered by `line`, `stop_group_id`, and `hour_bracket`.
+## Completeness And Coverage
 
-## Completeness
+Do not confuse ingestion completeness with service coverage.
 
-Trip facts are the analytics validity grain. A day can be incomplete while individual `complete` trips remain valid.
+`mart_day_completeness` checks raw GPS arrival by GPS date and mode. It does not know whether scheduled service existed in a missing hour.
 
-`mart_day_completeness` summarizes raw GPS ingestion by `gps_date` and mode. It is operational ingestion coverage, not schedule-aware service coverage.
+`agg_service_coverage` compares expected scheduled bus/tram trips with observed `complete` or `partial` trip candidates. `broken` rows do not count as observed service.
 
-`agg_service_coverage` summarizes scheduled bus/tram service observed by line, direction, headsign, scheduled-start date, and scheduled hour. Expected trips come from `int_gtfs_trip_schedule`; observed trips come from `int_trip_summary` rows with `complete` or `partial` quality. `broken` rows are excluded.
+No `agg_service_coverage` row means no scheduled bus/tram service for that slice. A row with `service_coverage_ratio = 0` means scheduled service was not observed.
 
-`agg_service_coverage` emits rows only for scheduled bus/tram service hours. No row means no scheduled service. A row with `service_coverage_ratio = 0` means scheduled service was not observed.
-
-`mart_pipeline_status` is the historical archive-health surface by Warsaw-local operational date and mode. Near-real-time poller liveness comes from the private heartbeat captured by the serving export, not from this mart.
+`mart_pipeline_status` combines historical archive health signals. Near-real-time poller liveness comes from the private heartbeat captured by the serving export, not from this mart.
 
 ## Aggregates
 
-Aggregate marts are serving accelerators over `fct_stop_arrival`. They use `trip_quality = 'complete'` rows and can be rebuilt from detail.
+Aggregates are serving accelerators over strict-quality stop-arrival detail. They can be rebuilt from facts.
 
-Period types:
+Period aggregates:
 
-- `month`: calendar month. Month rows use the latest schedule version observed in that month for each line/direction/schedule-day type.
-- `schedule_version`: one timetable-version period from `dim_schedule_version`.
+- `agg_line_stop_period`
+- `agg_stop_period`
+- `agg_time_period`
 
-Period rows expose `source_start_date`, `source_end_date`, and `is_partial_period`. Consumers should label or exclude partial periods when comparing complete windows.
+Daily aggregate:
 
-Aggregate day classes:
+- `agg_line_daily`
 
-- `day_type`: calendar weekday/weekend.
-- `weekday`: Monday through Sunday.
-- `schedule_day_type`: GTFS-derived service pattern.
+Period aggregates support `month` and `schedule_version` periods. Period rows expose `source_start_date`, `source_end_date`, and `is_partial_period`; consumers should label or filter partial windows before comparing them.
 
-Delay stats use the same columns across aggregate marts: `n`, `mean_delay_seconds`, `p10_delay_seconds`, `median_delay_seconds`, `p50_delay_seconds`, `p90_delay_seconds`, `stddev_delay_seconds`, `on_time_rate`, and fixed histogram buckets.
-
-Main aggregate roles:
-
-- `agg_line_stop_period`: line/stop/hour/period axis.
-- `agg_stop_period`: stop/line/hour/period axis.
-- `agg_time_period`: network time-of-day axis.
-- `agg_line_daily`: daily line trend surface.
-
-Aggregate rows carry display labels and `gtfs_snapshot_ids` lineage from the source facts. Frontend code must not relabel historical aggregates through `_current` dimensions.
+Aggregates carry labels and `gtfs_snapshot_ids` from source facts. Do not relabel historical aggregate rows through current dimensions.
 
 ## Serving Export
 
-`dag_serving_export` is manual. It exports a fixed allowlist of marts to GCS Parquet, downloads them in the Airflow worker, builds derived DuckDB serving tables, validates guardrails, and atomically swaps the stable DuckDB file.
+`dag_serving_export` is a manual publication step. It exports a fixed allowlist from `ztm_marts` to GCS Parquet, downloads it in the Airflow worker, builds derived DuckDB serving tables, validates guardrails, and atomically swaps the stable DuckDB file.
 
-The export is not a generic mirror of `ztm_marts`. It contains only current frontend source tables, derived DuckDB tables, `export_metadata`, and `export_table_stats`.
+The DuckDB artifact is not a mirror of `ztm_marts`. It contains only current frontend source tables, derived serving tables, `export_metadata`, and `export_table_stats`.
 
-Changing the serving surface means updating the DAG allowlist, derived SQL, tests, and serving contract together.
+Changing the frontend serving surface means changing the export allowlist, derived SQL, tests, and serving contract together.
 
-## Tests And Cost
+## Tests
 
-`error` tests are for structural invariants: uniqueness at declared grain, not-null keys, and enum accepted values. Distributional checks, low coverage, suspicious delays, and quality thresholds should be warnings or model columns unless the data is structurally unusable.
+Error tests are for structural invariants:
 
-Large partitioned models use `insert_overwrite` with bounded static partitions. Rerunning the same window replaces partitions and should not duplicate rows.
+- uniqueness at declared grain;
+- not-null keys;
+- enum accepted values;
+- relationship checks that protect lineage.
 
-Large partitioned tables should require partition filters. dbt models must filter upstream by the partition they overwrite.
+Distribution checks, suspicious delays, low coverage, and quality thresholds should be warnings or model columns unless the data is structurally unusable.
 
-Final projections should list columns explicitly. Avoid `select *` in outputs.
+Default Airflow dbt tests stay bounded. Full-history schedule/version tests, broad aggregate tests, broader contract audits, and serving export schema audits are manual jobs.
 
-The dbt BigQuery profile sets `maximum_bytes_billed`, defaulting to 100 GB per query. Large backfills should be dry-run first.
+## Cost Discipline
 
-Default Airflow paths skip known expensive schedule/version tests and broad aggregate tests. Full-history schedule/version tests, broad aggregate tests, broader contract audits, and serving export schema audits are manual jobs.
+Large models use `insert_overwrite` with bounded static partitions. Rerunning the same window replaces partitions and should not duplicate rows.
 
-Nightly GPS runs log BigQuery dbt job cost metadata from `INFORMATION_SCHEMA.JOBS_BY_USER`. Treat the initial 100 GiB warning threshold as an operational signal until calibrated.
+Large partitioned tables must require partition filters. Upstream dbt SQL must filter by the same partition window it overwrites.
 
-## Current Cutover
+Final model projections should list columns explicitly. Avoid `select *` in outputs.
 
-The v2 datasets are built in parallel with old `ztm_bq`. Keep `ztm_bq` until `ztm_raw`, `ztm_stg`, `ztm_int`, and `ztm_marts` are validated.
+The dbt BigQuery profile sets `maximum_bytes_billed`, defaulting to 100 GB per query. Dry-run large backfills before execution.
+
+Nightly GPS runs log BigQuery dbt job cost metadata from `INFORMATION_SCHEMA.JOBS_BY_USER`. Treat the 100 GiB warning threshold as an operational signal until calibrated.
