@@ -76,8 +76,6 @@ The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS
 
 ## Deployment Sync
 
-`Deploy VPS` runs after `CI` succeeds on `master`, or by manual dispatch.
-
 Deploy steps:
 
 - join the Tailnet as `tag:github-actions`;
@@ -93,9 +91,6 @@ Required GitHub secrets:
 - `TS_OAUTH_CLIENT_ID`
 - `TS_OAUTH_SECRET`
 - `VPS_DEPLOY_SSH_KEY`
-
-Required GitHub secret:
-
 - `VPS_DEPLOY_KNOWN_HOSTS`
 
 Optional GitHub vars override defaults: `VPS_DEPLOY_HOST`, `VPS_DEPLOY_USER`, `VPS_REPO_DIR`, and `AIRFLOW_CONTAINER_PREFIX`.

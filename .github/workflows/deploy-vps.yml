@@ -1,13 +1,6 @@
 name: Deploy VPS
 
 on:
-  workflow_run:
-    workflows:
-      - CI
-    branches:
-      - master
-    types:
-      - completed
   workflow_dispatch:
 
 permissions:
@@ -21,7 +14,6 @@ jobs:
   deploy:
     name: Sync Airflow/dbt to VPS
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
