@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from datetime import date
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 from ztm_frontend.db import fetch_all, fetch_one
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 STOP_ROWS_PER_COURSE = 36
 STOP_PICKER_LIMIT = 300
@@ -54,7 +53,7 @@ MIN_HOUR_SAMPLE_SIZE = 3
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
     """Read the serving artifact metadata row."""
-    return (
+    metadata = (
         fetch_one(
             db_path,
             """
@@ -71,6 +70,42 @@ def get_export_metadata(db_path: Path) -> dict[str, Any]:
         )
         or {}
     )
+    sidecar_metadata = _export_metadata_sidecar(db_path)
+    if sidecar_metadata:
+        metadata["last_export_at"] = sidecar_metadata.get("last_export_at") or sidecar_metadata.get("exported_at")
+        metadata["poller_status"] = _poller_status_metadata(sidecar_metadata.get("poller_status"))
+    return metadata
+
+
+def _export_metadata_sidecar(db_path: Path) -> dict[str, Any]:
+    metadata_path = Path(f"{db_path}.meta.json")
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _poller_status_metadata(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"status": "unknown", "vehicle_types": {}}
+    status = (
+        value.get("status")
+        if value.get("status") in {"ok", "starting", "degraded", "down", "stale", "unknown"}
+        else "unknown"
+    )
+    vehicle_types = value.get("vehicle_types") if isinstance(value.get("vehicle_types"), dict) else {}
+    return {
+        "status": status,
+        "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,
+        "last_success_at": value.get("last_success_at") if isinstance(value.get("last_success_at"), str) else None,
+        "stale_after_seconds": value.get("stale_after_seconds")
+        if isinstance(value.get("stale_after_seconds"), int)
+        else None,
+        "vehicle_types": vehicle_types,
+    }
 
 
 def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:

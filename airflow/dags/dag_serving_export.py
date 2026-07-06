@@ -6,7 +6,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +23,7 @@ from ztm_airflow_common import (
     SERVING_EXPORT_FILENAME,
     SERVING_EXPORT_GCS_PREFIX,
     SERVING_EXPORT_MAX_BYTES,
+    airflow_failure_alert,
 )
 
 if TYPE_CHECKING:
@@ -48,6 +49,8 @@ if TYPE_CHECKING:
 EXPORT_VERSION = "alpha-1"
 EXPORT_SOURCE_MODE = "current_pipeline_provisional"
 EXPORT_ID_PATTERN = re.compile(r"^[0-9A-Za-z_.=-]+$")
+POLLER_HEARTBEAT_GCS_PATH = "health/poller/latest.json"
+POLLER_HEARTBEAT_STALE_SECONDS = 180
 DUCKDB_MEMORY_LIMIT = "1GB"
 DUCKDB_TEMP_DIRECTORY_LIMIT = "2GB"
 DUCKDB_THREADS = 2
@@ -217,13 +220,14 @@ def _run_serving_export(config: ExportConfig) -> ExportResult:
     bigquery_client = bigquery.Client(project=GCP_PROJECT)
     storage_client = storage.Client(project=GCP_PROJECT)
     exported_at = datetime.now(UTC)
+    poller_status = _poller_status(storage_client, exported_at, config.gcs_bucket)
     source_stats = _source_table_stats(bigquery_client)
     _validate_source_stats(source_stats, config.max_source_bytes)
 
     with tempfile.TemporaryDirectory(prefix="ztm-serving-export-") as temp_dir:
         local_export_dir = Path(temp_dir)
         parquet_paths_by_table = _extract_and_download_marts(bigquery_client, storage_client, config, local_export_dir)
-        result = _publish_duckdb(config, parquet_paths_by_table, source_stats, exported_at)
+        result = _publish_duckdb(config, parquet_paths_by_table, source_stats, exported_at, poller_status)
 
     if config.cleanup_gcs_staging:
         _cleanup_gcs_staging(storage_client, config)
@@ -394,6 +398,7 @@ def _publish_duckdb(
     parquet_paths_by_table: dict[str, list[Path]],
     source_stats: Sequence[TableStats],
     exported_at: datetime,
+    poller_status: dict[str, object] | None = None,
 ) -> ExportResult:
     duckdb_module = _duckdb_module()
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -422,7 +427,7 @@ def _publish_duckdb(
 
         _update_duckdb_file_size(duckdb_module, temp_path, duckdb_size_bytes)
         duckdb_size_bytes = temp_path.stat().st_size
-        metadata = _export_metadata(config, source_stats, exported_at, duckdb_size_bytes)
+        metadata = _export_metadata(config, source_stats, exported_at, duckdb_size_bytes, poller_status)
         _validate_duckdb_export(duckdb_module, temp_path, source_stats)
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -873,12 +878,14 @@ def _export_metadata(
     source_stats: Sequence[TableStats],
     exported_at: datetime,
     duckdb_size_bytes: int,
+    poller_status: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "export_id": config.export_id,
         "export_version": EXPORT_VERSION,
         "source_mode": EXPORT_SOURCE_MODE,
         "exported_at": exported_at.isoformat(),
+        "last_export_at": exported_at.isoformat(),
         "source_project": GCP_PROJECT,
         "source_dataset": BIGQUERY_MARTS_DATASET,
         "duckdb_path": str(config.output_dir / config.output_filename),
@@ -886,8 +893,100 @@ def _export_metadata(
         "source_size_bytes": sum(stat.size_bytes for stat in source_stats),
         "source_row_count": sum(stat.row_count for stat in source_stats),
         "exported_table_count": len(EXPORTED_TABLES),
+        "poller_status": poller_status or _unknown_poller_status("not_collected"),
         "tables": [asdict(stat) for stat in source_stats],
     }
+
+
+def _poller_status(storage_client: storage.Client, now: datetime, bucket_name: str) -> dict[str, object]:
+    path = os.getenv("POLLER_HEARTBEAT_GCS_PATH", POLLER_HEARTBEAT_GCS_PATH).strip("/")
+    try:
+        payload = json.loads(storage_client.bucket(bucket_name).blob(path).download_as_bytes().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_poller_status(type(exc).__name__)
+
+    if not isinstance(payload, dict):
+        return _unknown_poller_status("invalid_payload")
+
+    updated_at = _string_or_none(payload.get("updated_at"))
+    heartbeat_time = _parse_utc_datetime(updated_at)
+    if heartbeat_time is None:
+        return _unknown_poller_status("invalid_updated_at")
+
+    status = _safe_status(payload.get("status"))
+    if now.astimezone(UTC) - heartbeat_time > timedelta(seconds=POLLER_HEARTBEAT_STALE_SECONDS):
+        status = "stale"
+
+    vehicle_types = _poller_vehicle_statuses(payload.get("vehicle_types"))
+    return {
+        "status": status,
+        "updated_at": updated_at,
+        "last_success_at": _latest_vehicle_success_at(vehicle_types),
+        "stale_after_seconds": POLLER_HEARTBEAT_STALE_SECONDS,
+        "vehicle_types": vehicle_types,
+    }
+
+
+def _unknown_poller_status(error_type: str) -> dict[str, object]:
+    return {
+        "status": "unknown",
+        "updated_at": None,
+        "last_success_at": None,
+        "stale_after_seconds": POLLER_HEARTBEAT_STALE_SECONDS,
+        "vehicle_types": {},
+        "error_type": error_type,
+    }
+
+
+def _poller_vehicle_statuses(raw_vehicle_types: object) -> dict[str, dict[str, object]]:
+    if not isinstance(raw_vehicle_types, dict):
+        return {}
+
+    statuses: dict[str, dict[str, object]] = {}
+    for mode in ("bus", "tram"):
+        raw_status = raw_vehicle_types.get(mode)
+        if not isinstance(raw_status, dict):
+            continue
+        statuses[mode] = {
+            "last_success_at": _string_or_none(raw_status.get("last_success_at")),
+            "last_accepted_rows": _int_or_zero(raw_status.get("last_accepted_rows")),
+            "consecutive_failures": _int_or_zero(raw_status.get("consecutive_failures")),
+            "last_error_type": _string_or_none(raw_status.get("last_error_type")),
+        }
+    return statuses
+
+
+def _latest_vehicle_success_at(vehicle_types: dict[str, dict[str, object]]) -> str | None:
+    success_times = [
+        success_at for status in vehicle_types.values() if isinstance(success_at := status.get("last_success_at"), str)
+    ]
+    return max(success_times) if success_times else None
+
+
+def _safe_status(value: object) -> str:
+    if value in {"ok", "starting", "degraded", "down"}:
+        return str(value)
+    return "unknown"
+
+
+def _parse_utc_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _string_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _int_or_zero(value: object) -> int:
+    return value if isinstance(value, int) else 0
 
 
 def _write_metadata_file(path: Path, metadata: dict[str, object]) -> None:
@@ -928,10 +1027,11 @@ with DAG(
     schedule=None,
     catchup=False,
     max_active_runs=1,
+    on_failure_callback=airflow_failure_alert,
     tags=["ztm", "serving", "manual"],
 ) as dag:
 
-    @task
+    @task(retries=0, on_failure_callback=airflow_failure_alert)
     def export_serving_duckdb() -> dict[str, object]:
         """Airflow task entrypoint for the manual alpha export."""
         result = _run_serving_export(_export_config(get_current_context()))

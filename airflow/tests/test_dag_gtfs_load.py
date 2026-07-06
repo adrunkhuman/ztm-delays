@@ -259,6 +259,8 @@ def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables
 def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     dag = _load_dag_module()
 
+    assert dag.dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
+    assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
     assert dag.dbt_run_gtfs_staging.task_id == "dbt_run_gtfs_staging"
     assert dag.dbt_test_gtfs_staging.task_id == "dbt_test_gtfs_staging"
     assert dag.dbt_run_gtfs_dimensions.task_id == "dbt_run_gtfs_dimensions"
@@ -300,6 +302,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert dag.dbt_run_gtfs_dimensions in dag.dbt_test_gtfs_staging.downstream
     assert dag.dbt_test_gtfs_dimensions in dag.dbt_run_gtfs_dimensions.downstream
     assert dag.watcher in dag.dbt_test_gtfs_dimensions.downstream
+    assert dag.fail_on_any_task_failure.kwargs["retries"] == 0
 
 
 def _assert_dbt_command(command: str, dbt_subcommand: str, selector: str) -> None:
@@ -437,8 +440,8 @@ class FakeBashOperator:
 
 
 class FakeDAG:
-    def __init__(self, **_kwargs: object) -> None:
-        return None
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
 
     def __enter__(self) -> FakeDAG:
         return self

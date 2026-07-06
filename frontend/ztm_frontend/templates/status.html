@@ -16,6 +16,25 @@
         </div>
       </header>
 
+      {% set poller = metadata.get("poller_status", {}) %}
+      <section class="status-panel">
+        <div class="status-panel-head">
+          <div>
+            <div class="tag">POLLER</div>
+            <div class="mono muted">last export {{ metadata.get("last_export_at") or metadata.get("exported_at") or "unknown" }}</div>
+          </div>
+          <div class="status-label {{ 'good' if poller.get('status') == 'ok' else 'usable' if poller.get('status') in ['starting', 'degraded'] else 'patchy' if poller.get('status') == 'stale' else 'muted' }}">{{ poller.get("status", "unknown") }}</div>
+        </div>
+        <div class="status-mini-grid">
+          <div><span class="label">heartbeat</span><b class="mono">{{ poller.get("updated_at") or "unknown" }}</b></div>
+          <div><span class="label">last success</span><b class="mono">{{ poller.get("last_success_at") or "unknown" }}</b></div>
+          {% for mode in ["bus", "tram"] %}
+            {% set vehicle = poller.get("vehicle_types", {}).get(mode, {}) %}
+            <div><span class="label">{{ mode }} failures</span><b class="mono {% if vehicle.get('consecutive_failures') %}late-text{% else %}muted{% endif %}">{{ vehicle.get("consecutive_failures", "n/a") }}</b></div>
+          {% endfor %}
+        </div>
+      </section>
+
       <section class="status-panels">
         {% for mode in ["bus", "tram"] %}
           {% set row = status_summary.get(mode) %}
