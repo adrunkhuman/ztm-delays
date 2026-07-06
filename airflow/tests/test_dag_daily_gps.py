@@ -27,6 +27,16 @@ def test_available_gps_part_uris_lists_existing_bus_and_tram_parts(monkeypatch: 
     ]
 
 
+def test_gps_prefix_uses_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RAW_GPS_PREFIX", "dev/raw/gps")
+    dag = _load_dag_module()
+
+    assert dag._gps_date_prefixes("2026-06-25") == [
+        "dev/raw/gps/vehicle_type=bus/date=2026-06-25/",
+        "dev/raw/gps/vehicle_type=tram/date=2026-06-25/",
+    ]
+
+
 def test_load_raw_gps_pings_returns_when_no_parts_exist(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
     client = FakeBigQueryClient()
@@ -476,6 +486,7 @@ class FakeBigQueryClient:
 def _load_dag_module() -> types.ModuleType:
     _install_airflow_stubs()
     _install_google_stubs()
+    sys.modules.pop("ztm_airflow_common", None)
 
     dag_dir = Path(__file__).parents[1] / "dags"
     if str(dag_dir) not in sys.path:

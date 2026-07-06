@@ -11,7 +11,7 @@ The warehouse is split by BigQuery dataset, not by table prefix alone:
 | Intermediate | `ztm_int` | Reusable reconstruction models at GPS/trip/arrival grains. |
 | Marts | `ztm_marts` | Frontend/export-facing dimensions, facts, aggregates, and status marts. |
 
-dbt uses `generate_schema_name` to route model layers to exact dataset names. Raw sources use `DBT_BIGQUERY_RAW_DATASET`, defaulting to `ztm_raw`.
+dbt uses `generate_schema_name` to route model layers to exact dataset names. Raw sources use `BIGQUERY_RAW_DATASET`, defaulting to `ztm_raw`.
 
 ## Naming
 

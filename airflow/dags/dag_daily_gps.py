@@ -27,6 +27,7 @@ from ztm_airflow_common import (
     GCS_BUCKET,
     GPS_MODELS_DATE_ASSET,
     RAW_GPS_DATE_ASSET,
+    RAW_GPS_PREFIX,
     airflow_failure_alert,
     dbt_command,
     dbt_vars,
@@ -37,7 +38,6 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-GCS_GPS_PREFIX = "raw/gps"
 VEHICLE_TYPES = ("bus", "tram")
 GPS_RAW_LOAD_CRON = "20 * * * *"
 GPS_WAREHOUSE_CRON = "0 4 * * *"
@@ -101,7 +101,7 @@ PERIOD_AGGREGATE_DBT_VARS = dbt_vars(
 
 
 def _gps_date_prefixes(processing_date: str) -> list[str]:
-    return [f"{GCS_GPS_PREFIX}/vehicle_type={vehicle_type}/date={processing_date}/" for vehicle_type in VEHICLE_TYPES]
+    return [f"{RAW_GPS_PREFIX}/vehicle_type={vehicle_type}/date={processing_date}/" for vehicle_type in VEHICLE_TYPES]
 
 
 def _available_gps_part_uris(processing_date: str) -> list[str]:

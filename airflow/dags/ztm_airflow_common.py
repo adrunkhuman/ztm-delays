@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -12,21 +13,29 @@ from airflow.sdk import Asset
 
 LOGGER = logging.getLogger(__name__)
 
-GCP_PROJECT = "ztm-data"
-BIGQUERY_RAW_DATASET = "ztm_raw"
-BIGQUERY_MARTS_DATASET = "ztm_marts"
-BIGQUERY_LOCATION = "europe-north1"
-GCS_BUCKET = "ztm-analytics-bucket"
-DBT_PROJECT_DIR = "/opt/airflow/dbt"
-RAW_GTFS_PREFIX = "raw/gtfs"
+
+def _env(name: str, default: str) -> str:
+    return os.getenv(name, default).strip() or default
+
+
+GCP_PROJECT = _env("GCP_PROJECT", "ztm-data")
+BIGQUERY_RAW_DATASET = _env("BIGQUERY_RAW_DATASET", "ztm_raw")
+BIGQUERY_STG_DATASET = _env("BIGQUERY_STG_DATASET", "ztm_stg")
+BIGQUERY_INT_DATASET = _env("BIGQUERY_INT_DATASET", "ztm_int")
+BIGQUERY_MARTS_DATASET = _env("BIGQUERY_MARTS_DATASET", "ztm_marts")
+BIGQUERY_LOCATION = _env("BIGQUERY_LOCATION", "europe-north1")
+GCS_BUCKET = _env("GCS_BUCKET", "ztm-analytics-bucket")
+DBT_PROJECT_DIR = _env("DBT_PROJECT_DIR", "/opt/airflow/dbt")
+RAW_GPS_PREFIX = _env("RAW_GPS_PREFIX", "raw/gps")
+RAW_GTFS_PREFIX = _env("RAW_GTFS_PREFIX", "raw/gtfs")
 AIRFLOW_TRANSIENT_RETRIES = 2
 AIRFLOW_TRANSIENT_RETRY_DELAY = timedelta(minutes=5)
 AIRFLOW_FAILURE_WEBHOOK_TIMEOUT_SECONDS = 10.0
 
-SERVING_EXPORT_DIR = "/opt/airflow/serving"
-SERVING_EXPORT_GCS_PREFIX = "serving/duckdb/staging"
-SERVING_EXPORT_FILENAME = "ztm.duckdb"
-SERVING_EXPORT_MAX_BYTES = 20 * 1024 * 1024 * 1024
+SERVING_EXPORT_DIR = _env("SERVING_EXPORT_DIR", "/opt/airflow/serving")
+SERVING_EXPORT_GCS_PREFIX = _env("SERVING_EXPORT_GCS_PREFIX", "serving/duckdb/staging")
+SERVING_EXPORT_FILENAME = _env("SERVING_EXPORT_FILENAME", "ztm.duckdb")
+SERVING_EXPORT_MAX_BYTES = _env("SERVING_EXPORT_MAX_BYTES", str(20 * 1024 * 1024 * 1024))
 
 GTFS_SNAPSHOT_ASSET = Asset("x-ztm://gtfs/snapshot")
 RAW_GPS_DATE_ASSET = Asset("x-ztm://gps/raw-date")
@@ -113,4 +122,4 @@ def dbt_command(subcommand: str, selector: str, dbt_vars: str, extra_args: str =
     args = f" {extra_args}" if extra_args else ""
     if subcommand == "test":
         args += " --exclude test_type:unit"
-    return f"cd {DBT_PROJECT_DIR} && dbt {subcommand} --select {selector}{args} --vars '{dbt_vars}'"
+    return f"cd {shlex.quote(DBT_PROJECT_DIR)} && dbt {subcommand} --select {selector}{args} --vars '{dbt_vars}'"

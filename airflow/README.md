@@ -4,12 +4,28 @@ DAG files in this directory are mounted into the Airflow container. DAG IDs are 
 
 ## Runtime Contract
 
-- `dbt/` is mounted at `/opt/airflow/dbt`.
+Runtime env defaults match the current VPS:
+
+| Env var | Default |
+| --- | --- |
+| `GCP_PROJECT` | `ztm-data` |
+| `BIGQUERY_RAW_DATASET` | `ztm_raw` |
+| `BIGQUERY_STG_DATASET` | `ztm_stg` |
+| `BIGQUERY_INT_DATASET` | `ztm_int` |
+| `BIGQUERY_MARTS_DATASET` | `ztm_marts` |
+| `BIGQUERY_LOCATION` | `europe-north1` |
+| `GCS_BUCKET` | `ztm-analytics-bucket` |
+| `DBT_PROJECT_DIR` | `/opt/airflow/dbt` |
+| `RAW_GPS_PREFIX` | `raw/gps` |
+| `RAW_GTFS_PREFIX` | `raw/gtfs` |
+
+- Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
+- `dbt/` is mounted at `DBT_PROJECT_DIR`.
 - `/opt/airflow/serving` is writable by Airflow when serving exports are enabled.
 - The frontend reads the same serving host directory as DuckDB plus `.meta.json`; it does not read BigQuery or GCS.
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
 - The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, and `duckdb`.
-- The service account can read/write the configured GCS bucket and load/query `ztm_raw`, `ztm_stg`, `ztm_int`, and `ztm_marts`.
+- The service account can read/write the configured GCS bucket and load/query the configured BigQuery datasets.
 
 ## DAG Boundaries
 
@@ -37,9 +53,12 @@ Default settings:
 SERVING_EXPORT_DIR=/opt/airflow/serving
 SERVING_EXPORT_FILENAME=ztm.duckdb
 SERVING_EXPORT_GCS_PREFIX=serving/duckdb/staging
+SERVING_EXPORT_MAX_BYTES=21474836480
 SERVING_EXPORT_MAX_SOURCE_BYTES=21474836480
 SERVING_EXPORT_MAX_DUCKDB_BYTES=21474836480
 ```
+
+`SERVING_EXPORT_MAX_SOURCE_BYTES` and `SERVING_EXPORT_MAX_DUCKDB_BYTES` default to `SERVING_EXPORT_MAX_BYTES`.
 
 Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`, `max_source_bytes`, `max_duckdb_bytes`, and `cleanup_gcs_staging`.
 
