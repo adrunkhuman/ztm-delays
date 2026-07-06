@@ -76,7 +76,7 @@ The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS
 
 ## Deployment Sync
 
-`Deploy VPS` runs after `CI` succeeds on `master`, or by manual dispatch.
+The `CI` workflow deploys after Poller, Airflow, and dbt jobs succeed on `master`. `Deploy VPS` remains available for manual dispatch.
 
 Deploy steps:
 
