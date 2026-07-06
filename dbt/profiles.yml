@@ -4,9 +4,9 @@ ztm_pipeline:
     dev:
       type: bigquery
       method: service-account
-      project: "{{ env_var('DBT_BIGQUERY_PROJECT', 'ztm-data') }}"
-      dataset: "{{ env_var('DBT_BIGQUERY_DATASET', 'ztm_stg') }}"
-      location: "{{ env_var('DBT_BIGQUERY_LOCATION', 'europe-north1') }}"
+      project: "{{ env_var('GCP_PROJECT', 'ztm-data') }}"
+      dataset: "{{ env_var('BIGQUERY_STG_DATASET', 'ztm_stg') }}"
+      location: "{{ env_var('BIGQUERY_LOCATION', 'europe-north1') }}"
       keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS', '/opt/airflow/gcp-key.json') }}"
       threads: 4
       job_execution_timeout_seconds: 300

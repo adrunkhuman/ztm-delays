@@ -58,6 +58,16 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.cleanup_gcs_staging is False
 
 
+def test_export_config_uses_shared_max_bytes_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVING_EXPORT_MAX_BYTES", "777")
+    dag = _load_dag_module()
+
+    config = dag._export_config({"dag_run": FakeDagRun({})})
+
+    assert config.max_source_bytes == 777
+    assert config.max_duckdb_bytes == 777
+
+
 def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
     dag = _load_dag_module()
 
@@ -602,6 +612,7 @@ def test_dag_is_manual_and_exposes_single_export_task() -> None:
 def _load_dag_module() -> types.ModuleType:
     _install_airflow_stubs()
     _install_google_stubs()
+    sys.modules.pop("ztm_airflow_common", None)
 
     dag_dir = Path(__file__).parents[1] / "dags"
     if str(dag_dir) not in sys.path:

@@ -2,8 +2,8 @@ version: 2
 
 sources:
   - name: raw
-    database: "{{ env_var('DBT_BIGQUERY_PROJECT', 'ztm-data') }}"
-    schema: "{{ env_var('DBT_BIGQUERY_RAW_DATASET', 'ztm_raw') }}"
+    database: "{{ env_var('GCP_PROJECT', 'ztm-data') }}"
+    schema: "{{ env_var('BIGQUERY_RAW_DATASET', 'ztm_raw') }}"
     tables:
       - name: raw_gps_pings
         description: Raw GPS pings loaded from poller Parquet files.

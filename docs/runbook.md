@@ -17,9 +17,9 @@ Rebuild order:
 6. Build `_current` lookup tables only for the selected serving snapshot.
 7. Reload GPS Parquet files into `ztm_raw.raw_gps_pings` with deterministic per-URI load job IDs.
 8. Build dbt models by processing date and governing GTFS snapshot.
-9. Validate backfilled facts before retiring `ztm_bq`.
+9. Validate backfilled facts, completeness, coverage, and serving export inputs before exposing rebuilt data.
 
-Do not drop `ztm_bq` before the v2 datasets are validated.
+The old `ztm_bq` dataset has been removed; recovery now targets `ztm_raw`, `ztm_stg`, `ztm_int`, and `ztm_marts`.
 
 ## Per-Date Rebuild
 
@@ -178,4 +178,4 @@ The stable DuckDB file and sidecar JSON are not swapped transactionally as one u
 - One malformed GPS coordinate should be filtered at staging and must not fail stop-arrival reconstruction.
 - Large ad-hoc BigQuery work should be dry-run and bounded by `maximum_bytes_billed`.
 - Default Airflow dbt tests must stay cheap enough for normal cadence; full-history schedule/version tests are manual audit work.
-- Keep old `ztm_bq` objects until v2 validation passes.
+- The old `ztm_bq` dataset is gone; rebuild and recovery work should target the v2 datasets.

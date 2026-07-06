@@ -7,6 +7,85 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+RUNTIME_ENV_VARS = (
+    "GCP_PROJECT",
+    "BIGQUERY_RAW_DATASET",
+    "BIGQUERY_STG_DATASET",
+    "BIGQUERY_INT_DATASET",
+    "BIGQUERY_MARTS_DATASET",
+    "BIGQUERY_LOCATION",
+    "GCS_BUCKET",
+    "DBT_PROJECT_DIR",
+    "RAW_GPS_PREFIX",
+    "RAW_GTFS_PREFIX",
+    "SERVING_EXPORT_DIR",
+    "SERVING_EXPORT_GCS_PREFIX",
+    "SERVING_EXPORT_FILENAME",
+    "SERVING_EXPORT_MAX_BYTES",
+)
+
+
+def test_runtime_config_defaults(monkeypatch: Any) -> None:
+    for name in RUNTIME_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    common = _load_common_module()
+    expected_max_bytes = str(20 * 1024 * 1024 * 1024)
+
+    assert common.GCP_PROJECT == "ztm-data"
+    assert common.BIGQUERY_RAW_DATASET == "ztm_raw"
+    assert common.BIGQUERY_STG_DATASET == "ztm_stg"
+    assert common.BIGQUERY_INT_DATASET == "ztm_int"
+    assert common.BIGQUERY_MARTS_DATASET == "ztm_marts"
+    assert common.BIGQUERY_LOCATION == "europe-north1"
+    assert common.GCS_BUCKET == "ztm-analytics-bucket"
+    assert common.DBT_PROJECT_DIR == "/opt/airflow/dbt"
+    assert common.RAW_GPS_PREFIX == "raw/gps"
+    assert common.RAW_GTFS_PREFIX == "raw/gtfs"
+    assert common.SERVING_EXPORT_DIR == "/opt/airflow/serving"
+    assert common.SERVING_EXPORT_GCS_PREFIX == "serving/duckdb/staging"
+    assert common.SERVING_EXPORT_FILENAME == "ztm.duckdb"
+    assert expected_max_bytes == common.SERVING_EXPORT_MAX_BYTES
+
+
+def test_runtime_config_env_overrides(monkeypatch: Any) -> None:
+    monkeypatch.setenv("GCP_PROJECT", "other-project")
+    monkeypatch.setenv("BIGQUERY_RAW_DATASET", "raw_dev")
+    monkeypatch.setenv("BIGQUERY_STG_DATASET", "stg_dev")
+    monkeypatch.setenv("BIGQUERY_INT_DATASET", "int_dev")
+    monkeypatch.setenv("BIGQUERY_MARTS_DATASET", "marts_dev")
+    monkeypatch.setenv("BIGQUERY_LOCATION", "europe-west1")
+    monkeypatch.setenv("GCS_BUCKET", "other-bucket")
+    monkeypatch.setenv("DBT_PROJECT_DIR", "/srv/dbt project")
+    monkeypatch.setenv("RAW_GPS_PREFIX", "dev/raw/gps")
+    monkeypatch.setenv("RAW_GTFS_PREFIX", "dev/raw/gtfs")
+    monkeypatch.setenv("SERVING_EXPORT_DIR", "/srv/serving")
+    monkeypatch.setenv("SERVING_EXPORT_GCS_PREFIX", "dev/serving")
+    monkeypatch.setenv("SERVING_EXPORT_FILENAME", "dev.duckdb")
+    monkeypatch.setenv("SERVING_EXPORT_MAX_BYTES", "12345")
+
+    common = _load_common_module()
+
+    assert common.GCP_PROJECT == "other-project"
+    assert common.BIGQUERY_RAW_DATASET == "raw_dev"
+    assert common.BIGQUERY_STG_DATASET == "stg_dev"
+    assert common.BIGQUERY_INT_DATASET == "int_dev"
+    assert common.BIGQUERY_MARTS_DATASET == "marts_dev"
+    assert common.BIGQUERY_LOCATION == "europe-west1"
+    assert common.GCS_BUCKET == "other-bucket"
+    assert common.DBT_PROJECT_DIR == "/srv/dbt project"
+    assert common.RAW_GPS_PREFIX == "dev/raw/gps"
+    assert common.RAW_GTFS_PREFIX == "dev/raw/gtfs"
+    assert common.SERVING_EXPORT_DIR == "/srv/serving"
+    assert common.SERVING_EXPORT_GCS_PREFIX == "dev/serving"
+    assert common.SERVING_EXPORT_FILENAME == "dev.duckdb"
+    assert common.SERVING_EXPORT_MAX_BYTES == "12345"
+    assert common.gtfs_gcs_uri("snapshot-id") == "gs://other-bucket/dev/raw/gtfs/snapshot-id.zip"
+    assert (
+        common.dbt_command("run", "model_name", "{}")
+        == "cd '/srv/dbt project' && dbt run --select model_name --vars '{}'"
+    )
+
 
 def test_airflow_failure_payload_uses_public_context_fields() -> None:
     common = _load_common_module()
