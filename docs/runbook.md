@@ -94,7 +94,7 @@ Required GitHub secrets:
 - `TS_OAUTH_SECRET`
 - `VPS_DEPLOY_SSH_KEY`
 
-Recommended GitHub secret:
+Required GitHub secret:
 
 - `VPS_DEPLOY_KNOWN_HOSTS`
 
