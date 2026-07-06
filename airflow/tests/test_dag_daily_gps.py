@@ -248,6 +248,20 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.dag.kwargs["schedule"].key_format == "%Y-%m-%d"
     assert dag.dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
     assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
+    expected_groups = {
+        "staging_group": ("staging", "Staging"),
+        "trip_group": ("trip_reconstruction", "Trip reconstruction"),
+        "current_facts_group": ("current_facts", "Current facts"),
+        "prior_facts_group": ("prior_facts", "Prior facts"),
+        "completeness_group": ("completeness_coverage", "Completeness and coverage"),
+        "aggregate_group": ("aggregate_marts", "Aggregate marts"),
+        "status_group": ("pipeline_status", "Pipeline status"),
+    }
+    for group_name, (group_id, display_name) in expected_groups.items():
+        group = getattr(dag, group_name)
+        assert group.kwargs["group_id"] == group_id
+        assert group.kwargs["group_display_name"] == display_name
+        assert group.kwargs["prefix_group_id"] is False
     assert dag.selected_gtfs_snapshot_id.kwargs == {}
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PROCESSING_DATE
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PRIOR_SERVICE_DATE
@@ -491,6 +505,7 @@ def _install_airflow_stubs() -> None:
     airflow_sdk_module.Metadata = FakeMetadata
     airflow_sdk_module.PartitionedAssetTimetable = FakePartitionedAssetTimetable
     airflow_sdk_module.StartOfDayMapper = FakeStartOfDayMapper
+    airflow_sdk_module.TaskGroup = FakeTaskGroup
     airflow_sdk_module.TriggerRule = types.SimpleNamespace(ONE_FAILED="one_failed")
     airflow_sdk_module.get_current_context = lambda: {"dag_run": FakeDagRun()}
     airflow_sdk_module.task = FakeTaskDecorator()
@@ -544,6 +559,17 @@ class FakeDAG:
         self.kwargs = kwargs
 
     def __enter__(self) -> FakeDAG:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
+class FakeTaskGroup:
+    def __init__(self, group_id: str | None, **kwargs: Any) -> None:
+        self.kwargs = {"group_id": group_id} | kwargs
+
+    def __enter__(self) -> FakeTaskGroup:
         return self
 
     def __exit__(self, *_args: object) -> None:
