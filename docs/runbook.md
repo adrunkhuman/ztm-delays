@@ -76,7 +76,7 @@ The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS
 
 ## Deployment Sync
 
-`Deploy VPS` runs on `master` pushes and manual dispatch.
+`Deploy VPS` runs after `CI` succeeds on `master`, or by manual dispatch.
 
 Deploy steps:
 
@@ -94,7 +94,7 @@ Required GitHub secrets:
 - `TS_OAUTH_SECRET`
 - `VPS_DEPLOY_SSH_KEY`
 
-Recommended GitHub secret:
+Required GitHub secret:
 
 - `VPS_DEPLOY_KNOWN_HOSTS`
 

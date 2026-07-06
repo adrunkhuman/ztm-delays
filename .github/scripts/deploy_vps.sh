@@ -23,7 +23,7 @@ if [[ -n "$tracked_changes" ]]; then
   exit 1
 fi
 
-git -C "$repo_dir" pull --ff-only origin "$branch"
+git -C "$repo_dir" pull --ff-only --quiet origin "$branch"
 
 airflow_container="$(sudo -n docker ps --format '{{.Names}}' | grep "^${airflow_container_prefix}-" | head -n1 || true)"
 if [[ -z "$airflow_container" ]]; then
@@ -31,7 +31,7 @@ if [[ -z "$airflow_container" ]]; then
   exit 1
 fi
 
-echo "Airflow container: $airflow_container"
+echo "Airflow container found"
 
 sudo -n docker exec -i "$airflow_container" python <<'PY'
 from pathlib import Path
@@ -46,5 +46,20 @@ for path in (
     compile(path.read_text(), str(path), "exec")
 PY
 
-sudo -n docker exec "$airflow_container" airflow dags list --output table
+expected_dags=(
+  dag_gtfs_poll
+  dag_gtfs_load
+  dag_gps_raw_load
+  dag_daily_gps
+  dag_serving_export
+)
+dag_list="$(sudo -n docker exec "$airflow_container" airflow dags list --output plain)"
+for dag_id in "${expected_dags[@]}"; do
+  if ! grep -q "^${dag_id}[[:space:]]" <<<"$dag_list"; then
+    echo "Missing Airflow DAG: $dag_id" >&2
+    exit 1
+  fi
+done
+echo "Airflow DAG smoke check passed"
+
 sudo -n docker exec "$airflow_container" dbt parse --project-dir /opt/airflow/dbt --profiles-dir /opt/airflow/dbt

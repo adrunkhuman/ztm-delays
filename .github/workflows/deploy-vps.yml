@@ -1,9 +1,13 @@
 name: Deploy VPS
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - CI
     branches:
       - master
+    types:
+      - completed
   workflow_dispatch:
 
 permissions:
@@ -17,6 +21,7 @@ jobs:
   deploy:
     name: Sync Airflow/dbt to VPS
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -36,13 +41,12 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
           install -d -m 700 ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          if [[ -n "$DEPLOY_KNOWN_HOSTS" ]]; then
-            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-            chmod 600 ~/.ssh/known_hosts
-          fi
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
       - name: Pull and smoke-check VPS repo
         env:
@@ -53,7 +57,7 @@ jobs:
           AIRFLOW_CONTAINER_PREFIX: ${{ vars.AIRFLOW_CONTAINER_PREFIX || 'l11t1z4fvjlunhohvau5w8gc' }}
         run: |
           set -euo pipefail
-          ssh_args=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+          ssh_args=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
           ssh "${ssh_args[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash -s -- '$DEPLOY_REPO_DIR' '$DEPLOY_BRANCH' '$AIRFLOW_CONTAINER_PREFIX'" \
             < .github/scripts/deploy_vps.sh
