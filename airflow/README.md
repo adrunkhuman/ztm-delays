@@ -1,32 +1,37 @@
 # Airflow DAGs
 
-DAGs in this directory are deployed to the Airflow host volume and run inside the Airflow container.
+DAG files in this directory are mounted into the Airflow container. DAG IDs are stable operational IDs; use `dag_display_name` for UI wording instead of renaming IDs and splitting history.
 
-Runtime contract:
+## Runtime Contract
 
 - `dbt/` is mounted at `/opt/airflow/dbt`.
-- Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, and `duckdb`.
-- Airflow image supports Airflow 3.2 APIs used by these DAGs: `Asset`, asset-event `Metadata`, and `CronPartitionTimetable`.
+- `/opt/airflow/serving` is writable by Airflow when serving exports are enabled.
+- The frontend reads the same serving host directory as DuckDB plus `.meta.json`; it does not read BigQuery or GCS.
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
-- Service account can list/read `gs://ztm-analytics-bucket/raw/gps/...` and load/query `ztm-data.ztm_raw`.
-- Service account can write `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/query/insert `ztm-data.ztm_raw.raw_gtfs_snapshots`.
-- Service account can read `gs://ztm-analytics-bucket/raw/gtfs/*.zip` and create/load/append GTFS raw tables in `ztm-data.ztm_raw`.
-- Service account can create/query/update dbt models in `ztm-data.ztm_stg`, `ztm-data.ztm_int`, and `ztm-data.ztm_marts`.
-- Service account can query `ztm-data.ztm_marts` table metadata/date ranges and extract the fixed frontend serving source-table allowlist to `gs://ztm-analytics-bucket/serving/duckdb/staging/...` for manual serving exports.
-- Service account can list/read GCS serving export staging objects, and can delete them when `cleanup_gcs_staging=true`.
-- `/opt/airflow/serving` or the configured `SERVING_EXPORT_DIR` is writable by the Airflow task and mounted to a stable VPS host path when the frontend will read the artifact.
+- The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, and `duckdb`.
+- The service account can read/write the configured GCS bucket and load/query `ztm_raw`, `ztm_stg`, `ztm_int`, and `ztm_marts`.
 
-The manual serving export DAG is:
+## DAG Boundaries
 
-```text
-dag_serving_export
-```
+| DAG ID | UI name | Trigger | Owns | Does not own |
+| --- | --- | --- | --- | --- |
+| `dag_gtfs_poll` | GTFS snapshot poll | Hourly cron | Download GTFS ZIP, hash it, store changed snapshots, emit `gtfs_snapshot`. | GTFS raw loading or dbt models. |
+| `dag_gtfs_load` | GTFS snapshot load | `gtfs_snapshot` asset | Load GTFS raw tables, run GTFS staging, rebuild dimensions and schedule-version models. | GPS processing or broad manual schedule audits. |
+| `dag_gps_raw_load` | GPS raw ingest | Hourly cron | Load available poller Parquet parts into raw BigQuery, emit `raw_gps_date`. | Completeness judgment or warehouse modeling. |
+| `dag_daily_gps` | GPS nightly warehouse | Nightly cron | Rebuild one GPS processing date, publish current/prior facts, run bounded marts/status, emit `gps_models_date`. | Hourly raw ingestion or full-history audit tests. |
+| `dag_serving_export` | Serving DuckDB export | Manual | Export the fixed frontend source allowlist, build DuckDB, write `.meta.json`, atomically publish the serving artifact. | Warehouse rebuilds or live poller streaming. |
 
-It has no schedule. Trigger it on demand after the marts are in the state you want to serve. The DAG exports the fixed frontend source-table allowlist to GCS Parquet, downloads those Parquet files into the Airflow worker temp directory, builds page-shaped DuckDB serving tables, validates expected tables and size guardrails, then atomically swaps the configured stable serving path.
+## Normal Runs
 
-DuckDB build resource profile is hard-coded for the current VPS: `memory_limit='1GB'`, `max_temp_directory_size='2GB'`, `threads=2`, and `preserve_insertion_order=false`. The source/download temp files use worker temp storage, while DuckDB spill files use `.duckdb-tmp-<export_id>` under `SERVING_EXPORT_DIR`. Keep enough free space on the serving mount for the final database, the temporary database, WAL sidecars, and up to the DuckDB temp-directory limit. `SERVING_EXPORT_MAX_DUCKDB_BYTES` is an output-size guardrail, not the DuckDB memory limit.
+- `dag_gtfs_poll` and `dag_gps_raw_load` are frequent ingestion DAGs.
+- `dag_gtfs_load` runs only when a changed GTFS snapshot is emitted.
+- `dag_daily_gps` runs once per night and accepts a manual `processing_date` for targeted recovery.
+- `dag_serving_export` is manual; use a fresh `export_id` for every run.
+- Default dbt tests stay bounded. Full-history schedule/version and broad aggregate audits are manual jobs.
 
-Default paths and limits:
+## Serving Export
+
+Default settings:
 
 ```text
 SERVING_EXPORT_DIR=/opt/airflow/serving
@@ -36,105 +41,38 @@ SERVING_EXPORT_MAX_SOURCE_BYTES=21474836480
 SERVING_EXPORT_MAX_DUCKDB_BYTES=21474836480
 ```
 
-Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`, `max_source_bytes`, `max_duckdb_bytes`, and `cleanup_gcs_staging`. Use a fresh `export_id` for every run because BigQuery extract job IDs are reserved permanently. Keep `output_dir` mounted to a VPS host path if another frontend container will read the resulting file.
+Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`, `max_source_bytes`, `max_duckdb_bytes`, and `cleanup_gcs_staging`.
 
-Local Windows/minimal-Python test environments need `tzdata` for `ZoneInfo("Europe/Warsaw")`; use `uv run --with pytest --with duckdb --with tzdata pytest airflow/tests` when running the Airflow test suite outside the Linux container.
+Use one shared host directory for Airflow and frontend serving mounts. Airflow needs write access; frontend should only need read access. On the current VPS the bind-mounted host directory should be writable by the Airflow container user:
 
-The GPS raw-load DAG is:
-
-```text
-dag_gps_raw_load
+```bash
+sudo install -d -o 50000 -g 0 -m 0775 /home/ubuntu/ztm-pipeline/serving
 ```
 
-It runs hourly, loads available poller Parquet files from GCS into `ztm_raw.raw_gps_pings`, and emits the partitioned Airflow asset `raw_gps_date`. The asset means “raw-load attempt for this Warsaw-local GPS date,” not “complete GPS day”; it can emit with `loaded_uri_count = 0`. Day health comes from completeness/status marts.
+Failed exports leave GCS staging files for inspection. Remove them manually when no longer needed:
 
-The GPS warehouse build DAG is:
-
-```text
-dag_daily_gps
+```bash
+gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=EXPORT_ID/
 ```
 
-The DAG ID is historical. It now runs on a nightly cron and rebuilds one Warsaw-local processing date per run.
+## Manual Recovery
 
-It runs at `04:00 Europe/Warsaw` by default via `GPS_WAREHOUSE_CRON`. The DAG still accepts a manual `processing_date` for recovery/backfill reruns. Hourly `raw_gps_date` asset events are retained as raw-load metadata, but no longer trigger the full warehouse graph.
+Trigger `dag_gtfs_load` manually only with explicit snapshot context:
 
-It verifies that at least one GTFS snapshot exists before the processing date, then runs `stg_gps__pings`, `int_ping_trip`, `int_gps_hourly_completeness`, `int_stop_arrivals`, `int_trip_summary`, `fct_trip`, `fct_stop_arrival`, `mart_day_completeness`, `agg_service_coverage`, aggregate marts, and `mart_pipeline_status`. Schedule matching resolves the governing snapshot per GTFS `service_date`: latest loaded snapshot whose Warsaw-local timestamp date is strictly before that service date. Facts publish both the current service date and the prior service date so after-midnight GPS can complete overnight trips without overwriting unrelated partitions. Aggregate/status marts currently rebuild the configured history window from the collected-history start date through the processing date.
-
-Expected input layout:
-
-```text
-gs://ztm-analytics-bucket/raw/gps/vehicle_type={bus|tram}/date={processing_date}/hour={00..23}/part-*.parquet
+```json
+{
+  "snapshot_id": "YYYY-MM-DDTHH:MM:SSZ_<12 hex>",
+  "gcs_path": "gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip",
+  "processing_date": "YYYY-MM-DD"
+}
 ```
 
-Raw-load schedule: `20 * * * *`.
+Trigger `dag_daily_gps` manually with one `processing_date`. Do not clear or backfill broad date ranges without a fresh byte estimate.
 
-The GTFS polling DAG is:
+## Local Tests
 
-```text
-dag_gtfs_poll
-```
+Local Windows/minimal-Python environments need `tzdata` for `ZoneInfo("Europe/Warsaw")`:
 
-It runs hourly, downloads `https://mkuran.pl/gtfs/warsaw.zip`, computes a SHA-256 hash, uploads changed snapshots to `gs://ztm-analytics-bucket/raw/gtfs/`, records metadata in `ztm_raw.raw_gtfs_snapshots`, and emits the Airflow asset `gtfs_snapshot` when the snapshot changed. Unchanged snapshots do not emit an asset event.
-
-The GTFS raw loader DAG is:
-
-```text
-dag_gtfs_load
-```
-
-It is scheduled by the `gtfs_snapshot` asset. It loads every GTFS snapshot event that triggered the run into raw GTFS BigQuery tables, appends `gtfs_snapshot_id` to each row, runs and tests GTFS staging models, then refreshes archive-safe dimensions, schedule-version models, and current-snapshot convenience lookups for the latest event in the run. The default dimension test task covers the cheap/default dimension tier, not full-history schedule/version audits.
-
-The default GTFS dimension test phase intentionally excludes `int_gtfs_trip_schedule` and `int_schedule_version`. Those full-history schedule/version tests are manual audit jobs until weekly/manual operations are mature.
-
-Manual recovery is still available by triggering it with explicit `snapshot_id`, `gcs_path`, and `processing_date` in `dag_run.conf`. Validation is strict: `snapshot_id` must match `YYYY-MM-DDTHH:MM:SSZ_<12 hex>`, `gcs_path` must equal `gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip`, and `processing_date` must be `YYYY-MM-DD`.
-
-Required ZIP members:
-
-```text
-trips.txt
-stop_times.txt
-stops.txt
-shapes.txt
-routes.txt
-calendar_dates.txt
-```
-
-dbt staging models run after raw loading:
-
-```text
-stg_gtfs__trips
-stg_gtfs__stop_times
-stg_gtfs__stops
-stg_gtfs__shapes
-stg_gtfs__routes
-stg_gtfs__calendar_dates
-```
-
-GTFS staging exposes all loaded snapshots and carries `gtfs_snapshot_id` as lineage. Schedule matching uses loaded `raw_gtfs_snapshots` history to choose the governing snapshot per `service_date`; the Airflow-provided snapshot ID is used for current convenience lookups and lineage-sensitive model runs, not as one global authority for all matched GPS rows.
-
-Archive-safe dimensions refreshed by `dag_gtfs_load` after each GTFS load:
-
-```text
-dim_line
-dim_stop_post
-dim_stop_group
-dim_date
-dim_schedule_date
-```
-
-Schedule-version models rebuilt from loaded GTFS snapshot history after each GTFS load:
-
-```text
-int_gtfs_trip_schedule
-int_schedule_version
-dim_schedule_version
-```
-
-Current-snapshot convenience lookups refreshed for the triggered `gtfs_snapshot_id`:
-
-```text
-dim_line_current
-dim_stop_post_current
-dim_stop_group_current
-dim_schedule_date_current
+```bash
+uv run --with pytest --with duckdb --with tzdata pytest airflow/tests
 ```

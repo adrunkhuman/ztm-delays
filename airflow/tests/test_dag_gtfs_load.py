@@ -259,6 +259,7 @@ def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables
 def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     dag = _load_dag_module()
 
+    assert dag.dag.kwargs["dag_display_name"] == "GTFS snapshot load"
     assert dag.dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
     assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
     assert dag.dbt_run_gtfs_staging.task_id == "dbt_run_gtfs_staging"

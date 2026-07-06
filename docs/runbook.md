@@ -76,6 +76,8 @@ The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS
 
 ## Airflow Cadence And Asset Graph
 
+DAG boundaries follow schedule, retry, and recovery semantics. TaskGroups may improve a DAG's graph view, but they do not replace separate DAGs with different triggers or recovery paths. The serving export is a publication step after marts exist, not part of ingestion/modeling.
+
 - `dag_gtfs_poll` produces `gtfs_snapshot` only when the GTFS ZIP hash changes.
 - `dag_gtfs_load` consumes `gtfs_snapshot` and loads/tests the exact emitted snapshot.
 - `dag_gps_raw_load` produces partitioned `raw_gps_date` events keyed by Warsaw-local GPS date. This records an hourly raw-load attempt, not a complete-day guarantee; completeness/status marts determine health.

@@ -232,6 +232,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     dag = _load_dag_module()
 
     assert isinstance(dag.raw_gps_dag.kwargs["schedule"], FakeCronPartitionTimetable)
+    assert dag.raw_gps_dag.kwargs["dag_display_name"] == "GPS raw ingest"
     assert dag.raw_gps_dag.kwargs["schedule"].cron == dag.GPS_RAW_LOAD_CRON
     assert dag.raw_gps_dag.kwargs["schedule"].timezone == "Europe/Warsaw"
     assert dag.raw_gps_dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
@@ -240,6 +241,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert "data_interval_start" not in dag.RAW_GPS_PROCESSING_DATE
     assert dag.load_raw_gps_pings.kwargs == {"outlets": [dag.RAW_GPS_DATE_ASSET]}
     assert isinstance(dag.dag.kwargs["schedule"], FakeCronPartitionTimetable)
+    assert dag.dag.kwargs["dag_display_name"] == "GPS nightly warehouse"
     assert dag.dag.kwargs["schedule"].cron == dag.GPS_WAREHOUSE_CRON
     assert dag.dag.kwargs["schedule"].timezone == "Europe/Warsaw"
     assert dag.dag.kwargs["schedule"].run_offset == -1

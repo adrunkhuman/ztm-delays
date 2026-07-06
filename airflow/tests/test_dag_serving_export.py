@@ -592,6 +592,7 @@ def test_publish_duckdb_cleans_temp_files_when_metadata_write_fails(
 def test_dag_is_manual_and_exposes_single_export_task() -> None:
     dag = _load_dag_module()
 
+    assert dag.dag.kwargs["dag_display_name"] == "Serving DuckDB export"
     assert dag.dag.kwargs["schedule"] is None
     assert dag.dag.kwargs["max_active_runs"] == 1
     assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert

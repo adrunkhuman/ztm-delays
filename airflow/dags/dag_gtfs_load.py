@@ -292,6 +292,7 @@ def _load_gtfs_snapshot_batch(snapshot_batch: dict[str, object]) -> None:
 
 with DAG(
     dag_id="dag_gtfs_load",
+    dag_display_name="GTFS snapshot load",
     description="Load GTFS snapshot asset ZIP, then rebuild GTFS staging and dimensions.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule=[GTFS_SNAPSHOT_ASSET],
