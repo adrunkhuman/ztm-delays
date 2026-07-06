@@ -74,6 +74,26 @@ Set `AIRFLOW_FAILURE_WEBHOOK_URL` to an HTTPS endpoint to receive structured tas
 
 The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS_PATH` or `health/poller/latest.json`, sanitizes it, and writes `poller_status` plus `last_export_at` into `ztm.duckdb.meta.json`. Heartbeats older than 180 seconds are exported as `stale`. Missing or malformed heartbeat data is exported as `unknown`, not as a serving-export failure.
 
+## Deployment Sync
+
+Merged `master` deploys by pulling the VPS repo. GitHub Actions joins the Tailnet, SSHes to `ubuntu@vps`, refuses tracked VPS worktree changes, runs `git pull --ff-only`, then smoke-checks Airflow DAG parsing and `dbt parse` inside the Airflow container. It does not rebuild containers or run dbt models.
+
+Required GitHub secrets:
+
+- `TS_OAUTH_CLIENT_ID`
+- `TS_OAUTH_SECRET`
+- `VPS_DEPLOY_SSH_KEY`
+
+Recommended GitHub secret:
+
+- `VPS_DEPLOY_KNOWN_HOSTS`
+
+Optional GitHub vars override defaults: `VPS_DEPLOY_HOST`, `VPS_DEPLOY_USER`, `VPS_REPO_DIR`, and `AIRFLOW_CONTAINER_PREFIX`.
+
+Keep SSH Tailscale-only. Do not open port 22 to GitHub-hosted runner IPs; those ranges are broad and change. Use a tagged ephemeral Tailscale node for the workflow and allow it to reach the VPS on TCP 22.
+
+Emergency hotfix path: SSH to the VPS, make the fix, and leave the tracked change visible. Automated deploys will fail until the hotfix is committed and pushed, or reverted intentionally.
+
 ## Airflow Cadence And Asset Graph
 
 DAG boundaries follow schedule, retry, and recovery semantics. TaskGroups may improve a DAG's graph view, but they do not replace separate DAGs with different triggers or recovery paths. The serving export is a publication step after marts exist, not part of ingestion/modeling.
