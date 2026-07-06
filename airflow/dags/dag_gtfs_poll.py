@@ -15,11 +15,13 @@ from airflow.sdk import DAG, task
 from google.api_core.exceptions import Conflict, NotFound, PreconditionFailed
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
+    AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
     BIGQUERY_LOCATION,
     BIGQUERY_RAW_DATASET,
     GCP_PROJECT,
     GCS_BUCKET,
     GTFS_SNAPSHOT_ASSET,
+    airflow_failure_alert,
     gtfs_gcs_path,
     gtfs_gcs_uri,
     gtfs_snapshot_id,
@@ -176,6 +178,8 @@ with DAG(
     schedule="0 * * * *",
     catchup=False,
     max_active_runs=1,
+    default_args=AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
+    on_failure_callback=airflow_failure_alert,
     tags=["ztm", "gtfs"],
 ) as dag:
 

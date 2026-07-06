@@ -234,6 +234,8 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert isinstance(dag.raw_gps_dag.kwargs["schedule"], FakeCronPartitionTimetable)
     assert dag.raw_gps_dag.kwargs["schedule"].cron == dag.GPS_RAW_LOAD_CRON
     assert dag.raw_gps_dag.kwargs["schedule"].timezone == "Europe/Warsaw"
+    assert dag.raw_gps_dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
+    assert dag.raw_gps_dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
     assert "dag_run.partition_key" in dag.RAW_GPS_PROCESSING_DATE
     assert "data_interval_start" not in dag.RAW_GPS_PROCESSING_DATE
     assert dag.load_raw_gps_pings.kwargs == {"outlets": [dag.RAW_GPS_DATE_ASSET]}
@@ -242,6 +244,8 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.dag.kwargs["schedule"].timezone == "Europe/Warsaw"
     assert dag.dag.kwargs["schedule"].run_offset == -1
     assert dag.dag.kwargs["schedule"].key_format == "%Y-%m-%d"
+    assert dag.dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
+    assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
     assert dag.selected_gtfs_snapshot_id.kwargs == {}
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PROCESSING_DATE
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PRIOR_SERVICE_DATE
@@ -287,6 +291,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.emit_gps_models_date_asset not in dag.log_bigquery_dbt_job_costs.downstream
     assert dag.log_bigquery_dbt_job_costs.kwargs == {"do_xcom_push": False}
     assert dag.watcher in dag.dbt_test_pipeline_status.downstream
+    assert dag.fail_on_any_task_failure.kwargs["retries"] == 0
 
 
 def test_dag_uses_bounded_mart_windows() -> None:

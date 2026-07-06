@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from dataclasses import dataclass
@@ -409,6 +410,124 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
         ]
 
 
+def test_export_metadata_includes_last_export_and_poller_status(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    exported_at = datetime(2026, 7, 6, 12, tzinfo=UTC)
+    metadata = dag._export_metadata(
+        dag.ExportConfig(
+            export_id="export-1",
+            output_dir=tmp_path,
+            output_filename="ztm.duckdb",
+            gcs_bucket="bucket",
+            gcs_prefix="prefix",
+            max_source_bytes=1000,
+            max_duckdb_bytes=1000,
+            cleanup_gcs_staging=False,
+        ),
+        [dag.TableStats(table_name="fct_trip", row_count=1, size_bytes=10)],
+        exported_at,
+        duckdb_size_bytes=100,
+        poller_status={"status": "healthy"},
+    )
+
+    assert metadata["last_export_at"] == exported_at.isoformat()
+    assert metadata["poller_status"] == {"status": "healthy"}
+
+
+def test_poller_status_sanitizes_private_heartbeat() -> None:
+    dag = _load_dag_module()
+    heartbeat = {
+        "updated_at": "2026-07-06T12:00:00+00:00",
+        "status": "ok",
+        "poller_hostname": "private-hostname",
+        "vehicle_types": {
+            "bus": {
+                "last_success_at": "2026-07-06T11:59:50+00:00",
+                "last_accepted_rows": 12,
+                "consecutive_failures": 0,
+                "last_error_type": None,
+                "private_extra": "secret",
+            },
+            "tram": {
+                "last_success_at": "2026-07-06T11:59:40+00:00",
+                "last_accepted_rows": 3,
+                "consecutive_failures": 1,
+                "last_error_type": "request_error",
+            },
+        },
+    }
+
+    status = dag._poller_status(
+        FakeStorageClient([FakeBlob("health/poller/latest.json", data=json.dumps(heartbeat).encode())]),
+        datetime(2026, 7, 6, 12, 1, tzinfo=UTC),
+        "ztm-analytics-bucket",
+    )
+
+    assert status == {
+        "status": "ok",
+        "updated_at": "2026-07-06T12:00:00+00:00",
+        "last_success_at": "2026-07-06T11:59:50+00:00",
+        "stale_after_seconds": 180,
+        "vehicle_types": {
+            "bus": {
+                "last_success_at": "2026-07-06T11:59:50+00:00",
+                "last_accepted_rows": 12,
+                "consecutive_failures": 0,
+                "last_error_type": None,
+            },
+            "tram": {
+                "last_success_at": "2026-07-06T11:59:40+00:00",
+                "last_accepted_rows": 3,
+                "consecutive_failures": 1,
+                "last_error_type": "request_error",
+            },
+        },
+    }
+
+
+def test_poller_status_marks_old_heartbeat_stale() -> None:
+    dag = _load_dag_module()
+    heartbeat = {"updated_at": "2026-07-06T12:00:00+00:00", "status": "ok", "vehicle_types": {}}
+
+    status = dag._poller_status(
+        FakeStorageClient([FakeBlob("health/poller/latest.json", data=json.dumps(heartbeat).encode())]),
+        datetime(2026, 7, 6, 12, 3, 1, tzinfo=UTC),
+        "ztm-analytics-bucket",
+    )
+
+    assert status["status"] == "stale"
+
+
+def test_poller_status_returns_unknown_when_heartbeat_missing() -> None:
+    dag = _load_dag_module()
+
+    status = dag._poller_status(FakeStorageClient([]), datetime(2026, 7, 6, 12, tzinfo=UTC), "ztm-analytics-bucket")
+
+    assert status["status"] == "unknown"
+    assert status["error_type"] == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not-json",
+        json.dumps(["bad"]).encode(),
+        json.dumps({"status": "ok"}).encode(),
+        json.dumps({"updated_at": "not-a-time", "status": "ok"}).encode(),
+    ],
+)
+def test_poller_status_returns_unknown_for_malformed_heartbeat(payload: bytes) -> None:
+    dag = _load_dag_module()
+
+    status = dag._poller_status(
+        FakeStorageClient([FakeBlob("health/poller/latest.json", data=payload)]),
+        datetime(2026, 7, 6, 12, tzinfo=UTC),
+        "ztm-analytics-bucket",
+    )
+
+    assert status["status"] == "unknown"
+
+
 def test_publish_duckdb_keeps_previous_file_when_validation_fails(tmp_path: Path) -> None:
     duckdb = pytest.importorskip("duckdb")
     dag = _load_dag_module()
@@ -475,6 +594,8 @@ def test_dag_is_manual_and_exposes_single_export_task() -> None:
 
     assert dag.dag.kwargs["schedule"] is None
     assert dag.dag.kwargs["max_active_runs"] == 1
+    assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
+    assert dag.export_serving_duckdb.kwargs == {"retries": 0, "on_failure_callback": dag.airflow_failure_alert}
 
 
 def _load_dag_module() -> types.ModuleType:
@@ -692,9 +813,12 @@ class FakeBucket:
         return [blob for blob in self.blobs if blob.name.startswith(prefix)]
 
     def blob(self, blob_name: str) -> FakeBlob:
-        if blob_name not in {blob.name for blob in self.blobs}:
+        matching_blob = next((blob for blob in self.blobs if blob.name == blob_name), None)
+        if matching_blob is None:
             raise RuntimeError(f"unexpected blob lookup: {blob_name}")
         self.blob_names.append(blob_name)
+        if matching_blob.data:
+            return matching_blob
         return FakeBlob(blob_name, deleted_blob_names=self.deleted_blob_names)
 
 
@@ -703,6 +827,7 @@ class FakeBlob:
     name: str
     fail_download: bool = False
     fail_delete: bool = False
+    data: bytes = b""
     deleted_blob_names: list[str] | None = None
 
     def download_to_filename(self, filename: str) -> None:
@@ -715,6 +840,9 @@ class FakeBlob:
             raise RuntimeError("stale listed blob was deleted")
         if self.deleted_blob_names is not None:
             self.deleted_blob_names.append(self.name)
+
+    def download_as_bytes(self) -> bytes:
+        return self.data
 
 
 class Conflict(Exception):

@@ -15,6 +15,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+airflow/uv.lock
 
 # dbt
 dbt/logs/
@@ -24,6 +25,7 @@ dbt/.user.yml
 
 # Local frontend serving data
 frontend/ztm/*.duckdb
+frontend/ztm/*.duckdb*.bak
 frontend/ztm/*.duckdb.wal
 frontend/ztm/*.duckdb.tmp
 frontend/ztm/*.meta.json

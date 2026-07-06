@@ -18,6 +18,7 @@ from airflow.sdk import (
 from google.api_core.exceptions import Conflict
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
+    AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
     BIGQUERY_LOCATION,
     BIGQUERY_MARTS_DATASET,
     BIGQUERY_RAW_DATASET,
@@ -25,6 +26,7 @@ from ztm_airflow_common import (
     GCS_BUCKET,
     GPS_MODELS_DATE_ASSET,
     RAW_GPS_DATE_ASSET,
+    airflow_failure_alert,
     dbt_command,
     dbt_vars,
 )
@@ -250,6 +252,8 @@ with DAG(
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     schedule=CronPartitionTimetable(GPS_RAW_LOAD_CRON, timezone="Europe/Warsaw"),
     catchup=False,
+    default_args=AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
+    on_failure_callback=airflow_failure_alert,
     tags=["ztm", "gps"],
 ) as raw_gps_dag:
 
@@ -277,6 +281,8 @@ with DAG(
     ),
     catchup=False,
     max_active_runs=1,
+    default_args=AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
+    on_failure_callback=airflow_failure_alert,
     tags=["ztm", "gps", "warehouse"],
 ) as dag:
 

@@ -66,6 +66,14 @@ uv run python measure_raw_gps_volume.py --start-date YYYY-MM-DD --end-date YYYY-
 
 The command defaults to `gs://ztm-analytics-bucket/raw/gps`; pass `--bucket` and `--prefix` for other environments. It does not query BigQuery. Use `--include-row-counts` only for a small bounded window when row counts are needed, because it downloads each matched Parquet object to read file metadata. Production durability uses periodic append-safe GCS flushes plus a bounded local JSON spool at `/var/lib/ztm-poller-spool`; compressed GCS volume is only a lower-bound sizing proxy. Revisit the default 100 MiB cap only with measured object/byte volume, expected outage duration, flush cadence, explicit disk budget, and crash-loss tolerance.
 
+## Recovery And Alerting
+
+Airflow orchestration DAGs use bounded transient retries by default: two retries with a five-minute delay. Failure watcher tasks keep `retries=0` so persistent upstream failures still make the DAG run fail loudly after retries are exhausted. Raw BigQuery load retries are safe because load job IDs are deterministic; dbt retries are only for transient execution failures and do not hide data-quality failures after the retry budget is spent. Manual serving export does not retry because its deterministic extract jobs are tied to one `export_id`; rerun it with a new `export_id` after fixing the failure.
+
+Set `AIRFLOW_FAILURE_WEBHOOK_URL` to an HTTPS endpoint to receive structured task/DAG failure callbacks. If it is unset, failures are still logged in Airflow. Do not clear failed historical DAG runs just to make the UI green; leave persistent data-quality failures as incident evidence until the underlying issue is understood. Clear or rerun only after fixing transient infrastructure issues, correcting configuration, or intentionally reprocessing a partition/snapshot.
+
+The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS_PATH` or `health/poller/latest.json`, sanitizes it, and writes `poller_status` plus `last_export_at` into `ztm.duckdb.meta.json`. Heartbeats older than 180 seconds are exported as `stale`. Missing or malformed heartbeat data is exported as `unknown`, not as a serving-export failure.
+
 ## Airflow Cadence And Asset Graph
 
 - `dag_gtfs_poll` produces `gtfs_snapshot` only when the GTFS ZIP hash changes.
