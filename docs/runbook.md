@@ -76,7 +76,17 @@ The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS
 
 ## Deployment Sync
 
-Merged `master` deploys by pulling the VPS repo. GitHub Actions joins the Tailnet, SSHes to `ubuntu@vps`, refuses tracked VPS worktree changes, runs `git pull --ff-only`, then smoke-checks Airflow DAG parsing and `dbt parse` inside the Airflow container. It does not rebuild containers or run dbt models.
+`Deploy VPS` runs on `master` pushes and manual dispatch.
+
+Deploy steps:
+
+- join the Tailnet as `tag:github-actions`;
+- SSH to `ubuntu@vps`;
+- fail on tracked VPS worktree changes;
+- run `git -C /home/ubuntu/ztm-pipeline pull --ff-only origin master`;
+- smoke-check Airflow DAG parsing, `airflow dags list`, and `dbt parse` inside the Airflow container.
+
+It does not rebuild containers or run dbt models.
 
 Required GitHub secrets:
 
@@ -90,9 +100,9 @@ Recommended GitHub secret:
 
 Optional GitHub vars override defaults: `VPS_DEPLOY_HOST`, `VPS_DEPLOY_USER`, `VPS_REPO_DIR`, and `AIRFLOW_CONTAINER_PREFIX`.
 
-Keep SSH Tailscale-only. Do not open port 22 to GitHub-hosted runner IPs; those ranges are broad and change. Use a tagged ephemeral Tailscale node for the workflow and allow it to reach the VPS on TCP 22.
+Keep SSH Tailscale-only. The workflow reaches the VPS through a tagged ephemeral Tailscale node.
 
-Emergency hotfix path: SSH to the VPS, make the fix, and leave the tracked change visible. Automated deploys will fail until the hotfix is committed and pushed, or reverted intentionally.
+Emergency hotfixes must be committed and pushed, or reverted intentionally, before automated deploys can resume.
 
 ## Airflow Cadence And Asset Graph
 
