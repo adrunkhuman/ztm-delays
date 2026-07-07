@@ -453,7 +453,7 @@ models:
         description: "Array of explainable quality flags for filtering and debug views. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. extreme_delay: absolute start or end delay > 3600 seconds. likely_wrong_trip_assignment: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, or non-monotonic progression."
 
   - name: fct_stop_arrival
-    description: Serving-layer stop-arrival detail fact. One row per detected scheduled stop arrival for an observed vehicle trip, partitioned by service_date, with archive-safe trip and stop labels baked from the governing GTFS snapshot. Strict analytics should default to trip_quality = 'complete'; partial rows are retained for exploration and broken rows for debugging.
+    description: Serving-layer stop-arrival detail fact. One row per detected scheduled stop arrival for an observed vehicle trip, partitioned by service_date, with archive-safe trip and stop labels baked from the governing GTFS snapshot. Strict analytics should default to trip_quality = 'complete'; partial rows are retained for exploration. Trips with non-monotonic stop progression keep diagnostics in fct_trip and intermediate models, but their stop arrivals are withheld from this serving fact.
     columns:
       - name: gtfs_snapshot_id
         description: Governing GTFS snapshot used for matching, schedule lineage, and archive-safe labels.
@@ -1639,6 +1639,13 @@ unit_tests:
             timestamp('2026-01-15 08:19:00+01') as segment_start_time,
             timestamp('2026-01-15 08:20:00+01') as segment_end_time,
             60 as segment_duration_seconds
+          union all
+          select
+            'snapshot-valid', '118', '2', 1904, 1, date '2026-01-15', date '2026-01-15', 'weekday',
+            'trip-non-monotonic', 'shape-2', 'svc', 0, '200101', 'Reverse 01', 5,
+            timestamp('2026-01-15 08:15:00+01'), timestamp('2026-01-15 08:15:20+01'),
+            timestamp('2026-01-15 08:09:00+01'), -360, 'segment_within_50m', 9.0, 4.0, 5.0,
+            timestamp('2026-01-15 08:08:30+01'), timestamp('2026-01-15 08:09:30+01'), 60
       - input: ref('fct_trip')
         format: sql
         rows: |
@@ -1685,12 +1692,22 @@ unit_tests:
             false as has_impossible_speed_jump,
             'complete' as trip_quality,
             array<string>[] as quality_flags
+          union all
+          select
+            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-non-monotonic', 1904,
+            '118', '118', 'bus', '2', 1, 0, 'svc', 'Reverse', 'shape-2', 'weekday', 'thursday', 'svc',
+            '118|0|thursday|2026-01-15', '200101', 'Reverse 01', '200105', 'Reverse 05',
+            timestamp('2026-01-15 08:00:00+01'), timestamp('2026-01-15 08:30:00+01'),
+            timestamp('2026-01-15 08:20:00+01'), timestamp('2026-01-15 08:09:00+01'),
+            1200, -1260, 10, 5, 0.5, 5, 1, 4, 120, 10.0, false, false, true, false,
+            'broken', ['non_monotonic_stop_progression', 'likely_wrong_trip_assignment']
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
           select '100101' as stop_id, 'Main 01' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
           union all select '100102', 'Main 02', 52.2, 21.2, 'snapshot-valid'
           union all select '100103', 'Main 02', 52.3, 21.3, 'snapshot-valid'
+          union all select '200101', 'Reverse 01', 52.4, 21.4, 'snapshot-valid'
           union all select '100101', 'Old Main', 52.0, 21.0, 'snapshot-old'
       - input: ref('dim_date')
         format: sql

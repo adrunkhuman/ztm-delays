@@ -65,9 +65,11 @@ trip_facts as (
         schedule_service_ids,
         schedule_version_id,
         trip_quality,
-        quality_flags
+        quality_flags,
+        has_non_monotonic_stop_progression
     from {{ ref('fct_trip') }}
     where service_date = date('{{ publish_service_date }}')
+      and not has_non_monotonic_stop_progression
 ),
 
 stops as (
