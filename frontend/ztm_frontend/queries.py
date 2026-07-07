@@ -632,10 +632,10 @@ def get_schedule(  # noqa: PLR0913
                     service_date,
                     trip_id,
                     vehicle_number,
-                    list(delay_seconds order by stop_sequence) as delay_profile
-                from fct_stop_arrival
+                    list(delay_seconds order by stop_sequence)
+                        filter (where observation_status = 'observed' and delay_seconds is not null) as delay_profile
+                from fct_expected_stop_event
                 where service_date = ?
-                  and trip_quality = 'complete'
                 group by service_date, trip_id, vehicle_number
             ) as stop_arrivals
                 on trips.service_date = stop_arrivals.service_date
@@ -664,12 +664,14 @@ def get_schedule(  # noqa: PLR0913
                 """
                 select
                     stop_sequence,
+                    stop_id,
                     stop_group_id,
                     stop_name,
                     scheduled_arrival_time,
                     actual_arrival_time,
-                    delay_seconds
-                from fct_stop_arrival
+                    delay_seconds,
+                    observation_status
+                from fct_expected_stop_event
                 where service_date = ?
                   and trip_id = ?
                   and vehicle_number = ?
@@ -677,6 +679,8 @@ def get_schedule(  # noqa: PLR0913
                 """,
                 [selected_date, selected_trip["trip_id"], selected_trip["vehicle_number"]],
             )
+            for stop in trip_stops:
+                stop["post_label"] = _stop_post_label(stop["stop_id"], stop["stop_group_id"])
     else:
         trip_landing_summary = _trip_landing_summary(db_path, selected_date, selected_mode)
         trip_landing_rows = _trip_landing_rows(db_path, selected_date, selected_mode, selected_rank)
@@ -763,8 +767,10 @@ def get_trip_detail(
                 stop_group_id,
                 stop_name,
                 scheduled_arrival_time,
-                delay_seconds
-            from fct_stop_arrival
+                actual_arrival_time,
+                delay_seconds,
+                observation_status
+            from fct_expected_stop_event
             where service_date = ?
               and trip_id = ?
               and vehicle_number = ?
@@ -774,7 +780,13 @@ def get_trip_detail(
         )
         for stop in trip_stops:
             stop["post_label"] = _stop_post_label(stop["stop_id"], stop["stop_group_id"])
-        trip["trace"] = _trip_trace([stop["delay_seconds"] for stop in trip_stops])
+        trip["trace"] = _trip_trace(
+            [
+                stop["delay_seconds"]
+                for stop in trip_stops
+                if stop["observation_status"] == "observed" and stop["delay_seconds"] is not None
+            ],
+        )
 
     return {
         "selected_date": selected_date,
@@ -1089,8 +1101,9 @@ def _trip_landing_rows(
                 service_date,
                 trip_id,
                 vehicle_number,
-                list(delay_seconds order by stop_sequence) as delay_profile
-            from fct_stop_arrival
+                list(delay_seconds order by stop_sequence)
+                    filter (where observation_status = 'observed' and delay_seconds is not null) as delay_profile
+            from fct_expected_stop_event
             where service_date = ?
               and mode = ?
               and trip_quality = 'complete'

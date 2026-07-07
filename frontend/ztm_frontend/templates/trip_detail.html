@@ -52,7 +52,9 @@
             </div>
             <a class="trip-stop-name" href="{{ url_for('stops', stop_group_id=stop.stop_group_id, post=stop.post_label, mode=trip.mode, date=selected_date) }}">{{ stop.stop_name }} <span class="post-suffix">[{{ stop.post_label }}]</span></a>
             <div class="mono muted">{{ stop.scheduled_arrival_time|time }}</div>
-            <div class="mono trip-stop-delay {{ stop.delay_seconds|delay_class }}">{{ stop.delay_seconds|delay }}</div>
+            <div class="mono trip-stop-delay {% if stop.observation_status == 'observed' %}{{ stop.delay_seconds|delay_class }}{% else %}muted{% endif %}">
+              {% if stop.observation_status == 'observed' %}{{ stop.delay_seconds|delay }}{% else %}{{ stop.observation_status }}{% endif %}
+            </div>
           </div>
         {% endfor %}
       </section>

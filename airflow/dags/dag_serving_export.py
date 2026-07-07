@@ -58,6 +58,7 @@ MART_TABLES = (
     "agg_line_daily",
     "dim_stop_group_current",
     "dim_stop_post_current",
+    "fct_expected_stop_event",
     "fct_stop_arrival",
     "fct_trip",
     "mart_pipeline_status",
@@ -77,6 +78,7 @@ DERIVED_TABLES = (
 EXPORTED_TABLES = MART_TABLES + DERIVED_TABLES
 DATE_RANGE_SQL_BY_TABLE = {
     "agg_line_daily": "service_date",
+    "fct_expected_stop_event": "service_date",
     "fct_stop_arrival": "service_date",
     "fct_trip": "service_date",
     "mart_pipeline_status": "service_date",
@@ -314,7 +316,14 @@ def _validate_source_stats(stats: Sequence[TableStats], max_source_bytes: int) -
     empty_required_tables = sorted(
         stat.table_name
         for stat in stats
-        if stat.table_name in {"agg_line_daily", "fct_stop_arrival", "fct_trip", "mart_pipeline_status"}
+        if stat.table_name
+        in {
+            "agg_line_daily",
+            "fct_expected_stop_event",
+            "fct_stop_arrival",
+            "fct_trip",
+            "mart_pipeline_status",
+        }
         and stat.row_count == 0
     )
     if empty_required_tables:

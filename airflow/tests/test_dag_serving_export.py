@@ -19,6 +19,7 @@ def test_mart_table_list_exports_frontend_source_tables() -> None:
         "agg_line_daily",
         "dim_stop_group_current",
         "dim_stop_post_current",
+        "fct_expected_stop_event",
         "fct_stop_arrival",
         "fct_trip",
         "mart_pipeline_status",
