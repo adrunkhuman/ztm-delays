@@ -59,6 +59,7 @@ from {{ ref('int_trip_summary') }}
 where service_date = date('{{ publish_service_date }}')
   and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
   and gps_date <= date('{{ var("processing_date") }}')
+  and scheduled_end_time < timestamp(date_add(date('{{ var("processing_date") }}'), interval 1 day), 'Europe/Warsaw')
 qualify row_number() over (
     partition by gtfs_snapshot_id, service_date, trip_id, vehicle_number
     order by

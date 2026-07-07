@@ -151,6 +151,32 @@ def test_latest_gtfs_snapshot_returns_latest_metadata(monkeypatch: pytest.Monkey
     }
 
 
+def test_latest_gtfs_snapshot_accepts_legacy_timestamp_gcs_path() -> None:
+    dag = _load_dag_module()
+    snapshot_id = "2026-06-25T14:00:00Z_abcdef123456"
+    gcs_path = "gs://ztm-analytics-bucket/raw/gtfs/2026-06-25T14:00:00Z.zip"
+    dag_run = FakeDagRun(
+        {
+            "snapshot_id": snapshot_id,
+            "gcs_path": gcs_path,
+            "processing_date": "2026-06-26",
+        }
+    )
+
+    assert dag._selected_gtfs_snapshot({"dag_run": dag_run}) == {
+        "snapshot_id": snapshot_id,
+        "gcs_path": gcs_path,
+        "processing_date": "2026-06-26",
+        "snapshots": [
+            {
+                "snapshot_id": snapshot_id,
+                "gcs_path": gcs_path,
+                "processing_date": "2026-06-26",
+            }
+        ],
+    }
+
+
 def test_selected_gtfs_snapshot_uses_current_triggering_asset_events() -> None:
     dag = _load_dag_module()
     first_snapshot_id = "2026-06-25T14:00:00Z_abcdef123456"
@@ -218,6 +244,7 @@ def test_latest_gtfs_snapshot_rejects_empty_metadata_table(monkeypatch: pytest.M
     [
         ("snapshot_id", "snapshot-1' && echo bad"),
         ("gcs_path", "gs://evil-bucket/raw/gtfs/2026-06-25T14:00:00Z_abcdef123456.zip"),
+        ("gcs_path", "gs://ztm-analytics-bucket/raw/gtfs/2026-06-25T15:00:00Z.zip"),
         ("processing_date", "2026-06-26' && echo bad"),
         ("processing_date", "2026-02-31"),
     ],

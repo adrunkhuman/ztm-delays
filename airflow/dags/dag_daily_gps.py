@@ -46,8 +46,10 @@ RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gps_pings"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
 DIM_SCHEDULE_VERSION_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_version"
-GTFS_TRIP_MATCHING_STAGING_MODELS = "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__calendar_dates"
-TRIP_MATCHING_SCHEDULE_MODELS = "int_gtfs_trip_schedule int_schedule_version"
+GTFS_TRIP_MATCHING_STAGING_MODELS = (
+    "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__routes stg_gtfs__calendar_dates"
+)
+TRIP_MATCHING_SCHEDULE_MODELS = "int_gtfs_trip_schedule int_gtfs_duty_chain int_schedule_version"
 GTFS_STOP_ARRIVAL_STAGING_MODELS = "stg_gtfs__stop_times stg_gtfs__stops"
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 TRIP_SUMMARY_MODEL = "int_trip_summary"
