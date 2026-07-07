@@ -53,6 +53,7 @@ select
     is_last_stop_observed,
     has_non_monotonic_stop_progression,
     has_impossible_speed_jump,
+    has_stale_stop_progression,
     trip_quality,
     quality_flags
 from {{ ref('int_trip_summary') }}

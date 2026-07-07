@@ -25,6 +25,7 @@ where service_date = date('{{ test_service_date }}')
     or actual_end_time is null
     or start_delay_seconds is null
     or end_delay_seconds is null
+    or has_stale_stop_progression is null
     or trip_quality is null
     or quality_flags is null
   )

@@ -11,5 +11,6 @@ where service_date = date('{{ test_service_date }}')
     'non_monotonic_stop_progression',
     'impossible_speed_jump',
     'extreme_delay',
+    'stale_stop_progression',
     'likely_wrong_trip_assignment'
   )
