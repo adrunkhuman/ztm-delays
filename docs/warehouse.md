@@ -56,7 +56,9 @@ Use these names carefully:
 | `scheduled_start_date` | Date of scheduled trip start, used by coverage marts. |
 | `publish_service_date` | Fact partition being published by the DAG. |
 
-Nightly GPS runs publish facts for the current processing date and the prior service date. That is deliberate: after-midnight GPS can complete previous-service-date trips.
+Nightly GPS runs publish current and prior service-date facts. The prior publish lets after-midnight GPS complete previous-service-date trips.
+
+Current service-date facts exclude trips ending after the processed GPS date. Those overnight trips publish on the next run, when the same service date is rebuilt as prior service.
 
 ## Core Tables
 
@@ -66,6 +68,7 @@ Nightly GPS runs publish facts for the current processing date and the prior ser
 | `stg_gtfs__*` | Snapshot-aware GTFS staging across all loaded snapshots. |
 | `int_gtfs_trip_schedule` | Scheduled trips under the governing snapshot, scoped to processing/service-date overlap. |
 | `int_gtfs_duty_chain` | Ordered scheduled duty segments by snapshot, service date, and duty identity. |
+| `int_ping_trip` | Settled GPS ping assignment to duty-chain trip candidates. |
 | `int_schedule_version` | Timetable-version ranges by `line`, `direction_id`, and `schedule_day_type`. |
 | `int_stop_arrivals` | Reconstructed scheduled stop arrivals from GPS movement. |
 | `int_trip_summary` | Observed vehicle trip candidates with quality flags. |
@@ -132,6 +135,12 @@ The mkuran GTFS feed is a rolling window. Schedule versions are known only from 
 Rows are ordered by scheduled trip time within one `gtfs_snapshot_id`, `service_date`, and duty identity. The model exposes line-change, layover, overlap, negative-duration, and missing-stop diagnostics for matcher work.
 
 When `block_id` is missing, the model falls back to `line:brigade`. Treat fallback rows as weaker lineage.
+
+Depot pull-out and pull-in trips stay in `int_gtfs_duty_chain` for matcher continuity. Use `is_public_service_segment` to exclude depot-only service from public views.
+
+`int_ping_trip` is the settled archive matcher. It assigns each eligible GPS ping to one duty-chain trip candidate using line, timing, duty-chain continuity, and overlap diagnostics.
+
+Spatial and stop-progression scores are reserved for later matcher work. Stop-event reconstruction stays in `int_stop_arrivals`.
 
 ## Completeness And Coverage
 

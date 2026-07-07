@@ -278,6 +278,16 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
     assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_ping_trip.kwargs["bash_command"]
     assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_trip_summary.kwargs["bash_command"]
+    trip_matching_command = dag.dbt_run_int_ping_trip.kwargs["bash_command"]
+    for selector in [
+        "stg_gtfs__trips",
+        "stg_gtfs__stop_times",
+        "stg_gtfs__stops",
+        "stg_gtfs__routes",
+        "stg_gtfs__calendar_dates",
+        "int_gtfs_duty_chain",
+    ]:
+        assert selector in trip_matching_command
     assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PROCESSING_DATE in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_fct_trip_prior.kwargs["bash_command"]

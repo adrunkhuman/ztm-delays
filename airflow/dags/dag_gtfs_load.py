@@ -189,14 +189,19 @@ def _validate_snapshot_context(raw_context: object) -> dict[str, str]:
         raise RuntimeError("dag_gtfs_load requires snapshot_id, gcs_path, and processing_date")
     if not isinstance(gcs_path, str):
         raise TypeError("dag_gtfs_load requires snapshot_id, gcs_path, and processing_date")
-    expected_gcs_path = gtfs_gcs_uri(snapshot_id)
-    if gcs_path != expected_gcs_path:
+    if gcs_path not in _accepted_gtfs_gcs_uris(snapshot_id):
         raise RuntimeError("dag_gtfs_load requires snapshot_id, gcs_path, and processing_date")
     if not isinstance(processing_date, str) or not PROCESSING_DATE_PATTERN.fullmatch(processing_date):
         raise RuntimeError("dag_gtfs_load requires snapshot_id, gcs_path, and processing_date")
     date.fromisoformat(processing_date)
 
     return {"snapshot_id": snapshot_id, "gcs_path": gcs_path, "processing_date": processing_date}
+
+
+def _accepted_gtfs_gcs_uris(snapshot_id: str) -> set[str]:
+    canonical_uri = gtfs_gcs_uri(snapshot_id)
+    legacy_timestamp_uri = f"{canonical_uri.rsplit('_', 1)[0]}.zip"
+    return {canonical_uri, legacy_timestamp_uri}
 
 
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:

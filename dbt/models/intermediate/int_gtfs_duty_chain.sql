@@ -105,6 +105,16 @@ trip_bounds as (
         and trip_terminal_stops.destination_stop_id = destination_stop.stop_id
 ),
 
+classified_trip_bounds as (
+    select
+        *,
+        regexp_contains(coalesce(origin_stop_name, ''), r'(?i)(^R-[0-9]+\s+Zajezdnia|^Zajezdnia|\sZajezdnia)')
+            as is_depot_pull_out,
+        regexp_contains(coalesce(destination_stop_name, ''), r'(?i)(^R-[0-9]+\s+Zajezdnia|^Zajezdnia|\sZajezdnia)')
+            as is_depot_pull_in
+    from trip_bounds
+),
+
 ordered as (
     select
         *,
@@ -121,7 +131,7 @@ ordered as (
         lead(line) over duty_chain_window as next_line,
         lag(trip_end_seconds) over duty_chain_window as previous_trip_end_seconds,
         lead(trip_start_seconds) over duty_chain_window as next_trip_start_seconds
-    from trip_bounds
+    from classified_trip_bounds
     window duty_chain_window as (
         partition by gtfs_snapshot_id, service_date, duty_chain_source, duty_chain_source_id
         order by trip_start_seconds, trip_end_seconds, trip_id
@@ -158,6 +168,10 @@ select
     ordered.origin_stop_name,
     ordered.destination_stop_id,
     ordered.destination_stop_name,
+    ordered.is_depot_pull_out,
+    ordered.is_depot_pull_in,
+    ordered.is_depot_pull_out or ordered.is_depot_pull_in as is_depot_segment,
+    not (ordered.is_depot_pull_out or ordered.is_depot_pull_in) as is_public_service_segment,
     ordered.first_stop_sequence,
     ordered.last_stop_sequence,
     cast(null as float64) as scheduled_distance_meters,
