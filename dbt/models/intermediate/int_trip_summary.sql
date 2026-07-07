@@ -14,6 +14,7 @@ with quality_thresholds as (
         0.30 as broken_stop_ratio,
         900 as large_ping_gap_seconds,
         2 as terminal_stop_tolerance,
+        120 as terminal_progress_lag_seconds,
         4 as large_stop_sequence_gap,
         50.0 as impossible_speed_mps,
         3600 as extreme_delay_seconds
@@ -225,6 +226,12 @@ summarized as (
         coalesce(arrival_time_progression.has_non_monotonic_stop_progression, false)
             as has_non_monotonic_stop_progression,
         coalesce(ping_diagnostics.max_speed_mps, 0.0) > quality_thresholds.impossible_speed_mps as has_impossible_speed_jump,
+        arrivals.last_detected_stop_sequence < schedule.stop_count - 1 - quality_thresholds.terminal_stop_tolerance
+            and timestamp_diff(
+                arrivals.actual_end_time,
+                timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval schedule.trip_end_seconds second),
+                second
+            ) >= -quality_thresholds.terminal_progress_lag_seconds as has_stale_stop_progression,
         quality_thresholds.complete_stop_ratio,
         quality_thresholds.broken_stop_ratio,
         quality_thresholds.large_ping_gap_seconds,
@@ -280,10 +287,12 @@ flagged as (
             if(has_non_monotonic_stop_progression, ['non_monotonic_stop_progression'], []),
             if(has_impossible_speed_jump, ['impossible_speed_jump'], []),
             if(
-                greatest(abs(start_delay_seconds), abs(end_delay_seconds)) > extreme_delay_seconds,
+                (is_first_stop_observed and abs(start_delay_seconds) > extreme_delay_seconds)
+                or (is_last_stop_observed and abs(end_delay_seconds) > extreme_delay_seconds),
                 ['extreme_delay'],
                 []
             ),
+            if(has_stale_stop_progression, ['stale_stop_progression'], []),
             if(
                 detected_stop_ratio < broken_stop_ratio
                 or max_stop_sequence_gap > large_stop_sequence_gap
@@ -304,7 +313,6 @@ classified as (
                 or max_ping_gap_seconds > large_ping_gap_seconds * 2
                 or has_non_monotonic_stop_progression
                 or has_impossible_speed_jump
-                or greatest(abs(start_delay_seconds), abs(end_delay_seconds)) > extreme_delay_seconds
                 then 'broken'
             when detected_stop_ratio >= complete_stop_ratio
                 and is_first_stop_observed
@@ -357,6 +365,7 @@ select
     is_last_stop_observed,
     has_non_monotonic_stop_progression,
     has_impossible_speed_jump,
+    has_stale_stop_progression,
     trip_quality,
     quality_flags
 from classified

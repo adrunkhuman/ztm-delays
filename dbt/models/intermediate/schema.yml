@@ -115,7 +115,7 @@ models:
       - name: progression_score
         description: Reserved for stop-sequence or shape-progress scoring.
       - name: matching_flags
-        description: "Matcher caveats: early_origin_censored, late_tail_censored, candidate_overlap, likely_previous_trip_tail, likely_vehicle_swap, uncertain_assignment."
+        description: "Matcher caveats: early_origin_censored, late_tail_censored, delayed_same_line_tail, candidate_overlap, likely_previous_trip_tail, likely_vehicle_swap, uncertain_assignment."
 
   - name: int_stop_arrivals
     description: Realized stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment passes within 50 meters of the scheduled stop point and the scheduled arrival is within a +/-30 minute window around the segment.
@@ -479,15 +479,18 @@ models:
       - name: has_impossible_speed_jump
         description: True when matched GPS pings imply a straight-line speed above the provisional impossible-speed threshold.
         tests: [not_null]
+      - name: has_stale_stop_progression
+        description: True when the last detected stop is still outside terminal tolerance but its timestamp is within 120 seconds of, or later than, the scheduled trip end. This flags weak trip-progress evidence, not high delay by itself.
+        tests: [not_null]
       - name: trip_quality
-        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, max_ping_gap_seconds > 1800, non-monotonic stop progression, max_speed_mps > 50, or terminal delay beyond 3600 seconds. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips."
+        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, max_ping_gap_seconds > 1800, non-monotonic stop progression, or max_speed_mps > 50. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips. High delay is not broken by itself when endpoint evidence is coherent."
         tests:
           - not_null
           - accepted_values:
               arguments:
                 values: ['complete', 'partial', 'broken']
       - name: quality_flags
-        description: "Array of explainable quality flags. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. extreme_delay: absolute start or end delay > 3600 seconds. likely_wrong_trip_assignment: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, or non-monotonic progression."
+        description: "Array of explainable quality flags. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. extreme_delay: trusted start or end endpoint delay > 3600 seconds. stale_stop_progression: detected stops remain far from the terminal when the scheduled trip should be ending. likely_wrong_trip_assignment: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, or non-monotonic progression."
         tests: [not_null]
 
 unit_tests:
@@ -796,6 +799,11 @@ unit_tests:
           union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 0, timestamp('2026-01-15 12:01:00+00:00')
           union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 1, timestamp('2026-01-15 12:11:00+00:00')
           union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 2, timestamp('2026-01-15 12:21:00+00:00')
+          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 1, timestamp('2026-01-15 13:20:00+00:00')
+          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 2, timestamp('2026-01-15 13:30:00+00:00')
+          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 3, timestamp('2026-01-15 13:40:00+00:00')
+          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 4, timestamp('2026-01-15 13:50:00+00:00')
+          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 5, timestamp('2026-01-15 14:00:00+00:00')
           union all select 'snapshot-valid', '187', '14', '1003', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-broken', 'shape-3', 'svc', 0, 5, timestamp('2026-01-15 11:21:00+00:00')
       - input: ref('int_ping_trip')
         format: sql
@@ -806,6 +814,8 @@ unit_tests:
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-partial', '1002', timestamp('2026-01-15 11:02:00+00:00'), 52.0001, 21.0001
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-zero-based-terminal-tolerance', '1004', timestamp('2026-01-15 13:00:00+00:00'), 52.0, 21.0
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-zero-based-terminal-tolerance', '1004', timestamp('2026-01-15 13:02:00+00:00'), 52.0001, 21.0001
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-stale-progress', '1005', timestamp('2026-01-15 15:00:00+00:00'), 52.0, 21.0
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-stale-progress', '1005', timestamp('2026-01-15 15:02:00+00:00'), 52.0001, 21.0001
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-broken', '1003', timestamp('2026-01-15 12:00:00+00:00'), 52.0, 21.0
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-broken', '1003', timestamp('2026-01-15 12:02:00+00:00'), 52.0001, 21.0001
       - input: ref('int_gtfs_trip_schedule')
@@ -814,6 +824,7 @@ unit_tests:
           select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-complete' as trip_id, 'svc' as service_id, 'Complete Head' as trip_headsign, 'shape-1' as shape_id, 36000 as trip_start_seconds, 38400 as trip_end_seconds, 5 as stop_count
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-partial', 'svc', 'Partial Head', 'shape-2', 39600, 42000, 5
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-zero-based-terminal-tolerance', 'svc', 'Zero Based Head', 'shape-4', 46800, 49200, 5
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-stale-progress', 'svc', 'Stale Progress Head', 'shape-5', 50400, 54000, 10
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-broken', 'svc', 'Broken Head', 'shape-3', 43200, 45600, 10
       - input: ref('int_schedule_version')
         format: sql
@@ -841,6 +852,16 @@ unit_tests:
           union all select 'trip-zero-based-terminal-tolerance', '400102', 2, 48000, 48000, 'snapshot-valid'
           union all select 'trip-zero-based-terminal-tolerance', '400103', 3, 48600, 48600, 'snapshot-valid'
           union all select 'trip-zero-based-terminal-tolerance', '400104', 4, 49200, 49200, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500101', 1, 50400, 50400, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500102', 2, 50800, 50800, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500103', 3, 51200, 51200, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500104', 4, 51600, 51600, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500105', 5, 52000, 52000, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500106', 6, 52400, 52400, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500107', 7, 52800, 52800, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500108', 8, 53200, 53200, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500109', 9, 53600, 53600, 'snapshot-valid'
+          union all select 'trip-stale-progress', '500110', 10, 54000, 54000, 'snapshot-valid'
           union all select 'trip-broken', '300101', 1, 43200, 43200, 'snapshot-valid'
           union all select 'trip-broken', '300105', 5, 44400, 44400, 'snapshot-valid'
           union all select 'trip-broken', '300110', 10, 45600, 45600, 'snapshot-valid'
@@ -862,6 +883,16 @@ unit_tests:
           union all select '400102', 'Zero Based Mid 2', 52.02, 21.02, 'snapshot-valid'
           union all select '400103', 'Zero Based Mid 3', 52.03, 21.03, 'snapshot-valid'
           union all select '400104', 'Zero Based Destination', 52.1, 21.1, 'snapshot-valid'
+          union all select '500101', 'Stale Origin', 52.0, 21.0, 'snapshot-valid'
+          union all select '500102', 'Stale Mid 2', 52.02, 21.02, 'snapshot-valid'
+          union all select '500103', 'Stale Mid 3', 52.03, 21.03, 'snapshot-valid'
+          union all select '500104', 'Stale Mid 4', 52.04, 21.04, 'snapshot-valid'
+          union all select '500105', 'Stale Mid 5', 52.05, 21.05, 'snapshot-valid'
+          union all select '500106', 'Stale Mid 6', 52.06, 21.06, 'snapshot-valid'
+          union all select '500107', 'Stale Mid 7', 52.07, 21.07, 'snapshot-valid'
+          union all select '500108', 'Stale Mid 8', 52.08, 21.08, 'snapshot-valid'
+          union all select '500109', 'Stale Mid 9', 52.09, 21.09, 'snapshot-valid'
+          union all select '500110', 'Stale Destination', 52.1, 21.1, 'snapshot-valid'
           union all select '300101', 'Broken Origin', 52.0, 21.0, 'snapshot-valid'
           union all select '300105', 'Broken Mid 5', 52.05, 21.05, 'snapshot-valid'
           union all select '300110', 'Broken Destination', 52.1, 21.1, 'snapshot-valid'
@@ -875,6 +906,7 @@ unit_tests:
           detected_stop_ratio: 1.0
           is_first_stop_observed: true
           is_last_stop_observed: true
+          has_stale_stop_progression: false
           schedule_version_id: 'schedule-version-1'
           mode: 'bus'
           trip_headsign: 'Complete Head'
@@ -889,6 +921,7 @@ unit_tests:
           detected_stop_ratio: 0.6
           is_first_stop_observed: true
           is_last_stop_observed: true
+          has_stale_stop_progression: false
           schedule_version_id: 'schedule-version-1'
           mode: 'bus'
           trip_headsign: 'Partial Head'
@@ -903,12 +936,28 @@ unit_tests:
           detected_stop_ratio: 0.6
           is_first_stop_observed: true
           is_last_stop_observed: true
+          has_stale_stop_progression: false
           schedule_version_id: 'schedule-version-1'
           mode: 'bus'
           trip_headsign: 'Zero Based Head'
           origin_stop_name: 'Zero Based Origin'
           destination_stop_name: 'Zero Based Destination'
           quality_flags: ['low_stop_coverage']
+        - trip_id: 'trip-stale-progress'
+          trip_quality: 'partial'
+          start_delay_seconds: 1200
+          end_delay_seconds: 0
+          stops_detected: 5
+          detected_stop_ratio: 0.5
+          is_first_stop_observed: true
+          is_last_stop_observed: false
+          has_stale_stop_progression: true
+          schedule_version_id: 'schedule-version-1'
+          mode: 'bus'
+          trip_headsign: 'Stale Progress Head'
+          origin_stop_name: 'Stale Origin'
+          destination_stop_name: 'Stale Destination'
+          quality_flags: ['missing_last_stop', 'low_stop_coverage', 'stale_stop_progression']
         - trip_id: 'trip-broken'
           trip_quality: 'broken'
           start_delay_seconds: 1260
@@ -917,6 +966,7 @@ unit_tests:
           detected_stop_ratio: 0.1
           is_first_stop_observed: false
           is_last_stop_observed: false
+          has_stale_stop_progression: false
           schedule_version_id: 'schedule-version-1'
           mode: 'bus'
           trip_headsign: 'Broken Head'
@@ -1408,6 +1458,10 @@ unit_tests:
         format: sql
         rows: |
           select 'svc' as service_id, date '2026-01-15' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'S3' as stop_id, 'Origin B' as stop_name, 52.5 as stop_lat, 21.5 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
     expect:
       rows:
         - observed_line: '10'
@@ -1461,6 +1515,77 @@ unit_tests:
           timing_penalty_seconds: 0
           matching_flags: ['candidate_overlap', 'likely_vehicle_swap']
 
+  - name: int_ping_trip_keeps_same_line_tail_until_next_origin
+    model: int_ping_trip
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('stg_gps__pings')
+        format: sql
+        rows: |
+          select '10' as line, '1' as brigade, 52.30 as lat, 21.30 as lon, timestamp('2026-01-15 09:31:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:31:10+00:00') as ingested_at, date '2026-01-15' as gps_date
+          union all select '10', '1', 52.50, 21.50, timestamp('2026-01-15 09:33:00+00:00'), '1001', 1, timestamp('2026-01-15 09:33:10+00:00'), date '2026-01-15'
+          union all select '10', '1', 52.52, 21.52, timestamp('2026-01-15 09:36:00+00:00'), '1001', 1, timestamp('2026-01-15 09:36:10+00:00'), date '2026-01-15'
+          union all select '10', '1', 52.50, 21.50, timestamp('2026-01-15 09:45:00+00:00'), '1001', 1, timestamp('2026-01-15 09:45:10+00:00'), date '2026-01-15'
+          union all select '10', '1', 52.52, 21.52, timestamp('2026-01-15 09:50:00+00:00'), '1001', 1, timestamp('2026-01-15 09:50:10+00:00'), date '2026-01-15'
+      - input: ref('int_gtfs_duty_chain')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, 'chain-1' as duty_chain_id, 'block_id' as duty_chain_source, 'block-1' as duty_chain_source_id, 1 as trip_order, '10' as line, '10' as route_short_name, 'bus' as mode, 'block-1' as block_id, '001' as block_short_name, '1' as brigade, 'trip-a' as trip_id, 'svc' as service_id, 0 as direction_id, 'shape-a' as shape_id, 'A' as trip_headsign, 32400 as trip_start_seconds, 34200 as trip_end_seconds, timestamp('2026-01-15 09:00:00+00:00') as scheduled_start_time, timestamp('2026-01-15 09:30:00+00:00') as scheduled_end_time, 2 as stop_count, 'S1' as origin_stop_id, 'Origin A' as origin_stop_name, 'S2' as destination_stop_id, 'Dest A' as destination_stop_name, 1 as first_stop_sequence, 2 as last_stop_sequence, cast(null as float64) as scheduled_distance_meters, cast(null as string) as previous_trip_id, 'trip-b' as next_trip_id, cast(null as int64) as layover_from_previous_seconds, 300 as layover_to_next_seconds, false as line_changed_from_previous, false as line_changes_to_next, false as overlaps_previous_trip, false as has_negative_duration, false as has_missing_stops, false as is_malformed_duty_segment
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', 'chain-1', 'block_id', 'block-1', 2, '10', '10', 'bus', 'block-1', '001', '1', 'trip-b', 'svc', 0, 'shape-b', 'B', 34500, 36000, timestamp('2026-01-15 09:35:00+00:00'), timestamp('2026-01-15 10:00:00+00:00'), 2, 'S3', 'Origin B', 'S4', 'Dest B', 1, 2, cast(null as float64), 'trip-a', cast(null as string), 300, cast(null as int64), false, false, false, false, false, false
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select 'svc' as service_id, date '2026-01-15' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'S3' as stop_id, 'Origin B' as stop_name, 52.50 as stop_lat, 21.50 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+    expect:
+      rows:
+        - observed_line: '10'
+          line: '10'
+          trip_id: 'trip-a'
+          vehicle_number: '1001'
+          gps_time: '2026-01-15 09:31:00+00:00'
+          candidate_count: 2
+          timing_penalty_seconds: 60
+          matching_flags: ['late_tail_censored', 'delayed_same_line_tail', 'candidate_overlap', 'likely_previous_trip_tail']
+        - observed_line: '10'
+          line: '10'
+          trip_id: 'trip-a'
+          vehicle_number: '1001'
+          gps_time: '2026-01-15 09:33:00+00:00'
+          candidate_count: 2
+          timing_penalty_seconds: 180
+          matching_flags: ['late_tail_censored', 'delayed_same_line_tail', 'candidate_overlap', 'likely_previous_trip_tail']
+        - observed_line: '10'
+          line: '10'
+          trip_id: 'trip-b'
+          vehicle_number: '1001'
+          gps_time: '2026-01-15 09:36:00+00:00'
+          candidate_count: 2
+          timing_penalty_seconds: 0
+          matching_flags: ['candidate_overlap']
+        - observed_line: '10'
+          line: '10'
+          trip_id: 'trip-b'
+          vehicle_number: '1001'
+          gps_time: '2026-01-15 09:45:00+00:00'
+          candidate_count: 2
+          timing_penalty_seconds: 0
+          matching_flags: ['candidate_overlap']
+        - observed_line: '10'
+          line: '10'
+          trip_id: 'trip-b'
+          vehicle_number: '1001'
+          gps_time: '2026-01-15 09:50:00+00:00'
+          candidate_count: 2
+          timing_penalty_seconds: 0
+          matching_flags: ['candidate_overlap']
+
   - name: int_ping_trip_matches_previous_service_date_overnight_duty
     model: int_ping_trip
     overrides:
@@ -1480,6 +1605,10 @@ unit_tests:
         format: sql
         rows: |
           select 'svc-night' as service_id, date '2026-01-14' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'S1' as stop_id, 'Origin' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
     expect:
       rows:
         - line: 'N1'
@@ -1510,5 +1639,9 @@ unit_tests:
         format: sql
         rows: |
           select 'svc' as service_id, date '2026-01-14' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'S1' as stop_id, 'Origin' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
     expect:
       rows: []

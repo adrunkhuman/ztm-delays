@@ -33,6 +33,7 @@ where gps_date = date('{{ var("processing_date", "1970-01-01") }}')
     or is_last_stop_observed is null
     or has_non_monotonic_stop_progression is null
     or has_impossible_speed_jump is null
+    or has_stale_stop_progression is null
     or trip_quality is null
     or quality_flags is null
   )
