@@ -238,7 +238,7 @@ def test_log_bigquery_dbt_job_costs_uses_dag_run_start_date(monkeypatch: pytest.
     assert result["started_at"] == started_at.isoformat()
 
 
-def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
+def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     dag = _load_dag_module()
 
     assert isinstance(dag.raw_gps_dag.kwargs["schedule"], FakeCronPartitionTimetable)
@@ -289,8 +289,10 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
     ]:
         assert selector in trip_matching_command
     assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
+    assert "--exclude test_type:unit" in dag.dbt_test_fct_expected_stop_event_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PROCESSING_DATE in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_fct_trip_prior.kwargs["bash_command"]
+    assert dag.EXPECTED_STOP_EVENT_FACT_MODEL in dag.dbt_run_fct_expected_stop_event_current.kwargs["bash_command"]
     assert dag.PIPELINE_STATUS_MODEL in dag.dbt_run_pipeline_status.kwargs["bash_command"]
     assert dag.emit_gps_models_date_asset.kwargs == {"outlets": [dag.GPS_MODELS_DATE_ASSET]}
 
@@ -310,8 +312,12 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:
         (dag.dbt_test_int_trip_summary, dag.dbt_run_fct_trip_prior),
         (dag.dbt_test_fct_trip_current, dag.dbt_run_fct_stop_arrival_current),
         (dag.dbt_test_fct_trip_prior, dag.dbt_run_fct_stop_arrival_prior),
-        (dag.dbt_test_fct_stop_arrival_current, dag.dbt_run_completeness_and_coverage),
-        (dag.dbt_test_fct_stop_arrival_prior, dag.dbt_run_completeness_and_coverage),
+        (dag.dbt_test_fct_stop_arrival_current, dag.dbt_run_fct_expected_stop_event_current),
+        (dag.dbt_run_fct_expected_stop_event_current, dag.dbt_test_fct_expected_stop_event_current),
+        (dag.dbt_test_fct_stop_arrival_prior, dag.dbt_run_fct_expected_stop_event_prior),
+        (dag.dbt_run_fct_expected_stop_event_prior, dag.dbt_test_fct_expected_stop_event_prior),
+        (dag.dbt_test_fct_expected_stop_event_current, dag.dbt_run_completeness_and_coverage),
+        (dag.dbt_test_fct_expected_stop_event_prior, dag.dbt_run_completeness_and_coverage),
         (dag.dbt_test_int_gps_hourly_completeness, dag.dbt_run_completeness_and_coverage),
     ]
     for upstream_task, downstream_task in expected_edges:

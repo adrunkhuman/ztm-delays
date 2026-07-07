@@ -55,6 +55,7 @@ GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 TRIP_SUMMARY_MODEL = "int_trip_summary"
 TRIP_FACT_MODEL = "fct_trip"
 STOP_ARRIVAL_FACT_MODEL = "fct_stop_arrival"
+EXPECTED_STOP_EVENT_FACT_MODEL = "fct_expected_stop_event"
 DAY_COMPLETENESS_MODEL = "mart_day_completeness"
 SERVICE_COVERAGE_MODEL = "agg_service_coverage"
 PIPELINE_STATUS_MODEL = "mart_pipeline_status"
@@ -366,6 +367,13 @@ with DAG(
             FACT_CURRENT_DBT_VARS,
             "--indirect-selection cautious",
         )
+        dbt_run_fct_expected_stop_event_current, dbt_test_fct_expected_stop_event_current = _dbt_run_test_pair(
+            "fct_expected_stop_event_current",
+            EXPECTED_STOP_EVENT_FACT_MODEL,
+            EXPECTED_STOP_EVENT_FACT_MODEL,
+            FACT_CURRENT_DBT_VARS,
+            "--indirect-selection cautious",
+        )
 
     with TaskGroup("prior_facts", group_display_name="Prior facts", prefix_group_id=False) as prior_facts_group:
         dbt_run_fct_trip_prior, dbt_test_fct_trip_prior = _dbt_run_test_pair(
@@ -378,6 +386,13 @@ with DAG(
             "fct_stop_arrival_prior",
             STOP_ARRIVAL_FACT_MODEL,
             STOP_ARRIVAL_FACT_MODEL,
+            FACT_PRIOR_DBT_VARS,
+            "--indirect-selection cautious",
+        )
+        dbt_run_fct_expected_stop_event_prior, dbt_test_fct_expected_stop_event_prior = _dbt_run_test_pair(
+            "fct_expected_stop_event_prior",
+            EXPECTED_STOP_EVENT_FACT_MODEL,
+            EXPECTED_STOP_EVENT_FACT_MODEL,
             FACT_PRIOR_DBT_VARS,
             "--indirect-selection cautious",
         )
@@ -475,11 +490,15 @@ with DAG(
     dbt_run_int_trip_summary >> dbt_test_int_trip_summary
     dbt_test_int_trip_summary >> dbt_run_fct_trip_current >> dbt_test_fct_trip_current
     dbt_test_fct_trip_current >> dbt_run_fct_stop_arrival_current >> dbt_test_fct_stop_arrival_current
+    dbt_test_fct_stop_arrival_current >> dbt_run_fct_expected_stop_event_current
+    dbt_run_fct_expected_stop_event_current >> dbt_test_fct_expected_stop_event_current
     dbt_test_int_trip_summary >> dbt_run_fct_trip_prior >> dbt_test_fct_trip_prior
     dbt_test_fct_trip_prior >> dbt_run_fct_stop_arrival_prior >> dbt_test_fct_stop_arrival_prior
+    dbt_test_fct_stop_arrival_prior >> dbt_run_fct_expected_stop_event_prior
+    dbt_run_fct_expected_stop_event_prior >> dbt_test_fct_expected_stop_event_prior
     for upstream_task in [
-        dbt_test_fct_stop_arrival_current,
-        dbt_test_fct_stop_arrival_prior,
+        dbt_test_fct_expected_stop_event_current,
+        dbt_test_fct_expected_stop_event_prior,
         dbt_test_int_gps_hourly_completeness,
     ]:
         upstream_task >> dbt_run_completeness_and_coverage

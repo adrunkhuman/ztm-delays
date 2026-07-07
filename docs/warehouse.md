@@ -74,6 +74,7 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 | `int_trip_summary` | Observed vehicle trip candidates with quality flags. |
 | `fct_trip` | Serving fact for observed trips, partitioned by `service_date`. |
 | `fct_stop_arrival` | Serving detail fact for detected stop arrivals, partitioned by `service_date`. |
+| `fct_expected_stop_event` | Serving trip-detail fact with every scheduled stop for each matched vehicle trip and explicit observation status. |
 | `mart_day_completeness` | Raw GPS ingestion coverage by GPS date and mode. |
 | `agg_service_coverage` | Schedule-aware observed-service coverage by scheduled start date/hour. |
 | `mart_pipeline_status` | Historical archive health by operational date and mode. |
@@ -105,6 +106,8 @@ Current convenience dimensions are present-day lookup surfaces only:
 `fct_trip` grain is one observed vehicle trip candidate. It carries archive-safe mode, route, headsign, origin, destination, schedule-version, and quality fields.
 
 `fct_stop_arrival` grain is one detected scheduled stop arrival per trip candidate and stop sequence. It carries stop labels, line labels, schedule-version lineage, `source_gps_date`, and `delay_seconds`.
+
+`fct_expected_stop_event` grain is one scheduled stop per matched vehicle trip. It attaches direct observations from `fct_stop_arrival` when available and emits `observed`, `missed`, or `uncertain` status for frontend trip timelines. `uncertain` rows can carry raw observation timestamps when the trip assignment is not trustworthy; do not use them as delay evidence.
 
 `delay_seconds = actual_arrival_time - scheduled_arrival_time`. Positive means late. Negative means early.
 

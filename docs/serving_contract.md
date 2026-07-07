@@ -36,6 +36,7 @@ env:       ZTM_DUCKDB_PATH=/app/serving/ztm.duckdb
 - `agg_line_daily`
 - `dim_stop_group_current`
 - `dim_stop_post_current`
+- `fct_expected_stop_event`
 - `fct_stop_arrival`
 - `fct_trip`
 - `mart_pipeline_status`
@@ -104,8 +105,8 @@ The current frontend routes are backed as follows:
 - `/lines/<line>`: `agg_line_daily`, `agg_line_hour_daily`, `agg_line_stop_daily`, `fct_stop_arrival`, `mart_delay_events`, `mart_trip_reliability`.
 - `/stops/`: `dim_stop_group_current`, `agg_stop_group_daily`.
 - `/stops/<group>` and `/stops/<group>/<post>`: `dim_stop_post_current`, `agg_stop_post_daily`, `agg_stop_line_daily`, `agg_stop_hour_daily`, `fct_stop_arrival`, `mart_delay_events`.
-- `/trips/` and `/schedule/`: `fct_trip`, with traces from `fct_stop_arrival`; `/trips/` is canonical and `/schedule/` is the compatibility alias.
-- `/trips/<trip_id>`: `fct_trip` and observed stop rows from `fct_stop_arrival`.
+- `/trips/` and `/schedule/`: `fct_trip`, with traces from trusted `observed` rows in `fct_expected_stop_event`; `/trips/` is canonical and `/schedule/` is the compatibility alias.
+- `/trips/<trip_id>`: `fct_trip` and full scheduled stop rows from `fct_expected_stop_event`.
 - `/status`: `mart_pipeline_status` plus `export_metadata` footer freshness.
 
 The frontend transforms exported rows into CSS-friendly widget shapes such as histogram bars, timeline ticks, and reliability strips. Those transforms are presentation logic. They should not be treated as fake data when the underlying exported rows are real.
@@ -115,7 +116,7 @@ The frontend transforms exported rows into CSS-friendly widget shapes such as hi
 These are intentionally not blockers for the alpha DuckDB artifact:
 
 - Scheduled-but-unobserved trips are not yet represented. `/trips/` shows observed trips from `fct_trip`.
-- Trip detail shows observed stop arrivals only. A complete scheduled-vs-observed stop-event surface is tracked separately by #73.
+- Trip detail uses `fct_expected_stop_event`, so scheduled stops are explicit as `observed`, `missed`, or `uncertain` rows. `uncertain` can include raw timestamps, but the frontend must not treat them as trusted delay evidence.
 - The export does not yet include sanitized private poller heartbeat status. Live poller status should be added separately from the archive-serving baseline.
 - The file is not scheduled for daily unattended export yet. Daily export cadence should wait for the cost and matcher-hardening passes.
 - Current facts remain provisional until #71, #72, #73, and #20 land the settled matching path and confidence diagnostics.
