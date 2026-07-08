@@ -14,7 +14,7 @@ with line_timetables as (
                 trip_timetable_signature
         ) as line_timetable_signature,
         count(*) as scheduled_trip_count
-    from {{ ref('int_gtfs_trip_schedule') }}
+    from {{ ref('int_gtfs_trip_schedule_history') }}
     group by processing_date, gtfs_snapshot_id, line, direction_id, schedule_day_type
 ),
 
