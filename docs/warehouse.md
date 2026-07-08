@@ -38,9 +38,7 @@ Raw GTFS snapshots use `RAW_GTFS_PREFIX`, defaulting to `raw/gtfs`. Snapshot IDs
 
 ## Snapshot Semantics
 
-The governing GTFS snapshot for a `service_date` is the latest loaded snapshot whose Warsaw-local snapshot date is strictly before that service date.
-
-Same-day GTFS snapshots do not govern that same service day. Intraday schedule changes are out of scope.
+Nightly GPS rebuilds use the latest dimension-built GTFS snapshot available at rebuild time. They publish both the current processing date and the prior service date, so a late GTFS correction for yesterday is replaced by the next nightly run.
 
 GTFS staging spans all loaded snapshots. Downstream models must choose and carry `gtfs_snapshot_id` explicitly.
 
@@ -66,7 +64,7 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 | --- | --- |
 | `stg_gps__pings` | One processing-date slice of cleaned GPS pings; deduped by vehicle and GPS timestamp. |
 | `stg_gtfs__*` | Snapshot-aware GTFS staging across all loaded snapshots. |
-| `int_gtfs_trip_schedule` | Scheduled trips under the governing snapshot, scoped to processing/service-date overlap. |
+| `int_gtfs_trip_schedule` | Scheduled trips under the selected snapshot, scoped to processing/service-date overlap. |
 | `int_gtfs_duty_chain` | Ordered scheduled duty segments by snapshot, service date, and duty identity. |
 | `int_ping_trip` | Settled GPS ping assignment to duty-chain trip candidates. |
 | `int_schedule_version` | Timetable-version ranges by `line`, `direction_id`, and `schedule_day_type`. |

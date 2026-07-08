@@ -111,20 +111,23 @@ def test_load_raw_gps_pings_continues_after_one_existing_job(monkeypatch: pytest
     assert client.existing_job.result_called is True
 
 
-def test_selected_gtfs_snapshot_id_returns_latest_snapshot_before_processing_date(
+def test_selected_gtfs_snapshot_id_returns_latest_dimension_built_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dag = _load_dag_module()
     client = FakeBigQueryClient(snapshot_rows=[FakeRow(gtfs_snapshot_id="snapshot-1")])
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
-    assert dag._selected_gtfs_snapshot_id("2026-06-27") == "snapshot-1"
+    assert dag._selected_gtfs_snapshot_id("2026-07-08") == "snapshot-1"
 
     assert client.query_call is not None
+    assert "raw_gtfs_snapshots" in client.query_call.query
     assert "dim_schedule_date" in client.query_call.query
-    assert "service_date = date(@processing_date)" in client.query_call.query
+    assert "date_sub(date(@processing_date), interval 1 day)" in client.query_call.query
+    assert "having count(distinct schedule_dates.service_date) = 2" in client.query_call.query
+    assert "order by snapshots.snapshot_timestamp desc, snapshots.snapshot_id desc" in client.query_call.query
     assert client.query_call.job_config.query_parameters == [
-        dag.bigquery.ScalarQueryParameter("processing_date", "DATE", "2026-06-27")
+        dag.bigquery.ScalarQueryParameter("processing_date", "DATE", "2026-07-08")
     ]
 
 
@@ -133,8 +136,8 @@ def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.
     client = FakeBigQueryClient(snapshot_rows=[])
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
-    with pytest.raises(dag.AirflowException, match="No built GTFS schedule dimension"):
-        dag._selected_gtfs_snapshot_id("2026-06-27")
+    with pytest.raises(dag.AirflowException, match="No built GTFS schedule dimension covers GPS processing date"):
+        dag._selected_gtfs_snapshot_id("2026-07-08")
 
 
 def test_period_aggregate_window_uses_active_schedule_versions(monkeypatch: pytest.MonkeyPatch) -> None:

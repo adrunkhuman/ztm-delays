@@ -16,14 +16,14 @@ Rebuild order:
 5. Rebuild schedule-version models from loaded GTFS history: `int_gtfs_trip_schedule`, `int_schedule_version`, and `dim_schedule_version`.
 6. Build `_current` lookup tables only for the selected serving snapshot.
 7. Reload GPS Parquet files into `ztm_raw.raw_gps_pings` with deterministic per-URI load job IDs.
-8. Build dbt models by processing date and governing GTFS snapshot.
+8. Build dbt models by processing date and selected GTFS snapshot.
 9. Validate backfilled facts, completeness, coverage, and serving export inputs before exposing rebuilt data.
 
 The old `ztm_bq` dataset has been removed; recovery now targets `ztm_raw`, `ztm_stg`, `ztm_int`, and `ztm_marts`.
 
 ## Per-Date Rebuild
 
-For one GPS date, load raw GPS parts first, then run dbt with the Warsaw-local processing date and governing GTFS snapshot:
+For one GPS date, load raw GPS parts first, then run dbt with the Warsaw-local processing date and the latest dimension-built GTFS snapshot available at rebuild time:
 
 ```bash
 dbt build --select stg_gps__pings int_gps_hourly_completeness \
@@ -49,11 +49,11 @@ GPS staging and intermediate models use static-partition `insert_overwrite` for 
 
 ## Date-Range Backfill
 
-Loop over dates in order. For every GPS processing date, ensure at least one loaded GTFS snapshot exists before that date. Schedule matching resolves governing snapshots per GTFS `service_date`: latest snapshot whose Warsaw-local `snapshot_timestamp` date is before the service date.
+Loop over dates in order. For every GPS processing date, ensure at least one GTFS snapshot has been loaded and its schedule dimensions have been built. Nightly rebuilds use the latest built snapshot available at rebuild time, not a same-day cutoff rule.
 
-For each GPS processing date, rebuild the GPS/intermediate models, then publish facts for the current service date and the prior service date. After detail exists, rebuild completeness, coverage, aggregate, and pipeline-status marts over the collected-history window.
+For each GPS processing date, rebuild the GPS/intermediate models, then publish facts for the current service date and the prior service date. Publishing the prior date is the cheap drift guard: if a late GTFS snapshot changes yesterday's schedule before the nightly run, yesterday is replaced with the same latest schedule as today. After detail exists, rebuild completeness, coverage, aggregate, and pipeline-status marts over the collected-history window.
 
-After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each `service_date` by running the governing-snapshot tests on `fct_trip` and `fct_stop_arrival`. Also verify `schedule_version_id` resolves to a version covering the row's GPS processing date. A successful run is not enough; matching every historical date against the newest snapshot is silent corruption. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
+After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each processing batch and that `schedule_version_id` resolves to a version covering the row's GPS processing date. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
 
 ## Raw GPS Volume
 
