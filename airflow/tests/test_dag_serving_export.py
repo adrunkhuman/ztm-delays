@@ -412,14 +412,14 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
         ).fetchone() == (
             "01",
             "1",
-            "Warszawa",
+            "Zabki",
         )
         assert connection.execute(
             "select effective_zone_ids, stop_name_stems, town_names from dim_stop_group_current"
         ).fetchone() == (
             "1",
             "Boundary Stop",
-            "Warszawa",
+            "Zabki",
         )
         histogram_labels = connection.execute(
             "select list_transform(delay_histogram, bucket -> bucket.bucket_label) from agg_mode_daily"
