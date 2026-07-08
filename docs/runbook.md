@@ -147,8 +147,6 @@ For `mart_day_completeness`, `agg_service_coverage`, `agg_line_daily`, and `mart
 
 For period aggregates, `aggregation_start_date` is the affected processing-date window, while `period_source_start_date` is the earliest affected month start or active schedule-version `valid_from_date` needed to recompute those affected rows. `period_partition_dates` is a pipe-delimited list of target `period_start_date` partitions. Omit `period_partition_dates` only for explicit dynamic/full-window rebuilds after a dry-run.
 
-The `Audit Required` GitHub workflow only reports changed-path risk. It does not run billable dbt/BigQuery audits. If it reports an audit tier, choose the smallest explicit manual command that covers the changed contract.
-
 After `dag_daily_gps` finishes its normal dbt phases, it logs a BigQuery dbt cost summary from `INFORMATION_SCHEMA.JOBS_BY_USER`: job count, total bytes processed, total bytes billed, and top jobs by bytes. This is visibility only. Metadata collection failure is logged but does not block asset publication. Attribution is best-effort: it is scoped to the same BigQuery principal, project, and region, and filters on dbt query comments, so concurrent dbt jobs from the same principal can be included while jobs from another principal or without dbt comments can be missed.
 
 ## Manual Serving Export
