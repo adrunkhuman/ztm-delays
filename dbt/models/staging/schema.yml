@@ -127,10 +127,20 @@ models:
         tests: [not_null]
       - name: stop_name
         tests: [not_null]
+      - name: stop_code
+        description: Raw GTFS stop_code metadata. Not the same as derived stop_post_code.
       - name: stop_lat
         tests: [not_null]
       - name: stop_lon
         tests: [not_null]
+      - name: zone_id
+        description: Raw GTFS fare-zone metadata from stops.txt.
+      - name: effective_zone_id
+        description: Simplified fare-zone bucket for consumers; exact raw 1+2 boundary stops are treated as zone 1 and all other values pass through unchanged.
+      - name: stop_name_stem
+        description: Warsaw feed stop-name stem metadata.
+      - name: town_name
+        description: Warsaw feed locality name. Current feed uses Warszawa for Warsaw-proper stops.
       - name: gtfs_snapshot_id
         tests: [not_null]
 
@@ -347,13 +357,15 @@ unit_tests:
       - input: source('raw', 'raw_gtfs_stops')
         format: sql
         rows: |
-          select '401001' as stop_id, 'Old Stop' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon, 'snapshot-old' as gtfs_snapshot_id
-          union all select '401002', 'Valid Stop', 52.2, 21.2, 'snapshot-valid'
-          union all select '401003', 'Bad Stop', 107.5, 21.3, 'snapshot-valid'
+          select '401001' as stop_id, 'Old Stop' as stop_name, '01' as stop_code, 52.1 as stop_lat, 21.1 as stop_lon, '1+2' as zone_id, 'Old' as stop_name_stem, 'Warszawa' as town_name, 'snapshot-old' as gtfs_snapshot_id
+          union all select '401002', 'Valid Stop', '02', 52.2, 21.2, '2', 'Valid', 'Piaseczno', 'snapshot-valid'
+          union all select '401004', 'Blank Zone Stop', '04', 52.4, 21.4, '', 'Blank Zone', 'Warszawa', 'snapshot-valid'
+          union all select '401003', 'Bad Stop', '03', 107.5, 21.3, '1', 'Bad', 'Warszawa', 'snapshot-valid'
     expect:
       rows:
-        - {stop_id: '401001', stop_name: 'Old Stop', stop_lat: 52.1, stop_lon: 21.1, gtfs_snapshot_id: 'snapshot-old'}
-        - {stop_id: '401002', stop_name: 'Valid Stop', stop_lat: 52.2, stop_lon: 21.2, gtfs_snapshot_id: 'snapshot-valid'}
+        - {stop_id: '401001', stop_name: 'Old Stop', stop_code: '01', stop_lat: 52.1, stop_lon: 21.1, zone_id: '1+2', effective_zone_id: '1', stop_name_stem: 'Old', town_name: 'Warszawa', gtfs_snapshot_id: 'snapshot-old'}
+        - {stop_id: '401002', stop_name: 'Valid Stop', stop_code: '02', stop_lat: 52.2, stop_lon: 21.2, zone_id: '2', effective_zone_id: '2', stop_name_stem: 'Valid', town_name: 'Piaseczno', gtfs_snapshot_id: 'snapshot-valid'}
+        - {stop_id: '401004', stop_name: 'Blank Zone Stop', stop_code: '04', stop_lat: 52.4, stop_lon: 21.4, zone_id: '', effective_zone_id: '', stop_name_stem: 'Blank Zone', town_name: 'Warszawa', gtfs_snapshot_id: 'snapshot-valid'}
 
   - name: stg_gtfs__shapes_spans_snapshots
     model: stg_gtfs__shapes

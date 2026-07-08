@@ -114,6 +114,82 @@ def test_load_csv_to_bigquery_uses_expected_load_contract(tmp_path: Path) -> Non
     assert client.load_call.job.result_called is True
 
 
+def test_gtfs_stops_schema_preserves_upstream_metadata_columns() -> None:
+    dag = _load_dag_module()
+    stops_spec = next(spec for spec in dag.GTFS_TABLES if spec.filename == "stops.txt")
+
+    assert [field.name for field in stops_spec.schema] == [
+        "stop_id",
+        "stop_name",
+        "stop_code",
+        "platform_code",
+        "stop_lat",
+        "stop_lon",
+        "location_type",
+        "parent_station",
+        "wheelchair_boarding",
+        "zone_id",
+        "stop_name_stem",
+        "town_name",
+        "street_name",
+        "gtfs_snapshot_id",
+    ]
+    assert {field.name: field.field_type for field in stops_spec.schema} == {
+        "stop_id": "STRING",
+        "stop_name": "STRING",
+        "stop_code": "STRING",
+        "platform_code": "STRING",
+        "stop_lat": "FLOAT",
+        "stop_lon": "FLOAT",
+        "location_type": "STRING",
+        "parent_station": "STRING",
+        "wheelchair_boarding": "STRING",
+        "zone_id": "STRING",
+        "stop_name_stem": "STRING",
+        "town_name": "STRING",
+        "street_name": "STRING",
+        "gtfs_snapshot_id": "STRING",
+    }
+
+
+def test_extract_gtfs_stops_preserves_metadata_values(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    stops_spec = next(spec for spec in dag.GTFS_TABLES if spec.filename == "stops.txt")
+    zip_path = tmp_path / "gtfs.zip"
+    with zipfile.ZipFile(zip_path, "w") as zip_file:
+        zip_file.writestr(
+            "stops.txt",
+            "stop_id,stop_name,stop_code,platform_code,stop_lat,stop_lon,location_type,parent_station,"
+            "wheelchair_boarding,zone_id,stop_name_stem,town_name,street_name\n"
+            "519001,Boundary Stop,01,01,52.1,21.1,0,,1,1+2,Boundary Stop,Zabki,Graniczna\n",
+        )
+
+    with zipfile.ZipFile(zip_path) as zip_file:
+        output_path = dag._extract_gtfs_table(zip_file, stops_spec, "snapshot-1", tmp_path)
+
+    with output_path.open(newline="", encoding="utf-8") as output_file:
+        rows = list(csv.DictReader(output_file))
+
+    assert rows == [
+        {
+            "stop_id": "519001",
+            "stop_name": "Boundary Stop",
+            "stop_code": "01",
+            "platform_code": "01",
+            "stop_lat": "52.1",
+            "stop_lon": "21.1",
+            "location_type": "0",
+            "parent_station": "",
+            "wheelchair_boarding": "1",
+            "zone_id": "1+2",
+            "stop_name_stem": "Boundary Stop",
+            "town_name": "Zabki",
+            "street_name": "Graniczna",
+            "gtfs_snapshot_id": "snapshot-1",
+        }
+    ]
+
+
 def test_load_csv_to_bigquery_waits_on_existing_job_after_conflict(tmp_path: Path) -> None:
     dag = _load_dag_module()
     client = FakeBigQueryClient(raise_conflict=True)
@@ -640,7 +716,12 @@ def _complete_gtfs_zip() -> bytes:
             "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type\n"
             "trip-1,12:00:00,12:00:30,stop-1,1,3,3\n",
         )
-        zip_file.writestr("stops.txt", "stop_id,stop_name,stop_lat,stop_lon\nstop-1,Stop,52.1,21.1\n")
+        zip_file.writestr(
+            "stops.txt",
+            "stop_id,stop_name,stop_code,platform_code,stop_lat,stop_lon,location_type,parent_station,"
+            "wheelchair_boarding,zone_id,stop_name_stem,town_name,street_name\n"
+            "stop-1,Boundary Stop,01,01,52.1,21.1,0,,1,1+2,Boundary Stop,Zabki,Graniczna\n",
+        )
         zip_file.writestr("shapes.txt", "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\nshape,52.1,21.1,1\n")
         zip_file.writestr("routes.txt", "route_id,route_short_name,route_type\n187,187,3\n")
         zip_file.writestr("calendar_dates.txt", "service_id,date,exception_type\nsvc,20260625,1\n")

@@ -124,6 +124,26 @@ sources:
           - name: stop_name
             tests:
               - not_null
+          - name: stop_code
+            description: Raw GTFS stop_code metadata from stops.txt.
+          - name: platform_code
+            description: Raw GTFS platform_code metadata from stops.txt.
+          - name: stop_lat
+          - name: stop_lon
+          - name: location_type
+            description: Raw GTFS location_type metadata from stops.txt.
+          - name: parent_station
+            description: Raw GTFS parent_station metadata from stops.txt.
+          - name: wheelchair_boarding
+            description: Raw GTFS wheelchair_boarding metadata from stops.txt.
+          - name: zone_id
+            description: Raw GTFS fare-zone metadata from stops.txt. Boundary stops can use values such as 1+2.
+          - name: stop_name_stem
+            description: Raw Warsaw feed stop-name stem metadata from stops.txt.
+          - name: town_name
+            description: Raw Warsaw feed locality name from stops.txt.
+          - name: street_name
+            description: Raw Warsaw feed street name from stops.txt.
           - name: gtfs_snapshot_id
             tests:
               - not_null

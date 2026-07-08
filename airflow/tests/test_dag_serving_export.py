@@ -407,6 +407,20 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
         assert connection.execute("select stop_post_code from agg_line_stop_daily").fetchone()[0] == "01"
         assert connection.execute("select stop_post_code from agg_stop_hour_daily").fetchone()[0] == "01"
         assert connection.execute("select stop_post_code from mart_delay_events").fetchone()[0] == "01"
+        assert connection.execute(
+            "select stop_code, effective_zone_id, town_name from dim_stop_post_current"
+        ).fetchone() == (
+            "01",
+            "1",
+            "Warszawa",
+        )
+        assert connection.execute(
+            "select effective_zone_ids, stop_name_stems, town_names from dim_stop_group_current"
+        ).fetchone() == (
+            "1",
+            "Boundary Stop",
+            "Warszawa",
+        )
         histogram_labels = connection.execute(
             "select list_transform(delay_histogram, bucket -> bucket.bucket_label) from agg_mode_daily"
         ).fetchone()[0]
@@ -887,6 +901,10 @@ def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], d
                 connection.execute(_copy_minimal_stop_arrival_sql(escaped_path))
             elif table_name == "fct_trip":
                 connection.execute(_copy_minimal_trip_sql(escaped_path))
+            elif table_name == "dim_stop_post_current":
+                connection.execute(_copy_minimal_stop_post_current_sql(escaped_path))
+            elif table_name == "dim_stop_group_current":
+                connection.execute(_copy_minimal_stop_group_current_sql(escaped_path))
             else:
                 connection.execute(
                     f"copy (select 1 as id, ? as table_name) to '{escaped_path}' (format parquet)", [table_name]
@@ -907,17 +925,62 @@ def _copy_minimal_stop_arrival_sql(escaped_path: str) -> str:
                 '190' as route_short_name,
                 'bus' as mode,
                 0 as direction_id,
-                'Centrum' as trip_headsign,
+                'Boundary Stop' as trip_headsign,
                 '7002' as stop_group_id,
-                'Centrum' as stop_group_name,
+                'Boundary Stop' as stop_group_name,
                 '700201' as stop_id,
                 '01' as stop_post_code,
-                'Centrum 01' as stop_name,
+                'Boundary Stop 01' as stop_name,
                 0 as stop_sequence,
                 timestamp '2026-07-02 06:00:00' as scheduled_arrival_time,
                 timestamp '2026-07-02 06:00:00' as hour_bracket,
                 45 as delay_seconds,
                 'complete' as trip_quality
+        ) to '{escaped_path}' (format parquet)
+    """
+
+
+def _copy_minimal_stop_post_current_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select
+                '700201' as stop_id,
+                '7002' as stop_group_id,
+                '01' as stop_post_code,
+                'Boundary Stop 01' as stop_name,
+                '01' as stop_code,
+                '1+2' as zone_id,
+                '1' as effective_zone_id,
+                'Boundary Stop' as stop_name_stem,
+                'Zabki' as town_name,
+                52.1 as stop_lat,
+                21.1 as stop_lon,
+                '190' as lines_served,
+                'bus' as modes_served,
+                '0' as directions_served,
+                'gtfs-1' as gtfs_snapshot_id
+        ) to '{escaped_path}' (format parquet)
+    """
+
+
+def _copy_minimal_stop_group_current_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select
+                '7002' as stop_group_id,
+                'Boundary Stop' as stop_group_name,
+                'Boundary Stop 01' as stop_group_names,
+                '1+2' as zone_ids,
+                '1' as effective_zone_ids,
+                'Boundary Stop' as stop_name_stems,
+                'Zabki' as town_names,
+                52.1 as centroid_lat,
+                21.1 as centroid_lon,
+                1 as stop_post_count,
+                '190' as lines_served,
+                'bus' as modes_served,
+                '0' as directions_served,
+                'gtfs-1' as gtfs_snapshot_id
         ) to '{escaped_path}' (format parquet)
     """
 
@@ -933,7 +996,7 @@ def _copy_minimal_trip_sql(escaped_path: str) -> str:
                 '190' as route_short_name,
                 'bus' as mode,
                 0 as direction_id,
-                'Centrum' as trip_headsign,
+                'Boundary Stop' as trip_headsign,
                 timestamp '2026-07-02 06:00:00' as scheduled_start_time,
                 'complete' as trip_quality
         ) to '{escaped_path}' (format parquet)
