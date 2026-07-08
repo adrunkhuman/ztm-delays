@@ -90,6 +90,9 @@ models:
               arguments:
                 to: ref('dim_stop_group')
                 field: stop_group_id
+      - name: stop_post_code
+        description: Derived frontend display code for the concrete stop post within the group. Six-character numeric post IDs use the final two digits, colon-delimited IDs use the final segment, other IDs use the suffix after the four-character group, and IDs without such a suffix fall back to the full stop_id. Distinct from any raw upstream GTFS stop_code metadata.
+        tests: [not_null]
       - name: stop_name
         description: Stop/location name from GTFS stops.txt for this validity range.
         tests: [not_null]
@@ -100,7 +103,7 @@ models:
         description: Stop/location longitude from GTFS stops.txt after staging coordinate guards.
         tests: [not_null]
       - name: attribute_hash
-        description: Hash of stop group, name, and coordinates used to collapse consecutive snapshots into one SCD row.
+        description: Hash of stop group, derived stop-post code, name, and coordinates used to collapse consecutive snapshots into one SCD row.
         tests: [not_null]
       - name: valid_from_date
         description: First Warsaw-local service date for which this stop/location attribute version is governed by the associated snapshot state.
@@ -128,6 +131,9 @@ models:
               arguments:
                 to: ref('dim_stop_group_current')
                 field: stop_group_id
+      - name: stop_post_code
+        description: Derived frontend display code for the concrete stop post within the group. Six-character numeric post IDs use the final two digits, colon-delimited IDs use the final segment, other IDs use the suffix after the four-character group, and IDs without such a suffix fall back to the full stop_id. Distinct from any raw upstream GTFS stop_code metadata.
+        tests: [not_null]
       - name: stop_name
         description: Stop/location name from GTFS stops.txt.
         tests: [not_null]
@@ -513,6 +519,8 @@ models:
         description: Physical stop/location identifier from the governing GTFS snapshot.
       - name: stop_group_id
         description: User-facing stop group identifier derived as LEFT(stop_id, 4).
+      - name: stop_post_code
+        description: Derived frontend display code for the concrete stop post within the group, for example 01 from 519001 or E1 from 1003M:E1.
       - name: stop_name
         description: Stop/location name from the governing GTFS snapshot. This is an archive-safe display label.
       - name: stop_lat
@@ -627,6 +635,8 @@ models:
         description: Physical stop/location identifier from the governing GTFS snapshot.
       - name: stop_group_id
         description: User-facing stop group identifier derived as LEFT(stop_id, 4).
+      - name: stop_post_code
+        description: Derived frontend display code for the concrete stop post within the group, for example 01 from 519001 or E1 from 1003M:E1.
       - name: stop_name
         description: Stop/location name from the governing GTFS snapshot.
       - name: stop_lat
@@ -875,6 +885,8 @@ models:
         description: Archive-safe stop group display name baked onto the source fact.
       - name: stop_id
         description: Physical stop/location identifier.
+      - name: stop_post_code
+        description: Derived frontend display code for the concrete stop post within the group, for example 01 from 519001 or E1 from 1003M:E1.
       - name: stop_name
         description: Archive-safe stop/location display name baked onto the source fact.
       - name: stop_lat
@@ -1813,6 +1825,7 @@ unit_tests:
           array<string>[] as service_observation_flags,
           '100101' as stop_id,
           '1001' as stop_group_id,
+          '01' as stop_post_code,
           'Main 01' as stop_name,
           52.1 as stop_lat,
           21.1 as stop_lon,
@@ -1998,6 +2011,7 @@ unit_tests:
           array<string>[] as matching_flags,
           '100101' as stop_id,
           '1001' as stop_group_id,
+          '01' as stop_post_code,
           'Main 01' as stop_name,
           52.1 as stop_lat,
           21.1 as stop_lon,
@@ -2027,7 +2041,7 @@ unit_tests:
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
-          1, 1, 1, array<string>[], '100102', '1001', 'Main 02', 52.2, 21.2, 'Main 01', 1, 0, 0, 'regular',
+          1, 1, 1, array<string>[], '100102', '1001', '02', 'Main 02', 52.2, 21.2, 'Main 01', 1, 0, 0, 'regular',
           timestamp('2026-01-15 08:25:00+01'), timestamp('2026-01-15 08:25:00+01'), cast(null as timestamp),
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
@@ -2037,7 +2051,7 @@ unit_tests:
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
-          1, 1, 1, array<string>[], '100105', '1001', 'Depot', 52.5, 21.5, 'Main 01', 2, 1, 1, 'not_in_passenger_service',
+          1, 1, 1, array<string>[], '100105', '1001', '05', 'Depot', 52.5, 21.5, 'Main 01', 2, 1, 1, 'not_in_passenger_service',
           timestamp('2026-01-15 08:26:40+01'), timestamp('2026-01-15 08:26:40+01'), cast(null as timestamp),
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
@@ -2047,7 +2061,7 @@ unit_tests:
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
-          1, 1, 1, array<string>[], '100106', '1001', 'Request Stop', 52.6, 21.6, 'Main 01', 3, 3, 3, 'request',
+          1, 1, 1, array<string>[], '100106', '1001', '06', 'Request Stop', 52.6, 21.6, 'Main 01', 3, 3, 3, 'request',
           timestamp('2026-01-15 08:28:20+01'), timestamp('2026-01-15 08:28:20+01'),
           timestamp('2026-01-15 08:28:25+01'), 5, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_250m', 250.0, 100.0, 120.0, 130.0, timestamp('2026-01-15 08:28:00+01'),
@@ -2057,7 +2071,7 @@ unit_tests:
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-2', 1002,
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
-          1, 2, 1, ['uncertain_assignment'], '100103', '1001', 'Main 03', 52.3, 21.3, 'Main 01', 0, 0, 0, 'regular',
+          1, 2, 1, ['uncertain_assignment'], '100103', '1001', '03', 'Main 03', 52.3, 21.3, 'Main 01', 0, 0, 0, 'regular',
           timestamp('2026-01-15 08:30:00+01'), timestamp('2026-01-15 08:30:00+01'),
           timestamp('2026-01-15 08:30:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:30:00+01'),
@@ -2067,7 +2081,7 @@ unit_tests:
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-3', 1003,
           '187', '187', 'bus', '3', 1, 0, 'svc', 'Central', 'shape-3', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', ['stale_stop_progression'], 'modified', ['stale_progress'], 'settled_duty_chain', 'chain-3', 'block_id', 'block-3',
-          1, 1, 1, array<string>[], '100104', '1001', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
+          1, 1, 1, array<string>[], '100104', '1001', '04', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
           timestamp('2026-01-15 08:35:00+01'), timestamp('2026-01-15 08:35:00+01'),
           timestamp('2026-01-15 08:35:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:35:00+01'),
@@ -2146,6 +2160,7 @@ unit_tests:
         format: sql
         rows: |
           select '100101' as stop_id, 'Valid Stop' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '1003M:E1', 'Metro Stop', 52.2, 21.2, 'snapshot-valid'
           union all select '100101', 'Future Stop', 52.5, 21.5, 'snapshot-future'
           union all select '100102', 'Old Stop', 51.5, 20.5, 'snapshot-old'
       - input: ref('stg_gtfs__stop_times')
@@ -2170,12 +2185,23 @@ unit_tests:
       rows:
         - stop_id: '100101'
           stop_group_id: '1001'
+          stop_post_code: '01'
           stop_name: 'Valid Stop'
           stop_lat: 52.0
           stop_lon: 21.0
           lines_served: '187, 9'
           modes_served: 'bus, tram'
           directions_served: '0, 1'
+          gtfs_snapshot_id: 'snapshot-valid'
+        - stop_id: '1003M:E1'
+          stop_group_id: '1003'
+          stop_post_code: 'E1'
+          stop_name: 'Metro Stop'
+          stop_lat: 52.2
+          stop_lon: 21.2
+          lines_served: ''
+          modes_served: ''
+          directions_served: ''
           gtfs_snapshot_id: 'snapshot-valid'
 
   - name: dim_line_closes_disappeared_line_and_uses_one_governing_snapshot_per_date
@@ -2301,11 +2327,13 @@ unit_tests:
         select
           '100101' as stop_id,
           '1001' as stop_group_id,
+          '01' as stop_post_code,
           'Old Stop' as stop_name,
           52.0 as stop_lat,
           21.0 as stop_lon,
           to_hex(md5(to_json_string(struct(
             '1001' as stop_group_id,
+            '01' as stop_post_code,
             'Old Stop' as stop_name,
             52.0 as stop_lat,
             21.0 as stop_lon
@@ -2318,11 +2346,13 @@ unit_tests:
         select
           '999901' as stop_id,
           '9999' as stop_group_id,
+          '01' as stop_post_code,
           'Other Stop' as stop_name,
           53.0 as stop_lat,
           22.0 as stop_lon,
           to_hex(md5(to_json_string(struct(
             '9999' as stop_group_id,
+            '01' as stop_post_code,
             'Other Stop' as stop_name,
             53.0 as stop_lat,
             22.0 as stop_lon
@@ -2353,11 +2383,13 @@ unit_tests:
         select
           '100101' as stop_id,
           '1001' as stop_group_id,
+          '01' as stop_post_code,
           'Main' as stop_name,
           52.0 as stop_lat,
           21.0 as stop_lon,
           to_hex(md5(to_json_string(struct(
             '1001' as stop_group_id,
+            '01' as stop_post_code,
             'Main' as stop_name,
             52.0 as stop_lat,
             21.0 as stop_lon
@@ -2370,11 +2402,13 @@ unit_tests:
         select
           '100101' as stop_id,
           '1001' as stop_group_id,
+          '01' as stop_post_code,
           'Main Renamed' as stop_name,
           52.1 as stop_lat,
           21.1 as stop_lon,
           to_hex(md5(to_json_string(struct(
             '1001' as stop_group_id,
+            '01' as stop_post_code,
             'Main Renamed' as stop_name,
             52.1 as stop_lat,
             21.1 as stop_lon

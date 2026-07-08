@@ -37,6 +37,7 @@ served_by as (
 select
     stops.stop_id,
     substr(stops.stop_id, 1, 4) as stop_group_id,
+    {{ stop_post_code('stops.stop_id') }} as stop_post_code,
     stops.stop_name,
     stops.stop_lat,
     stops.stop_lon,

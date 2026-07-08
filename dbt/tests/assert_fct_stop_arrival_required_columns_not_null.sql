@@ -24,6 +24,7 @@ where service_date = date('{{ test_service_date }}')
     or service_observation_flags is null
     or stop_id is null
     or stop_group_id is null
+    or stop_post_code is null
     or stop_name is null
     or stop_lat is null
     or stop_lon is null
