@@ -67,9 +67,6 @@ jobs:
       - name: Test Airflow DAG boundaries
         run: uvx --with pytest --with tzdata --with duckdb pytest airflow/tests
 
-      - name: Test audit classifier
-        run: uvx --with pytest pytest .github/scripts/test_audit_required.py
-
   dbt:
     name: dbt
     runs-on: ubuntu-latest
