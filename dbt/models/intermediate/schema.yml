@@ -118,7 +118,7 @@ models:
         description: "Matcher caveats: early_origin_censored, late_tail_censored, delayed_same_line_tail, candidate_overlap, likely_previous_trip_tail, likely_vehicle_swap, uncertain_assignment."
 
   - name: int_stop_arrivals
-    description: Realized stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment passes within 50 meters of the scheduled stop point and the scheduled arrival is within a +/-30 minute window around the segment.
+    description: Realized passenger-service stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment passes within the stop's adaptive radius and the scheduled arrival is within a +/-30 minute window around the segment. Non-passenger GTFS stop-time rows are excluded from observed arrivals.
     columns:
       - name: gtfs_snapshot_id
         description: Selected GTFS snapshot used for stop-arrival reconstruction.
@@ -150,6 +150,12 @@ models:
         description: Stop name from the selected GTFS snapshot.
       - name: stop_sequence
         description: GTFS stop_sequence for the stop within the trip. Together with snapshot, service date, trip, and vehicle, this is the model grain.
+      - name: pickup_type
+        description: GTFS pickup_type for this trip-stop row.
+      - name: drop_off_type
+        description: GTFS drop_off_type for this trip-stop row.
+      - name: stop_service_class
+        description: Passenger-service class derived from pickup/drop-off rules. int_stop_arrivals only emits regular and request rows.
       - name: scheduled_arrival_time
         description: Scheduled arrival timestamp reconstructed from service_date and GTFS arrival seconds.
       - name: scheduled_departure_time
@@ -159,7 +165,9 @@ models:
       - name: arrival_delay_seconds
         description: Difference in seconds between actual_arrival_time and scheduled_arrival_time. Positive values are late.
       - name: detection_method
-        description: Reconstruction method label. Current value is segment_within_50m.
+        description: Reconstruction method label. Current values are segment_within_75m and segment_within_250m.
+      - name: stop_match_radius_m
+        description: Adaptive stop matching radius used for this detection. Regular stops use 75m; request and terminal/near-terminal stops use 250m.
       - name: stop_distance_m
         description: Distance in meters from the GPS segment to the scheduled stop point.
       - name: prev_ping_distance_m
@@ -788,23 +796,27 @@ unit_tests:
       - input: ref('int_stop_arrivals')
         format: sql
         rows: |
-          select 'snapshot-valid' as gtfs_snapshot_id, '187' as line, '12' as brigade, '1001' as vehicle_number, 1 as vehicle_type, date '2026-01-15' as gps_date, date '2026-01-15' as service_date, 'weekday' as day_type, 'trip-complete' as trip_id, 'shape-1' as shape_id, 'svc' as service_id, 0 as direction_id, 1 as stop_sequence, timestamp('2026-01-15 09:01:00+00:00') as actual_arrival_time
-          union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 2, timestamp('2026-01-15 09:11:00+00:00')
-          union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 3, timestamp('2026-01-15 09:21:00+00:00')
-          union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 4, timestamp('2026-01-15 09:31:00+00:00')
-          union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 5, timestamp('2026-01-15 09:45:00+00:00')
-          union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 2, timestamp('2026-01-15 10:11:00+00:00')
-          union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 3, timestamp('2026-01-15 10:21:00+00:00')
-          union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 4, timestamp('2026-01-15 10:31:00+00:00')
-          union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 0, timestamp('2026-01-15 12:01:00+00:00')
-          union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 1, timestamp('2026-01-15 12:11:00+00:00')
-          union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 2, timestamp('2026-01-15 12:21:00+00:00')
-          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 1, timestamp('2026-01-15 13:20:00+00:00')
-          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 2, timestamp('2026-01-15 13:30:00+00:00')
-          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 3, timestamp('2026-01-15 13:40:00+00:00')
-          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 4, timestamp('2026-01-15 13:50:00+00:00')
-          union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 5, timestamp('2026-01-15 14:00:00+00:00')
-          union all select 'snapshot-valid', '187', '14', '1003', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-broken', 'shape-3', 'svc', 0, 5, timestamp('2026-01-15 11:21:00+00:00')
+          select *, if(trip_id = 'trip-complete' and stop_sequence = 6, 'request', 'regular') as stop_service_class
+          from (
+            select 'snapshot-valid' as gtfs_snapshot_id, '187' as line, '12' as brigade, '1001' as vehicle_number, 1 as vehicle_type, date '2026-01-15' as gps_date, date '2026-01-15' as service_date, 'weekday' as day_type, 'trip-complete' as trip_id, 'shape-1' as shape_id, 'svc' as service_id, 0 as direction_id, 1 as stop_sequence, timestamp('2026-01-15 09:01:00+00:00') as actual_arrival_time
+            union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 2, timestamp('2026-01-15 09:11:00+00:00')
+            union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 3, timestamp('2026-01-15 09:21:00+00:00')
+            union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 4, timestamp('2026-01-15 09:31:00+00:00')
+            union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 5, timestamp('2026-01-15 09:45:00+00:00')
+            union all select 'snapshot-valid', '187', '12', '1001', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-complete', 'shape-1', 'svc', 0, 6, timestamp('2026-01-15 09:55:00+00:00')
+            union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 2, timestamp('2026-01-15 10:11:00+00:00')
+            union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 3, timestamp('2026-01-15 10:21:00+00:00')
+            union all select 'snapshot-valid', '187', '13', '1002', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-partial', 'shape-2', 'svc', 0, 4, timestamp('2026-01-15 10:31:00+00:00')
+            union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 0, timestamp('2026-01-15 12:01:00+00:00')
+            union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 1, timestamp('2026-01-15 12:11:00+00:00')
+            union all select 'snapshot-valid', '187', '15', '1004', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-zero-based-terminal-tolerance', 'shape-4', 'svc', 0, 2, timestamp('2026-01-15 12:21:00+00:00')
+            union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 1, timestamp('2026-01-15 13:20:00+00:00')
+            union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 2, timestamp('2026-01-15 13:30:00+00:00')
+            union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 3, timestamp('2026-01-15 13:40:00+00:00')
+            union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 4, timestamp('2026-01-15 13:50:00+00:00')
+            union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 5, timestamp('2026-01-15 14:00:00+00:00')
+            union all select 'snapshot-valid', '187', '14', '1003', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-broken', 'shape-3', 'svc', 0, 5, timestamp('2026-01-15 11:21:00+00:00')
+          )
       - input: ref('int_ping_trip')
         format: sql
         rows: |
@@ -837,34 +849,50 @@ unit_tests:
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
-          select 'trip-complete' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-complete', '100102', 2, 36600, 36600, 'snapshot-valid'
-          union all select 'trip-complete', '100103', 3, 37200, 37200, 'snapshot-valid'
-          union all select 'trip-complete', '100104', 4, 37800, 37800, 'snapshot-valid'
-          union all select 'trip-complete', '100105', 5, 38400, 38400, 'snapshot-valid'
-          union all select 'trip-partial', '200101', 1, 39600, 39600, 'snapshot-valid'
-          union all select 'trip-partial', '200102', 2, 40200, 40200, 'snapshot-valid'
-          union all select 'trip-partial', '200103', 3, 40800, 40800, 'snapshot-valid'
-          union all select 'trip-partial', '200104', 4, 41400, 41400, 'snapshot-valid'
-          union all select 'trip-partial', '200105', 5, 42000, 42000, 'snapshot-valid'
-          union all select 'trip-zero-based-terminal-tolerance', '400100', 0, 46800, 46800, 'snapshot-valid'
-          union all select 'trip-zero-based-terminal-tolerance', '400101', 1, 47400, 47400, 'snapshot-valid'
-          union all select 'trip-zero-based-terminal-tolerance', '400102', 2, 48000, 48000, 'snapshot-valid'
-          union all select 'trip-zero-based-terminal-tolerance', '400103', 3, 48600, 48600, 'snapshot-valid'
-          union all select 'trip-zero-based-terminal-tolerance', '400104', 4, 49200, 49200, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500101', 1, 50400, 50400, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500102', 2, 50800, 50800, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500103', 3, 51200, 51200, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500104', 4, 51600, 51600, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500105', 5, 52000, 52000, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500106', 6, 52400, 52400, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500107', 7, 52800, 52800, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500108', 8, 53200, 53200, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500109', 9, 53600, 53600, 'snapshot-valid'
-          union all select 'trip-stale-progress', '500110', 10, 54000, 54000, 'snapshot-valid'
-          union all select 'trip-broken', '300101', 1, 43200, 43200, 'snapshot-valid'
-          union all select 'trip-broken', '300105', 5, 44400, 44400, 'snapshot-valid'
-          union all select 'trip-broken', '300110', 10, 45600, 45600, 'snapshot-valid'
+          select
+            *,
+            if(trip_id = 'trip-complete' and stop_sequence = 6, 3, 0) as pickup_type,
+            if(trip_id = 'trip-complete' and stop_sequence = 6, 3, 0) as drop_off_type,
+            if(trip_id = 'trip-complete' and stop_sequence = 6, 'request', 'regular') as stop_service_class,
+            'snapshot-valid' as gtfs_snapshot_id
+          from (
+            select 'trip-complete' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds
+            union all select 'trip-complete', '100102', 2, 36600, 36600
+            union all select 'trip-complete', '100103', 3, 37200, 37200
+            union all select 'trip-complete', '100104', 4, 37800, 37800
+            union all select 'trip-complete', '100105', 5, 38400, 38400
+            union all select 'trip-complete', '100106', 6, 39000, 39000
+            union all select 'trip-partial', '200101', 1, 39600, 39600
+            union all select 'trip-partial', '200102', 2, 40200, 40200
+            union all select 'trip-partial', '200103', 3, 40800, 40800
+            union all select 'trip-partial', '200104', 4, 41400, 41400
+            union all select 'trip-partial', '200105', 5, 42000, 42000
+            union all select 'trip-zero-based-terminal-tolerance', '400100', 0, 46800, 46800
+            union all select 'trip-zero-based-terminal-tolerance', '400101', 1, 47400, 47400
+            union all select 'trip-zero-based-terminal-tolerance', '400102', 2, 48000, 48000
+            union all select 'trip-zero-based-terminal-tolerance', '400103', 3, 48600, 48600
+            union all select 'trip-zero-based-terminal-tolerance', '400104', 4, 49200, 49200
+            union all select 'trip-stale-progress', '500101', 1, 50400, 50400
+            union all select 'trip-stale-progress', '500102', 2, 50800, 50800
+            union all select 'trip-stale-progress', '500103', 3, 51200, 51200
+            union all select 'trip-stale-progress', '500104', 4, 51600, 51600
+            union all select 'trip-stale-progress', '500105', 5, 52000, 52000
+            union all select 'trip-stale-progress', '500106', 6, 52400, 52400
+            union all select 'trip-stale-progress', '500107', 7, 52800, 52800
+            union all select 'trip-stale-progress', '500108', 8, 53200, 53200
+            union all select 'trip-stale-progress', '500109', 9, 53600, 53600
+            union all select 'trip-stale-progress', '500110', 10, 54000, 54000
+            union all select 'trip-broken', '300101', 1, 43200, 43200
+            union all select 'trip-broken', '300102', 2, 43500, 43500
+            union all select 'trip-broken', '300103', 3, 43800, 43800
+            union all select 'trip-broken', '300104', 4, 44100, 44100
+            union all select 'trip-broken', '300105', 5, 44400, 44400
+            union all select 'trip-broken', '300106', 6, 44700, 44700
+            union all select 'trip-broken', '300107', 7, 45000, 45000
+            union all select 'trip-broken', '300108', 8, 45200, 45200
+            union all select 'trip-broken', '300109', 9, 45400, 45400
+            union all select 'trip-broken', '300110', 10, 45600, 45600
+          )
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -873,6 +901,7 @@ unit_tests:
           union all select '100103', 'Complete Mid 3', 52.03, 21.03, 'snapshot-valid'
           union all select '100104', 'Complete Mid 4', 52.04, 21.04, 'snapshot-valid'
           union all select '100105', 'Complete Destination', 52.1, 21.1, 'snapshot-valid'
+          union all select '100106', 'Complete Request', 52.11, 21.11, 'snapshot-valid'
           union all select '200101', 'Partial Origin', 52.0, 21.0, 'snapshot-valid'
           union all select '200102', 'Partial Mid 2', 52.02, 21.02, 'snapshot-valid'
           union all select '200103', 'Partial Mid 3', 52.03, 21.03, 'snapshot-valid'
@@ -894,7 +923,14 @@ unit_tests:
           union all select '500109', 'Stale Mid 9', 52.09, 21.09, 'snapshot-valid'
           union all select '500110', 'Stale Destination', 52.1, 21.1, 'snapshot-valid'
           union all select '300101', 'Broken Origin', 52.0, 21.0, 'snapshot-valid'
+          union all select '300102', 'Broken Mid 2', 52.02, 21.02, 'snapshot-valid'
+          union all select '300103', 'Broken Mid 3', 52.03, 21.03, 'snapshot-valid'
+          union all select '300104', 'Broken Mid 4', 52.04, 21.04, 'snapshot-valid'
           union all select '300105', 'Broken Mid 5', 52.05, 21.05, 'snapshot-valid'
+          union all select '300106', 'Broken Mid 6', 52.06, 21.06, 'snapshot-valid'
+          union all select '300107', 'Broken Mid 7', 52.07, 21.07, 'snapshot-valid'
+          union all select '300108', 'Broken Mid 8', 52.08, 21.08, 'snapshot-valid'
+          union all select '300109', 'Broken Mid 9', 52.09, 21.09, 'snapshot-valid'
           union all select '300110', 'Broken Destination', 52.1, 21.1, 'snapshot-valid'
     expect:
       rows:
@@ -973,6 +1009,48 @@ unit_tests:
           origin_stop_name: 'Broken Origin'
           destination_stop_name: 'Broken Destination'
           quality_flags: ['missing_first_stop', 'missing_last_stop', 'low_stop_coverage', 'likely_wrong_trip_assignment']
+
+  - name: int_trip_summary_ignores_request_only_arrivals
+    model: int_trip_summary
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_stop_arrivals')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as gtfs_snapshot_id, '187' as line, '12' as brigade, '1001' as vehicle_number, 1 as vehicle_type, date '2026-01-15' as gps_date, date '2026-01-15' as service_date, 'weekday' as day_type, 'trip-request-only' as trip_id, 'shape-1' as shape_id, 'svc' as service_id, 0 as direction_id, 2 as stop_sequence, timestamp('2026-01-15 09:10:00+00:00') as actual_arrival_time, 'request' as stop_service_class
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as gps_date, date '2026-01-15' as service_date, 'trip-request-only' as trip_id, '1001' as vehicle_number, timestamp('2026-01-15 09:10:00+00:00') as gps_time, 52.0 as lat, 21.0 as lon
+      - input: ref('int_gtfs_trip_schedule')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-request-only' as trip_id, 'svc' as service_id, 'Request Only Head' as trip_headsign, 'shape-1' as shape_id, 36000 as trip_start_seconds, 37200 as trip_end_seconds, 3 as stop_count
+      - input: ref('int_schedule_version')
+        format: sql
+        rows: |
+          select 'schedule-version-1' as schedule_version_id, '187' as line, 0 as direction_id, 'weekday' as schedule_day_type, 'fingerprint' as timetable_fingerprint, date '2026-01-01' as valid_from_date, cast(null as date) as valid_to_date, 'snapshot-valid' as first_gtfs_snapshot_id, 'snapshot-valid' as last_gtfs_snapshot_id, date '2026-01-01' as first_processing_date, date '2026-01-15' as last_processing_date, 1 as max_scheduled_trip_count
+      - input: ref('stg_gtfs__routes')
+        format: sql
+        rows: |
+          select '187' as route_id, '187' as route_short_name, 3 as route_type, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-request-only' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-request-only', '100102', 2, 36600, 36600, 3, 3, 'request', 'snapshot-valid'
+          union all select 'trip-request-only', '100103', 3, 37200, 37200, 0, 0, 'regular', 'snapshot-valid'
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select '100101' as stop_id, 'Origin' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select '100102', 'Request Stop', 52.01, 21.01, 'snapshot-valid'
+          union all select '100103', 'Destination', 52.02, 21.02, 'snapshot-valid'
+    expect:
+      rows: []
 
   - name: int_gtfs_trip_schedule_uses_prior_day_governing_snapshot
     model: int_gtfs_trip_schedule
@@ -1305,7 +1383,7 @@ unit_tests:
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
-          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1331,7 +1409,8 @@ unit_tests:
           scheduled_departure_time: '2026-01-15 09:00:05+00:00'
           actual_arrival_time: '2026-01-15 09:00:05+00:00'
           arrival_delay_seconds: 0
-          detection_method: 'segment_within_50m'
+          detection_method: 'segment_within_250m'
+          stop_match_radius_m: 250.0
           stop_distance_m: 0.0
           segment_start_time: '2026-01-15 09:00:00+00:00'
           segment_end_time: '2026-01-15 09:00:10+00:00'
@@ -1352,7 +1431,7 @@ unit_tests:
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
-          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
+          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1378,7 +1457,8 @@ unit_tests:
           scheduled_departure_time: '2026-01-15 09:00:00+00:00'
           actual_arrival_time: '2026-01-15 09:00:02+00:00'
           arrival_delay_seconds: 2
-          detection_method: 'segment_within_50m'
+          detection_method: 'segment_within_250m'
+          stop_match_radius_m: 250.0
           stop_distance_m: 0.0
           segment_start_time: '2026-01-15 09:00:00+00:00'
           segment_end_time: '2026-01-15 09:00:10+00:00'
@@ -1399,8 +1479,8 @@ unit_tests:
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
-          select 'trip-reused' as trip_id, 'stop-valid' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-reused', 'stop-other', 2, 36005, 36005, 'snapshot-other'
+          select 'trip-reused' as trip_id, 'stop-valid' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-reused', 'stop-other', 2, 36005, 36005, 0, 0, 'regular', 'snapshot-other'
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1427,11 +1507,65 @@ unit_tests:
           scheduled_departure_time: '2026-01-15 09:00:05+00:00'
           actual_arrival_time: '2026-01-15 09:00:05+00:00'
           arrival_delay_seconds: 0
-          detection_method: 'segment_within_50m'
+          detection_method: 'segment_within_250m'
+          stop_match_radius_m: 250.0
           stop_distance_m: 0.0
           segment_start_time: '2026-01-15 09:00:00+00:00'
           segment_end_time: '2026-01-15 09:00:10+00:00'
           segment_duration_seconds: 10
+
+  - name: int_stop_arrivals_applies_service_class_matching_rules
+    model: int_stop_arrivals
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-service-class' as trip_id, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
+          union all select '187', '12', 52.0, 21.0100, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-service-class', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-service-class' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36001 as arrival_time_seconds, 36001 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-service-class', 'stop-2', 2, 36002, 36002, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-service-class', 'stop-3', 3, 36003, 36003, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-service-class', 'stop-4', 4, 36004, 36004, 1, 1, 'not_in_passenger_service', 'snapshot-valid'
+          union all select 'trip-service-class', 'stop-5', 5, 36005, 36005, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-service-class', 'stop-6', 6, 36006, 36006, 3, 3, 'request', 'snapshot-valid'
+          union all select 'trip-service-class', 'stop-7', 7, 36007, 36007, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-service-class', 'stop-8', 8, 36008, 36008, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-service-class', 'stop-9', 9, 36009, 36009, 0, 0, 'regular', 'snapshot-valid'
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'stop-1' as stop_id, 'Far Origin' as stop_name, 53.0 as stop_lat, 22.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'stop-2', 'Far Second', 53.0, 22.0, 'snapshot-valid'
+          union all select 'stop-3', 'Far Third', 53.0, 22.0, 'snapshot-valid'
+          union all select 'stop-4', 'Non Passenger Stop', 52.0, 21.0040, 'snapshot-valid'
+          union all select 'stop-5', 'Regular Mid Stop', 52.0, 21.0050, 'snapshot-valid'
+          union all select 'stop-6', 'Request Mid Stop', 52.0010, 21.0060, 'snapshot-valid'
+          union all select 'stop-7', 'Far Seventh', 53.0, 22.0, 'snapshot-valid'
+          union all select 'stop-8', 'Far Eighth', 53.0, 22.0, 'snapshot-valid'
+          union all select 'stop-9', 'Far Destination', 53.0, 22.0, 'snapshot-valid'
+    expect:
+      rows:
+        - stop_id: 'stop-5'
+          stop_sequence: 5
+          pickup_type: 0
+          drop_off_type: 0
+          stop_service_class: 'regular'
+          detection_method: 'segment_within_75m'
+          stop_match_radius_m: 75.0
+        - stop_id: 'stop-6'
+          stop_sequence: 6
+          pickup_type: 3
+          drop_off_type: 3
+          stop_service_class: 'request'
+          detection_method: 'segment_within_250m'
+          stop_match_radius_m: 250.0
 
   - name: int_ping_trip_matches_route_changes_and_flags_settled_candidates
     model: int_ping_trip

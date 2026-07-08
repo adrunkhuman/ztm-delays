@@ -27,9 +27,13 @@ where service_date = date('{{ test_service_date }}')
     or stop_lon is null
     or stop_group_name is null
     or stop_sequence is null
+    or pickup_type is null
+    or drop_off_type is null
+    or stop_service_class is null
     or scheduled_arrival_time is null
     or actual_arrival_time is null
     or delay_seconds is null
     or hour_bracket is null
     or detection_method is null
+    or stop_match_radius_m is null
   )

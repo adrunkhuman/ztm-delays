@@ -281,6 +281,9 @@ def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables
     assert len(client.load_calls) == len(dag.GTFS_TABLES)
     assert all(load.job.result_called for load in client.load_calls)
     assert any("snapshot-1" in load.loaded_text for load in client.load_calls)
+    stop_times_load = next(load for load in client.load_calls if load.destination.endswith(".raw_gtfs_stop_times"))
+    assert "pickup_type,drop_off_type" in stop_times_load.loaded_text
+    assert "trip-1,stop-1,1,12:00:00,12:00:30,3,3,snapshot-1" in stop_times_load.loaded_text
 
 
 def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
@@ -634,7 +637,8 @@ def _complete_gtfs_zip() -> bytes:
         )
         zip_file.writestr(
             "stop_times.txt",
-            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\ntrip-1,12:00:00,12:00:30,stop-1,1\n",
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type\n"
+            "trip-1,12:00:00,12:00:30,stop-1,1,3,3\n",
         )
         zip_file.writestr("stops.txt", "stop_id,stop_name,stop_lat,stop_lon\nstop-1,Stop,52.1,21.1\n")
         zip_file.writestr("shapes.txt", "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\nshape,52.1,21.1,1\n")

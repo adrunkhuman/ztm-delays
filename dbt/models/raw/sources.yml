@@ -104,6 +104,10 @@ sources:
           - name: departure_time
             tests:
               - not_null
+          - name: pickup_type
+            description: GTFS pickup_type. Warsaw feed currently uses 0 for regular, 1 for no pickup, and 3 for driver-arranged/request pickup.
+          - name: drop_off_type
+            description: GTFS drop_off_type. Warsaw feed currently uses 0 for regular, 1 for no drop-off, and 3 for driver-arranged/request drop-off.
           - name: gtfs_snapshot_id
             tests:
               - not_null
