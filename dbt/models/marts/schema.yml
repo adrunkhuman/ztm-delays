@@ -450,9 +450,13 @@ models:
       - name: has_stale_stop_progression
         description: True when the last detected stop is still outside terminal tolerance but its timestamp is within 120 seconds of, or later than, the scheduled trip end. This flags weak trip-progress evidence, not high delay by itself.
       - name: trip_quality
-        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, max_ping_gap_seconds > 1800, non-monotonic stop progression, or max_speed_mps > 50. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips. High delay is not broken by itself when endpoint evidence is coherent."
+        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_ping_gap_seconds > 1800, non-monotonic stop progression, or max_speed_mps > 50. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, max_stop_sequence_gap <= 4, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips. High delay or large internal stop gaps are not broken by themselves when endpoint evidence is coherent."
       - name: quality_flags
-        description: "Array of explainable quality flags for filtering and debug views. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. extreme_delay: trusted start or end endpoint delay > 3600 seconds. stale_stop_progression: detected stops remain far from the terminal when the scheduled trip should be ending. likely_wrong_trip_assignment: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, or non-monotonic progression."
+        description: "Array of explainable quality flags for filtering and debug views. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. large_stop_sequence_gap: detected stops skip a large scheduled sequence span. extreme_delay: trusted start or end endpoint delay > 3600 seconds. stale_stop_progression: detected stops remain far from the terminal when the scheduled trip should be ending. likely_wrong_trip_assignment: detected_stop_ratio < 0.30 or non-monotonic progression."
+      - name: service_observation_class
+        description: "Observed service class, separate from trip_quality. Precedence is matching_failure, modified, regular, then truncated. regular means route endpoints were observed without modified-service evidence, even if reconstruction quality is partial. truncated means coherent shortened service missing the scheduled origin and/or destination. modified means plausible operational deviation such as a large internal gap or stale route progress. matching_failure means evidence is too weak or contradictory to treat as operated service."
+      - name: service_observation_flags
+        description: "Array of service-class explanation flags: short_start, short_end, large_internal_gap, stale_progress, bad_assignment_evidence."
 
   - name: fct_stop_arrival
     description: Serving-layer stop-arrival detail fact. One row per detected scheduled stop arrival for an observed vehicle trip, partitioned by service_date, with archive-safe trip and stop labels baked from the governing GTFS snapshot. Strict analytics should default to trip_quality = 'complete'; partial rows are retained for exploration. Trips with non-monotonic stop progression keep diagnostics in fct_trip and intermediate models, but their stop arrivals are withheld from this serving fact.
@@ -501,6 +505,10 @@ models:
         description: Reconstruction quality class inherited from fct_trip. Strict analytics should use complete rows by default; exploratory views may include partial rows; broken rows are retained for debugging only.
       - name: quality_flags
         description: Array of explainable trip-quality flags inherited from fct_trip for filtering and debug views.
+      - name: service_observation_class
+        description: Observed service class inherited from fct_trip.
+      - name: service_observation_flags
+        description: Service-observation explanation flags inherited from fct_trip.
       - name: stop_id
         description: Physical stop/location identifier from the governing GTFS snapshot.
       - name: stop_group_id
@@ -595,6 +603,10 @@ models:
         description: Reconstruction quality class inherited from fct_trip.
       - name: quality_flags
         description: Array of explainable trip-quality flags inherited from fct_trip.
+      - name: service_observation_class
+        description: Observed service class inherited from fct_trip.
+      - name: service_observation_flags
+        description: Service-observation explanation flags inherited from fct_trip.
       - name: matching_method
         description: Matcher label used to assign the trip. Current value is settled_duty_chain.
       - name: matched_duty_chain_id
@@ -699,7 +711,7 @@ models:
         description: Largest gap reported by present hourly buckets. Missing hours are represented through missing_hours, not as 3600-second gaps.
 
   - name: agg_service_coverage
-    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the governing GTFS bus/tram schedule; observed service counts distinct complete/partial scheduled trip_id values from int_trip_summary after best-quality dedupe and excludes broken trips. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
+    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the governing GTFS bus/tram schedule; observed service counts distinct regular/truncated/modified scheduled trip_id values from int_trip_summary after best-class dedupe ordered regular > truncated > modified, and excludes matching failures. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
     columns:
       - name: service_date
         description: GTFS service date assigned to the scheduled trips. Overnight service can have service_hour on the next calendar date.
@@ -730,15 +742,21 @@ models:
       - name: expected_trip_count
         description: Number of scheduled trips whose scheduled start time falls in service_hour.
       - name: observed_trip_count
-        description: Number of distinct scheduled trip_id values observed as complete or partial in int_trip_summary whose scheduled start time falls in service_hour.
+        description: Number of distinct scheduled trip_id values observed as regular, truncated, or modified after best-class candidate selection in the service hour. Matching failures are excluded.
       - name: complete_trip_count
         description: Number of distinct observed trip_id values whose best available quality is complete in the service hour.
       - name: partial_trip_count
         description: Number of distinct observed trip_id values whose best available quality is partial in the service hour.
+      - name: regular_trip_count
+        description: Number of distinct observed trip_id values whose selected candidate is classified as regular service in the service hour.
+      - name: truncated_trip_count
+        description: Number of distinct observed trip_id values whose selected candidate is classified as coherent shortened service in the service hour.
+      - name: modified_trip_count
+        description: Number of distinct observed trip_id values whose selected candidate is classified as modified service in the service hour.
       - name: expected_service_minutes
         description: Sum of scheduled trip durations in minutes for trips starting in service_hour.
       - name: observed_service_minutes
-        description: Sum of observed complete/partial trip durations in minutes from actual_start_time to actual_end_time after best-quality dedupe. Negative durations are treated as 0 minutes.
+        description: Sum of observed regular/truncated/modified trip durations in minutes from actual_start_time to actual_end_time after best-class dedupe. Negative durations are treated as 0 minutes.
       - name: service_coverage_ratio
         description: observed_trip_count divided by expected_trip_count.
       - name: is_settled_hour
@@ -796,7 +814,7 @@ models:
       - name: expected_trips
         description: Settled scheduled trips from agg_service_coverage for this scheduled-start date and mode.
       - name: observed_trips
-        description: Settled complete/partial observed trips from agg_service_coverage for this scheduled-start date and mode.
+        description: Settled regular/truncated/modified observed trips from agg_service_coverage for this scheduled-start date and mode. Matching failures are excluded.
       - name: service_coverage_ratio
         description: observed_trips divided by expected_trips for settled service hours. Null when no settled scheduled service exists.
       - name: expected_service_minutes
@@ -1270,7 +1288,8 @@ unit_tests:
             timestamp('2026-01-15 23:30:00+01') as scheduled_start_time,
             timestamp('2026-01-15 23:31:00+01') as actual_start_time,
             timestamp('2026-01-16 00:51:00+01') as actual_end_time,
-            'complete' as trip_quality
+            'complete' as trip_quality,
+            'regular' as service_observation_class
           union all
           select
             'snapshot-valid',
@@ -1289,7 +1308,8 @@ unit_tests:
             timestamp('2026-01-15 23:30:00+01'),
             timestamp('2026-01-15 22:00:00+01'),
             timestamp('2026-01-16 02:00:00+01'),
-            'partial'
+            'partial',
+            'truncated'
           union all
           select
             'snapshot-valid',
@@ -1308,7 +1328,8 @@ unit_tests:
             timestamp('2026-01-15 01:00:00+01'),
             timestamp('2026-01-15 01:01:00+01'),
             timestamp('2026-01-15 01:31:00+01'),
-            'partial'
+            'partial',
+            'modified'
           union all
           select
             'snapshot-valid',
@@ -1327,7 +1348,8 @@ unit_tests:
             timestamp('2026-01-15 23:35:00+01'),
             timestamp('2026-01-15 23:36:00+01'),
             timestamp('2026-01-16 00:01:00+01'),
-            'broken'
+            'broken',
+            'matching_failure'
     expect:
       format: sql
       rows: |
@@ -1349,6 +1371,9 @@ unit_tests:
           1 as observed_trip_count,
           1 as complete_trip_count,
           0 as partial_trip_count,
+          1 as regular_trip_count,
+          0 as truncated_trip_count,
+          0 as modified_trip_count,
           120.0 as expected_service_minutes,
           80.0 as observed_service_minutes,
           0.5 as service_coverage_ratio,
@@ -1372,6 +1397,9 @@ unit_tests:
           1 as observed_trip_count,
           0 as complete_trip_count,
           1 as partial_trip_count,
+          0 as regular_trip_count,
+          0 as truncated_trip_count,
+          1 as modified_trip_count,
           30.0 as expected_service_minutes,
           30.0 as observed_service_minutes,
           1.0 as service_coverage_ratio,
@@ -1429,7 +1457,9 @@ unit_tests:
             false as has_impossible_speed_jump,
             false as has_stale_stop_progression,
             'complete' as trip_quality,
-            array<string>[] as quality_flags
+            array<string>[] as quality_flags,
+            'regular' as service_observation_class,
+            array<string>[] as service_observation_flags
           union all
           select
             'snapshot-valid',
@@ -1474,7 +1504,9 @@ unit_tests:
             false,
             false,
             'partial',
-            array<string>[]
+            array<string>[],
+            'truncated',
+            ['short_end']
     expect:
       format: sql
       rows: |
@@ -1521,7 +1553,9 @@ unit_tests:
           false as has_impossible_speed_jump,
           false as has_stale_stop_progression,
           'complete' as trip_quality,
-          array<string>[] as quality_flags
+          array<string>[] as quality_flags,
+          'regular' as service_observation_class,
+          array<string>[] as service_observation_flags
 
   - name: fct_trip_publishes_overnight_trip_on_prior_service_rebuild
     model: fct_trip
@@ -1576,7 +1610,9 @@ unit_tests:
             false as has_impossible_speed_jump,
             false as has_stale_stop_progression,
             'complete' as trip_quality,
-            array<string>[] as quality_flags
+            array<string>[] as quality_flags,
+            'regular' as service_observation_class,
+            array<string>[] as service_observation_flags
     expect:
       format: sql
       rows: |
@@ -1623,7 +1659,9 @@ unit_tests:
           false as has_impossible_speed_jump,
           false as has_stale_stop_progression,
           'complete' as trip_quality,
-          array<string>[] as quality_flags
+          array<string>[] as quality_flags,
+          'regular' as service_observation_class,
+          array<string>[] as service_observation_flags
 
   - name: fct_stop_arrival_adds_archive_labels_and_trip_quality
     model: fct_stop_arrival
@@ -1720,7 +1758,9 @@ unit_tests:
             false as has_impossible_speed_jump,
             false as has_stale_stop_progression,
             'complete' as trip_quality,
-            array<string>[] as quality_flags
+            array<string>[] as quality_flags,
+            'regular' as service_observation_class,
+            array<string>[] as service_observation_flags
           union all
           select
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-non-monotonic', 1904,
@@ -1729,7 +1769,8 @@ unit_tests:
             timestamp('2026-01-15 08:00:00+01'), timestamp('2026-01-15 08:30:00+01'),
             timestamp('2026-01-15 08:20:00+01'), timestamp('2026-01-15 08:09:00+01'),
             1200, -1260, 10, 5, 0.5, 5, 1, 4, 120, 10.0, false, false, true, false, false,
-            'broken', ['non_monotonic_stop_progression', 'likely_wrong_trip_assignment']
+            'broken', ['non_monotonic_stop_progression', 'likely_wrong_trip_assignment'],
+            'matching_failure', ['short_start', 'short_end', 'bad_assignment_evidence']
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1768,6 +1809,8 @@ unit_tests:
           '187|0|thursday|2026-01-15' as schedule_version_id,
           'complete' as trip_quality,
           array<string>[] as quality_flags,
+          'regular' as service_observation_class,
+          array<string>[] as service_observation_flags,
           '100101' as stop_id,
           '1001' as stop_group_id,
           'Main 01' as stop_name,
@@ -1822,15 +1865,19 @@ unit_tests:
             'svc' as schedule_service_ids,
             'schedule-version-1' as schedule_version_id,
             'complete' as trip_quality,
-            array<string>[] as quality_flags
+            array<string>[] as quality_flags,
+            'regular' as service_observation_class,
+            array<string>[] as service_observation_flags
           union all
           select
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-2', 1002, '187', '187', 'bus', '2',
-            1, 0, 'svc', 'Central', 'shape-2', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'partial', array<string>[]
+            1, 0, 'svc', 'Central', 'shape-2', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'partial', array<string>[],
+            'regular', array<string>[]
           union all
           select
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, '187', '187', 'bus', '3',
-            1, 0, 'svc', 'Central', 'shape-3', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'partial', ['stale_stop_progression']
+            1, 0, 'svc', 'Central', 'shape-3', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'partial', ['stale_stop_progression'],
+            'modified', ['stale_progress']
       - input: ref('int_ping_trip')
         format: sql
         rows: |
@@ -1939,6 +1986,8 @@ unit_tests:
           'schedule-version-1' as schedule_version_id,
           'complete' as trip_quality,
           array<string>[] as quality_flags,
+          'regular' as service_observation_class,
+          array<string>[] as service_observation_flags,
           'settled_duty_chain' as matching_method,
           'chain-1' as matched_duty_chain_id,
           'block_id' as matched_duty_chain_source,
@@ -1977,7 +2026,7 @@ unit_tests:
         select
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'complete', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
+          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
           1, 1, 1, array<string>[], '100102', '1001', 'Main 02', 52.2, 21.2, 'Main 01', 1, 0, 0, 'regular',
           timestamp('2026-01-15 08:25:00+01'), timestamp('2026-01-15 08:25:00+01'), cast(null as timestamp),
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
@@ -1987,7 +2036,7 @@ unit_tests:
         select
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'complete', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
+          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
           1, 1, 1, array<string>[], '100105', '1001', 'Depot', 52.5, 21.5, 'Main 01', 2, 1, 1, 'not_in_passenger_service',
           timestamp('2026-01-15 08:26:40+01'), timestamp('2026-01-15 08:26:40+01'), cast(null as timestamp),
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
@@ -1997,7 +2046,7 @@ unit_tests:
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'complete', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
+          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
           1, 1, 1, array<string>[], '100106', '1001', 'Request Stop', 52.6, 21.6, 'Main 01', 3, 3, 3, 'request',
           timestamp('2026-01-15 08:28:20+01'), timestamp('2026-01-15 08:28:20+01'),
           timestamp('2026-01-15 08:28:25+01'), 5, timestamp('2026-01-15 08:00:00+01'),
@@ -2007,7 +2056,7 @@ unit_tests:
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-2', 1002,
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'partial', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
+          'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
           1, 2, 1, ['uncertain_assignment'], '100103', '1001', 'Main 03', 52.3, 21.3, 'Main 01', 0, 0, 0, 'regular',
           timestamp('2026-01-15 08:30:00+01'), timestamp('2026-01-15 08:30:00+01'),
           timestamp('2026-01-15 08:30:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
@@ -2017,7 +2066,7 @@ unit_tests:
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-3', 1003,
           '187', '187', 'bus', '3', 1, 0, 'svc', 'Central', 'shape-3', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'partial', ['stale_stop_progression'], 'settled_duty_chain', 'chain-3', 'block_id', 'block-3',
+          'schedule-version-1', 'partial', ['stale_stop_progression'], 'modified', ['stale_progress'], 'settled_duty_chain', 'chain-3', 'block_id', 'block-3',
           1, 1, 1, array<string>[], '100104', '1001', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
           timestamp('2026-01-15 08:35:00+01'), timestamp('2026-01-15 08:35:00+01'),
           timestamp('2026-01-15 08:35:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),

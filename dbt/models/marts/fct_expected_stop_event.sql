@@ -33,7 +33,9 @@ with trip_facts as (
         schedule_service_ids,
         schedule_version_id,
         trip_quality,
-        quality_flags
+        quality_flags,
+        service_observation_class,
+        service_observation_flags
     from {{ ref('fct_trip') }}
     where service_date = date('{{ publish_service_date }}')
 ),
@@ -187,6 +189,8 @@ expected_events as (
         trip_facts.schedule_version_id,
         trip_facts.trip_quality,
         trip_facts.quality_flags,
+        trip_facts.service_observation_class,
+        trip_facts.service_observation_flags,
         matched_trip_lineage.matching_method,
         matched_trip_lineage.matched_duty_chain_id,
         matched_trip_lineage.matched_duty_chain_source,
@@ -270,6 +274,8 @@ select
     schedule_version_id,
     trip_quality,
     quality_flags,
+    service_observation_class,
+    service_observation_flags,
     matching_method,
     matched_duty_chain_id,
     matched_duty_chain_source,
@@ -305,7 +311,7 @@ select
     is_match_uncertain,
     case
         when stop_service_class = 'not_in_passenger_service' then 'not_in_passenger_service'
-        when is_match_uncertain or trip_quality = 'broken' then 'uncertain'
+        when is_match_uncertain or service_observation_class = 'matching_failure' then 'uncertain'
         when is_observed then 'observed'
         when stop_service_class = 'request' then 'skipped_optional'
         else 'missed'

@@ -491,14 +491,24 @@ models:
         description: True when the last detected stop is still outside terminal tolerance but its timestamp is within 120 seconds of, or later than, the scheduled trip end. This flags weak trip-progress evidence, not high delay by itself.
         tests: [not_null]
       - name: trip_quality
-        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, max_ping_gap_seconds > 1800, non-monotonic stop progression, or max_speed_mps > 50. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips. High delay is not broken by itself when endpoint evidence is coherent."
+        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_ping_gap_seconds > 1800, non-monotonic stop progression, or max_speed_mps > 50. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, max_stop_sequence_gap <= 4, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips. High delay or large internal stop gaps are not broken by themselves when endpoint evidence is coherent."
         tests:
           - not_null
           - accepted_values:
               arguments:
                 values: ['complete', 'partial', 'broken']
       - name: quality_flags
-        description: "Array of explainable quality flags. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. extreme_delay: trusted start or end endpoint delay > 3600 seconds. stale_stop_progression: detected stops remain far from the terminal when the scheduled trip should be ending. likely_wrong_trip_assignment: detected_stop_ratio < 0.30, max_stop_sequence_gap > 4, or non-monotonic progression."
+        description: "Array of explainable quality flags. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. large_stop_sequence_gap: detected stops skip a large scheduled sequence span. extreme_delay: trusted start or end endpoint delay > 3600 seconds. stale_stop_progression: detected stops remain far from the terminal when the scheduled trip should be ending. likely_wrong_trip_assignment: detected_stop_ratio < 0.30 or non-monotonic progression."
+        tests: [not_null]
+      - name: service_observation_class
+        description: "Observed service class, separate from trip_quality. Precedence is matching_failure, modified, regular, then truncated. regular means route endpoints were observed without modified-service evidence, even if reconstruction quality is partial. truncated means coherent shortened service missing the scheduled origin and/or destination. modified means plausible operational deviation such as a large internal gap or stale route progress. matching_failure means evidence is too weak or contradictory to treat as operated service."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['regular', 'truncated', 'modified', 'matching_failure']
+      - name: service_observation_flags
+        description: "Array of service-class explanation flags: short_start, short_end, large_internal_gap, stale_progress, bad_assignment_evidence."
         tests: [not_null]
 
 unit_tests:
@@ -815,7 +825,20 @@ unit_tests:
             union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 3, timestamp('2026-01-15 13:40:00+00:00')
             union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 4, timestamp('2026-01-15 13:50:00+00:00')
             union all select 'snapshot-valid', '187', '16', '1005', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-stale-progress', 'shape-5', 'svc', 0, 5, timestamp('2026-01-15 14:00:00+00:00')
+            union all select 'snapshot-valid', '187', '17', '1006', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-truncated', 'shape-6', 'svc', 0, 4, timestamp('2026-01-15 14:31:00+00:00')
+            union all select 'snapshot-valid', '187', '17', '1006', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-truncated', 'shape-6', 'svc', 0, 5, timestamp('2026-01-15 14:40:00+00:00')
+            union all select 'snapshot-valid', '187', '17', '1006', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-truncated', 'shape-6', 'svc', 0, 6, timestamp('2026-01-15 14:50:00+00:00')
+            union all select 'snapshot-valid', '187', '17', '1006', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-truncated', 'shape-6', 'svc', 0, 7, timestamp('2026-01-15 15:00:00+00:00')
+            union all select 'snapshot-valid', '187', '17', '1006', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-truncated', 'shape-6', 'svc', 0, 8, timestamp('2026-01-15 15:10:00+00:00')
+            union all select 'snapshot-valid', '187', '18', '1007', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-large-gap', 'shape-7', 'svc', 0, 1, timestamp('2026-01-15 15:01:00+00:00')
+            union all select 'snapshot-valid', '187', '18', '1007', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-large-gap', 'shape-7', 'svc', 0, 2, timestamp('2026-01-15 15:10:00+00:00')
+            union all select 'snapshot-valid', '187', '18', '1007', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-large-gap', 'shape-7', 'svc', 0, 8, timestamp('2026-01-15 16:00:00+00:00')
+            union all select 'snapshot-valid', '187', '18', '1007', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-large-gap', 'shape-7', 'svc', 0, 9, timestamp('2026-01-15 16:10:00+00:00')
+            union all select 'snapshot-valid', '187', '18', '1007', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-large-gap', 'shape-7', 'svc', 0, 10, timestamp('2026-01-15 16:20:00+00:00')
+            union all select 'snapshot-valid', '187', '19', '1008', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-high-coverage-large-gap', 'shape-8', 'svc', 0, stop_sequence, timestamp_add(timestamp('2026-01-15 17:00:00+00:00'), interval (stop_sequence - 1) * 300 + if(stop_sequence = 1, 60, 0) second)
+            from unnest([1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]) as stop_sequence
             union all select 'snapshot-valid', '187', '14', '1003', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-broken', 'shape-3', 'svc', 0, 5, timestamp('2026-01-15 11:21:00+00:00')
+            union all select 'snapshot-valid', '187', '14', '1003', 1, date '2026-01-15', date '2026-01-15', 'weekday', 'trip-broken', 'shape-3', 'svc', 0, 10, timestamp('2026-01-15 11:40:00+00:00')
           )
       - input: ref('int_ping_trip')
         format: sql
@@ -828,6 +851,12 @@ unit_tests:
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-zero-based-terminal-tolerance', '1004', timestamp('2026-01-15 13:02:00+00:00'), 52.0001, 21.0001
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-stale-progress', '1005', timestamp('2026-01-15 15:00:00+00:00'), 52.0, 21.0
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-stale-progress', '1005', timestamp('2026-01-15 15:02:00+00:00'), 52.0001, 21.0001
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-truncated', '1006', timestamp('2026-01-15 16:00:00+00:00'), 52.0, 21.0
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-truncated', '1006', timestamp('2026-01-15 16:02:00+00:00'), 52.0001, 21.0001
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-large-gap', '1007', timestamp('2026-01-15 18:20:00+00:00'), 52.0, 21.0
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-large-gap', '1007', timestamp('2026-01-15 18:22:00+00:00'), 52.0001, 21.0001
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-high-coverage-large-gap', '1008', timestamp('2026-01-15 19:10:00+00:00'), 52.0, 21.0
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-high-coverage-large-gap', '1008', timestamp('2026-01-15 19:12:00+00:00'), 52.0001, 21.0001
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-broken', '1003', timestamp('2026-01-15 12:00:00+00:00'), 52.0, 21.0
           union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-broken', '1003', timestamp('2026-01-15 12:02:00+00:00'), 52.0001, 21.0001
       - input: ref('int_gtfs_trip_schedule')
@@ -837,6 +866,9 @@ unit_tests:
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-partial', 'svc', 'Partial Head', 'shape-2', 39600, 42000, 5
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-zero-based-terminal-tolerance', 'svc', 'Zero Based Head', 'shape-4', 46800, 49200, 5
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-stale-progress', 'svc', 'Stale Progress Head', 'shape-5', 50400, 54000, 10
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-truncated', 'svc', 'Truncated Head', 'shape-6', 54000, 58200, 8
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-large-gap', 'svc', 'Large Gap Head', 'shape-7', 57600, 62400, 10
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-high-coverage-large-gap', 'svc', 'High Coverage Large Gap Head', 'shape-8', 64800, 70500, 20
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-broken', 'svc', 'Broken Head', 'shape-3', 43200, 45600, 10
       - input: ref('int_schedule_version')
         format: sql
@@ -882,6 +914,26 @@ unit_tests:
             union all select 'trip-stale-progress', '500108', 8, 53200, 53200
             union all select 'trip-stale-progress', '500109', 9, 53600, 53600
             union all select 'trip-stale-progress', '500110', 10, 54000, 54000
+            union all select 'trip-truncated', '600101', 1, 54000, 54000
+            union all select 'trip-truncated', '600102', 2, 54600, 54600
+            union all select 'trip-truncated', '600103', 3, 55200, 55200
+            union all select 'trip-truncated', '600104', 4, 55800, 55800
+            union all select 'trip-truncated', '600105', 5, 56400, 56400
+            union all select 'trip-truncated', '600106', 6, 57000, 57000
+            union all select 'trip-truncated', '600107', 7, 57600, 57600
+            union all select 'trip-truncated', '600108', 8, 58200, 58200
+            union all select 'trip-large-gap', '700101', 1, 57600, 57600
+            union all select 'trip-large-gap', '700102', 2, 58200, 58200
+            union all select 'trip-large-gap', '700103', 3, 58800, 58800
+            union all select 'trip-large-gap', '700104', 4, 59400, 59400
+            union all select 'trip-large-gap', '700105', 5, 60000, 60000
+            union all select 'trip-large-gap', '700106', 6, 60600, 60600
+            union all select 'trip-large-gap', '700107', 7, 61200, 61200
+            union all select 'trip-large-gap', '700108', 8, 61800, 61800
+            union all select 'trip-large-gap', '700109', 9, 62100, 62100
+            union all select 'trip-large-gap', '700110', 10, 62400, 62400
+            union all select 'trip-high-coverage-large-gap', format('8001%02d', stop_sequence), stop_sequence, 64800 + (stop_sequence - 1) * 300, 64800 + (stop_sequence - 1) * 300
+            from unnest(generate_array(1, 20)) as stop_sequence
             union all select 'trip-broken', '300101', 1, 43200, 43200
             union all select 'trip-broken', '300102', 2, 43500, 43500
             union all select 'trip-broken', '300103', 3, 43800, 43800
@@ -922,6 +974,26 @@ unit_tests:
           union all select '500108', 'Stale Mid 8', 52.08, 21.08, 'snapshot-valid'
           union all select '500109', 'Stale Mid 9', 52.09, 21.09, 'snapshot-valid'
           union all select '500110', 'Stale Destination', 52.1, 21.1, 'snapshot-valid'
+          union all select '600101', 'Truncated Origin', 52.0, 21.0, 'snapshot-valid'
+          union all select '600102', 'Truncated Mid 2', 52.02, 21.02, 'snapshot-valid'
+          union all select '600103', 'Truncated Mid 3', 52.03, 21.03, 'snapshot-valid'
+          union all select '600104', 'Truncated Mid 4', 52.04, 21.04, 'snapshot-valid'
+          union all select '600105', 'Truncated Mid 5', 52.05, 21.05, 'snapshot-valid'
+          union all select '600106', 'Truncated Mid 6', 52.06, 21.06, 'snapshot-valid'
+          union all select '600107', 'Truncated Mid 7', 52.07, 21.07, 'snapshot-valid'
+          union all select '600108', 'Truncated Destination', 52.1, 21.1, 'snapshot-valid'
+          union all select '700101', 'Large Gap Origin', 52.0, 21.0, 'snapshot-valid'
+          union all select '700102', 'Large Gap Mid 2', 52.02, 21.02, 'snapshot-valid'
+          union all select '700103', 'Large Gap Mid 3', 52.03, 21.03, 'snapshot-valid'
+          union all select '700104', 'Large Gap Mid 4', 52.04, 21.04, 'snapshot-valid'
+          union all select '700105', 'Large Gap Mid 5', 52.05, 21.05, 'snapshot-valid'
+          union all select '700106', 'Large Gap Mid 6', 52.06, 21.06, 'snapshot-valid'
+          union all select '700107', 'Large Gap Mid 7', 52.07, 21.07, 'snapshot-valid'
+          union all select '700108', 'Large Gap Mid 8', 52.08, 21.08, 'snapshot-valid'
+          union all select '700109', 'Large Gap Mid 9', 52.09, 21.09, 'snapshot-valid'
+          union all select '700110', 'Large Gap Destination', 52.1, 21.1, 'snapshot-valid'
+          union all select format('8001%02d', stop_sequence), case when stop_sequence = 1 then 'High Coverage Large Gap Origin' when stop_sequence = 20 then 'High Coverage Large Gap Destination' else format('High Coverage Large Gap Mid %d', stop_sequence) end, 52.0 + stop_sequence / 1000.0, 21.0 + stop_sequence / 1000.0, 'snapshot-valid'
+          from unnest(generate_array(1, 20)) as stop_sequence
           union all select '300101', 'Broken Origin', 52.0, 21.0, 'snapshot-valid'
           union all select '300102', 'Broken Mid 2', 52.02, 21.02, 'snapshot-valid'
           union all select '300103', 'Broken Mid 3', 52.03, 21.03, 'snapshot-valid'
@@ -949,6 +1021,8 @@ unit_tests:
           origin_stop_name: 'Complete Origin'
           destination_stop_name: 'Complete Destination'
           quality_flags: []
+          service_observation_class: 'regular'
+          service_observation_flags: []
         - trip_id: 'trip-partial'
           trip_quality: 'partial'
           start_delay_seconds: 660
@@ -964,6 +1038,8 @@ unit_tests:
           origin_stop_name: 'Partial Origin'
           destination_stop_name: 'Partial Destination'
           quality_flags: ['low_stop_coverage']
+          service_observation_class: 'regular'
+          service_observation_flags: []
         - trip_id: 'trip-zero-based-terminal-tolerance'
           trip_quality: 'partial'
           start_delay_seconds: 60
@@ -979,6 +1055,8 @@ unit_tests:
           origin_stop_name: 'Zero Based Origin'
           destination_stop_name: 'Zero Based Destination'
           quality_flags: ['low_stop_coverage']
+          service_observation_class: 'regular'
+          service_observation_flags: []
         - trip_id: 'trip-stale-progress'
           trip_quality: 'partial'
           start_delay_seconds: 1200
@@ -994,21 +1072,76 @@ unit_tests:
           origin_stop_name: 'Stale Origin'
           destination_stop_name: 'Stale Destination'
           quality_flags: ['missing_last_stop', 'low_stop_coverage', 'stale_stop_progression']
+          service_observation_class: 'modified'
+          service_observation_flags: ['short_end', 'stale_progress']
+        - trip_id: 'trip-truncated'
+          trip_quality: 'partial'
+          start_delay_seconds: 1860
+          end_delay_seconds: 0
+          stops_detected: 5
+          detected_stop_ratio: 0.625
+          is_first_stop_observed: false
+          is_last_stop_observed: true
+          has_stale_stop_progression: false
+          schedule_version_id: 'schedule-version-1'
+          mode: 'bus'
+          trip_headsign: 'Truncated Head'
+          origin_stop_name: 'Truncated Origin'
+          destination_stop_name: 'Truncated Destination'
+          quality_flags: ['missing_first_stop', 'low_stop_coverage']
+          service_observation_class: 'truncated'
+          service_observation_flags: ['short_start']
+        - trip_id: 'trip-large-gap'
+          trip_quality: 'partial'
+          start_delay_seconds: 60
+          end_delay_seconds: 0
+          stops_detected: 5
+          detected_stop_ratio: 0.5
+          is_first_stop_observed: true
+          is_last_stop_observed: true
+          has_stale_stop_progression: false
+          schedule_version_id: 'schedule-version-1'
+          mode: 'bus'
+          trip_headsign: 'Large Gap Head'
+          origin_stop_name: 'Large Gap Origin'
+          destination_stop_name: 'Large Gap Destination'
+          quality_flags: ['low_stop_coverage', 'large_stop_sequence_gap']
+          service_observation_class: 'modified'
+          service_observation_flags: ['large_internal_gap']
+        - trip_id: 'trip-high-coverage-large-gap'
+          trip_quality: 'partial'
+          start_delay_seconds: 60
+          end_delay_seconds: 0
+          stops_detected: 16
+          detected_stop_ratio: 0.8
+          is_first_stop_observed: true
+          is_last_stop_observed: true
+          has_stale_stop_progression: false
+          schedule_version_id: 'schedule-version-1'
+          mode: 'bus'
+          trip_headsign: 'High Coverage Large Gap Head'
+          origin_stop_name: 'High Coverage Large Gap Origin'
+          destination_stop_name: 'High Coverage Large Gap Destination'
+          quality_flags: ['large_stop_sequence_gap']
+          service_observation_class: 'modified'
+          service_observation_flags: ['large_internal_gap']
         - trip_id: 'trip-broken'
           trip_quality: 'broken'
           start_delay_seconds: 1260
-          end_delay_seconds: -1140
-          stops_detected: 1
-          detected_stop_ratio: 0.1
+          end_delay_seconds: 0
+          stops_detected: 2
+          detected_stop_ratio: 0.2
           is_first_stop_observed: false
-          is_last_stop_observed: false
+          is_last_stop_observed: true
           has_stale_stop_progression: false
           schedule_version_id: 'schedule-version-1'
           mode: 'bus'
           trip_headsign: 'Broken Head'
           origin_stop_name: 'Broken Origin'
           destination_stop_name: 'Broken Destination'
-          quality_flags: ['missing_first_stop', 'missing_last_stop', 'low_stop_coverage', 'likely_wrong_trip_assignment']
+          quality_flags: ['missing_first_stop', 'low_stop_coverage', 'large_stop_sequence_gap', 'likely_wrong_trip_assignment']
+          service_observation_class: 'matching_failure'
+          service_observation_flags: ['short_start', 'large_internal_gap', 'bad_assignment_evidence']
 
   - name: int_trip_summary_ignores_request_only_arrivals
     model: int_trip_summary
