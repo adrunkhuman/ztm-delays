@@ -1,49 +1,21 @@
-with date_bounds as (
-    select
-        min(service_date) as min_service_date,
-        max(service_date) as max_service_date
-    from {{ ref('stg_gtfs__calendar_dates') }}
-),
-
-date_spine as (
-    select service_date
-    from date_bounds,
-        unnest(generate_date_array(min_service_date, max_service_date)) as service_date
-),
-
-loaded_snapshots as (
-    select distinct gtfs_snapshot_id
-    from {{ ref('stg_gtfs__calendar_dates') }}
-),
-
-governing_snapshots as (
-    select
-        date_spine.service_date,
-        snapshots.snapshot_id as gtfs_snapshot_id,
-        snapshots.snapshot_timestamp
-    from date_spine
-    inner join {{ source('raw', 'raw_gtfs_snapshots') }} as snapshots
-        on date(snapshots.snapshot_timestamp, 'Europe/Warsaw') < date_spine.service_date
-    inner join loaded_snapshots
-        on snapshots.snapshot_id = loaded_snapshots.gtfs_snapshot_id
-    qualify row_number() over (
-        partition by date_spine.service_date
-        order by snapshots.snapshot_timestamp desc, snapshots.snapshot_id desc
-    ) = 1
+with selected_snapshot as (
+    select snapshot_id as gtfs_snapshot_id
+    from {{ source('raw', 'raw_gtfs_snapshots') }}
+    where snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+    limit 1
 ),
 
 calendar_dates as (
     select
         calendar_dates.service_id,
-        governing_snapshots.service_date,
-        governing_snapshots.gtfs_snapshot_id,
+        calendar_dates.service_date,
+        calendar_dates.gtfs_snapshot_id,
         -- Pc only means generic weekday; Warsaw service_id date prefixes carry the exact weekday pattern.
         safe_cast(regexp_extract(calendar_dates.service_id, r'^(\d{4}-\d{2}-\d{2}):') as date) as schedule_pattern_date,
         regexp_extract(calendar_dates.service_id, r'(?:^|:)(Pc|Pt|Sb|Nd)[A-Za-z]*$') as schedule_token
-    from governing_snapshots
-    left join {{ ref('stg_gtfs__calendar_dates') }} as calendar_dates
-        on governing_snapshots.gtfs_snapshot_id = calendar_dates.gtfs_snapshot_id
-        and governing_snapshots.service_date = calendar_dates.service_date
+    from {{ ref('stg_gtfs__calendar_dates') }} as calendar_dates
+    inner join selected_snapshot
+        on calendar_dates.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
 ),
 
 calendar_schedule_classes as (
@@ -75,6 +47,19 @@ calendar_schedule_classes as (
     from calendar_dates
 ),
 
+date_bounds as (
+    select
+        min(service_date) as min_service_date,
+        max(service_date) as max_service_date
+    from calendar_dates
+),
+
+date_spine as (
+    select service_date
+    from date_bounds,
+        unnest(generate_date_array(min_service_date, max_service_date)) as service_date
+),
+
 schedule_classes as (
     select
         service_date,
@@ -90,7 +75,7 @@ schedule_classes as (
 )
 
 select
-    service_date,
+    date_spine.service_date,
     case
         when specific_schedule_class_count = 1 then specific_schedule_class
         when specific_schedule_class_count > 1 then 'mixed'
@@ -98,7 +83,11 @@ select
         when schedule_class_count > 1 then 'mixed'
         else 'unknown'
     end as schedule_day_type,
-    schedule_day_types,
-    schedule_service_ids,
-    gtfs_snapshot_id
-from schedule_classes
+    coalesce(schedule_classes.schedule_day_types, 'unknown') as schedule_day_types,
+    coalesce(schedule_classes.schedule_service_ids, '') as schedule_service_ids,
+    selected_snapshot.gtfs_snapshot_id
+from date_spine
+cross join selected_snapshot
+left join schedule_classes
+    on date_spine.service_date = schedule_classes.service_date
+    and selected_snapshot.gtfs_snapshot_id = schedule_classes.gtfs_snapshot_id

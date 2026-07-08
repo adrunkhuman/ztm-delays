@@ -300,24 +300,24 @@ models:
         tests: [not_null]
 
   - name: dim_schedule_date
-    description: Archive-safe schedule-date dimension. One row per governable service date, meaning dates with a loaded snapshot whose Warsaw-local snapshot date is strictly before service_date. If that governing snapshot has no active service IDs for the date, the row emits schedule_day_type unknown and empty lineage rather than falling back to an older snapshot.
+    description: Schedule-date dimension for the selected GTFS snapshot. Nightly GPS rebuilds use the latest dimension-built snapshot available at rebuild time and publish both the processing date and prior service date, so late schedule corrections for yesterday are replaced by the next nightly run.
     columns:
       - name: service_date
-        description: Governable Warsaw-local service date whose schedule classification is derived from the governing GTFS snapshot.
+        description: Warsaw-local service date whose schedule classification is derived from the selected GTFS snapshot.
         tests: [not_null, unique]
       - name: schedule_day_type
-        description: Service pattern that actually ran according to GTFS service_id assignments in the governing snapshot.
+        description: Service pattern that actually ran according to GTFS service_id assignments in the selected snapshot.
         tests:
           - not_null
           - accepted_values:
               arguments:
                 values: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday_holiday', 'weekday', 'mixed', 'unknown']
       - name: schedule_day_types
-        description: Comma-delimited set of schedule classes extracted from all governing-snapshot GTFS service_id values for this service_date before collapsing to schedule_day_type. Unknown when the governing snapshot has no active service IDs for the date.
+        description: Comma-delimited set of schedule classes extracted from all selected-snapshot GTFS service_id values for this service_date before collapsing to schedule_day_type. Unknown when the selected snapshot has no active service IDs for the date.
       - name: schedule_service_ids
-        description: Comma-delimited raw GTFS service_id values active for this service_date in the governing snapshot. Empty when the governing snapshot has no active service IDs for the date.
+        description: Comma-delimited raw GTFS service_id values active for this service_date in the selected snapshot. Empty when the selected snapshot has no active service IDs for the date.
       - name: gtfs_snapshot_id
-        description: Governing GTFS snapshot selected as the latest snapshot whose Warsaw-local snapshot date is strictly before service_date.
+        description: Selected GTFS snapshot used to build this schedule-date row.
         tests: [not_null]
 
   - name: dim_schedule_date_current
@@ -354,7 +354,7 @@ models:
         tests: [not_null]
 
   - name: dim_schedule_version
-    description: Archive-safe schedule version dimension. One row per consecutive unchanged timetable fingerprint for line, direction_id, and schedule_day_type, derived from service-date governing GTFS snapshots observed in GPS processing windows. Versions are only known from collected GTFS snapshots onward because the mkuran feed is a rolling 31-day window. Same-day/intraday schedule changes are not represented until #27. Use this model for timetable baselines only; display labels come from governing-snapshot/archive-safe label columns.
+    description: Schedule version dimension. One row per consecutive unchanged timetable fingerprint for line, direction_id, and schedule_day_type, derived from selected GTFS snapshots observed in GPS processing windows. Versions are only known from collected GTFS snapshots onward because the mkuran feed is a rolling 31-day window. Nightly GPS rebuilds use the latest dimension-built snapshot and republish the prior service date to absorb late schedule corrections. Use this model for timetable baselines only; display labels come from baked fact columns.
     columns:
       - name: schedule_version_id
         description: Stable identifier for one consecutive timetable version period. Includes valid_from_date so a timetable that returns after a change becomes a new version period.
@@ -391,10 +391,10 @@ models:
       - name: valid_to_date
         description: Last Warsaw-local GPS processing date before the next observed timetable fingerprint change for line, direction_id, and schedule_day_type. Null means no later collected change is known.
       - name: first_gtfs_snapshot_id
-        description: First governing GTFS snapshot observed in this version period.
+        description: First selected GTFS snapshot observed in this version period.
         tests: [not_null]
       - name: last_gtfs_snapshot_id
-        description: Last governing GTFS snapshot observed in this version period.
+        description: Last selected GTFS snapshot observed in this version period.
         tests: [not_null]
       - name: first_processing_date
         description: First Warsaw-local GPS processing date observed in this version period. Equal to valid_from_date.
@@ -407,22 +407,22 @@ models:
         tests: [not_null]
 
   - name: fct_trip
-    description: Serving-layer completed-trip fact. One row per observed vehicle trip candidate, partitioned by service_date, with archive-safe labels baked from the governing GTFS snapshot and trip quality retained for strict/exploratory/debug filtering.
+    description: Serving-layer completed-trip fact. One row per observed vehicle trip candidate, partitioned by service_date, with archive-safe labels baked from the selected GTFS snapshot and trip quality retained for strict/exploratory/debug filtering.
     columns:
       - name: gtfs_snapshot_id
-        description: Governing GTFS snapshot used for matching, schedule lineage, and archive-safe labels.
+        description: Selected GTFS snapshot used for matching, schedule lineage, and archive-safe labels.
       - name: gps_date
         description: Warsaw-local GPS processing date that produced this realized trip row.
       - name: service_date
         description: GTFS service date for the trip. This is the fact partition field.
       - name: trip_id
-        description: Matched GTFS trip_id from the governing snapshot.
+        description: Matched GTFS trip_id from the selected snapshot.
       - name: vehicle_number
         description: Vehicle identifier observed in the GPS source.
       - name: line
         description: Public line identifier from the matched trip.
       - name: route_short_name
-        description: Public route short name from the governing GTFS snapshot.
+        description: Public route short name from the selected GTFS snapshot.
       - name: mode
         description: Transit mode from the governing GTFS route.
       - name: brigade
@@ -432,9 +432,9 @@ models:
       - name: direction_id
         description: GTFS direction_id for the matched trip.
       - name: service_id
-        description: GTFS service_id for the matched trip in the governing snapshot.
+        description: GTFS service_id for the matched trip in the selected snapshot.
       - name: trip_headsign
-        description: Matched trip headsign from the governing snapshot. This is an archive-safe display label.
+        description: Matched trip headsign from the selected snapshot. This is an archive-safe display label.
       - name: shape_id
         description: GTFS shape_id for the matched trip.
       - name: day_type
@@ -442,17 +442,17 @@ models:
       - name: schedule_day_type
         description: GTFS-derived service pattern for this line and direction on the service date.
       - name: schedule_service_ids
-        description: Comma-delimited active GTFS service_id values for this line and direction under the governing snapshot.
+        description: Comma-delimited active GTFS service_id values for this line and direction under the selected snapshot.
       - name: schedule_version_id
         description: Timetable-version identifier for since-schedule-change analytics.
       - name: origin_stop_id
-        description: First scheduled stop_id for the matched trip in the governing snapshot.
+        description: First scheduled stop_id for the matched trip in the selected snapshot.
       - name: origin_stop_name
-        description: First scheduled stop name from the governing snapshot. This is an archive-safe display label.
+        description: First scheduled stop name from the selected snapshot. This is an archive-safe display label.
       - name: destination_stop_id
-        description: Last scheduled stop_id for the matched trip in the governing snapshot.
+        description: Last scheduled stop_id for the matched trip in the selected snapshot.
       - name: destination_stop_name
-        description: Last scheduled stop name from the governing snapshot. This is an archive-safe display label.
+        description: Last scheduled stop name from the selected snapshot. This is an archive-safe display label.
       - name: scheduled_start_time
         description: Timestamp of the first scheduled stop arrival for the matched trip.
       - name: scheduled_end_time
@@ -501,10 +501,10 @@ models:
         description: "Array of service-class explanation flags: short_start, short_end, large_internal_gap, stale_progress, bad_assignment_evidence."
 
   - name: fct_stop_arrival
-    description: Serving-layer stop-arrival detail fact. One row per detected scheduled stop arrival for an observed vehicle trip, partitioned by service_date, with archive-safe trip and stop labels baked from the governing GTFS snapshot. Strict analytics should default to trip_quality = 'complete'; partial rows are retained for exploration. Trips with non-monotonic stop progression keep diagnostics in fct_trip and intermediate models, but their stop arrivals are withheld from this serving fact.
+    description: Serving-layer stop-arrival detail fact. One row per detected scheduled stop arrival for an observed vehicle trip, partitioned by service_date, with archive-safe trip and stop labels baked from the selected GTFS snapshot. Strict analytics should default to trip_quality = 'complete'; partial rows are retained for exploration. Trips with non-monotonic stop progression keep diagnostics in fct_trip and intermediate models, but their stop arrivals are withheld from this serving fact.
     columns:
       - name: gtfs_snapshot_id
-        description: Governing GTFS snapshot used for matching, schedule lineage, and archive-safe labels.
+        description: Selected GTFS snapshot used for matching, schedule lineage, and archive-safe labels.
       - name: gps_date
         description: Warsaw-local processing date inherited from fct_trip for the run that published this stop-arrival row.
       - name: source_gps_date
@@ -512,13 +512,13 @@ models:
       - name: service_date
         description: GTFS service date for the matched trip. This is the fact partition field.
       - name: trip_id
-        description: Matched GTFS trip_id from the governing snapshot.
+        description: Matched GTFS trip_id from the selected snapshot.
       - name: vehicle_number
         description: Vehicle identifier observed in the GPS source.
       - name: line
         description: Public line identifier from the matched trip.
       - name: route_short_name
-        description: Public route short name from the governing GTFS snapshot.
+        description: Public route short name from the selected GTFS snapshot.
       - name: mode
         description: Transit mode from the governing GTFS route.
       - name: brigade
@@ -528,9 +528,9 @@ models:
       - name: direction_id
         description: GTFS direction_id for the matched trip.
       - name: service_id
-        description: GTFS service_id for the matched trip in the governing snapshot.
+        description: GTFS service_id for the matched trip in the selected snapshot.
       - name: trip_headsign
-        description: Matched trip headsign from the governing snapshot. This is an archive-safe display label.
+        description: Matched trip headsign from the selected snapshot. This is an archive-safe display label.
       - name: shape_id
         description: GTFS shape_id for the matched trip.
       - name: day_type
@@ -538,9 +538,9 @@ models:
       - name: is_holiday
         description: True when service_date is a Polish public holiday.
       - name: schedule_day_type
-        description: GTFS-derived service pattern for this line and direction on the service date under the governing snapshot.
+        description: GTFS-derived service pattern for this line and direction on the service date under the selected snapshot.
       - name: schedule_service_ids
-        description: Comma-delimited active GTFS service_id values for this line and direction under the governing snapshot.
+        description: Comma-delimited active GTFS service_id values for this line and direction under the selected snapshot.
       - name: schedule_version_id
         description: Timetable-version identifier for since-schedule-change analytics.
       - name: trip_quality
@@ -757,28 +757,28 @@ models:
         description: Largest gap reported by present hourly buckets. Missing hours are represented through missing_hours, not as 3600-second gaps.
 
   - name: agg_service_coverage
-    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the governing GTFS bus/tram schedule; observed service counts distinct regular/truncated/modified scheduled trip_id values from int_trip_summary after best-class dedupe ordered regular > truncated > modified, and excludes matching failures. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
+    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the selected GTFS bus/tram schedule; observed service counts distinct regular/truncated/modified scheduled trip_id values from int_trip_summary after best-class dedupe ordered regular > truncated > modified, and excludes matching failures. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
     columns:
       - name: service_date
         description: GTFS service date assigned to the scheduled trips. Overnight service can have service_hour on the next calendar date.
       - name: scheduled_start_date
         description: Warsaw-local date of the scheduled trip start hour. This is the rebuild window key and table partition field.
       - name: gtfs_snapshot_id
-        description: Governing GTFS snapshot used for expected service and archive-safe route labels.
+        description: Selected GTFS snapshot used for expected service and archive-safe route labels.
       - name: line
-        description: Public line identifier from the governing GTFS schedule.
+        description: Public line identifier from the selected GTFS schedule.
       - name: route_short_name
-        description: Public route short name from the governing GTFS snapshot.
+        description: Public route short name from the selected GTFS snapshot.
       - name: mode
         description: Transit mode from the governing GTFS route.
       - name: direction_id
         description: GTFS direction_id for the scheduled trips.
       - name: trip_headsign
-        description: Matched GTFS trip headsign for this line and direction under the governing snapshot.
+        description: Matched GTFS trip headsign for this line and direction under the selected snapshot.
       - name: schedule_day_type
-        description: GTFS-derived service pattern from int_gtfs_trip_schedule under the governing snapshot.
+        description: GTFS-derived service pattern from int_gtfs_trip_schedule under the selected snapshot.
       - name: schedule_service_ids
-        description: Comma-delimited active GTFS service_id values for this line and direction under the governing snapshot.
+        description: Comma-delimited active GTFS service_id values for this line and direction under the selected snapshot.
       - name: schedule_version_id
         description: Timetable-version identifier for this line, direction_id, and schedule_day_type.
       - name: service_hour
@@ -2672,8 +2672,11 @@ unit_tests:
       rows:
         - {service_date: '2026-04-06', day_type: 'weekday', is_holiday: true, weekday_name: 'Monday', day_of_week: 2, iso_week: 15, month: 4, year: 2026}
 
-  - name: dim_schedule_date_uses_governing_snapshot_and_preserves_weekday_pattern
+  - name: dim_schedule_date_uses_selected_snapshot_and_preserves_weekday_pattern
     model: dim_schedule_date
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
     given:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
@@ -2697,8 +2700,11 @@ unit_tests:
           schedule_service_ids: '2026-07-01:PcS, PcM'
           gtfs_snapshot_id: 'snapshot-valid'
 
-  - name: dim_schedule_date_does_not_fall_back_when_governing_snapshot_lacks_service_date
+  - name: dim_schedule_date_does_not_fall_back_when_selected_snapshot_has_calendar_gap
     model: dim_schedule_date
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-valid'
     given:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
@@ -2709,9 +2715,15 @@ unit_tests:
         format: sql
         rows: |
           select '2026-07-01:PcS' as service_id, date '2026-07-08' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'PcM', date '2026-07-07', 1, 'weekday', 'snapshot-valid'
           union all select 'PcM', date '2026-07-09', 1, 'weekday', 'snapshot-valid'
     expect:
       rows:
+        - service_date: '2026-07-07'
+          schedule_day_type: 'weekday'
+          schedule_day_types: 'weekday'
+          schedule_service_ids: 'PcM'
+          gtfs_snapshot_id: 'snapshot-valid'
         - service_date: '2026-07-08'
           schedule_day_type: 'unknown'
           schedule_day_types: 'unknown'

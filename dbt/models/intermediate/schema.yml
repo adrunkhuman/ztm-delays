@@ -182,30 +182,30 @@ models:
         description: Duration in seconds between segment_start_time and segment_end_time.
 
   - name: int_gtfs_trip_schedule
-    description: Denormalized scheduled GTFS trip under the service date's governing snapshot for each Warsaw-local GPS processing date. One row per processing_date, service_date, governing gtfs_snapshot_id, and trip_id.
+    description: Denormalized scheduled GTFS trip under the selected GTFS snapshot for each Warsaw-local GPS processing date. One row per processing_date, service_date, selected gtfs_snapshot_id, and trip_id.
     columns:
       - name: service_date
         description: GTFS service date for the scheduled trip. Can be the previous date for overnight trips operating on processing_date.
       - name: processing_date
         description: Warsaw-local GPS processing date whose raw pings can overlap this scheduled trip.
       - name: schedule_day_type
-        description: GTFS-derived service pattern for this line and direction on service_date under the service date's governing snapshot.
+        description: GTFS-derived service pattern for this line and direction on service_date under the selected GTFS snapshot.
       - name: schedule_service_ids
-        description: Comma-delimited active GTFS service_id values for this line and direction on service_date in the service date's governing snapshot.
+        description: Comma-delimited active GTFS service_id values for this line and direction on service_date in the selected GTFS snapshot.
       - name: gtfs_snapshot_id
-        description: Governing GTFS snapshot selected as the latest loaded snapshot whose Warsaw-local snapshot date is strictly before service_date.
+        description: Selected GTFS snapshot used for this rebuild.
       - name: line
         description: Public line identifier from GTFS route_id. This is the current working line key, not a permanent historical entity guarantee.
       - name: direction_id
         description: GTFS direction_id for the scheduled trip.
       - name: trip_id
-        description: GTFS trip_id from the governing snapshot. Kept as lineage and not used as part of the stable schedule fingerprint.
+        description: GTFS trip_id from the selected snapshot. Kept as lineage and not used as part of the stable schedule fingerprint.
       - name: service_id
-        description: GTFS service_id for the scheduled trip in the governing snapshot. Kept as lineage and not used as part of the stable schedule fingerprint.
+        description: GTFS service_id for the scheduled trip in the selected snapshot. Kept as lineage and not used as part of the stable schedule fingerprint.
       - name: trip_headsign
-        description: Trip headsign from the governing snapshot. This is a display label and is not part of the schedule-version fingerprint.
+        description: Trip headsign from the selected snapshot. This is a display label and is not part of the schedule-version fingerprint.
       - name: shape_id
-        description: GTFS shape_id for the scheduled trip in the governing snapshot.
+        description: GTFS shape_id for the scheduled trip in the selected snapshot.
       - name: trip_start_seconds
         description: First scheduled arrival time for the trip, in seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
       - name: trip_end_seconds
@@ -220,7 +220,7 @@ models:
         description: Stable ordered stop/time signature for one trip, built from stop_sequence, stop_id, and arrival_time_seconds only.
 
   - name: int_gtfs_duty_chain
-    description: Ordered GTFS duty-chain schedule spine. One row per service_date, processing_date, governing snapshot, duty_chain_id, and trip_order. Uses GTFS block_id as the preferred duty identity and falls back to line plus normalized brigade only when block_id is missing.
+    description: Ordered GTFS duty-chain schedule spine. One row per service_date, processing_date, selected snapshot, duty_chain_id, and trip_order. Uses GTFS block_id as the preferred duty identity and falls back to line plus normalized brigade only when block_id is missing.
     columns:
       - name: service_date
         description: GTFS service date for the scheduled duty segment.
@@ -233,7 +233,7 @@ models:
       - name: schedule_service_ids
         description: Comma-delimited active GTFS service_id values for this line and direction on service_date.
       - name: gtfs_snapshot_id
-        description: Governing GTFS snapshot selected for the service date.
+        description: Selected GTFS snapshot used for this rebuild.
         tests: [not_null]
       - name: duty_chain_id
         description: Stable hash of gtfs_snapshot_id, service_date, duty_chain_source, and duty_chain_source_id.
@@ -346,7 +346,7 @@ models:
         tests: [not_null]
 
   - name: int_schedule_version
-    description: Per-line timetable fingerprint history. Consecutive governing processing dates with the same timetable fingerprint collapse into one schedule version for line, direction_id, and schedule_day_type.
+    description: Per-line timetable fingerprint history. Consecutive selected-snapshot processing dates with the same timetable fingerprint collapse into one schedule version for line, direction_id, and schedule_day_type.
     columns:
       - name: schedule_version_id
         description: Stable identifier for one consecutive timetable version period. Includes valid_from_date so a timetable that returns after a change becomes a new version period.
@@ -363,9 +363,9 @@ models:
       - name: valid_to_date
         description: Last Warsaw-local GPS processing date before the next observed timetable fingerprint change for line, direction_id, and schedule_day_type. Null means no later collected change is known.
       - name: first_gtfs_snapshot_id
-        description: First governing GTFS snapshot observed in this version period.
+        description: First selected GTFS snapshot observed in this version period.
       - name: last_gtfs_snapshot_id
-        description: Last governing GTFS snapshot observed in this version period.
+        description: Last selected GTFS snapshot observed in this version period.
       - name: first_processing_date
         description: First Warsaw-local GPS processing date observed in this version period. Equal to valid_from_date.
       - name: last_processing_date
@@ -377,7 +377,7 @@ models:
     description: Completed-trip reconstruction summary. One row per observed vehicle trip candidate in a GPS processing date, using detected stop arrivals as the realized-trip grain and matched pings for quality diagnostics.
     columns:
       - name: gtfs_snapshot_id
-        description: Governing GTFS snapshot used for trip matching, stop reconstruction, labels, and schedule-version lineage.
+        description: Selected GTFS snapshot used for trip matching, stop reconstruction, labels, and schedule-version lineage.
         tests: [not_null]
       - name: gps_date
         description: Warsaw-local GPS processing date partition rebuilt by dag_daily_gps.
@@ -386,7 +386,7 @@ models:
         description: GTFS service date for the trip. Can be the prior calendar date for overnight service.
         tests: [not_null]
       - name: trip_id
-        description: Matched GTFS trip_id from the governing snapshot.
+        description: Matched GTFS trip_id from the selected snapshot.
         tests: [not_null]
       - name: vehicle_number
         description: Vehicle identifier observed in the GPS source.
@@ -395,7 +395,7 @@ models:
         description: Public line identifier from the matched trip.
         tests: [not_null]
       - name: route_short_name
-        description: Public route short name from the governing GTFS snapshot.
+        description: Public route short name from the selected GTFS snapshot.
       - name: mode
         description: Transit mode from the governing GTFS route. Live GPS currently covers bus and tram.
       - name: brigade
@@ -1185,8 +1185,11 @@ unit_tests:
     expect:
       rows: []
 
-  - name: int_gtfs_trip_schedule_uses_prior_day_governing_snapshot
+  - name: int_gtfs_trip_schedule_uses_selected_snapshot_for_processing_window
     model: int_gtfs_trip_schedule
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-same-day'
     given:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
@@ -1216,32 +1219,15 @@ unit_tests:
       rows:
         - service_date: '2026-07-08'
           processing_date: '2026-07-08'
-          schedule_day_type: 'wednesday'
-          schedule_service_ids: '2026-07-01:PcS'
-          gtfs_snapshot_id: 'snapshot-prior'
-          line: '187'
-          direction_id: 0
-          trip_id: 'trip-prior'
-          service_id: '2026-07-01:PcS'
-          trip_headsign: 'Prior Head'
-          shape_id: 'shape-prior'
-          trip_start_seconds: 36000
-          trip_end_seconds: 36600
-          stop_count: 2
-          ordered_stop_ids: '100101 | 100102'
-          ordered_arrival_time_seconds: '36000 | 36600'
-          trip_timetable_signature: '000001:100101:00036000 | 000002:100102:00036600'
-        - service_date: '2026-07-08'
-          processing_date: '2026-07-08'
           schedule_day_type: 'sunday_holiday'
           schedule_service_ids: 'NdM'
-          gtfs_snapshot_id: 'snapshot-prior'
-          line: '999'
+          gtfs_snapshot_id: 'snapshot-same-day'
+          line: '187'
           direction_id: 0
-          trip_id: 'trip-other-line'
+          trip_id: 'trip-same-day'
           service_id: 'NdM'
-          trip_headsign: 'Other Line'
-          shape_id: 'shape-other-line'
+          trip_headsign: 'Same Day Head'
+          shape_id: 'shape-same-day'
           trip_start_seconds: 40000
           trip_end_seconds: 40000
           stop_count: 1
@@ -1306,6 +1292,9 @@ unit_tests:
 
   - name: int_gtfs_trip_schedule_includes_only_trips_overlapping_processing_date
     model: int_gtfs_trip_schedule
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-prior'
     given:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
@@ -1365,8 +1354,11 @@ unit_tests:
           ordered_arrival_time_seconds: '90000 | 90600'
           trip_timetable_signature: '000001:100101:00090000 | 000002:100102:00090600'
 
-  - name: int_gtfs_trip_schedule_uses_service_date_snapshot_for_overnight_processing
+  - name: int_gtfs_trip_schedule_uses_selected_snapshot_for_overnight_processing
     model: int_gtfs_trip_schedule
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-current'
     given:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
@@ -1396,21 +1388,21 @@ unit_tests:
       rows:
         - service_date: '2026-07-07'
           processing_date: '2026-07-08'
-          schedule_day_type: 'weekday'
-          schedule_service_ids: 'PcM'
-          gtfs_snapshot_id: 'snapshot-old'
+          schedule_day_type: 'sunday_holiday'
+          schedule_service_ids: 'NdM'
+          gtfs_snapshot_id: 'snapshot-current'
           line: '187'
           direction_id: 0
-          trip_id: 'trip-prior-night'
-          service_id: 'PcM'
-          trip_headsign: 'Prior Night'
-          shape_id: 'shape-prior'
+          trip_id: 'trip-prior-wrong-snapshot'
+          service_id: 'NdM'
+          trip_headsign: 'Wrong Prior'
+          shape_id: 'shape-wrong'
           trip_start_seconds: 90000
-          trip_end_seconds: 90600
-          stop_count: 2
-          ordered_stop_ids: '100101 | 100102'
-          ordered_arrival_time_seconds: '90000 | 90600'
-          trip_timetable_signature: '000001:100101:00090000 | 000002:100102:00090600'
+          trip_end_seconds: 90000
+          stop_count: 1
+          ordered_stop_ids: '999901'
+          ordered_arrival_time_seconds: '90000'
+          trip_timetable_signature: '000001:999901:00090000'
         - service_date: '2026-07-08'
           processing_date: '2026-07-08'
           schedule_day_type: 'weekday'

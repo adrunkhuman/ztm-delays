@@ -159,9 +159,14 @@ def _load_raw_gps_pings(processing_date: str) -> int:
 def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     client = bigquery.Client(project=GCP_PROJECT)
     query = f"""
-        select gtfs_snapshot_id
-        from `{DIM_SCHEDULE_DATE_TABLE}`
-        where service_date = date(@processing_date)
+        select snapshots.snapshot_id as gtfs_snapshot_id
+        from `{RAW_GTFS_SNAPSHOTS_TABLE}` as snapshots
+        inner join `{DIM_SCHEDULE_DATE_TABLE}` as schedule_dates
+          on schedule_dates.gtfs_snapshot_id = snapshots.snapshot_id
+        where schedule_dates.service_date in (date_sub(date(@processing_date), interval 1 day), date(@processing_date))
+        group by snapshots.snapshot_id, snapshots.snapshot_timestamp
+        having count(distinct schedule_dates.service_date) = 2
+        order by snapshots.snapshot_timestamp desc, snapshots.snapshot_id desc
         limit 1
     """
     job_config = bigquery.QueryJobConfig(
@@ -169,7 +174,9 @@ def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     )
     rows = list(client.query(query, job_config=job_config).result())
     if not rows:
-        raise AirflowException(f"No built GTFS schedule dimension available for GPS processing date {processing_date}")
+        raise AirflowException(
+            f"No built GTFS schedule dimension covers GPS processing date {processing_date} and its prior date"
+        )
     return str(rows[0].gtfs_snapshot_id)
 
 
@@ -311,7 +318,7 @@ with DAG(
 
     @task
     def selected_gtfs_snapshot_id(processing_date: str) -> str:
-        """Return the dimension-built GTFS snapshot that governs this GPS service date."""
+        """Return the latest dimension-built GTFS snapshot available at rebuild time."""
         return _selected_gtfs_snapshot_id(processing_date)
 
     selected_gtfs_snapshot = selected_gtfs_snapshot_id(PROCESSING_DATE)

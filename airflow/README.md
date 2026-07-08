@@ -41,7 +41,7 @@ Runtime env defaults match the current VPS:
 
 - `dag_gtfs_poll` and `dag_gps_raw_load` are frequent ingestion DAGs.
 - `dag_gtfs_load` runs only when a changed GTFS snapshot is emitted.
-- `dag_daily_gps` runs once per night and accepts a manual `processing_date` for targeted recovery.
+- `dag_daily_gps` runs once per night, uses the latest dimension-built GTFS snapshot available at rebuild time, republishes the current and prior service dates, and accepts a manual `processing_date` for targeted recovery.
 - `dag_serving_export` is manual; use a fresh `export_id` for every run.
 - Default dbt tests stay bounded. Full-history schedule/version and broad aggregate audits are manual jobs.
 
