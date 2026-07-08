@@ -28,4 +28,6 @@ where service_date = date('{{ test_service_date }}')
     or has_stale_stop_progression is null
     or trip_quality is null
     or quality_flags is null
+    or service_observation_class is null
+    or service_observation_flags is null
   )

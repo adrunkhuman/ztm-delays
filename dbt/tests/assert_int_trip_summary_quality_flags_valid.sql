@@ -8,6 +8,7 @@ where gps_date = date('{{ var("processing_date", "1970-01-01") }}')
     'large_ping_gap',
     'non_monotonic_stop_progression',
     'impossible_speed_jump',
+    'large_stop_sequence_gap',
     'extreme_delay',
     'stale_stop_progression',
     'likely_wrong_trip_assignment'

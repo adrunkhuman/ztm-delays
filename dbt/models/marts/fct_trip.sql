@@ -55,7 +55,9 @@ select
     has_impossible_speed_jump,
     has_stale_stop_progression,
     trip_quality,
-    quality_flags
+    quality_flags,
+    service_observation_class,
+    service_observation_flags
 from {{ ref('int_trip_summary') }}
 where service_date = date('{{ publish_service_date }}')
   and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)

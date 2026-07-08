@@ -311,6 +311,7 @@ flagged as (
             if(max_ping_gap_seconds > large_ping_gap_seconds, ['large_ping_gap'], []),
             if(has_non_monotonic_stop_progression, ['non_monotonic_stop_progression'], []),
             if(has_impossible_speed_jump, ['impossible_speed_jump'], []),
+            if(max_stop_sequence_gap > large_stop_sequence_gap, ['large_stop_sequence_gap'], []),
             if(
                 (is_first_stop_observed and abs(start_delay_seconds) > extreme_delay_seconds)
                 or (is_last_stop_observed and abs(end_delay_seconds) > extreme_delay_seconds),
@@ -320,7 +321,6 @@ flagged as (
             if(has_stale_stop_progression, ['stale_stop_progression'], []),
             if(
                 detected_stop_ratio < broken_stop_ratio
-                or max_stop_sequence_gap > large_stop_sequence_gap
                 or has_non_monotonic_stop_progression,
                 ['likely_wrong_trip_assignment'],
                 []
@@ -332,9 +332,22 @@ flagged as (
 classified as (
     select
         *,
+        array_concat(
+            if(not is_first_stop_observed, ['short_start'], []),
+            if(not is_last_stop_observed, ['short_end'], []),
+            if(max_stop_sequence_gap > large_stop_sequence_gap, ['large_internal_gap'], []),
+            if(has_stale_stop_progression, ['stale_progress'], []),
+            if(
+                detected_stop_ratio < broken_stop_ratio
+                or max_ping_gap_seconds > large_ping_gap_seconds * 2
+                or has_non_monotonic_stop_progression
+                or has_impossible_speed_jump,
+                ['bad_assignment_evidence'],
+                []
+            )
+        ) as service_observation_flags,
         case
             when detected_stop_ratio < broken_stop_ratio
-                or max_stop_sequence_gap > large_stop_sequence_gap
                 or max_ping_gap_seconds > large_ping_gap_seconds * 2
                 or has_non_monotonic_stop_progression
                 or has_impossible_speed_jump
@@ -342,11 +355,27 @@ classified as (
             when detected_stop_ratio >= complete_stop_ratio
                 and is_first_stop_observed
                 and is_last_stop_observed
+                and max_stop_sequence_gap <= large_stop_sequence_gap
                 and max_ping_gap_seconds <= large_ping_gap_seconds
                 then 'complete'
             else 'partial'
         end as trip_quality
     from flagged
+),
+
+service_classified as (
+    select
+        *,
+        case
+            when 'bad_assignment_evidence' in unnest(service_observation_flags) then 'matching_failure'
+            when 'large_internal_gap' in unnest(service_observation_flags)
+                or 'stale_progress' in unnest(service_observation_flags)
+                then 'modified'
+            when is_first_stop_observed and is_last_stop_observed then 'regular'
+            when not is_first_stop_observed or not is_last_stop_observed then 'truncated'
+            else 'modified'
+        end as service_observation_class
+    from classified
 )
 
 select
@@ -392,5 +421,7 @@ select
     has_impossible_speed_jump,
     has_stale_stop_progression,
     trip_quality,
-    quality_flags
-from classified
+    quality_flags,
+    service_observation_class,
+    service_observation_flags
+from service_classified

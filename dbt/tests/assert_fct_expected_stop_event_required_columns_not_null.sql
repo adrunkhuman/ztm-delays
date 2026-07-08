@@ -20,6 +20,8 @@ where service_date = date('{{ test_service_date }}')
     or schedule_version_id is null
     or trip_quality is null
     or quality_flags is null
+    or service_observation_class is null
+    or service_observation_flags is null
     or matching_method is null
     or matched_duty_chain_id is null
     or candidate_rank is null

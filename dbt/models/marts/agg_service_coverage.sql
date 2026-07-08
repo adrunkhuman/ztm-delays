@@ -110,16 +110,23 @@ observed_trips as (
         scheduled_start_time,
         actual_start_time,
         actual_end_time,
+        service_observation_class,
         case trip_quality
             when 'complete' then 2
             when 'partial' then 1
-        end as trip_quality_rank
+        end as trip_quality_rank,
+        case service_observation_class
+            when 'regular' then 3
+            when 'truncated' then 2
+            when 'modified' then 1
+            else 0
+        end as service_observation_rank
     from {{ ref('int_trip_summary') }}
     where gps_date between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
       and date(scheduled_start_time, 'Europe/Warsaw') between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
-      and trip_quality in ('complete', 'partial')
+      and service_observation_class in ('regular', 'truncated', 'modified')
 ),
 
 observed_trip_best_quality as (
@@ -129,7 +136,7 @@ observed_trip_best_quality as (
             *,
             row_number() over (
                 partition by service_date, gtfs_snapshot_id, schedule_version_id, trip_id
-                order by trip_quality_rank desc, actual_start_time, actual_end_time
+                order by service_observation_rank desc, trip_quality_rank desc, actual_start_time, actual_end_time
             ) as candidate_rank
         from observed_trips
     )
@@ -153,6 +160,9 @@ observed_by_hour as (
         count(distinct trip_id) as observed_trip_count,
         count(distinct if(trip_quality_rank = 2, trip_id, null)) as complete_trip_count,
         count(distinct if(trip_quality_rank = 1, trip_id, null)) as partial_trip_count,
+        count(distinct if(service_observation_class = 'regular', trip_id, null)) as regular_trip_count,
+        count(distinct if(service_observation_class = 'truncated', trip_id, null)) as truncated_trip_count,
+        count(distinct if(service_observation_class = 'modified', trip_id, null)) as modified_trip_count,
         sum(greatest(timestamp_diff(actual_end_time, actual_start_time, second), 0)) / 60.0 as observed_service_minutes
     from observed_trip_best_quality
     group by
@@ -188,6 +198,9 @@ select
     coalesce(observed.observed_trip_count, 0) as observed_trip_count,
     coalesce(observed.complete_trip_count, 0) as complete_trip_count,
     coalesce(observed.partial_trip_count, 0) as partial_trip_count,
+    coalesce(observed.regular_trip_count, 0) as regular_trip_count,
+    coalesce(observed.truncated_trip_count, 0) as truncated_trip_count,
+    coalesce(observed.modified_trip_count, 0) as modified_trip_count,
     expected.expected_service_minutes,
     coalesce(observed.observed_service_minutes, 0.0) as observed_service_minutes,
     safe_divide(coalesce(observed.observed_trip_count, 0), expected.expected_trip_count) as service_coverage_ratio,

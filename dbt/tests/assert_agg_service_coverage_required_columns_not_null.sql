@@ -18,6 +18,9 @@ where scheduled_start_date between date('{{ var("aggregation_start_date", var("p
       or observed_trip_count is null
       or complete_trip_count is null
       or partial_trip_count is null
+      or regular_trip_count is null
+      or truncated_trip_count is null
+      or modified_trip_count is null
       or expected_service_minutes is null
       or observed_service_minutes is null
       or service_coverage_ratio is null

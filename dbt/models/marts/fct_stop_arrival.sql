@@ -70,6 +70,8 @@ trip_facts as (
         schedule_version_id,
         trip_quality,
         quality_flags,
+        service_observation_class,
+        service_observation_flags,
         has_non_monotonic_stop_progression
     from {{ ref('fct_trip') }}
     where service_date = date('{{ publish_service_date }}')
@@ -139,6 +141,8 @@ select
     trip_facts.schedule_version_id,
     trip_facts.trip_quality,
     trip_facts.quality_flags,
+    trip_facts.service_observation_class,
+    trip_facts.service_observation_flags,
     arrivals.stop_id,
     arrivals.stop_group_id,
     stops.stop_name,

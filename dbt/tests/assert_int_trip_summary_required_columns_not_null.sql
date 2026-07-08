@@ -36,4 +36,6 @@ where gps_date = date('{{ var("processing_date", "1970-01-01") }}')
     or has_stale_stop_progression is null
     or trip_quality is null
     or quality_flags is null
+    or service_observation_class is null
+    or service_observation_flags is null
   )
