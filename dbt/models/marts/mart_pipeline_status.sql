@@ -160,6 +160,33 @@ select
     latest_gtfs_snapshot.latest_gtfs_snapshot_at,
     latest_gtfs_snapshot.gtfs_snapshot_age_hours,
     coalesce(service_coverage.schedule_versions_active, 0) as schedule_versions_active,
+    least(
+        coalesce(status_spine.completeness_ratio, 1.0),
+        coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 1.0),
+        coalesce(safe_divide(service_coverage.observed_trips, service_coverage.expected_trips), 1.0)
+    ) as health_ratio,
+    case
+        when status_spine.completeness_ratio is null
+            and matched_pings.pings_matched is null
+            and service_coverage.observed_trips is null then 'no data'
+        when least(
+            coalesce(status_spine.completeness_ratio, 1.0),
+            coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 1.0),
+            coalesce(safe_divide(service_coverage.observed_trips, service_coverage.expected_trips), 1.0)
+        ) >= 0.9 then 'good'
+        when least(
+            coalesce(status_spine.completeness_ratio, 1.0),
+            coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 1.0),
+            coalesce(safe_divide(service_coverage.observed_trips, service_coverage.expected_trips), 1.0)
+        ) >= 0.7 then 'usable'
+        when least(
+            coalesce(status_spine.completeness_ratio, 1.0),
+            coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 1.0),
+            coalesce(safe_divide(service_coverage.observed_trips, service_coverage.expected_trips), 1.0)
+        ) > 0 then 'patchy'
+        else 'missing'
+    end as health_label,
+    row_number() over (partition by status_spine.mode order by status_spine.service_date desc) as status_rank_desc,
     cast(null as timestamp) as last_export_at,
     current_timestamp() as status_generated_at
 from status_spine

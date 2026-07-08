@@ -1,0 +1,152 @@
+version: 2
+
+models:
+  - name: dim_serving_date
+    description: Frontend date-navigation dimension for service dates available in the serving marts.
+    columns:
+      - name: service_date
+        tests: [not_null, unique]
+      - name: service_date_key
+        tests: [not_null]
+
+  - name: mart_mode_window_summary
+    description: Mode-level delay summary at frontend display grain.
+    columns:
+      - name: mode
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['bus', 'tram']
+      - name: window_type
+        tests: &window_type_tests
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['day', 'weekdays', 'weekend', 'month']
+      - name: window_key
+        tests: [not_null]
+      - name: source_end_date
+        tests: [not_null]
+      - name: arrival_count
+        tests: [not_null]
+
+  - name: mart_line_window_summary
+    description: Line-level delay summary at frontend display grain.
+    columns:
+      - name: line
+        tests: [not_null]
+      - name: mode
+        tests: &mode_tests
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['bus', 'tram']
+      - name: universe_type
+        tests: &universe_tests
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['all_observed', 'zone1_public']
+      - name: window_type
+        tests: *window_type_tests
+      - name: source_end_date
+        tests: [not_null]
+
+  - name: mart_stop_group_window_summary
+    description: Stop-group delay summary at frontend display grain.
+    columns:
+      - name: stop_group_id
+        tests: [not_null]
+      - name: mode
+        tests: *mode_tests
+      - name: universe_type
+        tests: *universe_tests
+      - name: window_type
+        tests: *window_type_tests
+      - name: source_end_date
+        tests: [not_null]
+
+  - name: mart_stop_post_window_summary
+    description: Stop-post delay summary at frontend display grain.
+    columns:
+      - name: stop_id
+        tests: [not_null]
+      - name: stop_group_id
+        tests: [not_null]
+      - name: mode
+        tests: *mode_tests
+      - name: universe_type
+        tests: *universe_tests
+      - name: window_type
+        tests: *window_type_tests
+      - name: source_end_date
+        tests: [not_null]
+
+  - name: mart_hour_window_summary
+    description: Entity/hour median-delay summary for frontend hour bars.
+    columns:
+      - name: entity_type
+        tests: &entity_type_tests
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['mode', 'line', 'stop_group', 'stop_post']
+      - name: entity_id
+        tests: [not_null]
+      - name: mode
+        tests: *mode_tests
+      - name: window_type
+        tests: *window_type_tests
+      - name: local_hour
+        tests: [not_null]
+
+  - name: mart_entity_daily_summary
+    description: Plain daily entity median-delay table for seven-day frontend bars.
+    columns:
+      - name: entity_type
+        tests: *entity_type_tests
+      - name: entity_id
+        tests: [not_null]
+      - name: mode
+        tests: *mode_tests
+      - name: service_date
+        tests: [not_null]
+
+  - name: mart_entity_rankings
+    description: Precomputed eligible entity rankings for landing pages.
+    columns:
+      - name: entity_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['line', 'stop_group', 'stop_post']
+      - name: entity_id
+        tests: [not_null]
+      - name: metric
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['median_delay_seconds', 'on_time_rate', 'arrival_count', 'delay_spread_seconds']
+      - name: rank
+        tests: [not_null]
+      - name: n_entities
+        tests: [not_null]
+
+  - name: mart_trip_daily
+    description: Trip display mart with warehouse-computed delay profiles, erratic scores, and ranks.
+    columns:
+      - name: service_date
+        tests: [not_null]
+      - name: trip_id
+        tests: [not_null]
+      - name: vehicle_number
+        tests: [not_null]
+
+  - name: rpt_schedule_day_mapping_evidence
+    description: Evidence report for service_id token to schedule-day mapping.
+
+  - name: rpt_ranking_universe_evidence
+    description: Evidence report for ranking-universe and ranking-eligibility exclusions.
