@@ -44,6 +44,7 @@ arrival_candidates as (
         and date('{{ var("processing_date") }}')
       and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
         and date('{{ var("processing_date") }}')
+      and stop_service_class = 'regular'
     group by gtfs_snapshot_id, service_date, trip_id, vehicle_number
 ),
 
@@ -72,6 +73,7 @@ arrival_progression as (
             and date('{{ var("processing_date") }}')
           and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
             and date('{{ var("processing_date") }}')
+          and stop_service_class = 'regular'
     )
     group by gtfs_snapshot_id, gps_date, service_date, trip_id, vehicle_number
 ),
@@ -101,6 +103,7 @@ arrival_time_progression as (
             and date('{{ var("processing_date") }}')
           and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
             and date('{{ var("processing_date") }}')
+          and stop_service_class = 'regular'
     )
     group by gtfs_snapshot_id, gps_date, service_date, trip_id, vehicle_number
 ),
@@ -160,15 +163,23 @@ stop_extents as (
     select
         stop_times.gtfs_snapshot_id,
         stop_times.trip_id,
+        count(*) as required_stop_count,
+        min(stop_times.stop_sequence) as first_required_stop_sequence,
+        max(stop_times.stop_sequence) as last_required_stop_sequence,
         array_agg(stop_times.stop_id order by stop_times.stop_sequence)[offset(0)] as origin_stop_id,
         array_agg(stops.stop_name order by stop_times.stop_sequence)[offset(0)] as origin_stop_name,
         array_agg(stop_times.stop_id order by stop_times.stop_sequence desc)[offset(0)] as destination_stop_id,
-        array_agg(stops.stop_name order by stop_times.stop_sequence desc)[offset(0)] as destination_stop_name
+        array_agg(stops.stop_name order by stop_times.stop_sequence desc)[offset(0)] as destination_stop_name,
+        array_agg(stop_times.arrival_time_seconds order by stop_times.stop_sequence)[offset(0)]
+            as origin_arrival_time_seconds,
+        array_agg(stop_times.arrival_time_seconds order by stop_times.stop_sequence desc)[offset(0)]
+            as destination_arrival_time_seconds
     from {{ ref('stg_gtfs__stop_times') }} as stop_times
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.stop_id = stops.stop_id
         and stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
     where stop_times.gtfs_snapshot_id in (select distinct gtfs_snapshot_id from arrival_candidates)
+      and stop_times.stop_service_class = 'regular'
     group by stop_times.gtfs_snapshot_id, stop_times.trip_id
 ),
 
@@ -196,42 +207,56 @@ summarized as (
         stop_extents.origin_stop_name,
         stop_extents.destination_stop_id,
         stop_extents.destination_stop_name,
-        timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval schedule.trip_start_seconds second)
+        timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval stop_extents.origin_arrival_time_seconds second)
             as scheduled_start_time,
-        timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval schedule.trip_end_seconds second)
+        timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval stop_extents.destination_arrival_time_seconds second)
             as scheduled_end_time,
         arrivals.actual_start_time,
         arrivals.actual_end_time,
         timestamp_diff(
             arrivals.actual_start_time,
-            timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval schedule.trip_start_seconds second),
+            timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval stop_extents.origin_arrival_time_seconds second),
             second
         ) as start_delay_seconds,
         timestamp_diff(
             arrivals.actual_end_time,
-            timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval schedule.trip_end_seconds second),
+            timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval stop_extents.destination_arrival_time_seconds second),
             second
         ) as end_delay_seconds,
-        schedule.stop_count as stops_expected,
+        stop_extents.required_stop_count as stops_expected,
         arrivals.stops_detected,
-        safe_divide(arrivals.stops_detected, schedule.stop_count) as detected_stop_ratio,
+        safe_divide(arrivals.stops_detected, stop_extents.required_stop_count) as detected_stop_ratio,
         arrivals.first_detected_stop_sequence,
         arrivals.last_detected_stop_sequence,
         coalesce(arrival_progression.max_stop_sequence_gap, 0) as max_stop_sequence_gap,
         coalesce(ping_diagnostics.max_ping_gap_seconds, 0) as max_ping_gap_seconds,
         coalesce(ping_diagnostics.max_speed_mps, 0.0) as max_speed_mps,
-        arrivals.first_detected_stop_sequence <= quality_thresholds.terminal_stop_tolerance as is_first_stop_observed,
-        arrivals.last_detected_stop_sequence >= schedule.stop_count - 1 - quality_thresholds.terminal_stop_tolerance
-            as is_last_stop_observed,
+        coalesce(
+            arrivals.first_detected_stop_sequence <= stop_extents.first_required_stop_sequence
+                + quality_thresholds.terminal_stop_tolerance,
+            false
+        ) as is_first_stop_observed,
+        coalesce(
+            arrivals.last_detected_stop_sequence >= stop_extents.last_required_stop_sequence
+                - quality_thresholds.terminal_stop_tolerance,
+            false
+        ) as is_last_stop_observed,
         coalesce(arrival_time_progression.has_non_monotonic_stop_progression, false)
             as has_non_monotonic_stop_progression,
         coalesce(ping_diagnostics.max_speed_mps, 0.0) > quality_thresholds.impossible_speed_mps as has_impossible_speed_jump,
-        arrivals.last_detected_stop_sequence < schedule.stop_count - 1 - quality_thresholds.terminal_stop_tolerance
-            and timestamp_diff(
-                arrivals.actual_end_time,
-                timestamp_add(timestamp(arrivals.service_date, 'Europe/Warsaw'), interval schedule.trip_end_seconds second),
-                second
-            ) >= -quality_thresholds.terminal_progress_lag_seconds as has_stale_stop_progression,
+        coalesce(
+            arrivals.last_detected_stop_sequence < stop_extents.last_required_stop_sequence
+                - quality_thresholds.terminal_stop_tolerance
+                and timestamp_diff(
+                    arrivals.actual_end_time,
+                    timestamp_add(
+                        timestamp(arrivals.service_date, 'Europe/Warsaw'),
+                        interval stop_extents.destination_arrival_time_seconds second
+                    ),
+                    second
+                ) >= -quality_thresholds.terminal_progress_lag_seconds,
+            false
+        ) as has_stale_stop_progression,
         quality_thresholds.complete_stop_ratio,
         quality_thresholds.broken_stop_ratio,
         quality_thresholds.large_ping_gap_seconds,

@@ -93,6 +93,8 @@ GTFS_TABLES = (
             bigquery.SchemaField("stop_sequence", "INTEGER"),
             bigquery.SchemaField("arrival_time", "STRING"),
             bigquery.SchemaField("departure_time", "STRING"),
+            bigquery.SchemaField("pickup_type", "INTEGER"),
+            bigquery.SchemaField("drop_off_type", "INTEGER"),
             bigquery.SchemaField("gtfs_snapshot_id", "STRING", mode="REQUIRED"),
         ],
         clustering_fields=["gtfs_snapshot_id"],

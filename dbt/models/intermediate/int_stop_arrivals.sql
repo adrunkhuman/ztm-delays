@@ -33,6 +33,13 @@ with pings as (
     where gps_date = date('{{ var("processing_date") }}')
 ),
 
+matching_thresholds as (
+    select
+        75.0 as regular_stop_radius_m,
+        250.0 as expanded_stop_radius_m,
+        2 as terminal_stop_tolerance
+),
+
 segments as (
     select
         *,
@@ -64,13 +71,38 @@ scheduled_stops as (
         stop_times.stop_sequence,
         stop_times.arrival_time_seconds,
         stop_times.departure_time_seconds,
+        stop_times.pickup_type,
+        stop_times.drop_off_type,
+        stop_times.stop_service_class,
         stop_times.gtfs_snapshot_id,
-        st_geogpoint(stops.stop_lon, stops.stop_lat) as stop_point
+        st_geogpoint(stops.stop_lon, stops.stop_lat) as stop_point,
+        case
+            when stop_times.stop_service_class = 'request'
+                or stop_times.stop_sequence <= trip_stop_bounds.first_passenger_stop_sequence + matching_thresholds.terminal_stop_tolerance
+                or stop_times.stop_sequence >= trip_stop_bounds.last_passenger_stop_sequence - matching_thresholds.terminal_stop_tolerance
+                then matching_thresholds.expanded_stop_radius_m
+            else matching_thresholds.regular_stop_radius_m
+        end as stop_match_radius_m
     from {{ ref('stg_gtfs__stop_times') }} as stop_times
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.stop_id = stops.stop_id
         and stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
+    inner join (
+        select
+            gtfs_snapshot_id,
+            trip_id,
+            min(stop_sequence) as first_passenger_stop_sequence,
+            max(stop_sequence) as last_passenger_stop_sequence
+        from {{ ref('stg_gtfs__stop_times') }}
+        where gtfs_snapshot_id in (select distinct gtfs_snapshot_id from pings)
+          and stop_service_class != 'not_in_passenger_service'
+        group by gtfs_snapshot_id, trip_id
+    ) as trip_stop_bounds
+        on stop_times.gtfs_snapshot_id = trip_stop_bounds.gtfs_snapshot_id
+        and stop_times.trip_id = trip_stop_bounds.trip_id
+    cross join matching_thresholds
     where stop_times.gtfs_snapshot_id in (select distinct gtfs_snapshot_id from pings)
+      and stop_times.stop_service_class != 'not_in_passenger_service'
 ),
 
 candidate_crossings as (
@@ -97,6 +129,10 @@ candidate_crossings as (
         scheduled_stops.stop_sequence,
         scheduled_stops.arrival_time_seconds,
         scheduled_stops.departure_time_seconds,
+        scheduled_stops.pickup_type,
+        scheduled_stops.drop_off_type,
+        scheduled_stops.stop_service_class,
+        scheduled_stops.stop_match_radius_m,
         timestamp_add(
             timestamp(valid_segments.service_date, 'Europe/Warsaw'),
             interval scheduled_stops.arrival_time_seconds second
@@ -114,7 +150,7 @@ candidate_crossings as (
         and valid_segments.gtfs_snapshot_id = scheduled_stops.gtfs_snapshot_id
     where scheduled_stops.arrival_time_seconds between valid_segments.prev_gps_time_seconds - 1800
         and valid_segments.gps_time_seconds + 1800
-      and st_dwithin(valid_segments.gps_segment, scheduled_stops.stop_point, 50)
+      and st_dwithin(valid_segments.gps_segment, scheduled_stops.stop_point, scheduled_stops.stop_match_radius_m)
 ),
 
 estimated_crossings as (
@@ -146,11 +182,18 @@ select
     stop_id,
     stop_name,
     stop_sequence,
+    pickup_type,
+    drop_off_type,
+    stop_service_class,
     scheduled_arrival_time,
     scheduled_departure_time,
     actual_arrival_time,
     timestamp_diff(actual_arrival_time, scheduled_arrival_time, second) as arrival_delay_seconds,
-    'segment_within_50m' as detection_method,
+    case
+        when stop_match_radius_m = 250.0 then 'segment_within_250m'
+        else 'segment_within_75m'
+    end as detection_method,
+    stop_match_radius_m,
     stop_distance_m,
     prev_ping_distance_m,
     next_ping_distance_m,

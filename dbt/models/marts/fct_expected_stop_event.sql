@@ -81,6 +81,9 @@ scheduled_stops as (
         stops.stop_lat,
         stops.stop_lon,
         stop_times.stop_sequence,
+        stop_times.pickup_type,
+        stop_times.drop_off_type,
+        stop_times.stop_service_class,
         timestamp_add(
             timestamp(trip_spine.service_date, 'Europe/Warsaw'),
             interval stop_times.arrival_time_seconds second
@@ -111,20 +114,22 @@ stop_group_names as (
             stop_group_id,
             gtfs_snapshot_id,
             stop_name,
+            countif(stop_service_class != 'not_in_passenger_service') as passenger_post_count_for_name,
             count(*) as post_count_for_name
         from (
             select distinct
                 stop_group_id,
                 gtfs_snapshot_id,
                 stop_id,
-                stop_name
+                stop_name,
+                stop_service_class
             from scheduled_stops
         )
         group by stop_group_id, gtfs_snapshot_id, stop_name
     )
     qualify row_number() over (
         partition by stop_group_id, gtfs_snapshot_id
-        order by post_count_for_name desc, stop_name
+        order by passenger_post_count_for_name desc, post_count_for_name desc, stop_name
     ) = 1
 ),
 
@@ -147,6 +152,7 @@ observed_arrivals as (
         actual_arrival_time,
         delay_seconds,
         detection_method,
+        stop_match_radius_m,
         stop_distance_m,
         prev_ping_distance_m,
         next_ping_distance_m,
@@ -196,12 +202,16 @@ expected_events as (
         scheduled_stops.stop_lon,
         stop_group_names.stop_group_name,
         scheduled_stops.stop_sequence,
+        scheduled_stops.pickup_type,
+        scheduled_stops.drop_off_type,
+        scheduled_stops.stop_service_class,
         scheduled_stops.scheduled_arrival_time,
         scheduled_stops.scheduled_departure_time,
         observed_arrivals.actual_arrival_time,
         observed_arrivals.delay_seconds,
         timestamp_trunc(scheduled_stops.scheduled_arrival_time, hour, 'Europe/Warsaw') as hour_bracket,
         observed_arrivals.detection_method,
+        observed_arrivals.stop_match_radius_m,
         observed_arrivals.stop_distance_m,
         observed_arrivals.prev_ping_distance_m,
         observed_arrivals.next_ping_distance_m,
@@ -275,12 +285,16 @@ select
     stop_lon,
     stop_group_name,
     stop_sequence,
+    pickup_type,
+    drop_off_type,
+    stop_service_class,
     scheduled_arrival_time,
     scheduled_departure_time,
     actual_arrival_time,
     delay_seconds,
     hour_bracket,
     detection_method,
+    stop_match_radius_m,
     stop_distance_m,
     prev_ping_distance_m,
     next_ping_distance_m,
@@ -290,8 +304,10 @@ select
     is_observed,
     is_match_uncertain,
     case
+        when stop_service_class = 'not_in_passenger_service' then 'not_in_passenger_service'
         when is_match_uncertain or trip_quality = 'broken' then 'uncertain'
         when is_observed then 'observed'
+        when stop_service_class = 'request' then 'skipped_optional'
         else 'missed'
     end as observation_status
 from expected_events

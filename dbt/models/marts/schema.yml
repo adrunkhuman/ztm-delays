@@ -515,6 +515,12 @@ models:
         description: Deterministic user-facing stop group name from the governing GTFS snapshot, chosen from the most common post name in the group with alphabetical tie-break.
       - name: stop_sequence
         description: GTFS stop_sequence for this stop within the matched trip.
+      - name: pickup_type
+        description: GTFS pickup_type for this trip-stop row.
+      - name: drop_off_type
+        description: GTFS drop_off_type for this trip-stop row.
+      - name: stop_service_class
+        description: Passenger-service class for this trip-stop row. Observed stop arrivals exclude not_in_passenger_service rows.
       - name: scheduled_arrival_time
         description: Scheduled arrival timestamp reconstructed from service_date and GTFS arrival seconds.
       - name: scheduled_departure_time
@@ -526,7 +532,9 @@ models:
       - name: hour_bracket
         description: Warsaw-local hour floor of scheduled_arrival_time. This is the leaderboard and distribution time bucket; for example, scheduled arrivals from 08:00:00 through 08:59:59 share the 08:00 bracket.
       - name: detection_method
-        description: Reconstruction method label. Current value is segment_within_50m.
+        description: Reconstruction method label. Current values are segment_within_75m and segment_within_250m.
+      - name: stop_match_radius_m
+        description: Adaptive stop matching radius used for this detection.
       - name: stop_distance_m
         description: Distance in meters from the GPS segment to the scheduled stop point.
       - name: prev_ping_distance_m
@@ -617,6 +625,12 @@ models:
         description: Deterministic user-facing stop group name from the governing GTFS snapshot.
       - name: stop_sequence
         description: GTFS stop_sequence for this scheduled stop within the matched trip.
+      - name: pickup_type
+        description: GTFS pickup_type for this trip-stop row.
+      - name: drop_off_type
+        description: GTFS drop_off_type for this trip-stop row.
+      - name: stop_service_class
+        description: "Passenger-service class derived from pickup/drop-off rules: regular, request, or not_in_passenger_service."
       - name: scheduled_arrival_time
         description: Scheduled arrival timestamp reconstructed from service_date and GTFS arrival seconds.
       - name: scheduled_departure_time
@@ -629,6 +643,8 @@ models:
         description: Warsaw-local hour floor of scheduled_arrival_time.
       - name: detection_method
         description: Direct reconstruction method label when a GPS segment crossed the stop. Null when no direct crossing was detected.
+      - name: stop_match_radius_m
+        description: Adaptive stop matching radius used for the direct detection. Null when no direct crossing was detected.
       - name: stop_distance_m
         description: Distance in meters from the GPS segment to the scheduled stop point when observed.
       - name: prev_ping_distance_m
@@ -646,7 +662,7 @@ models:
       - name: is_match_uncertain
         description: True when ping-level matcher caveats make unobserved stop classification unreliable.
       - name: observation_status
-        description: "Explicit scheduled-stop state: observed for direct detections on plausible trip assignments, missed for unobserved stops on plausible matches, uncertain when the trip assignment is too ambiguous to trust the stop state."
+        description: "Explicit scheduled-stop state: observed for direct detections on plausible trip assignments, missed for unobserved required stops, skipped_optional for unobserved request stops, not_in_passenger_service for no-pickup/no-drop-off stop-time rows, and uncertain when the trip assignment is too ambiguous to trust the stop state."
 
   - name: mart_day_completeness
     description: Daily GPS ingestion completeness by Warsaw-local GPS date and mode. Normal builds replace the inclusive aggregation_start_date-through-processing_date GPS-date partitions. This is raw-ingestion coverage metadata, not schedule-aware service coverage; complete and partial trip facts remain usable even when a day is incomplete.
@@ -1635,11 +1651,15 @@ unit_tests:
             '100101' as stop_id,
             'Main 01' as stop_name,
             3 as stop_sequence,
+            0 as pickup_type,
+            0 as drop_off_type,
+            'regular' as stop_service_class,
             timestamp('2026-01-15 08:17:00+01') as scheduled_arrival_time,
             timestamp('2026-01-15 08:17:20+01') as scheduled_departure_time,
             timestamp('2026-01-15 08:19:30+01') as actual_arrival_time,
             150 as arrival_delay_seconds,
-            'segment_within_50m' as detection_method,
+            'segment_within_75m' as detection_method,
+            75.0 as stop_match_radius_m,
             12.3 as stop_distance_m,
             18.4 as prev_ping_distance_m,
             22.5 as next_ping_distance_m,
@@ -1650,8 +1670,9 @@ unit_tests:
           select
             'snapshot-valid', '118', '2', 1904, 1, date '2026-01-15', date '2026-01-15', 'weekday',
             'trip-non-monotonic', 'shape-2', 'svc', 0, '200101', 'Reverse 01', 5,
+            0, 0, 'regular',
             timestamp('2026-01-15 08:15:00+01'), timestamp('2026-01-15 08:15:20+01'),
-            timestamp('2026-01-15 08:09:00+01'), -360, 'segment_within_50m', 9.0, 4.0, 5.0,
+            timestamp('2026-01-15 08:09:00+01'), -360, 'segment_within_75m', 75.0, 9.0, 4.0, 5.0,
             timestamp('2026-01-15 08:08:30+01'), timestamp('2026-01-15 08:09:30+01'), 60
       - input: ref('fct_trip')
         format: sql
@@ -1754,12 +1775,16 @@ unit_tests:
           21.1 as stop_lon,
           'Main 02' as stop_group_name,
           3 as stop_sequence,
+          0 as pickup_type,
+          0 as drop_off_type,
+          'regular' as stop_service_class,
           timestamp('2026-01-15 08:17:00+01') as scheduled_arrival_time,
           timestamp('2026-01-15 08:17:20+01') as scheduled_departure_time,
           timestamp('2026-01-15 08:19:30+01') as actual_arrival_time,
           150 as delay_seconds,
           timestamp('2026-01-15 08:00:00+01') as hour_bracket,
-          'segment_within_50m' as detection_method,
+          'segment_within_75m' as detection_method,
+          75.0 as stop_match_radius_m,
           12.3 as stop_distance_m,
           18.4 as prev_ping_distance_m,
           22.5 as next_ping_distance_m,
@@ -1834,10 +1859,12 @@ unit_tests:
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
-          select 'trip-1' as trip_id, '100101' as stop_id, 0 as stop_sequence, 30000 as arrival_time_seconds, 30000 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-1', '100102', 1, 30300, 30300, 'snapshot-valid'
-          union all select 'trip-2', '100103', 0, 30600, 30600, 'snapshot-valid'
-          union all select 'trip-3', '100104', 0, 30900, 30900, 'snapshot-valid'
+          select 'trip-1' as trip_id, '100101' as stop_id, 0 as stop_sequence, 30000 as arrival_time_seconds, 30000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-1', '100102', 1, 30300, 30300, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-1', '100105', 2, 30400, 30400, 1, 1, 'not_in_passenger_service', 'snapshot-valid'
+          union all select 'trip-1', '100106', 3, 30500, 30500, 3, 3, 'request', 'snapshot-valid'
+          union all select 'trip-2', '100103', 0, 30600, 30600, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-3', '100104', 0, 30900, 30900, 0, 0, 'regular', 'snapshot-valid'
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1845,6 +1872,8 @@ unit_tests:
           union all select '100102', 'Main 02', 52.2, 21.2, 'snapshot-valid'
           union all select '100103', 'Main 03', 52.3, 21.3, 'snapshot-valid'
           union all select '100104', 'Main 04', 52.4, 21.4, 'snapshot-valid'
+          union all select '100105', 'Depot', 52.5, 21.5, 'snapshot-valid'
+          union all select '100106', 'Request Stop', 52.6, 21.6, 'snapshot-valid'
       - input: ref('dim_date')
         format: sql
         rows: |
@@ -1861,7 +1890,8 @@ unit_tests:
             0 as stop_sequence,
             timestamp('2026-01-15 08:20:05+01') as actual_arrival_time,
             5 as delay_seconds,
-            'segment_within_50m' as detection_method,
+            'segment_within_75m' as detection_method,
+            75.0 as stop_match_radius_m,
             10.0 as stop_distance_m,
             15.0 as prev_ping_distance_m,
             20.0 as next_ping_distance_m,
@@ -1871,13 +1901,18 @@ unit_tests:
           union all
           select
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-2', 1002, 0,
-            timestamp('2026-01-15 08:30:20+01'), 20, 'segment_within_50m', 11.0, 16.0, 21.0,
+            timestamp('2026-01-15 08:30:20+01'), 20, 'segment_within_75m', 75.0, 11.0, 16.0, 21.0,
             timestamp('2026-01-15 08:30:00+01'), timestamp('2026-01-15 08:30:30+01'), 30
           union all
           select
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, 0,
-            timestamp('2026-01-15 08:35:20+01'), 20, 'segment_within_50m', 11.0, 16.0, 21.0,
+            timestamp('2026-01-15 08:35:20+01'), 20, 'segment_within_75m', 75.0, 11.0, 16.0, 21.0,
             timestamp('2026-01-15 08:35:00+01'), timestamp('2026-01-15 08:35:30+01'), 30
+          union all
+          select
+            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 3,
+            timestamp('2026-01-15 08:28:25+01'), 5, 'segment_within_250m', 250.0, 100.0, 120.0, 130.0,
+            timestamp('2026-01-15 08:28:00+01'), timestamp('2026-01-15 08:28:30+01'), 30
     expect:
       format: sql
       rows: |
@@ -1919,12 +1954,16 @@ unit_tests:
           21.1 as stop_lon,
           'Main 01' as stop_group_name,
           0 as stop_sequence,
+          0 as pickup_type,
+          0 as drop_off_type,
+          'regular' as stop_service_class,
           timestamp('2026-01-15 08:20:00+01') as scheduled_arrival_time,
           timestamp('2026-01-15 08:20:00+01') as scheduled_departure_time,
           timestamp('2026-01-15 08:20:05+01') as actual_arrival_time,
           5 as delay_seconds,
           timestamp('2026-01-15 08:00:00+01') as hour_bracket,
-          'segment_within_50m' as detection_method,
+          'segment_within_75m' as detection_method,
+          75.0 as stop_match_radius_m,
           10.0 as stop_distance_m,
           15.0 as prev_ping_distance_m,
           20.0 as next_ping_distance_m,
@@ -1939,30 +1978,50 @@ unit_tests:
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
-          1, 1, 1, array<string>[], '100102', '1001', 'Main 02', 52.2, 21.2, 'Main 01', 1,
+          1, 1, 1, array<string>[], '100102', '1001', 'Main 02', 52.2, 21.2, 'Main 01', 1, 0, 0, 'regular',
           timestamp('2026-01-15 08:25:00+01'), timestamp('2026-01-15 08:25:00+01'), cast(null as timestamp),
-          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64),
+          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
           false, false, 'missed'
+        union all
+        select
+          'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
+          '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
+          'schedule-version-1', 'complete', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
+          1, 1, 1, array<string>[], '100105', '1001', 'Depot', 52.5, 21.5, 'Main 01', 2, 1, 1, 'not_in_passenger_service',
+          timestamp('2026-01-15 08:26:40+01'), timestamp('2026-01-15 08:26:40+01'), cast(null as timestamp),
+          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
+          cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
+          false, false, 'not_in_passenger_service'
+        union all
+        select
+          'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
+          '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
+          'schedule-version-1', 'complete', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
+          1, 1, 1, array<string>[], '100106', '1001', 'Request Stop', 52.6, 21.6, 'Main 01', 3, 3, 3, 'request',
+          timestamp('2026-01-15 08:28:20+01'), timestamp('2026-01-15 08:28:20+01'),
+          timestamp('2026-01-15 08:28:25+01'), 5, timestamp('2026-01-15 08:00:00+01'),
+          'segment_within_250m', 250.0, 100.0, 120.0, 130.0, timestamp('2026-01-15 08:28:00+01'),
+          timestamp('2026-01-15 08:28:30+01'), 30, true, false, 'observed'
         union all
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-2', 1002,
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
-          1, 2, 1, ['uncertain_assignment'], '100103', '1001', 'Main 03', 52.3, 21.3, 'Main 01', 0,
+          1, 2, 1, ['uncertain_assignment'], '100103', '1001', 'Main 03', 52.3, 21.3, 'Main 01', 0, 0, 0, 'regular',
           timestamp('2026-01-15 08:30:00+01'), timestamp('2026-01-15 08:30:00+01'),
           timestamp('2026-01-15 08:30:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
-          'segment_within_50m', 11.0, 16.0, 21.0, timestamp('2026-01-15 08:30:00+01'),
+          'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:30:00+01'),
           timestamp('2026-01-15 08:30:30+01'), 30, true, true, 'uncertain'
         union all
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-3', 1003,
           '187', '187', 'bus', '3', 1, 0, 'svc', 'Central', 'shape-3', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', ['stale_stop_progression'], 'settled_duty_chain', 'chain-3', 'block_id', 'block-3',
-          1, 1, 1, array<string>[], '100104', '1001', 'Main 04', 52.4, 21.4, 'Main 01', 0,
+          1, 1, 1, array<string>[], '100104', '1001', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
           timestamp('2026-01-15 08:35:00+01'), timestamp('2026-01-15 08:35:00+01'),
           timestamp('2026-01-15 08:35:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
-          'segment_within_50m', 11.0, 16.0, 21.0, timestamp('2026-01-15 08:35:00+01'),
+          'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:35:00+01'),
           timestamp('2026-01-15 08:35:30+01'), 30, true, false, 'observed'
 
   - name: dim_line_current_uses_selected_snapshot_and_collects_headsigns
