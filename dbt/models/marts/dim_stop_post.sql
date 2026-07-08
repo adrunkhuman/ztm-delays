@@ -28,6 +28,7 @@ stop_snapshots as (
     select
         entities.stop_id,
         substr(stops.stop_id, 1, 4) as stop_group_id,
+        {{ stop_post_code('stops.stop_id') }} as stop_post_code,
         stops.stop_name,
         stops.stop_lat,
         stops.stop_lon,
@@ -40,6 +41,7 @@ stop_snapshots as (
             '__missing__',
             to_hex(md5(to_json_string(struct(
                 substr(stops.stop_id, 1, 4) as stop_group_id,
+                {{ stop_post_code('stops.stop_id') }} as stop_post_code,
                 stops.stop_name as stop_name,
                 stops.stop_lat as stop_lat,
                 stops.stop_lon as stop_lon
@@ -80,6 +82,7 @@ scd_rows as (
     select
         stop_id,
         stop_group_id,
+        stop_post_code,
         stop_name,
         stop_lat,
         stop_lon,
@@ -92,6 +95,7 @@ scd_rows as (
     group by
         stop_id,
         stop_group_id,
+        stop_post_code,
         stop_name,
         stop_lat,
         stop_lon,
@@ -104,6 +108,7 @@ ranged_rows as (
     select
         stop_id,
         stop_group_id,
+        stop_post_code,
         stop_name,
         stop_lat,
         stop_lon,
@@ -119,6 +124,7 @@ ranged_rows as (
 select
     stop_id,
     stop_group_id,
+    stop_post_code,
     stop_name,
     stop_lat,
     stop_lon,

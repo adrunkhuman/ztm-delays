@@ -402,6 +402,11 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
         assert connection.execute("select count(*) from agg_line_hour_daily").fetchone()[0] == 1
         assert connection.execute("select count(*) from mart_delay_events").fetchone()[0] == 1
         assert connection.execute("select count(*) from mart_trip_reliability").fetchone()[0] == 1
+        assert connection.execute("select stop_post_code from agg_stop_post_daily").fetchone()[0] == "01"
+        assert connection.execute("select stop_post_code from agg_stop_line_daily").fetchone()[0] == "01"
+        assert connection.execute("select stop_post_code from agg_line_stop_daily").fetchone()[0] == "01"
+        assert connection.execute("select stop_post_code from agg_stop_hour_daily").fetchone()[0] == "01"
+        assert connection.execute("select stop_post_code from mart_delay_events").fetchone()[0] == "01"
         histogram_labels = connection.execute(
             "select list_transform(delay_histogram, bucket -> bucket.bucket_label) from agg_mode_daily"
         ).fetchone()[0]
@@ -906,6 +911,7 @@ def _copy_minimal_stop_arrival_sql(escaped_path: str) -> str:
                 '7002' as stop_group_id,
                 'Centrum' as stop_group_name,
                 '700201' as stop_id,
+                '01' as stop_post_code,
                 'Centrum 01' as stop_name,
                 0 as stop_sequence,
                 timestamp '2026-07-02 06:00:00' as scheduled_arrival_time,

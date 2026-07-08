@@ -89,6 +89,8 @@ late_over_20m
 
 Hourly tables use the service-day display window `04:00..03:59`; next-day `04:xx` rows are excluded from the selected service date's hourly widgets.
 
+Stop-post tables and stop-bearing facts expose `stop_post_code`, a derived display code for the concrete post inside a stop group. Six-character numeric post IDs use the final two digits (`519001 -> 01`), colon-delimited IDs use the final segment (`1003M:E1 -> E1`), other IDs use the suffix after the four-character group, and IDs without such a suffix fall back to the full `stop_id`. This is frontend display/business logic derived from `stop_id`; it is not raw upstream GTFS `stop_code` metadata.
+
 ## Metadata Tables
 
 - `export_metadata`: one row with `export_id`, `export_version`, `source_mode`, `exported_at`, source project/dataset identifiers, source row/byte totals, exported table count, and DuckDB file size.
