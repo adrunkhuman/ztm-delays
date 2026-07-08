@@ -1292,6 +1292,9 @@ unit_tests:
 
   - name: int_gtfs_trip_schedule_includes_only_trips_overlapping_processing_date
     model: int_gtfs_trip_schedule
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-prior'
     given:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
@@ -1351,8 +1354,11 @@ unit_tests:
           ordered_arrival_time_seconds: '90000 | 90600'
           trip_timetable_signature: '000001:100101:00090000 | 000002:100102:00090600'
 
-  - name: int_gtfs_trip_schedule_uses_service_date_snapshot_for_overnight_processing
+  - name: int_gtfs_trip_schedule_uses_selected_snapshot_for_overnight_processing
     model: int_gtfs_trip_schedule
+    overrides:
+      vars:
+        gtfs_snapshot_id: 'snapshot-current'
     given:
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
@@ -1382,21 +1388,21 @@ unit_tests:
       rows:
         - service_date: '2026-07-07'
           processing_date: '2026-07-08'
-          schedule_day_type: 'weekday'
-          schedule_service_ids: 'PcM'
-          gtfs_snapshot_id: 'snapshot-old'
+          schedule_day_type: 'sunday_holiday'
+          schedule_service_ids: 'NdM'
+          gtfs_snapshot_id: 'snapshot-current'
           line: '187'
           direction_id: 0
-          trip_id: 'trip-prior-night'
-          service_id: 'PcM'
-          trip_headsign: 'Prior Night'
-          shape_id: 'shape-prior'
+          trip_id: 'trip-prior-wrong-snapshot'
+          service_id: 'NdM'
+          trip_headsign: 'Wrong Prior'
+          shape_id: 'shape-wrong'
           trip_start_seconds: 90000
-          trip_end_seconds: 90600
-          stop_count: 2
-          ordered_stop_ids: '100101 | 100102'
-          ordered_arrival_time_seconds: '90000 | 90600'
-          trip_timetable_signature: '000001:100101:00090000 | 000002:100102:00090600'
+          trip_end_seconds: 90000
+          stop_count: 1
+          ordered_stop_ids: '999901'
+          ordered_arrival_time_seconds: '90000'
+          trip_timetable_signature: '000001:999901:00090000'
         - service_date: '2026-07-08'
           processing_date: '2026-07-08'
           schedule_day_type: 'weekday'
