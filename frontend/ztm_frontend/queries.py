@@ -49,6 +49,8 @@ TRIP_TRACE_EARLY_MAX_PX = 7
 MIN_TRIP_TRACE_POINTS = 2
 TIMELINE_MIN_GAP_PERCENT = 0.55
 MIN_HOUR_SAMPLE_SIZE = 3
+EXPECTED_STOP_EVENT_TABLE = "fct_expected_stop_event"
+LEGACY_STOP_EVENT_TABLE = "fct_scheduled_stop_event"
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -75,6 +77,30 @@ def get_export_metadata(db_path: Path) -> dict[str, Any]:
         metadata["last_export_at"] = sidecar_metadata.get("last_export_at") or sidecar_metadata.get("exported_at")
         metadata["poller_status"] = _poller_status_metadata(sidecar_metadata.get("poller_status"))
     return metadata
+
+
+def _stop_event_table(db_path: Path) -> str:
+    row = fetch_one(
+        db_path,
+        """
+        select table_name
+        from information_schema.tables
+        where table_schema = 'main'
+          and table_name in (?, ?)
+        order by case table_name when ? then 0 else 1 end
+        limit 1
+        """,
+        [EXPECTED_STOP_EVENT_TABLE, LEGACY_STOP_EVENT_TABLE, EXPECTED_STOP_EVENT_TABLE],
+    )
+    if row is None:
+        return EXPECTED_STOP_EVENT_TABLE
+    return str(row["table_name"])
+
+
+def _with_stop_event_table(sql: str, table_name: str) -> str:
+    if table_name not in {EXPECTED_STOP_EVENT_TABLE, LEGACY_STOP_EVENT_TABLE}:
+        raise ValueError("Unexpected stop-event table")
+    return sql.replace("__STOP_EVENT_TABLE__", table_name)
 
 
 def _export_metadata_sidecar(db_path: Path) -> dict[str, Any]:
@@ -588,6 +614,7 @@ def get_schedule(  # noqa: PLR0913
     selected_rank = _selected_trip_rank(selected_rank)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
+    stop_event_table = _stop_event_table(db_path)
     line_list = fetch_all(
         db_path,
         """
@@ -610,7 +637,8 @@ def get_schedule(  # noqa: PLR0913
     if selected_line is not None:
         trips = fetch_all(
             db_path,
-            """
+            _with_stop_event_table(
+                """
             select
                 trips.trip_id,
                 trips.vehicle_number,
@@ -634,7 +662,7 @@ def get_schedule(  # noqa: PLR0913
                     vehicle_number,
                     list(delay_seconds order by stop_sequence)
                         filter (where observation_status = 'observed' and delay_seconds is not null) as delay_profile
-                from fct_expected_stop_event
+                from __STOP_EVENT_TABLE__
                 where service_date = ?
                 group by service_date, trip_id, vehicle_number
             ) as stop_arrivals
@@ -648,6 +676,8 @@ def get_schedule(  # noqa: PLR0913
             order by trips.scheduled_start_time, trips.trip_headsign, trips.vehicle_number
             limit 160
             """,
+                stop_event_table,
+            ),
             [selected_date, selected_date, selected_mode, selected_line],
         )
         for trip in trips:
@@ -661,7 +691,8 @@ def get_schedule(  # noqa: PLR0913
         if selected_trip is not None:
             trip_stops = fetch_all(
                 db_path,
-                """
+                _with_stop_event_table(
+                    """
                 select
                     stop_sequence,
                     stop_id,
@@ -671,12 +702,14 @@ def get_schedule(  # noqa: PLR0913
                     actual_arrival_time,
                     delay_seconds,
                     observation_status
-                from fct_expected_stop_event
+                from __STOP_EVENT_TABLE__
                 where service_date = ?
                   and trip_id = ?
                   and vehicle_number = ?
                 order by stop_sequence
                 """,
+                    stop_event_table,
+                ),
                 [selected_date, selected_trip["trip_id"], selected_trip["vehicle_number"]],
             )
             for stop in trip_stops:
@@ -714,6 +747,7 @@ def get_trip_detail(
     """Build the individual observed trip page data."""
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
+    stop_event_table = _stop_event_table(db_path)
     trip = fetch_one(
         db_path,
         """
@@ -760,7 +794,8 @@ def get_trip_detail(
     if trip is not None:
         trip_stops = fetch_all(
             db_path,
-            """
+            _with_stop_event_table(
+                """
             select
                 stop_sequence,
                 stop_id,
@@ -770,12 +805,14 @@ def get_trip_detail(
                 actual_arrival_time,
                 delay_seconds,
                 observation_status
-            from fct_expected_stop_event
+            from __STOP_EVENT_TABLE__
             where service_date = ?
               and trip_id = ?
               and vehicle_number = ?
             order by stop_sequence
             """,
+                stop_event_table,
+            ),
             [selected_date, trip["trip_id"], trip["vehicle_number"]],
         )
         for stop in trip_stops:
@@ -1093,9 +1130,11 @@ def _trip_landing_rows(
     selected_mode: str,
     selected_rank: str,
 ) -> list[dict[str, Any]]:
+    stop_event_table = _stop_event_table(db_path)
     rows = fetch_all(
         db_path,
-        """
+        _with_stop_event_table(
+            """
         with stop_arrivals as (
             select
                 service_date,
@@ -1103,7 +1142,7 @@ def _trip_landing_rows(
                 vehicle_number,
                 list(delay_seconds order by stop_sequence)
                     filter (where observation_status = 'observed' and delay_seconds is not null) as delay_profile
-            from fct_expected_stop_event
+            from __STOP_EVENT_TABLE__
             where service_date = ?
               and mode = ?
               and trip_quality = 'complete'
@@ -1132,6 +1171,8 @@ def _trip_landing_rows(
           and trips.mode = ?
           and trips.trip_quality = 'complete'
         """,
+            stop_event_table,
+        ),
         [selected_date, selected_mode, selected_date, selected_mode],
     )
     for row in rows:
