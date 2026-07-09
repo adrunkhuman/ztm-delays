@@ -32,6 +32,7 @@ with contract_counts as (
         )) as schedule_day_type_violations,
         countif(direction_id not in (0, 1)) as direction_id_violations
     from {{ ref('int_gtfs_trip_schedule') }}
+    where processing_date = date('{{ var("processing_date", "1970-01-01") }}')
 )
 
 select issue_type, violation_count
