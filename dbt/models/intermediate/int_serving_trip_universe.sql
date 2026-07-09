@@ -1,4 +1,13 @@
-{{ config(materialized='view') }}
+{{
+    config(
+        materialized='incremental',
+        incremental_strategy='insert_overwrite',
+        partition_by={"field": "processing_date", "data_type": "date"},
+        partitions=["date('" ~ var("processing_date") ~ "')"],
+        cluster_by=["gtfs_snapshot_id", "line", "trip_id"],
+        require_partition_filter=true,
+    )
+}}
 
 with scheduled_trips as (
     select
@@ -18,6 +27,7 @@ with scheduled_trips as (
         stop_count
     from {{ ref('int_gtfs_duty_chain') }}
     where mode in ('bus', 'tram')
+      and processing_date = date('{{ var("processing_date") }}')
 ),
 
 trip_stops as (
@@ -37,12 +47,15 @@ trip_stops as (
         scheduled_trips.destination_stop_id,
         scheduled_trips.stop_count,
         string_agg(stop_times.stop_id, '|' order by stop_times.stop_sequence) as ordered_stop_ids,
-        0 as non_zone1_stop_count,
-        cast([] as array<string>) as zone_ids
+        countif(coalesce(stops.effective_zone_id, '') != '1') as non_zone1_stop_count,
+        array_agg(distinct coalesce(stops.effective_zone_id, '') order by coalesce(stops.effective_zone_id, '')) as zone_ids
     from scheduled_trips
     inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
         on scheduled_trips.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and scheduled_trips.trip_id = stop_times.trip_id
+    left join {{ ref('stg_gtfs__stops') }} as stops
+        on scheduled_trips.gtfs_snapshot_id = stops.gtfs_snapshot_id
+        and stop_times.stop_id = stops.stop_id
     group by
         scheduled_trips.service_date,
         scheduled_trips.processing_date,

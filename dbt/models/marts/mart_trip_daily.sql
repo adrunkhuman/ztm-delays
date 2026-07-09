@@ -47,7 +47,7 @@ joined as (
     select
         trips.*,
         coalesce(trips.trip_headsign, trips.destination_stop_name, trips.route_short_name) as route_label,
-        coalesce(profile_scores.delay_profile, cast([] as array<float64>)) as delay_profile,
+        coalesce(profile_scores.delay_profile, cast([] as array<int64>)) as delay_profile,
         coalesce(profile_scores.erratic_score, 0) as erratic_score
     from trips
     left join profile_scores

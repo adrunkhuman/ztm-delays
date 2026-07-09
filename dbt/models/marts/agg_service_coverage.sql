@@ -203,7 +203,8 @@ select
     coalesce(observed.modified_trip_count, 0) as modified_trip_count,
     expected.expected_service_minutes,
     coalesce(observed.observed_service_minutes, 0.0) as observed_service_minutes,
-    safe_divide(coalesce(observed.observed_trip_count, 0), expected.expected_trip_count) as service_coverage_ratio,
+    least(1.0, safe_divide(coalesce(observed.observed_trip_count, 0), expected.expected_trip_count))
+        as service_coverage_ratio,
     timestamp_add(expected.service_hour, interval 1 hour) < timestamp_sub(current_timestamp(), interval 90 minute)
         as is_settled_hour
 from expected_by_hour as expected

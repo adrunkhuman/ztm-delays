@@ -1,11 +1,18 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
 
-{{ config(materialized='view') }}
+{{ config(materialized='table') }}
 
-with trip_universe as (
+with latest_trip_universe as (
     select *
     from {{ ref('int_serving_trip_universe') }}
     where processing_date = date('{{ processing_date }}')
+),
+
+window_trip_universe as (
+    select *
+    from {{ ref('int_serving_trip_universe') }}
+    where processing_date between date_sub(date('{{ processing_date }}'), interval 60 day)
+        and date('{{ processing_date }}')
 ),
 
 summary_rows as (
@@ -19,22 +26,23 @@ summary_rows as (
         countif(is_zone1_only) as zone1_only_count,
         countif(is_zone1_public_ranking_trip) as ranking_trip_count,
         cast(null as int64) as below_min_arrival_entities
-    from trip_universe
+    from latest_trip_universe
 ),
 
 arrival_base as (
     select
         arrivals.*,
-        trip_universe.is_zone1_public_ranking_trip
+        window_trip_universe.is_zone1_public_ranking_trip
     from {{ ref('fct_stop_arrival') }} as arrivals
-    inner join trip_universe
-        on arrivals.gtfs_snapshot_id = trip_universe.gtfs_snapshot_id
-        and arrivals.service_date = trip_universe.service_date
-        and arrivals.trip_id = trip_universe.trip_id
+    inner join window_trip_universe
+        on arrivals.gtfs_snapshot_id = window_trip_universe.gtfs_snapshot_id
+        and arrivals.gps_date = window_trip_universe.processing_date
+        and arrivals.service_date = window_trip_universe.service_date
+        and arrivals.trip_id = window_trip_universe.trip_id
     where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval 60 day)
         and date('{{ processing_date }}')
       and arrivals.trip_quality = 'complete'
-      and trip_universe.is_zone1_public_ranking_trip
+      and window_trip_universe.is_zone1_public_ranking_trip
 ),
 
 windowed_entities as (

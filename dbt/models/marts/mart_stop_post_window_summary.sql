@@ -35,9 +35,12 @@ zone1_windowed as (
     from windowed
     inner join {{ ref('int_serving_trip_universe') }} as universe
         on windowed.gtfs_snapshot_id = universe.gtfs_snapshot_id
+        and windowed.gps_date = universe.processing_date
         and windowed.service_date = universe.service_date
         and windowed.trip_id = universe.trip_id
-    where universe.is_zone1_public_ranking_trip
+    where universe.processing_date between date_sub(date('{{ processing_date }}'), interval 60 day)
+        and date('{{ processing_date }}')
+      and universe.is_zone1_public_ranking_trip
 ),
 
 all_windowed as (
