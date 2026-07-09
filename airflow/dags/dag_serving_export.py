@@ -410,6 +410,7 @@ def _extract_and_download_marts(
     for table_name in MART_TABLES:
         if table_name in PARTITIONED_EXPORT_TABLES and config.changed_partition_date:
             _extract_partitioned_mart_to_gcs(bigquery_client, storage_client, config, table_name)
+            _ensure_partition_cache_complete(bigquery_client, storage_client, config, table_name)
             parquet_paths_by_table[table_name] = _download_partitioned_mart_parquet(
                 storage_client, config, table_name, local_export_dir
             )
@@ -448,6 +449,37 @@ def _extract_partitioned_mart_to_gcs(
     if partition_date is None:
         raise RuntimeError("partitioned mart export requires changed_partition_date")
 
+    _extract_mart_partition_to_cache(bigquery_client, storage_client, config, table_name, partition_date)
+
+
+def _ensure_partition_cache_complete(
+    bigquery_client: bigquery.Client,
+    storage_client: storage.Client,
+    config: ExportConfig,
+    table_name: str,
+) -> None:
+    date_column = PARTITIONED_EXPORT_TABLES[table_name]
+    cached_dates = _cached_partition_dates(storage_client, config, table_name, date_column)
+    for partition_date in _table_partition_dates(bigquery_client, table_name):
+        partition_date_value = partition_date.isoformat()
+        if partition_date_value in cached_dates:
+            continue
+        _extract_mart_partition_to_cache(
+            bigquery_client,
+            storage_client,
+            config,
+            table_name,
+            partition_date_value,
+        )
+
+
+def _extract_mart_partition_to_cache(
+    bigquery_client: bigquery.Client,
+    storage_client: storage.Client,
+    config: ExportConfig,
+    table_name: str,
+    partition_date: str,
+) -> None:
     date_column = PARTITIONED_EXPORT_TABLES[table_name]
     source_table = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}${partition_date.replace('-', '')}"
     destination_uri = _partition_staging_extract_uri(config, table_name, date_column, partition_date)
@@ -467,6 +499,24 @@ def _extract_partitioned_mart_to_gcs(
         ) from None
     job.result()
     _replace_partition_cache(storage_client, config, table_name, date_column, partition_date)
+
+
+def _cached_partition_dates(
+    storage_client: storage.Client,
+    config: ExportConfig,
+    table_name: str,
+    date_column: str,
+) -> set[str]:
+    bucket = storage_client.bucket(config.gcs_bucket)
+    partition_dates = set()
+    for blob in bucket.list_blobs(prefix=_partition_table_cache_prefix(config, table_name)):
+        if not blob.name.endswith(".parquet"):
+            continue
+        partition_dir = Path(blob.name).parent.name
+        partition_prefix = f"{date_column}="
+        if partition_dir.startswith(partition_prefix):
+            partition_dates.add(partition_dir.removeprefix(partition_prefix))
+    return partition_dates
 
 
 def _replace_partition_cache(
