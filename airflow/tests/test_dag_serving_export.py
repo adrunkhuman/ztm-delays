@@ -286,6 +286,51 @@ def test_extract_partitioned_mart_to_gcs_updates_partition_cache() -> None:
     ]
 
 
+def test_ensure_partition_cache_complete_extracts_missing_partitions() -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient(partition_ids=["20260701", "20260702", "20260703"])
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-01/part-000.parquet"),
+            FakeBlob(
+                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet"
+            ),
+            FakeBlob(
+                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-03/part-000.parquet"
+            ),
+        ]
+    )
+    config = dag.ExportConfig(
+        export_id="export-1",
+        output_dir=Path("export"),
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=1000,
+        cleanup_gcs_staging=False,
+        changed_partition_date="2026-07-03",
+    )
+
+    dag._ensure_partition_cache_complete(client, storage_client, config, "fct_expected_stop_event")
+
+    assert client.partition_table_refs == ["ztm-data.ztm_marts.fct_expected_stop_event"]
+    assert [call.source_table for call in client.extract_calls] == [
+        "ztm-data.ztm_marts.fct_expected_stop_event$20260702",
+        "ztm-data.ztm_marts.fct_expected_stop_event$20260703",
+    ]
+    assert storage_client.copied_blob_names == [
+        (
+            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
+            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
+        ),
+        (
+            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-03/part-000.parquet",
+            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-03/part-000.parquet",
+        ),
+    ]
+
+
 def test_download_mart_parquet_downloads_only_parquet_files(tmp_path: Path) -> None:
     dag = _load_dag_module()
     storage_client = FakeStorageClient(
@@ -803,12 +848,15 @@ class ExtractCall:
 
 
 class FakeBigQueryClient:
-    def __init__(self, *, raise_conflict: bool = False) -> None:
+    def __init__(self, *, raise_conflict: bool = False, partition_ids: list[str] | None = None) -> None:
         self.raise_conflict = raise_conflict
         self.extract_call: ExtractCall | None = None
+        self.extract_calls: list[ExtractCall] = []
         self.query_call: QueryCall | None = None
         self.existing_job = FakeJob()
         self.get_job_call: tuple[str, str, str] | None = None
+        self.partition_ids = partition_ids or []
+        self.partition_table_refs: list[str] = []
 
     def extract_table(
         self,
@@ -823,7 +871,12 @@ class FakeBigQueryClient:
             raise Conflict("job exists")
         job = FakeJob()
         self.extract_call = ExtractCall(source_table, destination_uri, job_config, job_id, location, job)
+        self.extract_calls.append(self.extract_call)
         return job
+
+    def list_partitions(self, table_ref: str) -> list[str]:
+        self.partition_table_refs.append(table_ref)
+        return self.partition_ids
 
     def get_job(self, job_id: str, *, project: str, location: str) -> FakeJob:
         self.get_job_call = (job_id, project, location)
