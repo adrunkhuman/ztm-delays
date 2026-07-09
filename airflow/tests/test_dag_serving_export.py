@@ -211,6 +211,52 @@ def test_extract_mart_to_gcs_rejects_existing_job_after_conflict() -> None:
     assert client.existing_job.result_called is False
 
 
+def test_extract_partitioned_mart_to_gcs_updates_partition_cache() -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient()
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet"),
+            FakeBlob(
+                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet"
+            ),
+        ]
+    )
+    config = dag.ExportConfig(
+        export_id="export-1",
+        output_dir=Path("export"),
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=1000,
+        cleanup_gcs_staging=False,
+        changed_partition_date="2026-07-02",
+    )
+
+    dag._extract_partitioned_mart_to_gcs(client, storage_client, config, "fct_expected_stop_event")
+
+    assert client.query_call is not None
+    assert "export data options" in client.query_call.query.lower()
+    assert "where service_date = date '2026-07-02'" in client.query_call.query.lower()
+    assert (
+        "gs://bucket/prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-*.parquet"
+        in client.query_call.query
+    )
+    assert client.query_call.job_id == "serving_export_partition_export_1_fct_expected_stop_event_2026_07_02"
+    assert client.query_call.location == dag.BIGQUERY_LOCATION
+    assert client.query_call.job.result_called is True
+    assert storage_client.deleted_blob_names == [
+        "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet"
+    ]
+    assert storage_client.copied_blob_names == [
+        (
+            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
+            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
+        )
+    ]
+
+
 def test_download_mart_parquet_downloads_only_parquet_files(tmp_path: Path) -> None:
     dag = _load_dag_module()
     storage_client = FakeStorageClient(
@@ -283,7 +329,10 @@ def test_cleanup_gcs_staging_resolves_listed_blobs_by_name(tmp_path: Path) -> No
 
     dag._cleanup_gcs_staging(storage_client, config)
 
-    assert storage_client.list_prefixes == ["prefix/export_id=export-1/"]
+    assert storage_client.list_prefixes == [
+        "prefix/export_id=export-1/",
+        "prefix/partition_staging/export_id=export-1/",
+    ]
     assert storage_client.blob_names == [
         "prefix/export_id=export-1/mart_trip_daily/part-000.parquet",
         "prefix/export_id=export-1/mart_trip_daily/_SUCCESS",
@@ -722,6 +771,7 @@ class FakeBigQueryClient:
     def __init__(self, *, raise_conflict: bool = False) -> None:
         self.raise_conflict = raise_conflict
         self.extract_call: ExtractCall | None = None
+        self.query_call: QueryCall | None = None
         self.existing_job = FakeJob()
         self.get_job_call: tuple[str, str, str] | None = None
 
@@ -743,6 +793,21 @@ class FakeBigQueryClient:
     def get_job(self, job_id: str, *, project: str, location: str) -> FakeJob:
         self.get_job_call = (job_id, project, location)
         return self.existing_job
+
+    def query(self, query: str, *, job_id: str, location: str) -> FakeJob:
+        if self.raise_conflict:
+            raise Conflict("job exists")
+        job = FakeJob()
+        self.query_call = QueryCall(query, job_id, location, job)
+        return job
+
+
+@dataclass(frozen=True)
+class QueryCall:
+    query: str
+    job_id: str
+    location: str
+    job: FakeJob
 
 
 class FakeStatsBigQueryClient:
@@ -804,25 +869,20 @@ class FakeStorageClient:
         self.list_prefixes: list[str] = []
         self.blob_names: list[str] = []
         self.deleted_blob_names: list[str] = []
+        self.copied_blob_names: list[tuple[str, str]] = []
 
     def bucket(self, bucket_name: str) -> FakeBucket:
-        return FakeBucket(bucket_name, self.blobs, self.list_prefixes, self.blob_names, self.deleted_blob_names)
+        return FakeBucket(bucket_name, self)
 
 
 class FakeBucket:
-    def __init__(
-        self,
-        bucket_name: str,
-        blobs: list[FakeBlob],
-        list_prefixes: list[str],
-        blob_names: list[str],
-        deleted_blob_names: list[str],
-    ) -> None:
+    def __init__(self, bucket_name: str, storage_client: FakeStorageClient) -> None:
         self.bucket_name = bucket_name
-        self.blobs = blobs
-        self.list_prefixes = list_prefixes
-        self.blob_names = blob_names
-        self.deleted_blob_names = deleted_blob_names
+        self.blobs = storage_client.blobs
+        self.list_prefixes = storage_client.list_prefixes
+        self.blob_names = storage_client.blob_names
+        self.deleted_blob_names = storage_client.deleted_blob_names
+        self.copied_blob_names = storage_client.copied_blob_names
 
     def list_blobs(self, *, prefix: str) -> list[FakeBlob]:
         self.list_prefixes.append(prefix)
@@ -836,6 +896,12 @@ class FakeBucket:
         if matching_blob.data:
             return matching_blob
         return FakeBlob(blob_name, deleted_blob_names=self.deleted_blob_names)
+
+    def copy_blob(self, blob: FakeBlob, _destination_bucket: FakeBucket, new_name: str) -> FakeBlob:
+        self.copied_blob_names.append((blob.name, new_name))
+        copied_blob = FakeBlob(new_name)
+        self.blobs.append(copied_blob)
+        return copied_blob
 
 
 @dataclass
