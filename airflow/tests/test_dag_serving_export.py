@@ -63,7 +63,22 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.gcs_prefix == "serving/duckdb/staging"
     assert config.max_source_bytes == 20 * 1024 * 1024 * 1024
     assert config.max_duckdb_bytes == 20 * 1024 * 1024 * 1024
-    assert config.cleanup_gcs_staging is False
+    assert config.cleanup_gcs_staging is True
+    assert config.changed_partition_date is None
+
+
+def test_export_config_uses_gps_models_asset_processing_date() -> None:
+    dag = _load_dag_module()
+
+    config = dag._export_config(
+        {
+            "dag_run": FakeDagRun({}),
+            "triggering_asset_events": {dag.GPS_MODELS_DATE_ASSET: [FakeAssetEvent({"processing_date": "2026-07-08"})]},
+        },
+        datetime(2026, 7, 9, 5, 0, tzinfo=UTC),
+    )
+
+    assert config.changed_partition_date == "2026-07-08"
 
 
 def test_export_config_uses_shared_max_bytes_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,7 +105,8 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
                     "gcs_prefix": "/custom/prefix/",
                     "max_source_bytes": 123,
                     "max_duckdb_bytes": "456",
-                    "cleanup_gcs_staging": True,
+                    "cleanup_gcs_staging": False,
+                    "changed_partition_date": "2026-07-07",
                 }
             )
         }
@@ -103,7 +119,8 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
     assert config.gcs_prefix == "custom/prefix"
     assert config.max_source_bytes == 123
     assert config.max_duckdb_bytes == 456
-    assert config.cleanup_gcs_staging is True
+    assert config.cleanup_gcs_staging is False
+    assert config.changed_partition_date == "2026-07-07"
 
 
 @pytest.mark.parametrize(
@@ -661,11 +678,11 @@ def test_publish_duckdb_cleans_temp_files_when_metadata_write_fails(
     assert list(tmp_path.glob(".duckdb-tmp-*")) == []
 
 
-def test_dag_is_manual_and_exposes_single_export_task() -> None:
+def test_dag_is_asset_scheduled_and_exposes_single_export_task() -> None:
     dag = _load_dag_module()
 
     assert dag.dag.kwargs["dag_display_name"] == "Serving DuckDB export"
-    assert dag.dag.kwargs["schedule"] is None
+    assert dag.dag.kwargs["schedule"] == [dag.GPS_MODELS_DATE_ASSET]
     assert dag.dag.kwargs["max_active_runs"] == 1
     assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
     assert dag.export_serving_duckdb.kwargs == {"retries": 0, "on_failure_callback": dag.airflow_failure_alert}
@@ -765,6 +782,11 @@ class FakeDAG:
 @dataclass(frozen=True)
 class FakeDagRun:
     conf: dict[str, object]
+
+
+@dataclass(frozen=True)
+class FakeAssetEvent:
+    extra: dict[str, object]
 
 
 @dataclass(frozen=True)

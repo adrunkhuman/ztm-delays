@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from importlib import import_module
@@ -19,6 +20,7 @@ from ztm_airflow_common import (
     BIGQUERY_MARTS_DATASET,
     GCP_PROJECT,
     GCS_BUCKET,
+    GPS_MODELS_DATE_ASSET,
     SERVING_EXPORT_DIR,
     SERVING_EXPORT_FILENAME,
     SERVING_EXPORT_GCS_PREFIX,
@@ -27,7 +29,7 @@ from ztm_airflow_common import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable
     from types import ModuleType
     from typing import Protocol
 
@@ -207,13 +209,40 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
             "max_duckdb_bytes",
             os.getenv("SERVING_EXPORT_MAX_DUCKDB_BYTES", str(SERVING_EXPORT_MAX_BYTES)),
         ),
-        cleanup_gcs_staging=_bool_config(conf, "cleanup_gcs_staging", False),
-        changed_partition_date=_date_config(
-            conf,
-            "changed_partition_date",
-            os.getenv("SERVING_EXPORT_CHANGED_PARTITION_DATE", ""),
-        ),
+        cleanup_gcs_staging=_bool_config(conf, "cleanup_gcs_staging", True),
+        changed_partition_date=_changed_partition_date(context, conf),
     )
+
+
+def _changed_partition_date(context: dict[str, object], conf: dict[str, object]) -> str | None:
+    configured_date = _date_config(
+        conf,
+        "changed_partition_date",
+        os.getenv("SERVING_EXPORT_CHANGED_PARTITION_DATE", ""),
+    )
+    if configured_date is not None:
+        return configured_date
+    return _asset_processing_date(context)
+
+
+def _asset_processing_date(context: dict[str, object]) -> str | None:
+    triggering_asset_events = context.get("triggering_asset_events")
+    if not isinstance(triggering_asset_events, Mapping) or GPS_MODELS_DATE_ASSET not in triggering_asset_events:
+        return None
+
+    asset_events = triggering_asset_events[GPS_MODELS_DATE_ASSET]
+    if not isinstance(asset_events, Sequence) or isinstance(asset_events, (str, bytes)) or not asset_events:
+        raise RuntimeError("dag_serving_export requires a GPS models asset event with processing_date")
+
+    latest_event = asset_events[-1]
+    extra = getattr(latest_event, "extra", None)
+    if not isinstance(extra, dict):
+        raise TypeError("dag_serving_export requires a GPS models asset event with processing_date")
+    processing_date = extra.get("processing_date")
+    if not isinstance(processing_date, str) or not EXPORT_DATE_PATTERN.fullmatch(processing_date):
+        raise RuntimeError("dag_serving_export requires a GPS models asset event with processing_date")
+    date.fromisoformat(processing_date)
+    return processing_date
 
 
 def _default_export_id(now: datetime) -> str:
@@ -1159,13 +1188,13 @@ def _duckdb_path_list(paths: Iterable[Path]) -> str:
 with DAG(
     dag_id="dag_serving_export",
     dag_display_name="Serving DuckDB export",
-    description="Manually export all mart tables to an atomically swapped DuckDB serving file.",
+    description="Export mart tables to an atomically swapped DuckDB serving file after GPS warehouse completion.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
-    schedule=None,
+    schedule=[GPS_MODELS_DATE_ASSET],
     catchup=False,
     max_active_runs=1,
     on_failure_callback=airflow_failure_alert,
-    tags=["ztm", "serving", "manual"],
+    tags=["ztm", "serving"],
 ) as dag:
 
     @task(retries=0, on_failure_callback=airflow_failure_alert)
