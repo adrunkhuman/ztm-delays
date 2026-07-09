@@ -1,5 +1,6 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
 {% set aggregation_start_date = var("aggregation_start_date", processing_date) %}
+{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
 {% set start_date = modules.datetime.datetime.strptime(aggregation_start_date, "%Y-%m-%d").date() %}
 {% set end_date = modules.datetime.datetime.strptime(processing_date, "%Y-%m-%d").date() %}
 {% set partition_dates = [] %}
@@ -42,6 +43,7 @@ with raw_scheduled_trips as (
         and schedule.gtfs_snapshot_id = routes.gtfs_snapshot_id
     where schedule.processing_date between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
+      and schedule.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
       and routes.mode in ('bus', 'tram')
 ),
 
@@ -126,6 +128,7 @@ observed_trips as (
         and date('{{ processing_date }}')
       and date(scheduled_start_time, 'Europe/Warsaw') between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
+      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
       and service_observation_class in ('regular', 'truncated', 'modified')
 ),
 

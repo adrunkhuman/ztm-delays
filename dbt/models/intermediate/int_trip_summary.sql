@@ -8,6 +8,8 @@
     )
 }}
 
+{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
+
 with quality_thresholds as (
     select
         0.80 as complete_stop_ratio,
@@ -44,6 +46,7 @@ arrival_candidates as (
         and date('{{ var("processing_date") }}')
       and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
         and date('{{ var("processing_date") }}')
+      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
       and stop_service_class = 'regular'
     group by gtfs_snapshot_id, service_date, trip_id, vehicle_number
 ),
@@ -73,6 +76,7 @@ arrival_progression as (
             and date('{{ var("processing_date") }}')
           and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
             and date('{{ var("processing_date") }}')
+          and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
           and stop_service_class = 'regular'
     )
     group by gtfs_snapshot_id, gps_date, service_date, trip_id, vehicle_number
@@ -103,6 +107,7 @@ arrival_time_progression as (
             and date('{{ var("processing_date") }}')
           and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
             and date('{{ var("processing_date") }}')
+          and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
           and stop_service_class = 'regular'
     )
     group by gtfs_snapshot_id, gps_date, service_date, trip_id, vehicle_number
@@ -138,6 +143,7 @@ ping_segments as (
             and date('{{ var("processing_date") }}')
           and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
             and date('{{ var("processing_date") }}')
+          and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
         window trip_vehicle_window as (
             partition by gtfs_snapshot_id, service_date, trip_id, vehicle_number
             order by gps_time
@@ -178,7 +184,8 @@ stop_extents as (
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.stop_id = stops.stop_id
         and stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
-    where stop_times.gtfs_snapshot_id in (select distinct gtfs_snapshot_id from arrival_candidates)
+        and stops.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+    where stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
       and stop_times.stop_service_class = 'regular'
     group by stop_times.gtfs_snapshot_id, stop_times.trip_id
 ),
@@ -269,6 +276,7 @@ summarized as (
         and arrivals.service_date = schedule.service_date
         and arrivals.gtfs_snapshot_id = schedule.gtfs_snapshot_id
         and arrivals.trip_id = schedule.trip_id
+        and schedule.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     inner join {{ ref('int_schedule_version') }} as schedule_version
         on schedule.line = schedule_version.line
         and schedule.direction_id = schedule_version.direction_id
