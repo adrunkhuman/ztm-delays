@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha1
 from typing import TYPE_CHECKING
 
@@ -165,13 +165,16 @@ def _load_raw_gps_pings(processing_date: str) -> int:
 
 def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     client = bigquery.Client(project=GCP_PROJECT)
-    partition_suffix = date.fromisoformat(processing_date).strftime("%Y%m%d")
     query = f"""
         select gtfs_snapshot_id
-        from `{INT_GTFS_PROCESSING_SNAPSHOT_TABLE}${partition_suffix}`
+        from `{INT_GTFS_PROCESSING_SNAPSHOT_TABLE}`
+        where processing_date = @processing_date
         limit 1
     """
-    rows = list(client.query(query).result())
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("processing_date", "DATE", processing_date)]
+    )
+    rows = list(client.query(query, job_config=job_config).result())
     if not rows:
         raise AirflowException(f"No governing GTFS snapshot mapping exists for GPS processing date {processing_date}")
     return str(rows[0].gtfs_snapshot_id)

@@ -20,13 +20,13 @@ def test_weekly_audit_dag_runs_audit_tag() -> None:
     assert dag.dbt_test_weekly_audits in dag.selected_gtfs_snapshot.downstream
 
 
-def test_selected_gtfs_snapshot_id_uses_processing_date_partition(monkeypatch: Any) -> None:
+def test_selected_gtfs_snapshot_id_uses_processing_date_filter(monkeypatch: Any) -> None:
     dag = _load_dag_module()
     client = FakeBigQueryClient([FakeRow(gtfs_snapshot_id="snapshot-1")])
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
     assert dag._selected_gtfs_snapshot_id("2026-07-08") == "snapshot-1"
-    assert "where _PARTITIONDATE = @processing_date" in client.query_call
+    assert "where processing_date = @processing_date" in client.query_call
     assert client.job_config is not None
     assert client.job_config.query_parameters == [FakeScalarQueryParameter("processing_date", "DATE", "2026-07-08")]
 

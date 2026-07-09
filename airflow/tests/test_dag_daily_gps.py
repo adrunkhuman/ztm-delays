@@ -121,9 +121,12 @@ def test_selected_gtfs_snapshot_id_returns_processing_date_mapping(
     assert dag._selected_gtfs_snapshot_id("2026-07-08") == "snapshot-1"
 
     assert client.query_call is not None
-    assert "int_gtfs_processing_snapshot$20260708" in client.query_call.query
-    assert "where processing_date" not in client.query_call.query
-    assert client.query_call.job_config is None
+    assert "int_gtfs_processing_snapshot`" in client.query_call.query
+    assert "where processing_date = @processing_date" in client.query_call.query
+    assert client.query_call.job_config is not None
+    assert client.query_call.job_config.query_parameters == [
+        dag.bigquery.ScalarQueryParameter("processing_date", "DATE", "2026-07-08")
+    ]
 
 
 def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
