@@ -168,12 +168,15 @@ def test_source_table_stats_merges_date_ranges() -> None:
     assert by_table["mart_trip_daily"].min_date == "2026-06-27"
     assert by_table["mart_trip_daily"].max_date == "2026-07-02"
     assert by_table["mart_trip_daily"].date_count == 6
+    assert by_table["dim_serving_date"].min_date is None
+    assert by_table["dim_serving_date"].max_date is None
+    assert by_table["dim_serving_date"].date_count is None
     assert client.table_refs == [f"ztm-data.ztm_marts.{table_name}" for table_name in dag.MART_TABLES]
     assert client.queries == []
     assert client.partition_table_refs == [
         f"ztm-data.ztm_marts.{table_name}"
         for table_name in dag.DATE_RANGE_SQL_BY_TABLE
-        if table_name in dag.MART_TABLES
+        if table_name in dag.MART_TABLES and table_name != "dim_serving_date"
     ]
 
 
@@ -851,7 +854,10 @@ class FakeStatsBigQueryClient:
 
     def get_table(self, table_ref: str) -> FakeTableMetadata:
         self.table_refs.append(table_ref)
-        return FakeTableMetadata(num_rows=10, num_bytes=100)
+        table_name = table_ref.rsplit(".", 1)[-1]
+        return FakeTableMetadata(
+            num_rows=10, num_bytes=100, time_partitioning=None if table_name == "dim_serving_date" else object()
+        )
 
     def query(self, query: str) -> FakeQueryJob:
         self.queries.append(query)
@@ -874,6 +880,7 @@ class FakeQueryJob:
 class FakeTableMetadata:
     num_rows: int
     num_bytes: int
+    time_partitioning: object | None = object()
 
 
 class FakeExtractJobConfig:

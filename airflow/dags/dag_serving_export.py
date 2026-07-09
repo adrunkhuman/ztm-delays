@@ -303,19 +303,25 @@ def _run_serving_export(config: ExportConfig) -> ExportResult:
 
 def _source_table_stats(client: bigquery.Client) -> list[TableStats]:
     stats_by_table = {}
+    partitioned_table_names = set()
     for table_name in MART_TABLES:
         table_ref = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}"
         try:
             table = client.get_table(table_ref)
         except NotFound:
             continue
+        if (
+            getattr(table, "time_partitioning", None) is not None
+            or getattr(table, "range_partitioning", None) is not None
+        ):
+            partitioned_table_names.add(table_name)
         stats_by_table[table_name] = TableStats(
             table_name=table_name,
             row_count=int(table.num_rows or 0),
             size_bytes=int(table.num_bytes or 0),
         )
 
-    dated_stats = {stat.table_name: stat for stat in _source_date_ranges(client)}
+    dated_stats = {stat.table_name: stat for stat in _source_date_ranges(client, partitioned_table_names)}
     return [
         TableStats(
             table_name=table_name,
@@ -330,10 +336,10 @@ def _source_table_stats(client: bigquery.Client) -> list[TableStats]:
     ]
 
 
-def _source_date_ranges(client: bigquery.Client) -> list[TableStats]:
+def _source_date_ranges(client: bigquery.Client, partitioned_table_names: set[str]) -> list[TableStats]:
     stats = []
     for table_name in DATE_RANGE_SQL_BY_TABLE:
-        if table_name not in MART_TABLES:
+        if table_name not in MART_TABLES or table_name not in partitioned_table_names:
             continue
         partition_dates = _table_partition_dates(client, table_name)
         if not partition_dates:
