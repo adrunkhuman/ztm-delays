@@ -53,6 +53,9 @@ with grouped_events as (
         countif(
             observation_status not in ('observed', 'missed', 'uncertain', 'skipped_optional', 'not_in_passenger_service')
             or (observation_status = 'observed' and (actual_arrival_time is null or delay_seconds is null))
+            or (is_observed != (actual_arrival_time is not null))
+            or (is_observed and observation_status != 'observed')
+            or (actual_arrival_time is not null and observation_status != 'observed')
             or (observation_status = 'missed' and (actual_arrival_time is not null or delay_seconds is not null))
             or (observation_status in ('skipped_optional', 'not_in_passenger_service') and actual_arrival_time is not null)
         ) as status_violations

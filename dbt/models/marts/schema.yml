@@ -694,9 +694,9 @@ models:
       - name: scheduled_departure_time
         description: Scheduled departure timestamp reconstructed from service_date and GTFS departure seconds.
       - name: actual_arrival_time
-        description: Directly observed arrival timestamp when the GPS segment crossed the stop. Can be populated on uncertain rows when the trip assignment itself is unreliable.
+        description: Directly observed arrival timestamp when the GPS segment crossed the stop.
       - name: delay_seconds
-        description: Difference in seconds between actual_arrival_time and scheduled_arrival_time. Null when no direct arrival was observed; suspect on uncertain rows.
+        description: Difference in seconds between actual_arrival_time and scheduled_arrival_time. Null when no direct arrival was observed.
       - name: hour_bracket
         description: Warsaw-local hour floor of scheduled_arrival_time.
       - name: detection_method
@@ -718,9 +718,9 @@ models:
       - name: is_observed
         description: True when this scheduled stop has a direct observed arrival row.
       - name: is_match_uncertain
-        description: True when ping-level matcher caveats make unobserved stop classification unreliable.
+        description: True when ping-level matcher caveats make stop classification less reliable. Direct detections still emit observed status.
       - name: observation_status
-        description: "Explicit scheduled-stop state: observed for direct detections on plausible trip assignments, missed for unobserved required stops, skipped_optional for unobserved request stops, not_in_passenger_service for no-pickup/no-drop-off stop-time rows, and uncertain when the trip assignment is too ambiguous to trust the stop state."
+        description: "Explicit scheduled-stop state: observed for direct detections, missed for unobserved required stops, skipped_optional for unobserved request stops, not_in_passenger_service for no-pickup/no-drop-off stop-time rows, and uncertain for unobserved stops when the trip assignment is too ambiguous to trust the stop state."
 
   - name: mart_day_completeness
     description: Daily GPS ingestion completeness by Warsaw-local GPS date and mode. Normal builds replace the inclusive aggregation_start_date-through-processing_date GPS-date partitions. This is raw-ingestion coverage metadata, not schedule-aware service coverage; complete and partial trip facts remain usable even when a day is incomplete.
@@ -1697,6 +1697,11 @@ unit_tests:
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, '187', '187', 'bus', '3',
             1, 0, 'svc', 'Central', 'shape-3', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'partial', ['stale_stop_progression'],
             'modified', ['stale_progress']
+          union all
+          select
+            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-4', 1004, '187', '187', 'bus', '4',
+            1, 0, 'svc', 'Central', 'shape-4', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'broken', ['likely_wrong_trip_assignment'],
+            'matching_failure', ['bad_assignment_evidence']
       - input: ref('int_ping_trip')
         format: sql
         rows: |
@@ -1722,6 +1727,10 @@ unit_tests:
           select
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, 'settled_duty_chain',
             'chain-3', 'block_id', 'block-3', 1, 1, 1, array<string>[]
+          union all
+          select
+            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-4', 1004, 'settled_duty_chain',
+            'chain-4', 'block_id', 'block-4', 1, 1, 1, array<string>[]
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
@@ -1730,7 +1739,9 @@ unit_tests:
           union all select 'trip-1', '100105', 2, 30400, 30400, 1, 1, 'not_in_passenger_service', 'snapshot-valid'
           union all select 'trip-1', '100106', 3, 30500, 30500, 3, 3, 'request', 'snapshot-valid'
           union all select 'trip-2', '100103', 0, 30600, 30600, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-2', '100107', 1, 30700, 30700, 0, 0, 'regular', 'snapshot-valid'
           union all select 'trip-3', '100104', 0, 30900, 30900, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-4', '100108', 0, 31200, 31200, 0, 0, 'regular', 'snapshot-valid'
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1740,6 +1751,8 @@ unit_tests:
           union all select '100104', 'Main 04', 52.4, 21.4, 'snapshot-valid'
           union all select '100105', 'Depot', 52.5, 21.5, 'snapshot-valid'
           union all select '100106', 'Request Stop', 52.6, 21.6, 'snapshot-valid'
+          union all select '100107', 'Main 07', 52.7, 21.7, 'snapshot-valid'
+          union all select '100108', 'Main 08', 52.8, 21.8, 'snapshot-valid'
       - input: ref('dim_date')
         format: sql
         rows: |
@@ -1881,7 +1894,17 @@ unit_tests:
           timestamp('2026-01-15 08:30:00+01'), timestamp('2026-01-15 08:30:00+01'),
           timestamp('2026-01-15 08:30:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:30:00+01'),
-          timestamp('2026-01-15 08:30:30+01'), 30, true, true, 'uncertain'
+          timestamp('2026-01-15 08:30:30+01'), 30, true, true, 'observed'
+        union all
+        select
+          'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-2', 1002,
+          '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
+          'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
+          1, 2, 1, ['uncertain_assignment'], '100107', '1001', '07', 'Main 07', 52.7, 21.7, 'Main 01', 1, 0, 0, 'regular',
+          timestamp('2026-01-15 08:31:40+01'), timestamp('2026-01-15 08:31:40+01'), cast(null as timestamp),
+          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
+          cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
+          false, true, 'uncertain'
         union all
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-3', 1003,
@@ -1892,6 +1915,16 @@ unit_tests:
           timestamp('2026-01-15 08:35:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:35:00+01'),
           timestamp('2026-01-15 08:35:30+01'), 30, true, false, 'observed'
+        union all
+        select
+          'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-4', 1004,
+          '187', '187', 'bus', '4', 1, 0, 'svc', 'Central', 'shape-4', 'weekday', false, 'thursday', 'svc',
+          'schedule-version-1', 'broken', ['likely_wrong_trip_assignment'], 'matching_failure', ['bad_assignment_evidence'], 'settled_duty_chain', 'chain-4', 'block_id', 'block-4',
+          1, 1, 1, array<string>[], '100108', '1001', '08', 'Main 08', 52.8, 21.8, 'Main 01', 0, 0, 0, 'regular',
+          timestamp('2026-01-15 08:40:00+01'), timestamp('2026-01-15 08:40:00+01'), cast(null as timestamp),
+          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
+          cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
+          false, false, 'uncertain'
 
   - name: dim_line_current_uses_selected_snapshot_and_collects_headsigns
     model: dim_line_current
