@@ -320,8 +320,8 @@ select
     is_match_uncertain,
     case
         when stop_service_class = 'not_in_passenger_service' then 'not_in_passenger_service'
-        when is_match_uncertain or service_observation_class = 'matching_failure' then 'uncertain'
         when is_observed then 'observed'
+        when is_match_uncertain or service_observation_class = 'matching_failure' then 'uncertain'
         when stop_service_class = 'request' then 'skipped_optional'
         else 'missed'
     end as observation_status
