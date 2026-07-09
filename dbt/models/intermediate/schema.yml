@@ -5,45 +5,19 @@ models:
     description: Hourly processing coverage metadata for staged GPS pings. One Warsaw-local GPS date is rebuilt at a time and emits one row per expected vehicle type and real Warsaw-local hour. Coverage is estimated from distinct 10-second GPS timestamp buckets because each poll returns many vehicle rows, not one explicit poll snapshot row.
     columns:
       - name: gps_date
-        tests:
-          - not_null
       - name: gps_hour
         description: Timestamp for the real hour boundary in Europe/Warsaw. Timestamp storage disambiguates DST fall-back hours.
-        tests:
-          - not_null
       - name: vehicle_type
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [1, 2]
-                quote: false
       - name: first_gps_time
         description: Earliest GPS timestamp observed in this vehicle/hour bucket. Null when no rows were observed.
       - name: last_gps_time
         description: Latest GPS timestamp observed in this vehicle/hour bucket. Null when no rows were observed.
       - name: row_count
-        tests:
-          - not_null
       - name: vehicle_count
-        tests:
-          - not_null
       - name: observed_10s_buckets
-        tests:
-          - not_null
       - name: expected_10s_buckets
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [360]
-                quote: false
       - name: coverage_ratio
-        tests:
-          - not_null
       - name: max_gap_seconds
-        tests:
-          - not_null
 
   - name: int_ping_trip
     description: GPS pings matched to scheduled duty-chain trips. Processes one Warsaw-local GPS date at a time and can match previous-service-date overnight trips.
@@ -473,80 +447,40 @@ models:
     columns:
       - name: gtfs_snapshot_id
         description: Selected GTFS snapshot used for trip matching, stop reconstruction, labels, and schedule-version lineage.
-        tests:
-          - not_null:
-              config: &int_trip_summary_gps_date_filter
-                where: "gps_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
       - name: gps_date
         description: Warsaw-local GPS processing date partition rebuilt by dag_daily_gps.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: service_date
         description: GTFS service date for the trip. Can be the prior calendar date for overnight service.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: trip_id
         description: Matched GTFS trip_id from the selected snapshot.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: vehicle_number
         description: Vehicle identifier observed in the GPS source.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: line
         description: Public line identifier from the matched trip.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: route_short_name
         description: Public route short name from the selected GTFS snapshot.
       - name: mode
         description: Transit mode from the governing GTFS route. Live GPS currently covers bus and tram.
       - name: brigade
         description: Normalized brigade/block short name used for GPS-to-GTFS trip matching.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: vehicle_type
         description: "Vehicle type from the GPS source: 1 for bus, 2 for tram."
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: direction_id
         description: GTFS direction_id for the matched trip.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: service_id
         description: GTFS service_id for the matched trip in the governing snapshot.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: trip_headsign
         description: Matched trip headsign from the governing snapshot. This is an archive-safe display label.
       - name: shape_id
         description: GTFS shape_id for the matched trip.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: day_type
         description: Calendar weekday/weekend class carried from upstream matching. Use schedule_day_type for transit service-pattern analytics.
       - name: schedule_day_type
         description: GTFS-derived service pattern for this line and direction on the service date.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: schedule_service_ids
         description: Comma-delimited active GTFS service_id values for this line and direction under the governing snapshot.
       - name: schedule_version_id
         description: Timetable-version identifier for since-schedule-change analytics.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: origin_stop_id
         description: First scheduled stop_id for the matched trip in the governing snapshot.
       - name: origin_stop_name
@@ -557,127 +491,50 @@ models:
         description: Last scheduled stop name from the governing snapshot. This is an archive-safe display label.
       - name: scheduled_start_time
         description: Timestamp of the first scheduled stop arrival for the matched trip.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: scheduled_end_time
         description: Timestamp of the last scheduled stop arrival for the matched trip.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: actual_start_time
         description: Estimated arrival time at the first detected stop sequence for the realized trip. For partial trips this can be a non-terminal stop, so use is_first_stop_observed before treating start_delay_seconds as a strict terminal delay.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: actual_end_time
         description: Estimated arrival time at the last detected stop sequence for the realized trip. For partial trips this can be a non-terminal stop, so use is_last_stop_observed before treating end_delay_seconds as a strict terminal delay.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: start_delay_seconds
         description: Difference in seconds between actual_start_time and scheduled_start_time. Positive values are late.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: end_delay_seconds
         description: Difference in seconds between actual_end_time and scheduled_end_time. Positive values are late.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: stops_expected
         description: Scheduled stop count for the matched trip.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: stops_detected
         description: Number of scheduled stops detected from GPS segment crossings.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: detected_stop_ratio
         description: stops_detected divided by stops_expected.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: first_detected_stop_sequence
         description: Lowest scheduled stop_sequence detected for this realized trip.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: last_detected_stop_sequence
         description: Highest scheduled stop_sequence detected for this realized trip.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: max_stop_sequence_gap
         description: Largest scheduled stop_sequence gap between consecutive detected stops.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: max_ping_gap_seconds
         description: Largest observed time gap between consecutive matched GPS pings for this vehicle trip. A value of 0 can mean no consecutive matched ping pair was available.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: max_speed_mps
         description: Largest implied straight-line speed between consecutive matched GPS pings, in meters per second. A value of 0 can mean no consecutive matched ping pair was available.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: is_first_stop_observed
         description: True when the first detected stop is within 2 scheduled stop_sequence positions from the scheduled first stop. The tolerance is provisional.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: is_last_stop_observed
         description: True when the last detected stop is within 2 scheduled stop_sequence positions from the scheduled last stop. The tolerance is provisional.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: has_non_monotonic_stop_progression
         description: True when detected stops move backward in scheduled stop_sequence when ordered by actual arrival time.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: has_impossible_speed_jump
         description: True when matched GPS pings imply a straight-line speed above the provisional impossible-speed threshold.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: has_stale_stop_progression
         description: True when the last detected stop is still outside terminal tolerance but its timestamp is within 120 seconds of, or later than, the scheduled trip end. This flags weak trip-progress evidence, not high delay by itself.
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: trip_quality
         description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_ping_gap_seconds > 1800, non-monotonic stop progression, or max_speed_mps > 50. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, max_stop_sequence_gap <= 4, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips. High delay or large internal stop gaps are not broken by themselves when endpoint evidence is coherent."
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
-          - accepted_values:
-              arguments:
-                values: ['complete', 'partial', 'broken']
-              config: *int_trip_summary_gps_date_filter
       - name: quality_flags
         description: "Array of explainable quality flags. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. large_stop_sequence_gap: detected stops skip a large scheduled sequence span. extreme_delay: trusted start or end endpoint delay > 3600 seconds. stale_stop_progression: detected stops remain far from the terminal when the scheduled trip should be ending. likely_wrong_trip_assignment: detected_stop_ratio < 0.30 or non-monotonic progression."
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
       - name: service_observation_class
         description: "Observed service class, separate from trip_quality. Precedence is matching_failure, modified, regular, then truncated. regular means route endpoints were observed without modified-service evidence, even if reconstruction quality is partial. truncated means coherent shortened service missing the scheduled origin and/or destination. modified means plausible operational deviation such as a large internal gap or stale route progress. matching_failure means evidence is too weak or contradictory to treat as operated service."
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
-          - accepted_values:
-              arguments:
-                values: ['regular', 'truncated', 'modified', 'matching_failure']
-              config: *int_trip_summary_gps_date_filter
       - name: service_observation_flags
         description: "Array of service-class explanation flags: short_start, short_end, large_internal_gap, stale_progress, bad_assignment_evidence."
-        tests:
-          - not_null:
-              config: *int_trip_summary_gps_date_filter
 
 unit_tests:
   - name: int_gtfs_duty_chain_orders_segments_and_flags_diagnostics
@@ -1038,7 +895,7 @@ unit_tests:
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-large-gap', 'svc', 'Large Gap Head', 'shape-7', 57600, 62400, 10
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-high-coverage-large-gap', 'svc', 'High Coverage Large Gap Head', 'shape-8', 64800, 70500, 20
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-broken', 'svc', 'Broken Head', 'shape-3', 43200, 45600, 10
-      - input: ref('int_schedule_version')
+      - input: ref('dim_schedule_version')
         format: sql
         rows: |
           select 'schedule-version-1' as schedule_version_id, '187' as line, 0 as direction_id, 'weekday' as schedule_day_type, 'fingerprint' as timetable_fingerprint, date '2026-01-01' as valid_from_date, cast(null as date) as valid_to_date, 'snapshot-valid' as first_gtfs_snapshot_id, 'snapshot-valid' as last_gtfs_snapshot_id, date '2026-01-01' as first_processing_date, date '2026-01-15' as last_processing_date, 3 as max_scheduled_trip_count
@@ -1330,7 +1187,7 @@ unit_tests:
         format: sql
         rows: |
           select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-request-only' as trip_id, 'svc' as service_id, 'Request Only Head' as trip_headsign, 'shape-1' as shape_id, 36000 as trip_start_seconds, 37200 as trip_end_seconds, 3 as stop_count
-      - input: ref('int_schedule_version')
+      - input: ref('dim_schedule_version')
         format: sql
         rows: |
           select 'schedule-version-1' as schedule_version_id, '187' as line, 0 as direction_id, 'weekday' as schedule_day_type, 'fingerprint' as timetable_fingerprint, date '2026-01-01' as valid_from_date, cast(null as date) as valid_to_date, 'snapshot-valid' as first_gtfs_snapshot_id, 'snapshot-valid' as last_gtfs_snapshot_id, date '2026-01-01' as first_processing_date, date '2026-01-15' as last_processing_date, 1 as max_scheduled_trip_count

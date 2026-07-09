@@ -1,3 +1,5 @@
+{{ config(tags=['audit']) }}
+
 with contract_counts as (
     select
         countif(

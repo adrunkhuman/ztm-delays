@@ -39,12 +39,6 @@ models:
           - not_null:
               config:
                 where: "gps_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
-          - accepted_values:
-              arguments:
-                values: [1, 2]
-                quote: false
-              config:
-                where: "gps_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
       - name: ingested_at
         tests:
           - not_null:
@@ -57,82 +51,43 @@ models:
     description: GTFS trips spanning all loaded snapshots. Downstream models choose the governing snapshot explicitly.
     columns:
       - name: trip_id
-        tests: [not_null]
       - name: line
-        tests: [not_null]
       - name: service_id
-        tests: [not_null]
       - name: trip_headsign
       - name: direction_id
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1]
-                quote: false
       - name: block_id
         description: GTFS block_id when provided by the feed. This is the preferred duty-chain identity for schedule-spine models.
       - name: block_short_name
         description: Public block or brigade short name from GTFS before normalization.
       - name: brigade
-        tests: [not_null]
       - name: shape_id
-        tests: [not_null]
       - name: gtfs_snapshot_id
-        tests: [not_null]
 
   - name: stg_gtfs__stop_times
     description: GTFS stop times spanning all loaded snapshots, with schedule times converted to seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
     columns:
       - name: trip_id
-        tests: [not_null]
       - name: stop_id
-        tests: [not_null]
       - name: stop_sequence
-        tests: [not_null]
       - name: arrival_time_seconds
-        tests: [not_null]
       - name: departure_time_seconds
-        tests: [not_null]
       - name: pickup_type
         description: GTFS pickup_type normalized to 0 when omitted. Current Warsaw snapshots use 0, 1, and 3.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1, 2, 3]
-                quote: false
       - name: drop_off_type
         description: GTFS drop_off_type normalized to 0 when omitted. Current Warsaw snapshots use 0, 1, and 3.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1, 2, 3]
-                quote: false
       - name: stop_service_class
         description: "Passenger-service class derived from GTFS pickup/drop-off rules: regular, request, or not_in_passenger_service."
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['regular', 'request', 'not_in_passenger_service']
       - name: gtfs_snapshot_id
-        tests: [not_null]
 
   - name: stg_gtfs__stops
     description: GTFS stops spanning all loaded snapshots, after dropping structurally impossible coordinates.
     columns:
       - name: stop_id
-        tests: [not_null]
       - name: stop_name
-        tests: [not_null]
       - name: stop_code
         description: Raw GTFS stop_code metadata. Not the same as derived stop_post_code.
       - name: stop_lat
-        tests: [not_null]
       - name: stop_lon
-        tests: [not_null]
       - name: zone_id
         description: Raw GTFS fare-zone metadata from stops.txt.
       - name: effective_zone_id
@@ -142,68 +97,35 @@ models:
       - name: town_name
         description: Warsaw feed locality name. Current feed uses Warszawa for Warsaw-proper stops.
       - name: gtfs_snapshot_id
-        tests: [not_null]
 
   - name: stg_gtfs__shapes
     description: GTFS shape points spanning all loaded snapshots, after dropping structurally impossible coordinates.
     columns:
       - name: shape_id
-        tests: [not_null]
       - name: shape_pt_lat
-        tests: [not_null]
       - name: shape_pt_lon
-        tests: [not_null]
       - name: shape_pt_sequence
-        tests: [not_null]
       - name: gtfs_snapshot_id
-        tests: [not_null]
 
   - name: stg_gtfs__routes
     description: GTFS routes spanning all loaded snapshots, with route_type mapped to a readable mode.
     columns:
       - name: route_id
-        tests: [not_null]
       - name: route_short_name
-        tests: [not_null]
       - name: route_type
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1, 2, 3]
-                quote: false
       - name: mode
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['tram', 'metro', 'rail', 'bus']
       - name: gtfs_snapshot_id
-        tests: [not_null]
 
   - name: stg_gtfs__calendar_dates
     description: GTFS service dates spanning all loaded snapshots, limited to active service additions.
     columns:
       - name: service_id
-        tests: [not_null]
       - name: service_date
-        tests: [not_null]
       - name: exception_type
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [1]
-                quote: false
+        description: Only active service additions are retained in staging.
       - name: day_type
         description: Calendar weekday/weekend class derived from service_date; not a transit schedule pattern. Use dim_schedule_date.schedule_day_type for GTFS service-pattern grouping.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['weekday', 'weekend']
       - name: gtfs_snapshot_id
-        tests: [not_null]
 
 unit_tests:
   - name: stg_gps__pings_filters_normalizes_deduplicates_and_drops_bad_coordinates

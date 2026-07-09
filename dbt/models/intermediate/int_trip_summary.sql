@@ -277,7 +277,7 @@ summarized as (
         and arrivals.gtfs_snapshot_id = schedule.gtfs_snapshot_id
         and arrivals.trip_id = schedule.trip_id
         and schedule.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-    inner join {{ ref('int_schedule_version') }} as schedule_version
+    inner join {{ ref('dim_schedule_version') }} as schedule_version
         on schedule.line = schedule_version.line
         and schedule.direction_id = schedule_version.direction_id
         and schedule.schedule_day_type = schedule_version.schedule_day_type

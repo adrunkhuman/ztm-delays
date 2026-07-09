@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from airflow.sdk import DAG, get_current_context, task
-from google.api_core.exceptions import Conflict
+from google.api_core.exceptions import Conflict, NotFound
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
     BIGQUERY_LOCATION,
@@ -273,15 +273,18 @@ def _run_serving_export(config: ExportConfig) -> ExportResult:
 
 
 def _source_table_stats(client: bigquery.Client) -> list[TableStats]:
-    rows = list(client.query(_table_stats_sql()).result())
-    stats_by_table = {
-        row.table_id: TableStats(
-            table_name=row.table_id,
-            row_count=int(row.row_count),
-            size_bytes=int(row.size_bytes),
+    stats_by_table = {}
+    for table_name in MART_TABLES:
+        table_ref = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}"
+        try:
+            table = client.get_table(table_ref)
+        except NotFound:
+            continue
+        stats_by_table[table_name] = TableStats(
+            table_name=table_name,
+            row_count=int(table.num_rows or 0),
+            size_bytes=int(table.num_bytes or 0),
         )
-        for row in rows
-    }
 
     dated_stats = {stat.table_name: stat for stat in _source_date_ranges(client)}
     return [
@@ -298,48 +301,35 @@ def _source_table_stats(client: bigquery.Client) -> list[TableStats]:
     ]
 
 
-def _table_stats_sql() -> str:
-    quoted_tables = ", ".join(f"'{table_name}'" for table_name in MART_TABLES)
-    return f"""
-        select table_id, row_count, size_bytes
-        from `{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.__TABLES__`
-        where table_id in ({quoted_tables})
-    """
-
-
 def _source_date_ranges(client: bigquery.Client) -> list[TableStats]:
-    selects = [
-        _date_range_select(table_name, date_column)
-        for table_name, date_column in DATE_RANGE_SQL_BY_TABLE.items()
-        if table_name in MART_TABLES
-    ]
-    if not selects:
-        return []
-
-    rows = list(client.query(" union all ".join(selects)).result())
-    return [
-        TableStats(
-            table_name=row.table_name,
-            row_count=0,
-            size_bytes=0,
-            min_date=str(row.min_date) if row.min_date is not None else None,
-            max_date=str(row.max_date) if row.max_date is not None else None,
-            date_count=int(row.date_count) if row.date_count is not None else None,
+    stats = []
+    for table_name in DATE_RANGE_SQL_BY_TABLE:
+        if table_name not in MART_TABLES:
+            continue
+        partition_dates = _table_partition_dates(client, table_name)
+        if not partition_dates:
+            continue
+        stats.append(
+            TableStats(
+                table_name=table_name,
+                row_count=0,
+                size_bytes=0,
+                min_date=partition_dates[0].isoformat(),
+                max_date=partition_dates[-1].isoformat(),
+                date_count=len(partition_dates),
+            )
         )
-        for row in rows
-    ]
+    return stats
 
 
-def _date_range_select(table_name: str, date_column: str) -> str:
-    return f"""
-        select
-            '{table_name}' as table_name,
-            min({date_column}) as min_date,
-            max({date_column}) as max_date,
-            count(distinct {date_column}) as date_count
-        from `{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}`
-        where {date_column} >= date '1900-01-01'
-    """
+def _table_partition_dates(client: bigquery.Client, table_name: str) -> list[date]:
+    table_ref = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}"
+    partitions = []
+    for partition_id in client.list_partitions(table_ref):
+        if not isinstance(partition_id, str) or not re.fullmatch(r"\d{8}", partition_id):
+            continue
+        partitions.append(date.fromisoformat(f"{partition_id[:4]}-{partition_id[4:6]}-{partition_id[6:]}"))
+    return sorted(partitions)
 
 
 def _validate_source_stats(stats: Sequence[TableStats], max_source_bytes: int) -> None:
@@ -424,20 +414,18 @@ def _extract_partitioned_mart_to_gcs(
         raise RuntimeError("partitioned mart export requires changed_partition_date")
 
     date_column = PARTITIONED_EXPORT_TABLES[table_name]
+    source_table = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}${partition_date.replace('-', '')}"
     destination_uri = _partition_staging_extract_uri(config, table_name, date_column, partition_date)
-    query = f"""
-        export data options(
-          uri='{destination_uri}',
-          format='PARQUET',
-          overwrite=true
-        ) as
-        select *
-        from `{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}`
-        where {date_column} = date '{partition_date}'
-    """
+    job_config = bigquery.ExtractJobConfig(destination_format=bigquery.DestinationFormat.PARQUET)
     job_id = _bigquery_job_id("serving_export_partition", config.export_id, table_name, partition_date)
     try:
-        job = bigquery_client.query(query, job_id=job_id, location=BIGQUERY_LOCATION)
+        job = bigquery_client.extract_table(
+            source_table,
+            destination_uri,
+            job_config=job_config,
+            job_id=job_id,
+            location=BIGQUERY_LOCATION,
+        )
     except Conflict:
         raise RuntimeError(
             f"Serving export partition job already exists for export_id={config.export_id} table={table_name}"

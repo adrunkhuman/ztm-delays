@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+import os
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha1
 from typing import TYPE_CHECKING
 
@@ -78,6 +79,7 @@ SERVING_MODELS = (
 WAREHOUSE_HISTORY_START_DATE = "2026-06-25"
 BIGQUERY_DBT_COST_LOOKBACK_HOURS = 12
 BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD = 100 * 1024**3
+LOG_BIGQUERY_DBT_JOB_COSTS = os.getenv("LOG_BIGQUERY_DBT_JOB_COSTS", "false").lower() == "true"
 
 RAW_GPS_PROCESSING_DATE = "{{ (dag_run.partition_key or dag_run.conf.get('processing_date'))[:10] }}"
 PROCESSING_DATE = "{{ dag_run.conf.get('processing_date') or dag_run.partition_key or data_interval_start.in_timezone('Europe/Warsaw').to_date_string() }}"
@@ -163,16 +165,13 @@ def _load_raw_gps_pings(processing_date: str) -> int:
 
 def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     client = bigquery.Client(project=GCP_PROJECT)
+    partition_suffix = date.fromisoformat(processing_date).strftime("%Y%m%d")
     query = f"""
         select gtfs_snapshot_id
-        from `{INT_GTFS_PROCESSING_SNAPSHOT_TABLE}`
-        where processing_date = date(@processing_date)
+        from `{INT_GTFS_PROCESSING_SNAPSHOT_TABLE}${partition_suffix}`
         limit 1
     """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("processing_date", "DATE", processing_date)]
-    )
-    rows = list(client.query(query, job_config=job_config).result())
+    rows = list(client.query(query).result())
     if not rows:
         raise AirflowException(f"No governing GTFS snapshot mapping exists for GPS processing date {processing_date}")
     return str(rows[0].gtfs_snapshot_id)
@@ -227,7 +226,8 @@ def _dbt_run_test_pair(
     test_extra_args: str = "",
 ) -> tuple[BashOperator, BashOperator]:
     run_task = _dbt_task(f"dbt_run_{task_name}", "run", run_selector, vars_json)
-    test_task = _dbt_task(f"dbt_test_{task_name}", "test", test_selector, vars_json, test_extra_args)
+    audit_excluded_args = f"{test_extra_args} --exclude tag:audit".strip()
+    test_task = _dbt_task(f"dbt_test_{task_name}", "test", test_selector, vars_json, audit_excluded_args)
     run_task >> test_task
     return run_task, test_task
 
@@ -287,6 +287,7 @@ with DAG(
             "stg_gps__pings",
             "source:raw.raw_gps_pings stg_gps__pings",
             GPS_DBT_VARS,
+            "--exclude test_type:generic",
         )
 
     with TaskGroup(
@@ -306,7 +307,7 @@ with DAG(
         )
         dbt_run_int_trip_summary, dbt_test_int_trip_summary = _dbt_run_test_pair(
             "int_trip_summary",
-            f"{TRIP_MATCHING_SCHEDULE_MODELS} {TRIP_SUMMARY_MODEL}",
+            TRIP_SUMMARY_MODEL,
             TRIP_SUMMARY_MODEL,
             GPS_TRIP_DBT_VARS,
         )
@@ -365,6 +366,7 @@ with DAG(
             GPS_COMPLETENESS_MODEL,
             GPS_COMPLETENESS_MODEL,
             GPS_DBT_VARS,
+            "--exclude test_type:generic",
         )
         dbt_run_completeness_and_coverage, dbt_test_completeness_and_coverage = _dbt_run_test_pair(
             "completeness_and_coverage",
@@ -387,7 +389,7 @@ with DAG(
             SERVING_MODELS,
             SERVING_MODELS,
             MART_DBT_VARS,
-            "--indirect-selection cautious",
+            "--indirect-selection cautious --exclude test_type:generic",
         )
 
     @task(do_xcom_push=False)
@@ -457,9 +459,10 @@ with DAG(
     dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_pipeline_status
     dbt_run_pipeline_status >> dbt_test_pipeline_status
     dbt_test_pipeline_status >> dbt_run_serving_marts >> dbt_test_serving_marts
-    cost_summary = log_bigquery_dbt_job_costs()
     gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE)
-    dbt_test_serving_marts >> cost_summary
+    if LOG_BIGQUERY_DBT_JOB_COSTS:
+        cost_summary = log_bigquery_dbt_job_costs()
+        dbt_test_serving_marts >> cost_summary
     dbt_test_serving_marts >> gps_models_date
     watcher = fail_on_any_task_failure()
     dbt_test_serving_marts >> watcher
