@@ -276,13 +276,14 @@ with DAG(
     on_failure_callback=airflow_failure_alert,
     tags=["ztm", "gps", "warehouse"],
 ) as dag:
+    with TaskGroup("snapshot_lookup", group_display_name="Snapshot lookup", prefix_group_id=False) as snapshot_group:
 
-    @task
-    def selected_gtfs_snapshot_id(processing_date: str) -> str:
-        """Return the latest dimension-built GTFS snapshot available at rebuild time."""
-        return _selected_gtfs_snapshot_id(processing_date)
+        @task
+        def selected_gtfs_snapshot_id(processing_date: str) -> str:
+            """Return the latest dimension-built GTFS snapshot available at rebuild time."""
+            return _selected_gtfs_snapshot_id(processing_date)
 
-    selected_gtfs_snapshot = selected_gtfs_snapshot_id(PROCESSING_DATE)
+        selected_gtfs_snapshot = selected_gtfs_snapshot_id(PROCESSING_DATE)
 
     with TaskGroup("staging", group_display_name="Staging", prefix_group_id=False) as staging_group:
         dbt_run_stg_gps_pings, dbt_test_stg_gps_pings = _dbt_run_test_pair(
@@ -395,49 +396,51 @@ with DAG(
             "--indirect-selection cautious --exclude test_type:generic",
         )
 
-    @task(do_xcom_push=False)
-    def log_bigquery_dbt_job_costs() -> dict[str, object]:
-        """Log BigQuery dbt job bytes for the current DAG run without blocking publication."""
-        context = get_current_context()
-        dag_run = context.get("dag_run")
-        started_at = getattr(dag_run, "start_date", None)
-        if not isinstance(started_at, datetime):
-            started_at = datetime.now(UTC) - timedelta(hours=BIGQUERY_DBT_COST_LOOKBACK_HOURS)
-        elif started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=UTC)
+    with TaskGroup("completion", group_display_name="Completion", prefix_group_id=False) as completion_group:
 
-        try:
-            summary = _bigquery_dbt_job_cost_summary(started_at)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to collect BigQuery dbt cost metadata: %s", exc)
-            return {"error": str(exc), "started_at": started_at.isoformat()}
+        @task(do_xcom_push=False)
+        def log_bigquery_dbt_job_costs() -> dict[str, object]:
+            """Log BigQuery dbt job bytes for the current DAG run without blocking publication."""
+            context = get_current_context()
+            dag_run = context.get("dag_run")
+            started_at = getattr(dag_run, "start_date", None)
+            if not isinstance(started_at, datetime):
+                started_at = datetime.now(UTC) - timedelta(hours=BIGQUERY_DBT_COST_LOOKBACK_HOURS)
+            elif started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=UTC)
 
-        LOGGER.info(
-            "BigQuery dbt cost summary since %s: jobs=%s bytes_processed=%s bytes_billed=%s top_jobs=%s",
-            started_at.isoformat(),
-            summary["job_count"],
-            summary["total_bytes_processed"],
-            summary["total_bytes_billed"],
-            summary["top_jobs"],
-        )
-        total_bytes_billed = summary["total_bytes_billed"]
-        if isinstance(total_bytes_billed, int) and total_bytes_billed > BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD:
-            LOGGER.warning(
-                "BigQuery dbt billed bytes exceeded warning threshold: billed=%s threshold=%s",
-                total_bytes_billed,
-                BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD,
+            try:
+                summary = _bigquery_dbt_job_cost_summary(started_at)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Failed to collect BigQuery dbt cost metadata: %s", exc)
+                return {"error": str(exc), "started_at": started_at.isoformat()}
+
+            LOGGER.info(
+                "BigQuery dbt cost summary since %s: jobs=%s bytes_processed=%s bytes_billed=%s top_jobs=%s",
+                started_at.isoformat(),
+                summary["job_count"],
+                summary["total_bytes_processed"],
+                summary["total_bytes_billed"],
+                summary["top_jobs"],
             )
-        return summary | {"started_at": started_at.isoformat()}
+            total_bytes_billed = summary["total_bytes_billed"]
+            if isinstance(total_bytes_billed, int) and total_bytes_billed > BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD:
+                LOGGER.warning(
+                    "BigQuery dbt billed bytes exceeded warning threshold: billed=%s threshold=%s",
+                    total_bytes_billed,
+                    BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD,
+                )
+            return summary | {"started_at": started_at.isoformat()}
 
-    @task(outlets=[GPS_MODELS_DATE_ASSET])
-    def emit_gps_models_date_asset(processing_date: str) -> Iterator[Metadata]:
-        """Emit the completed GPS warehouse partition."""
-        yield Metadata(GPS_MODELS_DATE_ASSET, {"processing_date": processing_date})
+        @task(outlets=[GPS_MODELS_DATE_ASSET])
+        def emit_gps_models_date_asset(processing_date: str) -> Iterator[Metadata]:
+            """Emit the completed GPS warehouse partition."""
+            yield Metadata(GPS_MODELS_DATE_ASSET, {"processing_date": processing_date})
 
-    @task(trigger_rule=TriggerRule.ONE_FAILED, retries=0)
-    def fail_on_any_task_failure() -> None:
-        """Fail the DAG run when the single-sink graph propagates an upstream failure."""
-        raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
+        @task(trigger_rule=TriggerRule.ONE_FAILED, retries=0)
+        def fail_on_any_task_failure() -> None:
+            """Fail the DAG run when the single-sink graph propagates an upstream failure."""
+            raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
 
     selected_gtfs_snapshot >> dbt_run_int_ping_trip
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings

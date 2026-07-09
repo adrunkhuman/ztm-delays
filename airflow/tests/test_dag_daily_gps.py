@@ -239,6 +239,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert dag.dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
     assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
     expected_groups = {
+        "snapshot_group": ("snapshot_lookup", "Snapshot lookup"),
         "staging_group": ("staging", "Staging"),
         "trip_group": ("trip_reconstruction", "Trip reconstruction"),
         "current_facts_group": ("current_facts", "Current facts"),
@@ -246,6 +247,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         "completeness_group": ("completeness_coverage", "Completeness and coverage"),
         "status_group": ("pipeline_status", "Pipeline status"),
         "serving_group": ("serving_marts", "Serving marts"),
+        "completion_group": ("completion", "Completion"),
     }
     for group_name, (group_id, display_name) in expected_groups.items():
         group = getattr(dag, group_name)
