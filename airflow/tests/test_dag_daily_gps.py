@@ -111,7 +111,7 @@ def test_load_raw_gps_pings_continues_after_one_existing_job(monkeypatch: pytest
     assert client.existing_job.result_called is True
 
 
-def test_selected_gtfs_snapshot_id_returns_latest_dimension_built_snapshot(
+def test_selected_gtfs_snapshot_id_returns_processing_date_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dag = _load_dag_module()
@@ -121,11 +121,8 @@ def test_selected_gtfs_snapshot_id_returns_latest_dimension_built_snapshot(
     assert dag._selected_gtfs_snapshot_id("2026-07-08") == "snapshot-1"
 
     assert client.query_call is not None
-    assert "raw_gtfs_snapshots" in client.query_call.query
-    assert "dim_schedule_date" in client.query_call.query
-    assert "date_sub(date(@processing_date), interval 1 day)" in client.query_call.query
-    assert "having count(distinct schedule_dates.service_date) = 2" in client.query_call.query
-    assert "order by snapshots.snapshot_timestamp desc, snapshots.snapshot_id desc" in client.query_call.query
+    assert "int_gtfs_processing_snapshot" in client.query_call.query
+    assert "where processing_date = date(@processing_date)" in client.query_call.query
     assert client.query_call.job_config.query_parameters == [
         dag.bigquery.ScalarQueryParameter("processing_date", "DATE", "2026-07-08")
     ]
@@ -136,7 +133,7 @@ def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.
     client = FakeBigQueryClient(snapshot_rows=[])
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
 
-    with pytest.raises(dag.AirflowException, match="No built GTFS schedule dimension covers GPS processing date"):
+    with pytest.raises(dag.AirflowException, match="No governing GTFS snapshot mapping exists"):
         dag._selected_gtfs_snapshot_id("2026-07-08")
 
 
@@ -269,6 +266,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         "completeness_group": ("completeness_coverage", "Completeness and coverage"),
         "aggregate_group": ("aggregate_marts", "Aggregate marts"),
         "status_group": ("pipeline_status", "Pipeline status"),
+        "serving_group": ("serving_marts", "Serving marts"),
     }
     for group_name, (group_id, display_name) in expected_groups.items():
         group = getattr(dag, group_name)
@@ -289,6 +287,9 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         "stg_gtfs__routes",
         "stg_gtfs__calendar_dates",
         "int_gtfs_duty_chain",
+        "int_gtfs_processing_snapshot",
+        "int_gtfs_trip_schedule_history",
+        "dim_schedule_version",
     ]:
         assert selector in trip_matching_command
     assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
@@ -297,6 +298,17 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert '"publish_service_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_fct_trip_prior.kwargs["bash_command"]
     assert dag.EXPECTED_STOP_EVENT_FACT_MODEL in dag.dbt_run_fct_expected_stop_event_current.kwargs["bash_command"]
     assert dag.PIPELINE_STATUS_MODEL in dag.dbt_run_pipeline_status.kwargs["bash_command"]
+    for serving_model in [
+        "int_serving_trip_universe",
+        "mart_line_window_summary",
+        "mart_stop_group_window_summary",
+        "mart_stop_post_window_summary",
+        "mart_entity_rankings",
+        "dim_serving_date",
+        "rpt_schedule_day_mapping_evidence",
+        "rpt_ranking_universe_evidence",
+    ]:
+        assert serving_model in dag.dbt_run_serving_marts.kwargs["bash_command"]
     assert dag.emit_gps_models_date_asset.kwargs == {"outlets": [dag.GPS_MODELS_DATE_ASSET]}
 
     expected_edges = [
@@ -331,11 +343,13 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert dag.dbt_run_period_aggregate_marts in dag.dbt_run_daily_aggregate_mart.downstream
     assert dag.dbt_run_period_aggregate_marts in dag.period_aggregate_window.downstream
     assert dag.dbt_run_pipeline_status in dag.dbt_run_period_aggregate_marts.downstream
-    assert dag.log_bigquery_dbt_job_costs in dag.dbt_test_pipeline_status.downstream
-    assert dag.emit_gps_models_date_asset in dag.dbt_test_pipeline_status.downstream
+    assert dag.dbt_run_serving_marts in dag.dbt_test_pipeline_status.downstream
+    assert dag.dbt_test_serving_marts in dag.dbt_run_serving_marts.downstream
+    assert dag.log_bigquery_dbt_job_costs in dag.dbt_test_serving_marts.downstream
+    assert dag.emit_gps_models_date_asset in dag.dbt_test_serving_marts.downstream
     assert dag.emit_gps_models_date_asset not in dag.log_bigquery_dbt_job_costs.downstream
     assert dag.log_bigquery_dbt_job_costs.kwargs == {"do_xcom_push": False}
-    assert dag.watcher in dag.dbt_test_pipeline_status.downstream
+    assert dag.watcher in dag.dbt_test_serving_marts.downstream
     assert dag.fail_on_any_task_failure.kwargs["retries"] == 0
 
 
@@ -348,6 +362,8 @@ def test_dag_uses_bounded_mart_windows() -> None:
         (dag.dbt_run_period_aggregate_marts, dag.PRIOR_SERVICE_DATE),
         (dag.dbt_run_pipeline_status, dag.PRIOR_SERVICE_DATE),
         (dag.dbt_test_pipeline_status, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_run_serving_marts, dag.WAREHOUSE_HISTORY_START_DATE),
+        (dag.dbt_test_serving_marts, dag.WAREHOUSE_HISTORY_START_DATE),
     ]
 
     for task, expected_start_date in expected_aggregation_vars:
@@ -362,6 +378,7 @@ def test_dag_uses_bounded_mart_windows() -> None:
     )
     assert dag.DAILY_AGGREGATE_MODEL in dag.dbt_run_daily_aggregate_mart.kwargs["bash_command"]
     assert dag.PERIOD_AGGREGATE_MODELS in dag.dbt_run_period_aggregate_marts.kwargs["bash_command"]
+    assert dag.SERVING_MODELS in dag.dbt_run_serving_marts.kwargs["bash_command"]
 
 
 def test_dag_excludes_broad_aggregate_tests_from_nightly_path() -> None:

@@ -9,6 +9,6 @@ ztm_pipeline:
       location: "{{ env_var('BIGQUERY_LOCATION', 'europe-north1') }}"
       keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS', '/opt/airflow/gcp-key.json') }}"
       threads: 4
-      job_execution_timeout_seconds: 300
+      job_execution_timeout_seconds: "{{ env_var('DBT_BIGQUERY_JOB_TIMEOUT_SECONDS', '300') | as_number }}"
       job_retries: 1
       maximum_bytes_billed: "{{ env_var('DBT_BIGQUERY_MAXIMUM_BYTES_BILLED', '100000000000') | as_number }}"

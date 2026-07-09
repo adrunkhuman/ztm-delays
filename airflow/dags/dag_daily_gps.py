@@ -20,6 +20,7 @@ from google.api_core.exceptions import Conflict
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
     AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
+    BIGQUERY_INT_DATASET,
     BIGQUERY_LOCATION,
     BIGQUERY_MARTS_DATASET,
     BIGQUERY_RAW_DATASET,
@@ -44,12 +45,16 @@ GPS_WAREHOUSE_CRON = "0 4 * * *"
 
 RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gps_pings"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
+INT_GTFS_PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_gtfs_processing_snapshot"
 DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
 DIM_SCHEDULE_VERSION_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_version"
 GTFS_TRIP_MATCHING_STAGING_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__routes stg_gtfs__calendar_dates"
 )
-TRIP_MATCHING_SCHEDULE_MODELS = "int_gtfs_trip_schedule int_gtfs_duty_chain int_schedule_version"
+TRIP_MATCHING_SCHEDULE_MODELS = (
+    "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history "
+    "int_gtfs_trip_schedule int_gtfs_duty_chain int_schedule_version dim_schedule_version"
+)
 GTFS_STOP_ARRIVAL_STAGING_MODELS = "stg_gtfs__stop_times stg_gtfs__stops"
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 TRIP_SUMMARY_MODEL = "int_trip_summary"
@@ -59,6 +64,18 @@ EXPECTED_STOP_EVENT_FACT_MODEL = "fct_expected_stop_event"
 DAY_COMPLETENESS_MODEL = "mart_day_completeness"
 SERVICE_COVERAGE_MODEL = "agg_service_coverage"
 PIPELINE_STATUS_MODEL = "mart_pipeline_status"
+SERVING_MODELS = (
+    "int_serving_trip_universe "
+    "dim_serving_date "
+    "mart_mode_window_summary mart_entity_daily_summary mart_line_window_summary "
+    "mart_stop_group_window_summary mart_stop_post_window_summary mart_hour_window_summary "
+    "mart_entity_rankings mart_entity_timeline_daily mart_worst_delay_event "
+    "mart_line_reliability_daily mart_trip_daily mart_trip_mode_daily_summary "
+    "mart_trip_line_daily mart_line_trip_group_daily mart_line_course_window "
+    "mart_line_course_stop_window mart_stop_line_window_summary "
+    "mart_stop_post_line_group_window mart_stop_group_line_group_window "
+    "mart_pipeline_status_recent_summary rpt_schedule_day_mapping_evidence rpt_ranking_universe_evidence"
+)
 DAILY_AGGREGATE_MODEL = "agg_line_daily"
 PERIOD_AGGREGATE_MODELS = "agg_line_stop_period agg_stop_period agg_time_period"
 WAREHOUSE_HISTORY_START_DATE = "2026-06-25"
@@ -159,14 +176,9 @@ def _load_raw_gps_pings(processing_date: str) -> int:
 def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     client = bigquery.Client(project=GCP_PROJECT)
     query = f"""
-        select snapshots.snapshot_id as gtfs_snapshot_id
-        from `{RAW_GTFS_SNAPSHOTS_TABLE}` as snapshots
-        inner join `{DIM_SCHEDULE_DATE_TABLE}` as schedule_dates
-          on schedule_dates.gtfs_snapshot_id = snapshots.snapshot_id
-        where schedule_dates.service_date in (date_sub(date(@processing_date), interval 1 day), date(@processing_date))
-        group by snapshots.snapshot_id, snapshots.snapshot_timestamp
-        having count(distinct schedule_dates.service_date) = 2
-        order by snapshots.snapshot_timestamp desc, snapshots.snapshot_id desc
+        select gtfs_snapshot_id
+        from `{INT_GTFS_PROCESSING_SNAPSHOT_TABLE}`
+        where processing_date = date(@processing_date)
         limit 1
     """
     job_config = bigquery.QueryJobConfig(
@@ -174,9 +186,7 @@ def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     )
     rows = list(client.query(query, job_config=job_config).result())
     if not rows:
-        raise AirflowException(
-            f"No built GTFS schedule dimension covers GPS processing date {processing_date} and its prior date"
-        )
+        raise AirflowException(f"No governing GTFS snapshot mapping exists for GPS processing date {processing_date}")
     return str(rows[0].gtfs_snapshot_id)
 
 
@@ -444,6 +454,15 @@ with DAG(
             COMPLETENESS_COVERAGE_DBT_VARS,
         )
 
+    with TaskGroup("serving_marts", group_display_name="Serving marts", prefix_group_id=False) as serving_group:
+        dbt_run_serving_marts, dbt_test_serving_marts = _dbt_run_test_pair(
+            "serving_marts",
+            SERVING_MODELS,
+            SERVING_MODELS,
+            MART_DBT_VARS,
+            "--indirect-selection cautious",
+        )
+
     @task(do_xcom_push=False)
     def log_bigquery_dbt_job_costs() -> dict[str, object]:
         """Log BigQuery dbt job bytes for the current DAG run without blocking publication."""
@@ -512,12 +531,13 @@ with DAG(
     dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_daily_aggregate_mart
     [dbt_run_daily_aggregate_mart, period_aggregate] >> dbt_run_period_aggregate_marts
     dbt_run_period_aggregate_marts >> dbt_run_pipeline_status >> dbt_test_pipeline_status
+    dbt_test_pipeline_status >> dbt_run_serving_marts >> dbt_test_serving_marts
     cost_summary = log_bigquery_dbt_job_costs()
     gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE)
-    dbt_test_pipeline_status >> cost_summary
-    dbt_test_pipeline_status >> gps_models_date
+    dbt_test_serving_marts >> cost_summary
+    dbt_test_serving_marts >> gps_models_date
     watcher = fail_on_any_task_failure()
-    dbt_test_pipeline_status >> watcher
+    dbt_test_serving_marts >> watcher
 
 
 if __name__ == "__main__":

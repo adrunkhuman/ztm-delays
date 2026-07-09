@@ -47,6 +47,8 @@ dbt build --select fct_trip fct_stop_arrival \
 
 GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the production DAG publishes both the current service date and the prior service date for each GPS processing date.
 
+`insert_overwrite` replaces the listed partitions even when the compiled source query returns zero rows. Historical reruns must derive the governing GTFS snapshot from the warehouse processing-date mapping, not from the latest snapshot, and must stop on schedule-version or snapshot-lineage test failures before continuing to later dates.
+
 ## Date-Range Backfill
 
 Loop over dates in order. For every GPS processing date, ensure at least one GTFS snapshot has been loaded and its schedule dimensions have been built. Nightly rebuilds use the latest built snapshot available at rebuild time, not a same-day cutoff rule.

@@ -55,46 +55,59 @@ DUCKDB_MEMORY_LIMIT = "1GB"
 DUCKDB_TEMP_DIRECTORY_LIMIT = "2GB"
 DUCKDB_THREADS = 2
 MART_TABLES = (
-    "agg_line_daily",
+    "dim_serving_date",
     "dim_stop_group_current",
     "dim_stop_post_current",
     "fct_expected_stop_event",
-    "fct_stop_arrival",
-    "fct_trip",
+    "mart_entity_daily_summary",
+    "mart_entity_rankings",
+    "mart_entity_timeline_daily",
+    "mart_hour_window_summary",
+    "mart_line_course_stop_window",
+    "mart_line_course_window",
+    "mart_line_reliability_daily",
+    "mart_line_trip_group_daily",
+    "mart_line_window_summary",
+    "mart_mode_window_summary",
     "mart_pipeline_status",
+    "mart_pipeline_status_recent_summary",
+    "mart_stop_group_line_group_window",
+    "mart_stop_group_window_summary",
+    "mart_stop_line_window_summary",
+    "mart_stop_post_line_group_window",
+    "mart_stop_post_window_summary",
+    "mart_trip_daily",
+    "mart_trip_line_daily",
+    "mart_trip_mode_daily_summary",
+    "mart_worst_delay_event",
 )
-DERIVED_TABLES = (
-    "agg_line_hour_daily",
-    "agg_line_stop_daily",
-    "agg_mode_daily",
-    "agg_mode_hour_daily",
-    "agg_stop_group_daily",
-    "agg_stop_hour_daily",
-    "agg_stop_line_daily",
-    "agg_stop_post_daily",
-    "mart_delay_events",
-    "mart_trip_reliability",
-)
+DERIVED_TABLES: tuple[str, ...] = ()
 EXPORTED_TABLES = MART_TABLES + DERIVED_TABLES
 DATE_RANGE_SQL_BY_TABLE = {
-    "agg_line_daily": "service_date",
+    "dim_serving_date": "service_date",
     "fct_expected_stop_event": "service_date",
-    "fct_stop_arrival": "service_date",
-    "fct_trip": "service_date",
+    "mart_entity_daily_summary": "service_date",
+    "mart_entity_rankings": "source_end_date",
+    "mart_entity_timeline_daily": "service_date",
+    "mart_hour_window_summary": "source_end_date",
+    "mart_line_course_stop_window": "source_end_date",
+    "mart_line_course_window": "source_end_date",
+    "mart_line_reliability_daily": "service_date",
+    "mart_line_trip_group_daily": "service_date",
+    "mart_line_window_summary": "source_end_date",
+    "mart_mode_window_summary": "source_end_date",
     "mart_pipeline_status": "service_date",
+    "mart_stop_group_line_group_window": "source_end_date",
+    "mart_stop_group_window_summary": "source_end_date",
+    "mart_stop_line_window_summary": "source_end_date",
+    "mart_stop_post_line_group_window": "source_end_date",
+    "mart_stop_post_window_summary": "source_end_date",
+    "mart_trip_daily": "service_date",
+    "mart_trip_line_daily": "service_date",
+    "mart_trip_mode_daily_summary": "service_date",
+    "mart_worst_delay_event": "service_date",
 }
-DERIVED_DATE_RANGE_SQL_BY_TABLE = {
-    "agg_line_hour_daily": "service_date",
-    "agg_line_stop_daily": "service_date",
-    "agg_mode_daily": "service_date",
-    "agg_mode_hour_daily": "service_date",
-    "agg_stop_group_daily": "service_date",
-    "agg_stop_hour_daily": "service_date",
-    "agg_stop_line_daily": "service_date",
-    "agg_stop_post_daily": "service_date",
-    "mart_delay_events": "service_date",
-    "mart_trip_reliability": "service_date",
-}
+DERIVED_DATE_RANGE_SQL_BY_TABLE: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -318,10 +331,14 @@ def _validate_source_stats(stats: Sequence[TableStats], max_source_bytes: int) -
         for stat in stats
         if stat.table_name
         in {
-            "agg_line_daily",
+            "dim_serving_date",
             "fct_expected_stop_event",
-            "fct_stop_arrival",
-            "fct_trip",
+            "mart_mode_window_summary",
+            "mart_line_window_summary",
+            "mart_stop_group_window_summary",
+            "mart_stop_post_window_summary",
+            "mart_entity_rankings",
+            "mart_trip_daily",
             "mart_pipeline_status",
         }
         and stat.row_count == 0
@@ -552,31 +569,8 @@ def _configure_duckdb_build_connection(connection: DuckdbConnection, temp_direct
     connection.execute("set preserve_insertion_order = false")
 
 
-def _create_derived_serving_tables(connection: DuckdbConnection) -> None:
-    connection.execute(
-        """
-        create temp view complete_stop_arrivals as
-        select *
-        from (
-            select
-                *,
-                floor(
-                    (epoch_ms(scheduled_arrival_time + interval '2 hours')
-                    - epoch_ms(service_date::timestamp + interval '4 hours')) / 3600000
-                ) as service_hour_index,
-                ((4 + floor(
-                    (epoch_ms(scheduled_arrival_time + interval '2 hours')
-                    - epoch_ms(service_date::timestamp + interval '4 hours')) / 3600000
-                )) % 24)::bigint as local_hour
-            from fct_stop_arrival
-            where trip_quality = 'complete'
-        )
-        where service_hour_index between 0 and 23
-        """
-    )
-    _create_daily_derived_tables(connection)
-    _create_hourly_derived_tables(connection)
-    _create_event_derived_tables(connection)
+def _create_derived_serving_tables(_connection: DuckdbConnection) -> None:
+    return None
 
 
 def _create_daily_derived_tables(connection: DuckdbConnection) -> None:
@@ -863,17 +857,18 @@ def _validate_duckdb_export(duckdb_module: ModuleType, path: Path, source_stats:
             raise RuntimeError(f"DuckDB export missing tables: {', '.join(missing_tables)}")
 
         for table_name in [
-            "agg_line_daily",
+            "dim_serving_date",
             "dim_stop_group_current",
             "dim_stop_post_current",
-            "fct_stop_arrival",
-            "fct_trip",
+            "mart_mode_window_summary",
+            "mart_line_window_summary",
+            "mart_stop_group_window_summary",
+            "mart_stop_post_window_summary",
+            "mart_entity_rankings",
+            "mart_hour_window_summary",
+            "mart_entity_timeline_daily",
+            "mart_trip_daily",
             "mart_pipeline_status",
-            "agg_mode_daily",
-            "agg_line_hour_daily",
-            "agg_stop_hour_daily",
-            "mart_delay_events",
-            "mart_trip_reliability",
         ]:
             row_count = connection.execute(f"select count(*) from {_identifier(table_name)}").fetchone()[0]
             if row_count == 0:

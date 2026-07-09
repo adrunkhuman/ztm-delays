@@ -16,31 +16,38 @@ def test_mart_table_list_exports_frontend_source_tables() -> None:
     dag = _load_dag_module()
 
     assert set(dag.MART_TABLES) == {
-        "agg_line_daily",
+        "dim_serving_date",
         "dim_stop_group_current",
         "dim_stop_post_current",
         "fct_expected_stop_event",
-        "fct_stop_arrival",
-        "fct_trip",
+        "mart_entity_daily_summary",
+        "mart_entity_rankings",
+        "mart_entity_timeline_daily",
+        "mart_hour_window_summary",
+        "mart_line_course_stop_window",
+        "mart_line_course_window",
+        "mart_line_reliability_daily",
+        "mart_line_trip_group_daily",
+        "mart_line_window_summary",
+        "mart_mode_window_summary",
         "mart_pipeline_status",
+        "mart_pipeline_status_recent_summary",
+        "mart_stop_group_line_group_window",
+        "mart_stop_group_window_summary",
+        "mart_stop_line_window_summary",
+        "mart_stop_post_line_group_window",
+        "mart_stop_post_window_summary",
+        "mart_trip_daily",
+        "mart_trip_line_daily",
+        "mart_trip_mode_daily_summary",
+        "mart_worst_delay_event",
     }
 
 
 def test_derived_table_list_exports_frontend_serving_tables() -> None:
     dag = _load_dag_module()
 
-    assert set(dag.DERIVED_TABLES) == {
-        "agg_line_hour_daily",
-        "agg_line_stop_daily",
-        "agg_mode_daily",
-        "agg_mode_hour_daily",
-        "agg_stop_group_daily",
-        "agg_stop_hour_daily",
-        "agg_stop_line_daily",
-        "agg_stop_post_daily",
-        "mart_delay_events",
-        "mart_trip_reliability",
-    }
+    assert dag.DERIVED_TABLES == ()
     assert dag.EXPORTED_TABLES == dag.MART_TABLES + dag.DERIVED_TABLES
 
 
@@ -139,16 +146,16 @@ def test_source_table_stats_merges_date_ranges() -> None:
 
     by_table = {stat.table_name: stat for stat in stats}
     assert len(stats) == len(dag.MART_TABLES)
-    assert by_table["fct_trip"].row_count == 10
-    assert by_table["fct_trip"].size_bytes == 100
-    assert by_table["fct_trip"].min_date == "2026-06-27"
-    assert by_table["fct_trip"].max_date == "2026-07-02"
-    assert by_table["fct_trip"].date_count == 6
+    assert by_table["mart_trip_daily"].row_count == 10
+    assert by_table["mart_trip_daily"].size_bytes == 100
+    assert by_table["mart_trip_daily"].min_date == "2026-06-27"
+    assert by_table["mart_trip_daily"].max_date == "2026-07-02"
+    assert by_table["mart_trip_daily"].date_count == 6
     assert "where service_date >= date '1900-01-01'" in client.queries[1].lower()
 
 
 @pytest.mark.parametrize(
-    ("table_name", "date_column"), [("fct_stop_arrival", "service_date"), ("mart_pipeline_status", "service_date")]
+    ("table_name", "date_column"), [("mart_trip_daily", "service_date"), ("mart_entity_rankings", "source_end_date")]
 )
 def test_date_range_select_keeps_required_partition_filter(table_name: str, date_column: str) -> None:
     dag = _load_dag_module()
@@ -173,12 +180,12 @@ def test_extract_mart_to_gcs_uses_parquet_extract_contract() -> None:
         cleanup_gcs_staging=False,
     )
 
-    dag._extract_mart_to_gcs(client, config, "fct_trip")
+    dag._extract_mart_to_gcs(client, config, "mart_trip_daily")
 
     assert client.extract_call is not None
-    assert client.extract_call.source_table == "ztm-data.ztm_marts.fct_trip"
-    assert client.extract_call.destination_uri == "gs://bucket/prefix/export_id=export-1/fct_trip/part-*.parquet"
-    assert client.extract_call.job_id == "serving_export_export_1_fct_trip"
+    assert client.extract_call.source_table == "ztm-data.ztm_marts.mart_trip_daily"
+    assert client.extract_call.destination_uri == "gs://bucket/prefix/export_id=export-1/mart_trip_daily/part-*.parquet"
+    assert client.extract_call.job_id == "serving_export_export_1_mart_trip_daily"
     assert client.extract_call.location == dag.BIGQUERY_LOCATION
     assert client.extract_call.job_config.destination_format == dag.bigquery.DestinationFormat.PARQUET
     assert client.extract_call.job.result_called is True
@@ -199,7 +206,7 @@ def test_extract_mart_to_gcs_rejects_existing_job_after_conflict() -> None:
     )
 
     with pytest.raises(RuntimeError, match="job already exists"):
-        dag._extract_mart_to_gcs(client, config, "fct_trip")
+        dag._extract_mart_to_gcs(client, config, "mart_trip_daily")
 
     assert client.existing_job.result_called is False
 
@@ -208,9 +215,9 @@ def test_download_mart_parquet_downloads_only_parquet_files(tmp_path: Path) -> N
     dag = _load_dag_module()
     storage_client = FakeStorageClient(
         [
-            FakeBlob("prefix/export_id=export-1/fct_trip/part-000.parquet"),
-            FakeBlob("prefix/export_id=export-1/fct_trip_extra/part-999.parquet"),
-            FakeBlob("prefix/export_id=export-1/fct_trip/_SUCCESS"),
+            FakeBlob("prefix/export_id=export-1/mart_trip_daily/part-000.parquet"),
+            FakeBlob("prefix/export_id=export-1/mart_trip_daily_extra/part-999.parquet"),
+            FakeBlob("prefix/export_id=export-1/mart_trip_daily/_SUCCESS"),
         ]
     )
     config = dag.ExportConfig(
@@ -224,18 +231,18 @@ def test_download_mart_parquet_downloads_only_parquet_files(tmp_path: Path) -> N
         cleanup_gcs_staging=False,
     )
 
-    paths = dag._download_mart_parquet(storage_client, config, "fct_trip", tmp_path)
+    paths = dag._download_mart_parquet(storage_client, config, "mart_trip_daily", tmp_path)
 
     assert [path.name for path in paths] == ["part-000.parquet"]
     assert paths[0].read_text(encoding="utf-8") == "downloaded"
-    assert storage_client.list_prefixes == ["prefix/export_id=export-1/fct_trip/"]
-    assert storage_client.blob_names == ["prefix/export_id=export-1/fct_trip/part-000.parquet"]
+    assert storage_client.list_prefixes == ["prefix/export_id=export-1/mart_trip_daily/"]
+    assert storage_client.blob_names == ["prefix/export_id=export-1/mart_trip_daily/part-000.parquet"]
 
 
 def test_download_mart_parquet_resolves_listed_blobs_by_name(tmp_path: Path) -> None:
     dag = _load_dag_module()
     storage_client = FakeStorageClient(
-        [FakeBlob("prefix/export_id=export-1/fct_trip/part-000.parquet", fail_download=True)]
+        [FakeBlob("prefix/export_id=export-1/mart_trip_daily/part-000.parquet", fail_download=True)]
     )
     config = dag.ExportConfig(
         export_id="export-1",
@@ -248,19 +255,19 @@ def test_download_mart_parquet_resolves_listed_blobs_by_name(tmp_path: Path) -> 
         cleanup_gcs_staging=False,
     )
 
-    paths = dag._download_mart_parquet(storage_client, config, "fct_trip", tmp_path)
+    paths = dag._download_mart_parquet(storage_client, config, "mart_trip_daily", tmp_path)
 
     assert [path.name for path in paths] == ["part-000.parquet"]
     assert paths[0].read_text(encoding="utf-8") == "downloaded"
-    assert storage_client.blob_names == ["prefix/export_id=export-1/fct_trip/part-000.parquet"]
+    assert storage_client.blob_names == ["prefix/export_id=export-1/mart_trip_daily/part-000.parquet"]
 
 
 def test_cleanup_gcs_staging_resolves_listed_blobs_by_name(tmp_path: Path) -> None:
     dag = _load_dag_module()
     storage_client = FakeStorageClient(
         [
-            FakeBlob("prefix/export_id=export-1/fct_trip/part-000.parquet", fail_delete=True),
-            FakeBlob("prefix/export_id=export-1/fct_trip/_SUCCESS", fail_delete=True),
+            FakeBlob("prefix/export_id=export-1/mart_trip_daily/part-000.parquet", fail_delete=True),
+            FakeBlob("prefix/export_id=export-1/mart_trip_daily/_SUCCESS", fail_delete=True),
         ]
     )
     config = dag.ExportConfig(
@@ -278,12 +285,12 @@ def test_cleanup_gcs_staging_resolves_listed_blobs_by_name(tmp_path: Path) -> No
 
     assert storage_client.list_prefixes == ["prefix/export_id=export-1/"]
     assert storage_client.blob_names == [
-        "prefix/export_id=export-1/fct_trip/part-000.parquet",
-        "prefix/export_id=export-1/fct_trip/_SUCCESS",
+        "prefix/export_id=export-1/mart_trip_daily/part-000.parquet",
+        "prefix/export_id=export-1/mart_trip_daily/_SUCCESS",
     ]
     assert storage_client.deleted_blob_names == [
-        "prefix/export_id=export-1/fct_trip/part-000.parquet",
-        "prefix/export_id=export-1/fct_trip/_SUCCESS",
+        "prefix/export_id=export-1/mart_trip_daily/part-000.parquet",
+        "prefix/export_id=export-1/mart_trip_daily/_SUCCESS",
     ]
 
 
@@ -369,9 +376,9 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
             table_name=table_name,
             row_count=1,
             size_bytes=10,
-            min_date="2026-06-27" if table_name == "fct_trip" else None,
-            max_date="2026-07-02" if table_name == "fct_trip" else None,
-            date_count=6 if table_name == "fct_trip" else None,
+            min_date="2026-06-27" if table_name == "mart_trip_daily" else None,
+            max_date="2026-07-02" if table_name == "mart_trip_daily" else None,
+            date_count=6 if table_name == "mart_trip_daily" else None,
         )
         for table_name in dag.MART_TABLES
     ]
@@ -392,21 +399,15 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
     assert Path(result.metadata_path).exists()
     assert list(tmp_path.glob(".duckdb-tmp-*")) == []
     with duckdb.connect(result.duckdb_path, read_only=True) as connection:
-        assert connection.execute("select count(*) from fct_trip").fetchone()[0] == 1
+        assert connection.execute("select count(*) from mart_trip_daily").fetchone()[0] == 1
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "export-1"
         assert connection.execute("select exported_table_count from export_metadata").fetchone()[0] == len(
             dag.EXPORTED_TABLES
         )
         assert connection.execute("select count(*) from export_table_stats").fetchone()[0] == len(dag.EXPORTED_TABLES)
-        assert connection.execute("select count(*) from agg_mode_daily").fetchone()[0] == 1
-        assert connection.execute("select count(*) from agg_line_hour_daily").fetchone()[0] == 1
-        assert connection.execute("select count(*) from mart_delay_events").fetchone()[0] == 1
-        assert connection.execute("select count(*) from mart_trip_reliability").fetchone()[0] == 1
-        assert connection.execute("select stop_post_code from agg_stop_post_daily").fetchone()[0] == "01"
-        assert connection.execute("select stop_post_code from agg_stop_line_daily").fetchone()[0] == "01"
-        assert connection.execute("select stop_post_code from agg_line_stop_daily").fetchone()[0] == "01"
-        assert connection.execute("select stop_post_code from agg_stop_hour_daily").fetchone()[0] == "01"
-        assert connection.execute("select stop_post_code from mart_delay_events").fetchone()[0] == "01"
+        assert connection.execute("select count(*) from mart_mode_window_summary").fetchone()[0] == 1
+        assert connection.execute("select count(*) from mart_hour_window_summary").fetchone()[0] == 1
+        assert connection.execute("select count(*) from mart_worst_delay_event").fetchone()[0] == 1
         assert connection.execute(
             "select stop_code, effective_zone_id, town_name from dim_stop_post_current"
         ).fetchone() == (
@@ -421,23 +422,6 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
             "Boundary Stop",
             "Zabki",
         )
-        histogram_labels = connection.execute(
-            "select list_transform(delay_histogram, bucket -> bucket.bucket_label) from agg_mode_daily"
-        ).fetchone()[0]
-        assert histogram_labels == [
-            "early_over_5m",
-            "early_2_to_5m",
-            "early_1_to_2m",
-            "on_time_early_30_60s",
-            "on_time_early_0_30s",
-            "on_time_late_0_30s",
-            "on_time_late_30_60s",
-            "on_time_late_1_to_3m",
-            "late_3_to_5m",
-            "late_5_to_10m",
-            "late_10_to_20m",
-            "late_over_20m",
-        ]
 
 
 def test_export_metadata_includes_last_export_and_poller_status(tmp_path: Path) -> None:
@@ -454,7 +438,7 @@ def test_export_metadata_includes_last_export_and_poller_status(tmp_path: Path) 
             max_duckdb_bytes=1000,
             cleanup_gcs_staging=False,
         ),
-        [dag.TableStats(table_name="fct_trip", row_count=1, size_bytes=10)],
+        [dag.TableStats(table_name="mart_trip_daily", row_count=1, size_bytes=10)],
         exported_at,
         duckdb_size_bytes=100,
         poller_status={"status": "healthy"},
@@ -897,9 +881,7 @@ def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], d
             table_dir.mkdir(parents=True, exist_ok=True)
             path = table_dir / "part-000.parquet"
             escaped_path = path.as_posix().replace("'", "''")
-            if table_name == "fct_stop_arrival":
-                connection.execute(_copy_minimal_stop_arrival_sql(escaped_path))
-            elif table_name == "fct_trip":
+            if table_name == "mart_trip_daily":
                 connection.execute(_copy_minimal_trip_sql(escaped_path))
             elif table_name == "dim_stop_post_current":
                 connection.execute(_copy_minimal_stop_post_current_sql(escaped_path))
@@ -911,33 +893,6 @@ def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], d
                 )
             paths_by_table[table_name] = [path]
     return paths_by_table
-
-
-def _copy_minimal_stop_arrival_sql(escaped_path: str) -> str:
-    return f"""
-        copy (
-            select
-                'gtfs-1' as gtfs_snapshot_id,
-                date '2026-07-02' as service_date,
-                'trip-1' as trip_id,
-                '1001' as vehicle_number,
-                '190' as line,
-                '190' as route_short_name,
-                'bus' as mode,
-                0 as direction_id,
-                'Boundary Stop' as trip_headsign,
-                '7002' as stop_group_id,
-                'Boundary Stop' as stop_group_name,
-                '700201' as stop_id,
-                '01' as stop_post_code,
-                'Boundary Stop 01' as stop_name,
-                0 as stop_sequence,
-                timestamp '2026-07-02 06:00:00' as scheduled_arrival_time,
-                timestamp '2026-07-02 06:00:00' as hour_bracket,
-                45 as delay_seconds,
-                'complete' as trip_quality
-        ) to '{escaped_path}' (format parquet)
-    """
 
 
 def _copy_minimal_stop_post_current_sql(escaped_path: str) -> str:

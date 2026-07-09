@@ -378,7 +378,9 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
         "dim_stop_group",
         "dim_date",
         "dim_schedule_date",
+        "int_gtfs_processing_snapshot",
         "int_gtfs_trip_schedule",
+        "int_gtfs_trip_schedule_history",
         "int_gtfs_duty_chain",
         "int_schedule_version",
         "dim_schedule_version",
@@ -390,6 +392,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert set(dag.GTFS_DIMENSION_MODELS.split()) == expected_dimension_models
     assert set(dag.GTFS_DAILY_DIMENSION_TEST_MODELS.split()) == expected_dimension_models - {
         "int_gtfs_trip_schedule",
+        "int_gtfs_trip_schedule_history",
         "int_gtfs_duty_chain",
         "int_schedule_version",
     }
@@ -403,6 +406,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
         assert model_name in dag.dbt_run_gtfs_dimensions.bash_command
     for model_name in expected_dimension_models - {
         "int_gtfs_trip_schedule",
+        "int_gtfs_trip_schedule_history",
         "int_gtfs_duty_chain",
         "int_schedule_version",
     }:
