@@ -37,8 +37,6 @@ Bucket bounds are, in order: `< -300`, `-300..-121`, `-120..-61`, `-60..-31`, `-
 
 `universe_type`: `all_observed` for detail pages, `zone1_public` for rankings.
 
-Deviation: current raw GTFS stop data in BigQuery does not expose fare-zone columns, so `zone1_public` currently means public non-short-turn trips until zone ingestion exists.
-
 `rank_eligibility_min_arrivals`: provisional minimum sample constants used before an entity can enter `mart_entity_rankings`. These are serving-quality thresholds, like trip-quality thresholds, not presentation rules.
 
 `entity_type`: `mode`, `line`, `stop_group`, `stop_post`, where supported by the table.
@@ -92,7 +90,7 @@ All listed tables are exported to DuckDB unless explicitly marked sidecar. `Colu
 
 | Table | Grain | Purpose | Columns |
 | --- | --- | --- | --- |
-| `dim_serving_date` | One available service date | Default date and datebox navigation | `service_date`, `service_date_key`, `previous_service_date`, `next_service_date`, `is_latest`, `service_date_rank_desc` |
+| `dim_serving_date` | One available service date; `is_latest` marks the latest complete day per `mart_pipeline_status`, not the newest ingested partial day. | Default date and datebox navigation | `service_date`, `service_date_key`, `previous_service_date`, `next_service_date`, `is_latest`, `service_date_rank_desc` |
 | `dim_stop_group_current` | One current stop group | Stop picker only; never relabel historical facts | `stop_group_id`, `stop_group_name`, `modes_served` |
 | `dim_stop_post_current` | One current stop post | Current post metadata where needed | `stop_id`, `stop_group_id`, `stop_post_code`, `stop_name`, `modes_served` |
 | `mart_mode_window_summary` | `mode`, `window_type`, `window_key` | Overview cards, overview histograms, landing summaries | `mode`, `window_cols`, `line_count`, `stop_group_count`, `stop_post_count`, `delay_metric_cols` |
@@ -256,7 +254,9 @@ Column-level removal candidates:
 | Week bars | True daily display-grain medians replace weighted lower-grain medians. |
 | Landing pages | Full rankings replace `LANDING_ROW_LIMIT = 16`. |
 | Ranking rows | Zone-1 public-service universe excludes non-qualifying entities. |
+| Night (`N`) lines | Effectively excluded from rankings because `rank_eligibility_min_arrivals` is unmet due to a known midnight-fragmentation bug in trip matching ([#113](https://github.com/adrunkhuman/ztm-pipeline/issues/113)). |
 | Best rank ties | Old best ranking used `on_time_rate desc, median_delay_seconds asc`; new ranking is single-metric `on_time_rate` only. |
+| Matcher coverage | Arrival volumes are about 1.5-3x higher per entity and delay medians shift upward versus the previous artifact because the legacy matcher misassigned pings to the following trip once delay exceeded about 30s, systematically dropping delayed trips and biasing historical delay stats low. Fact grain checks showed `rows_ = distinct_grain` for `fct_stop_arrival`, `fct_trip`, and `fct_expected_stop_event`, so this is not duplicate publishing. |
 
 ## Implementation Gates
 
