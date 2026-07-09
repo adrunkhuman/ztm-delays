@@ -26,7 +26,7 @@ def _selected_gtfs_snapshot_id(processing_date: str) -> str:
         (
             "select gtfs_snapshot_id",
             f"from `{INT_GTFS_PROCESSING_SNAPSHOT_TABLE}`",
-            "where _PARTITIONDATE = @processing_date",
+            "where processing_date = @processing_date",
             "limit 1",
         )
     )
