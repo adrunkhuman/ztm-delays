@@ -35,12 +35,12 @@ GTFS_STAGING_MODELS = (
 )
 GTFS_DIMENSION_MODELS = (
     "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_trip_schedule int_gtfs_duty_chain "
-    "int_schedule_version "
+    "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version "
     "dim_schedule_version "
     "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
 )
 GTFS_DAILY_DIMENSION_TEST_MODELS = (
-    "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_schedule_version "
+    "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_processing_snapshot dim_schedule_version "
     "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
 )
 GTFS_RAW_SOURCES = (
