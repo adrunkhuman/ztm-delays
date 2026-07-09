@@ -13,10 +13,6 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_ping_
 
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_trip_summary fct_trip fct_stop_arrival --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
 
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select agg_line_daily --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD"}'
-
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select agg_line_stop_period agg_stop_period agg_time_period --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD", "period_source_start_date": "YYYY-MM-DD", "period_partition_dates": "YYYY-MM-DD|YYYY-MM-DD"}'
-
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select mart_day_completeness agg_service_coverage mart_pipeline_status --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD"}'
 ```
 
@@ -32,9 +28,7 @@ Historical facts bake labels from the selected snapshot used for their rebuild. 
 
 Schedule versions are per-line timetable fingerprints derived from selected snapshots across collected history. They intentionally exclude display labels and unstable GTFS identifiers. Nightly runs use the latest built GTFS snapshot and republish the prior service date, so late corrections for yesterday are picked up by the next run.
 
-Period aggregate marts incrementally replace affected `period_start_date` partitions. Airflow computes two vars for normal runs: `period_source_start_date`, the earliest affected month start or active schedule-version `valid_from_date` needed to recompute affected rows, and `period_partition_dates`, the pipe-delimited period-start partitions to replace. Manual full-window rebuilds can omit `period_partition_dates` to use dbt's dynamic partition replacement, but dry-run first and keep `source_start_date`, `source_end_date`, and `is_partial_period` visible when serving bounded outputs.
-
-`mart_day_completeness`, `agg_service_coverage`, `agg_line_daily`, and `mart_pipeline_status` incrementally replace the inclusive `[aggregation_start_date, processing_date]` partitions; normal Airflow runs pass the prior date as `aggregation_start_date` because observed overnight trips can land on the next GPS date and facts publish both current and prior service dates. A 2026-06-25-through-current lag check found complete/partial `int_trip_summary` rows only at same-day and next-day lag, supporting the two-day normal coverage window. `mart_day_completeness` summarizes raw GPS presence by GPS date and mode. `agg_service_coverage` compares scheduled trips to regular/truncated/modified observed service candidates from `int_trip_summary` by scheduled service hour, excludes matching failures, and partitions rows by `scheduled_start_date`; overnight rows can keep the prior GTFS `service_date`. `mart_pipeline_status` combines completeness, matching, trip quality, settled service coverage, stop-arrival output counts, and GTFS freshness by operational status date and mode; its `service_date` field is aligned to GPS processing date and scheduled-start date, not necessarily GTFS service_date for overnight trips. Treat `mart_pipeline_status` rows as generated operational reports for their partition, not as a table that refreshes every historical row with the latest global status every night.
+`mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` incrementally replace the inclusive `[aggregation_start_date, processing_date]` partitions; normal Airflow runs pass the prior date as `aggregation_start_date` because observed overnight trips can land on the next GPS date and facts publish both current and prior service dates. A 2026-06-25-through-current lag check found complete/partial `int_trip_summary` rows only at same-day and next-day lag, supporting the two-day normal coverage window. `mart_day_completeness` summarizes raw GPS presence by GPS date and mode. `agg_service_coverage` compares scheduled trips to regular/truncated/modified observed service candidates from `int_trip_summary` by scheduled service hour, excludes matching failures, and partitions rows by `scheduled_start_date`; overnight rows can keep the prior GTFS `service_date`. `mart_pipeline_status` combines completeness, matching, trip quality, settled service coverage, stop-arrival output counts, and GTFS freshness by operational status date and mode; its `service_date` field is aligned to GPS processing date and scheduled-start date, not necessarily GTFS service_date for overnight trips. Treat `mart_pipeline_status` rows as generated operational reports for their partition, not as a table that refreshes every historical row with the latest global status every night.
 
 ## Test Tiers
 
@@ -46,7 +40,7 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt test --select int_gtfs
 
 That manual selector uses singular contract tests for required fields and accepted values instead of repeated generic column tests over the expensive schedule views.
 
-Default Airflow runs also exclude broad aggregate mart tests over `agg_line_stop_period`, `agg_stop_period`, `agg_time_period`, and `agg_line_daily`. Nightly Airflow still tests `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`; only the four broad serving aggregate tests moved to manual audits. For aggregate/fact audits, pass `aggregation_start_date` and `publish_service_date` explicitly and keep those vars aligned with the aggregate mart build window. Do not run unbounded full-history tests casually.
+For fact/status audits, pass `aggregation_start_date` and `publish_service_date` explicitly and keep those vars aligned with the rebuild window. Do not run unbounded full-history tests casually.
 
 The local `profiles.yml` uses environment variables for BigQuery connection settings and credentials.
 
