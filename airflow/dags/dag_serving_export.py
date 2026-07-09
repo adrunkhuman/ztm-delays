@@ -6,13 +6,13 @@ import re
 import shutil
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from airflow.sdk import DAG, get_current_context, task
-from google.api_core.exceptions import Conflict
+from google.api_core.exceptions import Conflict, NotFound
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
     BIGQUERY_LOCATION,
@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 EXPORT_VERSION = "alpha-1"
 EXPORT_SOURCE_MODE = "current_pipeline_provisional"
 EXPORT_ID_PATTERN = re.compile(r"^[0-9A-Za-z_.=-]+$")
+EXPORT_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 POLLER_HEARTBEAT_GCS_PATH = "health/poller/latest.json"
 POLLER_HEARTBEAT_STALE_SECONDS = 180
 DUCKDB_MEMORY_LIMIT = "1GB"
@@ -81,6 +82,11 @@ MART_TABLES = (
     "mart_trip_mode_daily_summary",
     "mart_worst_delay_event",
 )
+PARTITIONED_EXPORT_TABLES = {
+    "fct_expected_stop_event": "service_date",
+    "mart_entity_timeline_daily": "service_date",
+    "mart_hour_window_summary": "source_end_date",
+}
 DERIVED_TABLES: tuple[str, ...] = ()
 EXPORTED_TABLES = MART_TABLES + DERIVED_TABLES
 DATE_RANGE_SQL_BY_TABLE = {
@@ -122,6 +128,7 @@ class ExportConfig:
     max_source_bytes: int
     max_duckdb_bytes: int
     cleanup_gcs_staging: bool
+    changed_partition_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +208,11 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
             os.getenv("SERVING_EXPORT_MAX_DUCKDB_BYTES", str(SERVING_EXPORT_MAX_BYTES)),
         ),
         cleanup_gcs_staging=_bool_config(conf, "cleanup_gcs_staging", False),
+        changed_partition_date=_date_config(
+            conf,
+            "changed_partition_date",
+            os.getenv("SERVING_EXPORT_CHANGED_PARTITION_DATE", ""),
+        ),
     )
 
 
@@ -231,6 +243,16 @@ def _bool_config(conf: dict[str, object], key: str, default: bool) -> bool:
     return value
 
 
+def _date_config(conf: dict[str, object], key: str, default: str) -> str | None:
+    value = conf.get(key, default)
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or not EXPORT_DATE_PATTERN.fullmatch(value):
+        raise ValueError(f"{key} must be an ISO date string")
+    date.fromisoformat(value)
+    return value
+
+
 def _run_serving_export(config: ExportConfig) -> ExportResult:
     bigquery_client = bigquery.Client(project=GCP_PROJECT)
     storage_client = storage.Client(project=GCP_PROJECT)
@@ -251,15 +273,18 @@ def _run_serving_export(config: ExportConfig) -> ExportResult:
 
 
 def _source_table_stats(client: bigquery.Client) -> list[TableStats]:
-    rows = list(client.query(_table_stats_sql()).result())
-    stats_by_table = {
-        row.table_id: TableStats(
-            table_name=row.table_id,
-            row_count=int(row.row_count),
-            size_bytes=int(row.size_bytes),
+    stats_by_table = {}
+    for table_name in MART_TABLES:
+        table_ref = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}"
+        try:
+            table = client.get_table(table_ref)
+        except NotFound:
+            continue
+        stats_by_table[table_name] = TableStats(
+            table_name=table_name,
+            row_count=int(table.num_rows or 0),
+            size_bytes=int(table.num_bytes or 0),
         )
-        for row in rows
-    }
 
     dated_stats = {stat.table_name: stat for stat in _source_date_ranges(client)}
     return [
@@ -276,48 +301,35 @@ def _source_table_stats(client: bigquery.Client) -> list[TableStats]:
     ]
 
 
-def _table_stats_sql() -> str:
-    quoted_tables = ", ".join(f"'{table_name}'" for table_name in MART_TABLES)
-    return f"""
-        select table_id, row_count, size_bytes
-        from `{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.__TABLES__`
-        where table_id in ({quoted_tables})
-    """
-
-
 def _source_date_ranges(client: bigquery.Client) -> list[TableStats]:
-    selects = [
-        _date_range_select(table_name, date_column)
-        for table_name, date_column in DATE_RANGE_SQL_BY_TABLE.items()
-        if table_name in MART_TABLES
-    ]
-    if not selects:
-        return []
-
-    rows = list(client.query(" union all ".join(selects)).result())
-    return [
-        TableStats(
-            table_name=row.table_name,
-            row_count=0,
-            size_bytes=0,
-            min_date=str(row.min_date) if row.min_date is not None else None,
-            max_date=str(row.max_date) if row.max_date is not None else None,
-            date_count=int(row.date_count) if row.date_count is not None else None,
+    stats = []
+    for table_name in DATE_RANGE_SQL_BY_TABLE:
+        if table_name not in MART_TABLES:
+            continue
+        partition_dates = _table_partition_dates(client, table_name)
+        if not partition_dates:
+            continue
+        stats.append(
+            TableStats(
+                table_name=table_name,
+                row_count=0,
+                size_bytes=0,
+                min_date=partition_dates[0].isoformat(),
+                max_date=partition_dates[-1].isoformat(),
+                date_count=len(partition_dates),
+            )
         )
-        for row in rows
-    ]
+    return stats
 
 
-def _date_range_select(table_name: str, date_column: str) -> str:
-    return f"""
-        select
-            '{table_name}' as table_name,
-            min({date_column}) as min_date,
-            max({date_column}) as max_date,
-            count(distinct {date_column}) as date_count
-        from `{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}`
-        where {date_column} >= date '1900-01-01'
-    """
+def _table_partition_dates(client: bigquery.Client, table_name: str) -> list[date]:
+    table_ref = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}"
+    partitions = []
+    for partition_id in client.list_partitions(table_ref):
+        if not isinstance(partition_id, str) or not re.fullmatch(r"\d{8}", partition_id):
+            continue
+        partitions.append(date.fromisoformat(f"{partition_id[:4]}-{partition_id[4:6]}-{partition_id[6:]}"))
+    return sorted(partitions)
 
 
 def _validate_source_stats(stats: Sequence[TableStats], max_source_bytes: int) -> None:
@@ -361,6 +373,13 @@ def _extract_and_download_marts(
 ) -> dict[str, list[Path]]:
     parquet_paths_by_table = {}
     for table_name in MART_TABLES:
+        if table_name in PARTITIONED_EXPORT_TABLES and config.changed_partition_date:
+            _extract_partitioned_mart_to_gcs(bigquery_client, storage_client, config, table_name)
+            parquet_paths_by_table[table_name] = _download_partitioned_mart_parquet(
+                storage_client, config, table_name, local_export_dir
+            )
+            continue
+
         _extract_mart_to_gcs(bigquery_client, config, table_name)
         parquet_paths_by_table[table_name] = _download_mart_parquet(
             storage_client, config, table_name, local_export_dir
@@ -384,12 +403,88 @@ def _extract_mart_to_gcs(client: bigquery.Client, config: ExportConfig, table_na
     job.result()
 
 
+def _extract_partitioned_mart_to_gcs(
+    bigquery_client: bigquery.Client,
+    storage_client: storage.Client,
+    config: ExportConfig,
+    table_name: str,
+) -> None:
+    partition_date = config.changed_partition_date
+    if partition_date is None:
+        raise RuntimeError("partitioned mart export requires changed_partition_date")
+
+    date_column = PARTITIONED_EXPORT_TABLES[table_name]
+    source_table = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}${partition_date.replace('-', '')}"
+    destination_uri = _partition_staging_extract_uri(config, table_name, date_column, partition_date)
+    job_config = bigquery.ExtractJobConfig(destination_format=bigquery.DestinationFormat.PARQUET)
+    job_id = _bigquery_job_id("serving_export_partition", config.export_id, table_name, partition_date)
+    try:
+        job = bigquery_client.extract_table(
+            source_table,
+            destination_uri,
+            job_config=job_config,
+            job_id=job_id,
+            location=BIGQUERY_LOCATION,
+        )
+    except Conflict:
+        raise RuntimeError(
+            f"Serving export partition job already exists for export_id={config.export_id} table={table_name}"
+        ) from None
+    job.result()
+    _replace_partition_cache(storage_client, config, table_name, date_column, partition_date)
+
+
+def _replace_partition_cache(
+    storage_client: storage.Client,
+    config: ExportConfig,
+    table_name: str,
+    date_column: str,
+    partition_date: str,
+) -> None:
+    bucket = storage_client.bucket(config.gcs_bucket)
+    cache_prefix = _partition_cache_prefix(config, table_name, date_column, partition_date)
+    for blob in list(bucket.list_blobs(prefix=f"{cache_prefix}/")):
+        bucket.blob(blob.name).delete()
+
+    staging_prefix = _partition_staging_prefix(config, table_name, date_column, partition_date)
+    copied = 0
+    for blob in list(bucket.list_blobs(prefix=f"{staging_prefix}/")):
+        if not blob.name.endswith(".parquet"):
+            continue
+        destination_name = f"{cache_prefix}/{Path(blob.name).name}"
+        bucket.copy_blob(blob, bucket, destination_name)
+        copied += 1
+    if copied == 0:
+        raise RuntimeError(f"Partitioned export produced no parquet files for {table_name} {partition_date}")
+
+
 def _table_extract_uri(config: ExportConfig, table_name: str) -> str:
     return f"gs://{config.gcs_bucket}/{_table_staging_prefix(config, table_name)}/part-*.parquet"
 
 
+def _partition_staging_extract_uri(
+    config: ExportConfig,
+    table_name: str,
+    date_column: str,
+    partition_date: str,
+) -> str:
+    return f"gs://{config.gcs_bucket}/{_partition_staging_prefix(config, table_name, date_column, partition_date)}/part-*.parquet"
+
+
 def _table_staging_prefix(config: ExportConfig, table_name: str) -> str:
     return f"{config.gcs_prefix}/export_id={config.export_id}/{table_name}"
+
+
+def _partition_staging_prefix(config: ExportConfig, table_name: str, date_column: str, partition_date: str) -> str:
+    return f"{config.gcs_prefix}/partition_staging/export_id={config.export_id}/{table_name}/{date_column}={partition_date}"
+
+
+def _partition_cache_prefix(config: ExportConfig, table_name: str, date_column: str, partition_date: str) -> str:
+    return f"{config.gcs_prefix}/partition_cache/{table_name}/{date_column}={partition_date}"
+
+
+def _partition_table_cache_prefix(config: ExportConfig, table_name: str) -> str:
+    return f"{config.gcs_prefix}/partition_cache/{table_name}/"
 
 
 def _download_mart_parquet(
@@ -416,6 +511,34 @@ def _download_mart_parquet(
 
     if not paths:
         raise RuntimeError(f"BigQuery extract produced no parquet files for {table_name}")
+    return paths
+
+
+def _download_partitioned_mart_parquet(
+    storage_client: storage.Client,
+    config: ExportConfig,
+    table_name: str,
+    local_export_dir: Path,
+) -> list[Path]:
+    bucket = storage_client.bucket(config.gcs_bucket)
+    table_dir = local_export_dir / table_name
+    table_dir.mkdir(parents=True, exist_ok=True)
+    blob_names = [
+        blob.name
+        for blob in bucket.list_blobs(prefix=_partition_table_cache_prefix(config, table_name))
+        if blob.name.endswith(".parquet")
+    ]
+
+    paths = []
+    for blob_name in sorted(blob_names):
+        partition_dir = table_dir / Path(blob_name).parent.name
+        partition_dir.mkdir(parents=True, exist_ok=True)
+        path = partition_dir / Path(blob_name).name
+        bucket.blob(blob_name).download_to_filename(str(path))
+        paths.append(path)
+
+    if not paths:
+        raise RuntimeError(f"No cached partition parquet files found for {table_name}")
     return paths
 
 
@@ -1010,9 +1133,13 @@ def _remove_duckdb_sidecar_files(path: Path) -> None:
 
 def _cleanup_gcs_staging(storage_client: storage.Client, config: ExportConfig) -> None:
     bucket = storage_client.bucket(config.gcs_bucket)
-    prefix = f"{config.gcs_prefix}/export_id={config.export_id}/"
-    for blob_name in [blob.name for blob in bucket.list_blobs(prefix=prefix)]:
-        bucket.blob(blob_name).delete()
+    prefixes = [
+        f"{config.gcs_prefix}/export_id={config.export_id}/",
+        f"{config.gcs_prefix}/partition_staging/export_id={config.export_id}/",
+    ]
+    for prefix in prefixes:
+        for blob_name in [blob.name for blob in bucket.list_blobs(prefix=prefix)]:
+            bucket.blob(blob_name).delete()
 
 
 def _bigquery_job_id(*parts: str) -> str:

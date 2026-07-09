@@ -1,4 +1,5 @@
 {% set publish_service_date = var("publish_service_date", var("processing_date")) %}
+{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
 
 {{
     config(
@@ -38,6 +39,7 @@ with trip_facts as (
         service_observation_flags
     from {{ ref('fct_trip') }}
     where service_date = date('{{ publish_service_date }}')
+      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 matched_trip_lineage_raw as (
@@ -58,6 +60,7 @@ matched_trip_lineage_raw as (
     where service_date = date('{{ publish_service_date }}')
       and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
       and gps_date <= date('{{ var("processing_date") }}')
+      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     group by gtfs_snapshot_id, service_date, trip_id, vehicle_number
 ),
 
@@ -102,9 +105,11 @@ scheduled_stops as (
     inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
         on trip_spine.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and trip_spine.trip_id = stop_times.trip_id
+        and stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
         and stop_times.stop_id = stops.stop_id
+        and stops.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 stop_group_names as (
@@ -164,6 +169,7 @@ observed_arrivals as (
         segment_duration_seconds
     from {{ ref('fct_stop_arrival') }}
     where service_date = date('{{ publish_service_date }}')
+      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 expected_events as (

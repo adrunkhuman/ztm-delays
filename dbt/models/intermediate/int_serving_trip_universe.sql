@@ -9,6 +9,8 @@
     )
 }}
 
+{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
+
 with scheduled_trips as (
     select
         service_date,
@@ -28,6 +30,7 @@ with scheduled_trips as (
     from {{ ref('int_gtfs_duty_chain') }}
     where mode in ('bus', 'tram')
       and processing_date = date('{{ var("processing_date") }}')
+      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 trip_stops as (
@@ -53,9 +56,11 @@ trip_stops as (
     inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
         on scheduled_trips.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and scheduled_trips.trip_id = stop_times.trip_id
+        and stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     left join {{ ref('stg_gtfs__stops') }} as stops
         on scheduled_trips.gtfs_snapshot_id = stops.gtfs_snapshot_id
         and stop_times.stop_id = stops.stop_id
+        and stops.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     group by
         scheduled_trips.service_date,
         scheduled_trips.processing_date,

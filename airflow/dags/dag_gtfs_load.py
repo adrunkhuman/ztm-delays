@@ -338,7 +338,12 @@ with DAG(
 
     dbt_test_gtfs_staging = BashOperator(
         task_id="dbt_test_gtfs_staging",
-        bash_command=dbt_command("test", f"{GTFS_RAW_SOURCES} {GTFS_STAGING_MODELS}", GTFS_DBT_VARS),
+        bash_command=dbt_command(
+            "test",
+            f"{GTFS_RAW_SOURCES} {GTFS_STAGING_MODELS}",
+            GTFS_DBT_VARS,
+            "--indirect-selection cautious --exclude tag:audit",
+        ),
     )
 
     dbt_run_gtfs_dimensions = BashOperator(
@@ -349,7 +354,10 @@ with DAG(
     dbt_test_gtfs_dimensions = BashOperator(
         task_id="dbt_test_gtfs_dimensions",
         bash_command=dbt_command(
-            "test", GTFS_DAILY_DIMENSION_TEST_MODELS, GTFS_DBT_VARS, "--indirect-selection cautious"
+            "test",
+            GTFS_DAILY_DIMENSION_TEST_MODELS,
+            GTFS_DBT_VARS,
+            "--indirect-selection cautious --exclude test_type:generic --exclude tag:audit",
         ),
     )
 

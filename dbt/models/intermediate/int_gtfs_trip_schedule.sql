@@ -1,7 +1,9 @@
+{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
+
 with selected_snapshot as (
     select snapshot_id as gtfs_snapshot_id
     from {{ source('raw', 'raw_gtfs_snapshots') }}
-    where snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+    where snapshot_id = '{{ gtfs_snapshot_id }}'
     limit 1
 ),
 
@@ -12,6 +14,7 @@ date_bounds as (
     from {{ ref('stg_gtfs__calendar_dates') }} as calendar_dates
     inner join selected_snapshot
         on calendar_dates.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
+    where calendar_dates.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 processing_date_spine as (
@@ -44,6 +47,7 @@ calendar_dates as (
     from processing_service_dates
     inner join {{ ref('stg_gtfs__calendar_dates') }} as calendar_dates
         on processing_service_dates.service_date = calendar_dates.service_date
+        and calendar_dates.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     inner join selected_snapshot
         on calendar_dates.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
 ),
@@ -91,6 +95,7 @@ active_trip_services as (
     inner join calendar_schedule_classes
         on trips.service_id = calendar_schedule_classes.service_id
         and trips.gtfs_snapshot_id = calendar_schedule_classes.gtfs_snapshot_id
+    where trips.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 line_direction_schedule_classes as (
@@ -141,6 +146,7 @@ active_trips as (
         and calendar_dates.gtfs_snapshot_id = line_direction_schedule_classes.gtfs_snapshot_id
         and trips.line = line_direction_schedule_classes.line
         and trips.direction_id = line_direction_schedule_classes.direction_id
+    where trips.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 trip_stop_times as (
@@ -164,6 +170,7 @@ trip_stop_times as (
     inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
         on active_trips.trip_id = stop_times.trip_id
         and active_trips.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
+        and stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 trip_schedules as (

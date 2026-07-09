@@ -121,11 +121,9 @@ def test_selected_gtfs_snapshot_id_returns_processing_date_mapping(
     assert dag._selected_gtfs_snapshot_id("2026-07-08") == "snapshot-1"
 
     assert client.query_call is not None
-    assert "int_gtfs_processing_snapshot" in client.query_call.query
-    assert "where processing_date = date(@processing_date)" in client.query_call.query
-    assert client.query_call.job_config.query_parameters == [
-        dag.bigquery.ScalarQueryParameter("processing_date", "DATE", "2026-07-08")
-    ]
+    assert "int_gtfs_processing_snapshot$20260708" in client.query_call.query
+    assert "where processing_date" not in client.query_call.query
+    assert client.query_call.job_config is None
 
 
 def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,7 +254,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PRIOR_SERVICE_DATE
     assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
     assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_ping_trip.kwargs["bash_command"]
-    assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_trip_summary.kwargs["bash_command"]
+    assert dag.TRIP_MATCHING_SCHEDULE_MODELS not in dag.dbt_run_int_trip_summary.kwargs["bash_command"]
     trip_matching_command = dag.dbt_run_int_ping_trip.kwargs["bash_command"]
     for selector in [
         "stg_gtfs__trips",
@@ -276,6 +274,12 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert '"publish_service_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_fct_trip_prior.kwargs["bash_command"]
     assert dag.EXPECTED_STOP_EVENT_FACT_MODEL in dag.dbt_run_fct_expected_stop_event_current.kwargs["bash_command"]
     assert dag.PIPELINE_STATUS_MODEL in dag.dbt_run_pipeline_status.kwargs["bash_command"]
+    assert "--exclude tag:audit" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
+    assert "--exclude tag:audit" in dag.dbt_test_int_ping_trip.kwargs["bash_command"]
+    assert "--exclude test_type:generic" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
+    assert "--exclude test_type:generic" in dag.dbt_test_int_gps_hourly_completeness.kwargs["bash_command"]
+    assert "--exclude test_type:generic" in dag.dbt_test_serving_marts.kwargs["bash_command"]
+    assert "--exclude tag:audit" in dag.dbt_test_serving_marts.kwargs["bash_command"]
     for serving_model in [
         "int_serving_trip_universe",
         "mart_line_window_summary",
@@ -319,12 +323,21 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert dag.dbt_run_pipeline_status in dag.dbt_test_completeness_and_coverage.downstream
     assert dag.dbt_run_serving_marts in dag.dbt_test_pipeline_status.downstream
     assert dag.dbt_test_serving_marts in dag.dbt_run_serving_marts.downstream
-    assert dag.log_bigquery_dbt_job_costs in dag.dbt_test_serving_marts.downstream
+    assert dag.LOG_BIGQUERY_DBT_JOB_COSTS is False
+    assert dag.log_bigquery_dbt_job_costs not in dag.dbt_test_serving_marts.downstream
     assert dag.emit_gps_models_date_asset in dag.dbt_test_serving_marts.downstream
-    assert dag.emit_gps_models_date_asset not in dag.log_bigquery_dbt_job_costs.downstream
     assert dag.log_bigquery_dbt_job_costs.kwargs == {"do_xcom_push": False}
     assert dag.watcher in dag.dbt_test_serving_marts.downstream
     assert dag.fail_on_any_task_failure.kwargs["retries"] == 0
+
+
+def test_dag_can_enable_bigquery_dbt_job_cost_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_BIGQUERY_DBT_JOB_COSTS", "true")
+    dag = _load_dag_module()
+
+    assert dag.LOG_BIGQUERY_DBT_JOB_COSTS is True
+    assert dag.log_bigquery_dbt_job_costs in dag.dbt_test_serving_marts.downstream
+    assert dag.emit_gps_models_date_asset not in dag.log_bigquery_dbt_job_costs.downstream
 
 
 def test_dag_uses_bounded_mart_windows() -> None:
@@ -451,7 +464,7 @@ class FakeBigQueryClient:
         self.get_job_calls.append((job_id, project, location))
         return self.existing_job
 
-    def query(self, query: str, *, job_config: Any) -> FakeQueryJob:
+    def query(self, query: str, *, job_config: Any = None) -> FakeQueryJob:
         self.query_call = QueryCall(query, job_config)
         if "INFORMATION_SCHEMA.JOBS_BY_USER" in query:
             return FakeQueryJob(self.cost_rows)

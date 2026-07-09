@@ -1,3 +1,5 @@
+{{ config(tags=['audit']) }}
+
 select
     left_range.line,
     left_range.direction_id,

@@ -1,3 +1,5 @@
+{{ config(tags=['audit']) }}
+
 select gps_date, vehicle_number, gps_time, flag
 from {{ ref('int_ping_trip') }}
 cross join unnest(matching_flags) as flag

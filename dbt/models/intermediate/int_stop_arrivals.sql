@@ -9,6 +9,8 @@
     )
 }}
 
+{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
+
 with pings as (
     select
         line,
@@ -31,6 +33,7 @@ with pings as (
         st_geogpoint(lon, lat) as gps_point
     from {{ ref('int_ping_trip') }}
     where gps_date = date('{{ var("processing_date") }}')
+      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 matching_thresholds as (
@@ -87,6 +90,7 @@ scheduled_stops as (
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.stop_id = stops.stop_id
         and stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
+        and stops.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     inner join (
         select
             gtfs_snapshot_id,
@@ -94,14 +98,14 @@ scheduled_stops as (
             min(stop_sequence) as first_passenger_stop_sequence,
             max(stop_sequence) as last_passenger_stop_sequence
         from {{ ref('stg_gtfs__stop_times') }}
-        where gtfs_snapshot_id in (select distinct gtfs_snapshot_id from pings)
+        where gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
           and stop_service_class != 'not_in_passenger_service'
         group by gtfs_snapshot_id, trip_id
     ) as trip_stop_bounds
         on stop_times.gtfs_snapshot_id = trip_stop_bounds.gtfs_snapshot_id
         and stop_times.trip_id = trip_stop_bounds.trip_id
     cross join matching_thresholds
-    where stop_times.gtfs_snapshot_id in (select distinct gtfs_snapshot_id from pings)
+    where stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
       and stop_times.stop_service_class != 'not_in_passenger_service'
 ),
 

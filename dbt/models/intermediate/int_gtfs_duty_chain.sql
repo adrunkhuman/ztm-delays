@@ -1,3 +1,5 @@
+{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
+
 with scheduled_trips as (
     select
         schedule.service_date,
@@ -31,9 +33,11 @@ with scheduled_trips as (
     inner join {{ ref('stg_gtfs__trips') }} as trips
         on schedule.gtfs_snapshot_id = trips.gtfs_snapshot_id
         and schedule.trip_id = trips.trip_id
+        and trips.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     left join {{ ref('stg_gtfs__routes') }} as routes
         on schedule.gtfs_snapshot_id = routes.gtfs_snapshot_id
         and schedule.line = routes.route_id
+    where schedule.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 service_day_trips as (
@@ -73,6 +77,7 @@ trip_terminal_stops as (
     inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
         on service_day_trips.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and service_day_trips.trip_id = stop_times.trip_id
+        and stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     group by service_day_trips.gtfs_snapshot_id, service_day_trips.trip_id
 ),
 
@@ -100,9 +105,11 @@ trip_bounds as (
     left join {{ ref('stg_gtfs__stops') }} as origin_stop
         on service_day_trips.gtfs_snapshot_id = origin_stop.gtfs_snapshot_id
         and trip_terminal_stops.origin_stop_id = origin_stop.stop_id
+        and origin_stop.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     left join {{ ref('stg_gtfs__stops') }} as destination_stop
         on service_day_trips.gtfs_snapshot_id = destination_stop.gtfs_snapshot_id
         and trip_terminal_stops.destination_stop_id = destination_stop.stop_id
+        and destination_stop.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 classified_trip_bounds as (

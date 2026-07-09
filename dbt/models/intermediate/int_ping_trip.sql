@@ -10,6 +10,8 @@
     )
 }}
 
+{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
+
 with matching_thresholds as (
     select
         900 as pre_start_tolerance_seconds,
@@ -52,7 +54,9 @@ duty_segments as (
         on duty.service_id = calendar_dates.service_id
         and duty.service_date = calendar_dates.service_date
         and duty.gtfs_snapshot_id = calendar_dates.gtfs_snapshot_id
+        and calendar_dates.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     where duty.processing_date = date('{{ var("processing_date") }}')
+      and duty.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
       and duty.service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
         and date('{{ var("processing_date") }}')
       and not duty.is_malformed_duty_segment
@@ -73,6 +77,7 @@ duty_segments_with_handoff as (
     left join {{ ref('stg_gtfs__stops') }} as next_origin_stop
         on next_duty.gtfs_snapshot_id = next_origin_stop.gtfs_snapshot_id
         and next_duty.origin_stop_id = next_origin_stop.stop_id
+        and next_origin_stop.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 gps_pings as (

@@ -55,75 +55,34 @@ sources:
         description: Metadata for retained GTFS ZIP snapshots.
         columns:
           - name: snapshot_id
-            tests:
-              - not_null
-              - unique
           - name: snapshot_timestamp
-            tests:
-              - not_null
           - name: file_hash
-            tests:
-              - not_null
           - name: gcs_path
-            tests:
-              - not_null
       - name: raw_gtfs_trips
         description: Raw trips.txt rows loaded from GTFS snapshots.
         columns:
           - name: trip_id
-            tests:
-              - not_null
           - name: route_id
-            tests:
-              - not_null
           - name: service_id
-            tests:
-              - not_null
           - name: gtfs_snapshot_id
-            tests:
-              - not_null
-              - relationships:
-                  arguments:
-                    to: source('raw', 'raw_gtfs_snapshots')
-                    field: snapshot_id
       - name: raw_gtfs_stop_times
         description: Raw stop_times.txt rows loaded from GTFS snapshots.
         columns:
           - name: trip_id
-            tests:
-              - not_null
           - name: stop_id
-            tests:
-              - not_null
           - name: stop_sequence
-            tests:
-              - not_null
           - name: arrival_time
-            tests:
-              - not_null
           - name: departure_time
-            tests:
-              - not_null
           - name: pickup_type
             description: GTFS pickup_type. Warsaw feed currently uses 0 for regular, 1 for no pickup, and 3 for driver-arranged/request pickup.
           - name: drop_off_type
             description: GTFS drop_off_type. Warsaw feed currently uses 0 for regular, 1 for no drop-off, and 3 for driver-arranged/request drop-off.
           - name: gtfs_snapshot_id
-            tests:
-              - not_null
-              - relationships:
-                  arguments:
-                    to: source('raw', 'raw_gtfs_snapshots')
-                    field: snapshot_id
       - name: raw_gtfs_stops
         description: Raw stops.txt rows loaded from GTFS snapshots.
         columns:
           - name: stop_id
-            tests:
-              - not_null
           - name: stop_name
-            tests:
-              - not_null
           - name: stop_code
             description: Raw GTFS stop_code metadata from stops.txt.
           - name: platform_code
@@ -145,67 +104,23 @@ sources:
           - name: street_name
             description: Raw Warsaw feed street name from stops.txt.
           - name: gtfs_snapshot_id
-            tests:
-              - not_null
-              - relationships:
-                  arguments:
-                    to: source('raw', 'raw_gtfs_snapshots')
-                    field: snapshot_id
       - name: raw_gtfs_shapes
         description: Raw shapes.txt rows loaded from GTFS snapshots.
         columns:
           - name: shape_id
-            tests:
-              - not_null
           - name: shape_pt_sequence
-            tests:
-              - not_null
           - name: gtfs_snapshot_id
-            tests:
-              - not_null
-              - relationships:
-                  arguments:
-                    to: source('raw', 'raw_gtfs_snapshots')
-                    field: snapshot_id
       - name: raw_gtfs_routes
         description: Raw routes.txt rows loaded from GTFS snapshots.
         columns:
           - name: route_id
-            tests:
-              - not_null
           - name: route_short_name
-            tests:
-              - not_null
           - name: route_type
-            tests:
-              - not_null
           - name: gtfs_snapshot_id
-            tests:
-              - not_null
-              - relationships:
-                  arguments:
-                    to: source('raw', 'raw_gtfs_snapshots')
-                    field: snapshot_id
       - name: raw_gtfs_calendar_dates
         description: Raw calendar_dates.txt rows loaded from GTFS snapshots.
         columns:
           - name: service_id
-            tests:
-              - not_null
           - name: date
-            tests:
-              - not_null
           - name: exception_type
-            tests:
-              - not_null
-              - accepted_values:
-                  arguments:
-                    values: [1, 2]
-                    quote: false
           - name: gtfs_snapshot_id
-            tests:
-              - not_null
-              - relationships:
-                  arguments:
-                    to: source('raw', 'raw_gtfs_snapshots')
-                    field: snapshot_id

@@ -1,3 +1,5 @@
+{{ config(tags=['audit']) }}
+
 select
     trip_schedule.gtfs_snapshot_id,
     trip_schedule.processing_date,

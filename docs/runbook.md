@@ -47,7 +47,7 @@ dbt build --select fct_trip fct_stop_arrival \
 
 GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the production DAG publishes both the current service date and the prior service date for each GPS processing date.
 
-`insert_overwrite` replaces the listed partitions even when the compiled source query returns zero rows. Historical reruns must derive the governing GTFS snapshot from the warehouse processing-date mapping, not from the latest snapshot, and must stop on schedule-version or snapshot-lineage test failures before continuing to later dates.
+`insert_overwrite` replaces the listed partitions even when the compiled source query returns zero rows. Historical reruns must derive the governing GTFS snapshot from the warehouse processing-date mapping, not from the latest snapshot, and must stop on schedule-version or snapshot-lineage test failures before continuing to later dates. Those expensive lineage checks are tagged `audit`, excluded from normal DAG test paths, and run by `dag_weekly_audit`; if you run recovery manually, run the audit selector explicitly rather than relying on default DAG tests.
 
 ## Date-Range Backfill
 
@@ -122,15 +122,17 @@ Normal Airflow cadence must stay bounded and deliberate:
 - Serving marts build from warehouse facts after pipeline status succeeds.
 - GTFS load runs raw load, staging, dimensions, and cheap/default dimension tests.
 
-Expensive tests are manual audit jobs until operational maturity is higher. Do not add them back to default Airflow DAG paths.
+Expensive tests are audit jobs until operational maturity is higher. Do not add them back to default Airflow DAG paths.
+
+Audit-tagged tests are real tests, not vacuous pass-through SQL. Normal Airflow DAG tests exclude `tag:audit`; `dag_weekly_audit` runs `dbt test --select tag:audit` weekly. Manual recovery/backfill procedures that need lineage assurance must run the same selector and stop on failure before continuing to later dates.
 
 Nightly Airflow tests `mart_day_completeness`, `agg_service_coverage`, `mart_pipeline_status`, and the serving marts. Retired serving aggregate tests stay out of the default path.
 
 Manual GTFS schedule audit:
 
 ```bash
-dbt test --select int_gtfs_trip_schedule int_schedule_version \
-  --indirect-selection cautious --exclude test_type:unit \
+dbt test --select tag:audit \
+  --indirect-selection eager --exclude test_type:unit \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
 ```
 

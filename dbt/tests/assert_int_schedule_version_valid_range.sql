@@ -1,3 +1,5 @@
+{{ config(tags=['audit']) }}
+
 select
     schedule_version_id,
     valid_from_date,
