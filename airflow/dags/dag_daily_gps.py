@@ -47,7 +47,6 @@ RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gps_pings"
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 INT_GTFS_PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_gtfs_processing_snapshot"
 DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
-DIM_SCHEDULE_VERSION_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_version"
 GTFS_TRIP_MATCHING_STAGING_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__routes stg_gtfs__calendar_dates"
 )
@@ -76,8 +75,6 @@ SERVING_MODELS = (
     "mart_stop_post_line_group_window mart_stop_group_line_group_window "
     "mart_pipeline_status_recent_summary rpt_schedule_day_mapping_evidence rpt_ranking_universe_evidence"
 )
-DAILY_AGGREGATE_MODEL = "agg_line_daily"
-PERIOD_AGGREGATE_MODELS = "agg_line_stop_period agg_stop_period agg_time_period"
 WAREHOUSE_HISTORY_START_DATE = "2026-06-25"
 BIGQUERY_DBT_COST_LOOKBACK_HOURS = 12
 BIGQUERY_DBT_BYTES_BILLED_WARN_THRESHOLD = 100 * 1024**3
@@ -108,15 +105,6 @@ MART_DBT_VARS = dbt_vars(
     processing_date=PROCESSING_DATE,
     gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
     aggregation_start_date=WAREHOUSE_HISTORY_START_DATE,
-)
-PERIOD_AGGREGATE_SOURCE_START_DATE = "{{ ti.xcom_pull(task_ids='period_aggregate_window')['source_start_date'] }}"
-PERIOD_AGGREGATE_PARTITION_DATES = "{{ ti.xcom_pull(task_ids='period_aggregate_window')['partition_dates'] }}"
-PERIOD_AGGREGATE_DBT_VARS = dbt_vars(
-    processing_date=PROCESSING_DATE,
-    gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
-    aggregation_start_date=PRIOR_SERVICE_DATE,
-    period_source_start_date=PERIOD_AGGREGATE_SOURCE_START_DATE,
-    period_partition_dates=PERIOD_AGGREGATE_PARTITION_DATES,
 )
 
 
@@ -188,46 +176,6 @@ def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     if not rows:
         raise AirflowException(f"No governing GTFS snapshot mapping exists for GPS processing date {processing_date}")
     return str(rows[0].gtfs_snapshot_id)
-
-
-def _period_aggregate_window(aggregation_start_date: str, processing_date: str) -> dict[str, str]:
-    client = bigquery.Client(project=GCP_PROJECT)
-    query = f"""
-        with affected_service_dates as (
-          select service_date
-          from unnest(generate_date_array(date(@aggregation_start_date), date(@processing_date))) as service_date
-        ),
-
-        affected_periods as (
-          select distinct date_trunc(service_date, month) as period_start_date
-          from affected_service_dates
-
-          union distinct
-
-          select distinct valid_from_date as period_start_date
-          from `{DIM_SCHEDULE_VERSION_TABLE}`
-          where valid_from_date <= date(@processing_date)
-            and coalesce(valid_to_date, date '9999-12-31') >= date(@aggregation_start_date)
-        )
-
-        select
-          cast(min(period_start_date) as string) as source_start_date,
-          string_agg(cast(period_start_date as string), '|' order by period_start_date) as partition_dates
-        from affected_periods
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("aggregation_start_date", "DATE", aggregation_start_date),
-            bigquery.ScalarQueryParameter("processing_date", "DATE", processing_date),
-        ]
-    )
-    rows = list(client.query(query, job_config=job_config).result())
-    if not rows:
-        return {"source_start_date": aggregation_start_date, "partition_dates": aggregation_start_date}
-    return {
-        "source_start_date": str(rows[0].source_start_date or aggregation_start_date),
-        "partition_dates": str(rows[0].partition_dates or aggregation_start_date),
-    }
 
 
 def _bigquery_dbt_job_cost_summary(started_at: datetime) -> dict[str, object]:
@@ -333,13 +281,6 @@ with DAG(
 
     selected_gtfs_snapshot = selected_gtfs_snapshot_id(PROCESSING_DATE)
 
-    @task
-    def period_aggregate_window(aggregation_start_date: str, processing_date: str) -> dict[str, str]:
-        """Return the source window and target partitions for affected period aggregates."""
-        return _period_aggregate_window(aggregation_start_date, processing_date)
-
-    period_aggregate = period_aggregate_window(PRIOR_SERVICE_DATE, PROCESSING_DATE)
-
     with TaskGroup("staging", group_display_name="Staging", prefix_group_id=False) as staging_group:
         dbt_run_stg_gps_pings, dbt_test_stg_gps_pings = _dbt_run_test_pair(
             "stg_gps_pings",
@@ -432,20 +373,6 @@ with DAG(
             COMPLETENESS_COVERAGE_DBT_VARS,
         )
 
-    with TaskGroup("aggregate_marts", group_display_name="Aggregate marts", prefix_group_id=False) as aggregate_group:
-        dbt_run_daily_aggregate_mart = _dbt_task(
-            "dbt_run_daily_aggregate_mart",
-            "run",
-            DAILY_AGGREGATE_MODEL,
-            COMPLETENESS_COVERAGE_DBT_VARS,
-        )
-        dbt_run_period_aggregate_marts = _dbt_task(
-            "dbt_run_period_aggregate_marts",
-            "run",
-            PERIOD_AGGREGATE_MODELS,
-            PERIOD_AGGREGATE_DBT_VARS,
-        )
-
     with TaskGroup("pipeline_status", group_display_name="Pipeline status", prefix_group_id=False) as status_group:
         dbt_run_pipeline_status, dbt_test_pipeline_status = _dbt_run_test_pair(
             "pipeline_status",
@@ -508,7 +435,6 @@ with DAG(
         raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
 
     selected_gtfs_snapshot >> dbt_run_int_ping_trip
-    selected_gtfs_snapshot >> period_aggregate
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
     dbt_test_stg_gps_pings >> dbt_run_int_ping_trip >> dbt_test_int_ping_trip >> dbt_run_int_stop_arrivals
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
@@ -528,9 +454,8 @@ with DAG(
         dbt_test_int_gps_hourly_completeness,
     ]:
         upstream_task >> dbt_run_completeness_and_coverage
-    dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_daily_aggregate_mart
-    [dbt_run_daily_aggregate_mart, period_aggregate] >> dbt_run_period_aggregate_marts
-    dbt_run_period_aggregate_marts >> dbt_run_pipeline_status >> dbt_test_pipeline_status
+    dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_pipeline_status
+    dbt_run_pipeline_status >> dbt_test_pipeline_status
     dbt_test_pipeline_status >> dbt_run_serving_marts >> dbt_test_serving_marts
     cost_summary = log_bigquery_dbt_job_costs()
     gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE)

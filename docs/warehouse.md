@@ -155,24 +155,6 @@ No `agg_service_coverage` row means no scheduled bus/tram service for that slice
 
 `mart_pipeline_status` combines historical archive health signals. Near-real-time poller liveness comes from the private heartbeat captured by the serving export, not from this mart.
 
-## Aggregates
-
-Aggregates are serving accelerators over strict-quality stop-arrival detail. They can be rebuilt from facts.
-
-Period aggregates:
-
-- `agg_line_stop_period`
-- `agg_stop_period`
-- `agg_time_period`
-
-Daily aggregate:
-
-- `agg_line_daily`
-
-Period aggregates support `month` and `schedule_version` periods. Period rows expose `source_start_date`, `source_end_date`, and `is_partial_period`; consumers should label or filter partial windows before comparing them.
-
-Aggregates carry labels and `gtfs_snapshot_ids` from source facts. Do not relabel historical aggregate rows through current dimensions.
-
 ## Serving Export
 
 `dag_serving_export` is a manual publication step. It exports a fixed allowlist from `ztm_marts` to GCS Parquet, downloads it in the Airflow worker, builds derived DuckDB serving tables, validates guardrails, and atomically swaps the stable DuckDB file.

@@ -137,27 +137,6 @@ def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.
         dag._selected_gtfs_snapshot_id("2026-07-08")
 
 
-def test_period_aggregate_window_uses_active_schedule_versions(monkeypatch: pytest.MonkeyPatch) -> None:
-    dag = _load_dag_module()
-    client = FakeBigQueryClient(
-        period_window_rows=[FakeRow(source_start_date="2026-06-01", partition_dates="2026-06-01|2026-06-29")]
-    )
-    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
-
-    assert dag._period_aggregate_window("2026-06-29", "2026-06-30") == {
-        "source_start_date": "2026-06-01",
-        "partition_dates": "2026-06-01|2026-06-29",
-    }
-
-    assert client.query_call is not None
-    assert "dim_schedule_version" in client.query_call.query
-    assert "string_agg(cast(period_start_date as string), '|' order by period_start_date)" in client.query_call.query
-    assert client.query_call.job_config.query_parameters == [
-        dag.bigquery.ScalarQueryParameter("aggregation_start_date", "DATE", "2026-06-29"),
-        dag.bigquery.ScalarQueryParameter("processing_date", "DATE", "2026-06-30"),
-    ]
-
-
 def test_bigquery_dbt_job_cost_summary_queries_jobs_by_user(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
     started_at = dag.datetime(2026, 7, 5, 4, 0, tzinfo=dag.UTC)
@@ -264,7 +243,6 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         "current_facts_group": ("current_facts", "Current facts"),
         "prior_facts_group": ("prior_facts", "Prior facts"),
         "completeness_group": ("completeness_coverage", "Completeness and coverage"),
-        "aggregate_group": ("aggregate_marts", "Aggregate marts"),
         "status_group": ("pipeline_status", "Pipeline status"),
         "serving_group": ("serving_marts", "Serving marts"),
     }
@@ -314,7 +292,6 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     expected_edges = [
         (dag.dbt_run_stg_gps_pings, dag.dbt_test_stg_gps_pings),
         (dag.selected_gtfs_snapshot, dag.dbt_run_int_ping_trip),
-        (dag.selected_gtfs_snapshot, dag.period_aggregate_window),
         (dag.dbt_test_stg_gps_pings, dag.dbt_run_int_ping_trip),
         (dag.dbt_test_stg_gps_pings, dag.dbt_run_int_gps_hourly_completeness),
         (dag.dbt_run_int_ping_trip, dag.dbt_test_int_ping_trip),
@@ -339,10 +316,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         assert downstream_task in upstream_task.downstream
 
     assert not hasattr(dag, "dbt_test_aggregate_marts")
-    assert dag.dbt_run_daily_aggregate_mart in dag.dbt_test_completeness_and_coverage.downstream
-    assert dag.dbt_run_period_aggregate_marts in dag.dbt_run_daily_aggregate_mart.downstream
-    assert dag.dbt_run_period_aggregate_marts in dag.period_aggregate_window.downstream
-    assert dag.dbt_run_pipeline_status in dag.dbt_run_period_aggregate_marts.downstream
+    assert dag.dbt_run_pipeline_status in dag.dbt_test_completeness_and_coverage.downstream
     assert dag.dbt_run_serving_marts in dag.dbt_test_pipeline_status.downstream
     assert dag.dbt_test_serving_marts in dag.dbt_run_serving_marts.downstream
     assert dag.log_bigquery_dbt_job_costs in dag.dbt_test_serving_marts.downstream
@@ -358,8 +332,6 @@ def test_dag_uses_bounded_mart_windows() -> None:
     expected_aggregation_vars = [
         (dag.dbt_run_completeness_and_coverage, dag.PRIOR_SERVICE_DATE),
         (dag.dbt_test_completeness_and_coverage, dag.PRIOR_SERVICE_DATE),
-        (dag.dbt_run_daily_aggregate_mart, dag.PRIOR_SERVICE_DATE),
-        (dag.dbt_run_period_aggregate_marts, dag.PRIOR_SERVICE_DATE),
         (dag.dbt_run_pipeline_status, dag.PRIOR_SERVICE_DATE),
         (dag.dbt_test_pipeline_status, dag.PRIOR_SERVICE_DATE),
         (dag.dbt_run_serving_marts, dag.WAREHOUSE_HISTORY_START_DATE),
@@ -368,38 +340,7 @@ def test_dag_uses_bounded_mart_windows() -> None:
 
     for task, expected_start_date in expected_aggregation_vars:
         assert '"aggregation_start_date": "' + expected_start_date in task.kwargs["bash_command"]
-    assert (
-        '"period_source_start_date": "' + dag.PERIOD_AGGREGATE_SOURCE_START_DATE
-        in dag.dbt_run_period_aggregate_marts.kwargs["bash_command"]
-    )
-    assert (
-        '"period_partition_dates": "' + dag.PERIOD_AGGREGATE_PARTITION_DATES
-        in dag.dbt_run_period_aggregate_marts.kwargs["bash_command"]
-    )
-    assert dag.DAILY_AGGREGATE_MODEL in dag.dbt_run_daily_aggregate_mart.kwargs["bash_command"]
-    assert dag.PERIOD_AGGREGATE_MODELS in dag.dbt_run_period_aggregate_marts.kwargs["bash_command"]
     assert dag.SERVING_MODELS in dag.dbt_run_serving_marts.kwargs["bash_command"]
-
-
-def test_dag_excludes_broad_aggregate_tests_from_nightly_path() -> None:
-    dag = _load_dag_module()
-
-    assert dag.dbt_run_daily_aggregate_mart.kwargs["bash_command"].startswith(
-        f"cd /opt/airflow/dbt && dbt run --select {dag.DAILY_AGGREGATE_MODEL}"
-    )
-    assert dag.dbt_run_period_aggregate_marts.kwargs["bash_command"].startswith(
-        f"cd /opt/airflow/dbt && dbt run --select {dag.PERIOD_AGGREGATE_MODELS}"
-    )
-    assert not hasattr(dag, "dbt_test_aggregate_marts")
-    aggregate_models = [dag.DAILY_AGGREGATE_MODEL, *dag.PERIOD_AGGREGATE_MODELS.split()]
-    for value in vars(dag).values():
-        if not isinstance(value, FakeOperator):
-            continue
-        bash_command = value.kwargs["bash_command"]
-        is_aggregate_test = bash_command.startswith("cd /opt/airflow/dbt && dbt test") and any(
-            model_name in bash_command for model_name in aggregate_models
-        )
-        assert not is_aggregate_test
 
 
 @dataclass
