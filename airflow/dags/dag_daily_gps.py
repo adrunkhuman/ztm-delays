@@ -64,6 +64,7 @@ EXPECTED_STOP_EVENT_FACT_MODEL = "fct_expected_stop_event"
 DAY_COMPLETENESS_MODEL = "mart_day_completeness"
 SERVICE_COVERAGE_MODEL = "agg_service_coverage"
 PIPELINE_STATUS_MODEL = "mart_pipeline_status"
+COVERAGE_SCHEDULE_MODELS = "int_gtfs_trip_schedule int_gtfs_duty_chain"
 SERVING_UNIVERSE_MODEL = "int_serving_trip_universe"
 SERVING_TRIP_EXECUTION_MODEL = "int_serving_trip_execution"
 SERVING_MODELS = (
@@ -97,6 +98,7 @@ RAW_GPS_PROCESSING_DATE = "{{ (dag_run.partition_key or dag_run.conf.get('proces
 PROCESSING_DATE = "{{ dag_run.conf.get('processing_date') or dag_run.partition_key or data_interval_start.in_timezone('Europe/Warsaw').to_date_string() }}"
 PRIOR_SERVICE_DATE = "{{ macros.ds_add(dag_run.conf.get('processing_date') or dag_run.partition_key or data_interval_start.in_timezone('Europe/Warsaw').to_date_string(), -1) }}"
 SELECTED_GTFS_SNAPSHOT_ID = "{{ ti.xcom_pull(task_ids='selected_gtfs_snapshot_id') }}"
+SELECTED_PRIOR_GTFS_SNAPSHOT_ID = "{{ ti.xcom_pull(task_ids='selected_prior_gtfs_snapshot_id') }}"
 GPS_DBT_VARS = dbt_vars(processing_date=PROCESSING_DATE)
 GPS_TRIP_DBT_VARS = dbt_vars(processing_date=PROCESSING_DATE, gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID)
 FACT_CURRENT_DBT_VARS = dbt_vars(
@@ -110,9 +112,14 @@ FACT_PRIOR_DBT_VARS = dbt_vars(
     publish_service_date=PRIOR_SERVICE_DATE,
     aggregation_start_date=PRIOR_SERVICE_DATE,
 )
-COMPLETENESS_COVERAGE_DBT_VARS = dbt_vars(
+CURRENT_COMPLETENESS_COVERAGE_DBT_VARS = dbt_vars(
     processing_date=PROCESSING_DATE,
     gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
+    aggregation_start_date=PROCESSING_DATE,
+)
+PRIOR_COMPLETENESS_COVERAGE_DBT_VARS = dbt_vars(
+    processing_date=PRIOR_SERVICE_DATE,
+    gtfs_snapshot_id=SELECTED_PRIOR_GTFS_SNAPSHOT_ID,
     aggregation_start_date=PRIOR_SERVICE_DATE,
 )
 MART_DBT_VARS = dbt_vars(
@@ -123,6 +130,10 @@ PRIOR_MART_DBT_VARS = dbt_vars(
     processing_date=PRIOR_SERVICE_DATE,
     gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
     max_gps_date=PROCESSING_DATE,
+)
+PRIOR_SCHEDULE_DBT_VARS = dbt_vars(
+    processing_date=PRIOR_SERVICE_DATE,
+    gtfs_snapshot_id=SELECTED_PRIOR_GTFS_SNAPSHOT_ID,
 )
 
 
@@ -299,7 +310,13 @@ with DAG(
             """Return the latest dimension-built GTFS snapshot available at rebuild time."""
             return _selected_gtfs_snapshot_id(processing_date)
 
+        @task
+        def selected_prior_gtfs_snapshot_id(processing_date: str) -> str:
+            """Return the governing GTFS snapshot for prior-date coverage."""
+            return _selected_gtfs_snapshot_id(processing_date)
+
         selected_gtfs_snapshot = selected_gtfs_snapshot_id(PROCESSING_DATE)
+        selected_prior_gtfs_snapshot = selected_prior_gtfs_snapshot_id(PRIOR_SERVICE_DATE)
 
     with TaskGroup("staging", group_display_name="Staging", prefix_group_id=False) as staging_group:
         dbt_run_stg_gps_pings, dbt_test_stg_gps_pings = _dbt_run_test_pair(
@@ -392,7 +409,24 @@ with DAG(
             "completeness_and_coverage",
             f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
             f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
-            COMPLETENESS_COVERAGE_DBT_VARS,
+            CURRENT_COMPLETENESS_COVERAGE_DBT_VARS,
+        )
+        dbt_run_prior_coverage_schedule = _dbt_task(
+            "dbt_run_prior_coverage_schedule",
+            "run",
+            COVERAGE_SCHEDULE_MODELS,
+            PRIOR_SCHEDULE_DBT_VARS,
+        )
+        dbt_run_completeness_and_coverage_prior, dbt_test_completeness_and_coverage_prior = _dbt_run_test_pair(
+            "completeness_and_coverage_prior",
+            f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
+            f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
+            PRIOR_COMPLETENESS_COVERAGE_DBT_VARS,
+        )
+        dbt_restore_current_coverage_schedule = BashOperator(
+            task_id="dbt_restore_current_coverage_schedule",
+            bash_command=dbt_command("run", COVERAGE_SCHEDULE_MODELS, GPS_TRIP_DBT_VARS),
+            trigger_rule=TriggerRule.ALL_DONE,
         )
 
     with TaskGroup("pipeline_status", group_display_name="Pipeline status", prefix_group_id=False) as status_group:
@@ -400,7 +434,13 @@ with DAG(
             "pipeline_status",
             PIPELINE_STATUS_MODEL,
             PIPELINE_STATUS_MODEL,
-            COMPLETENESS_COVERAGE_DBT_VARS,
+            CURRENT_COMPLETENESS_COVERAGE_DBT_VARS,
+        )
+        dbt_run_pipeline_status_prior, dbt_test_pipeline_status_prior = _dbt_run_test_pair(
+            "pipeline_status_prior",
+            PIPELINE_STATUS_MODEL,
+            PIPELINE_STATUS_MODEL,
+            PRIOR_COMPLETENESS_COVERAGE_DBT_VARS,
         )
 
     with TaskGroup("serving_marts", group_display_name="Serving marts", prefix_group_id=False) as serving_group:
@@ -482,6 +522,7 @@ with DAG(
             raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
 
     selected_gtfs_snapshot >> dbt_run_int_ping_trip
+    selected_prior_gtfs_snapshot >> dbt_run_prior_coverage_schedule
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
     dbt_test_stg_gps_pings >> dbt_run_int_ping_trip >> dbt_test_int_ping_trip >> dbt_run_int_stop_arrivals
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
@@ -503,7 +544,12 @@ with DAG(
         upstream_task >> dbt_run_completeness_and_coverage
     dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_pipeline_status
     dbt_run_pipeline_status >> dbt_test_pipeline_status
-    dbt_test_pipeline_status >> dbt_run_serving_universe >> dbt_test_serving_universe
+    dbt_test_pipeline_status >> dbt_run_prior_coverage_schedule
+    dbt_run_prior_coverage_schedule >> dbt_run_completeness_and_coverage_prior
+    dbt_run_completeness_and_coverage_prior >> dbt_test_completeness_and_coverage_prior >> dbt_run_pipeline_status_prior
+    dbt_run_pipeline_status_prior >> dbt_test_pipeline_status_prior >> dbt_restore_current_coverage_schedule
+    dbt_test_pipeline_status_prior >> dbt_run_serving_universe
+    dbt_restore_current_coverage_schedule >> dbt_run_serving_universe >> dbt_test_serving_universe
     dbt_test_serving_universe >> dbt_run_serving_marts_prior >> dbt_test_serving_marts_prior
     dbt_test_serving_marts_prior >> dbt_run_serving_marts >> dbt_test_serving_marts
     gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE)

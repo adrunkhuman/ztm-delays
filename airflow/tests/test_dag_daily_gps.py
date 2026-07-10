@@ -255,6 +255,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         assert group.kwargs["group_display_name"] == display_name
         assert group.kwargs["prefix_group_id"] is False
     assert dag.selected_gtfs_snapshot_id.kwargs == {}
+    assert dag.selected_prior_gtfs_snapshot_id.kwargs == {}
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PROCESSING_DATE
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PRIOR_SERVICE_DATE
     assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
@@ -322,13 +323,20 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         (dag.dbt_test_fct_expected_stop_event_current, dag.dbt_run_completeness_and_coverage),
         (dag.dbt_test_fct_expected_stop_event_prior, dag.dbt_run_completeness_and_coverage),
         (dag.dbt_test_int_gps_hourly_completeness, dag.dbt_run_completeness_and_coverage),
+        (dag.selected_prior_gtfs_snapshot, dag.dbt_run_prior_coverage_schedule),
     ]
     for upstream_task, downstream_task in expected_edges:
         assert downstream_task in upstream_task.downstream
 
     assert not hasattr(dag, "dbt_test_aggregate_marts")
     assert dag.dbt_run_pipeline_status in dag.dbt_test_completeness_and_coverage.downstream
-    assert dag.dbt_run_serving_universe in dag.dbt_test_pipeline_status.downstream
+    assert dag.dbt_run_prior_coverage_schedule in dag.dbt_test_pipeline_status.downstream
+    assert dag.dbt_run_completeness_and_coverage_prior in dag.dbt_run_prior_coverage_schedule.downstream
+    assert dag.dbt_run_pipeline_status_prior in dag.dbt_test_completeness_and_coverage_prior.downstream
+    assert dag.dbt_restore_current_coverage_schedule in dag.dbt_test_pipeline_status_prior.downstream
+    assert dag.dbt_run_serving_universe in dag.dbt_test_pipeline_status_prior.downstream
+    assert dag.dbt_run_serving_universe in dag.dbt_restore_current_coverage_schedule.downstream
+    assert dag.dbt_restore_current_coverage_schedule.kwargs["trigger_rule"] == dag.TriggerRule.ALL_DONE
     assert dag.dbt_test_serving_universe in dag.dbt_run_serving_universe.downstream
     assert dag.dbt_run_serving_marts_prior in dag.dbt_test_serving_universe.downstream
     assert dag.dbt_test_serving_marts_prior in dag.dbt_run_serving_marts_prior.downstream
@@ -354,10 +362,14 @@ def test_dag_can_enable_bigquery_dbt_job_cost_logging(monkeypatch: pytest.Monkey
 def test_dag_uses_bounded_mart_windows() -> None:
     dag = _load_dag_module()
     expected_aggregation_vars = [
-        (dag.dbt_run_completeness_and_coverage, dag.PRIOR_SERVICE_DATE),
-        (dag.dbt_test_completeness_and_coverage, dag.PRIOR_SERVICE_DATE),
-        (dag.dbt_run_pipeline_status, dag.PRIOR_SERVICE_DATE),
-        (dag.dbt_test_pipeline_status, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_run_completeness_and_coverage, dag.PROCESSING_DATE),
+        (dag.dbt_test_completeness_and_coverage, dag.PROCESSING_DATE),
+        (dag.dbt_run_pipeline_status, dag.PROCESSING_DATE),
+        (dag.dbt_test_pipeline_status, dag.PROCESSING_DATE),
+        (dag.dbt_run_completeness_and_coverage_prior, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_test_completeness_and_coverage_prior, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_run_pipeline_status_prior, dag.PRIOR_SERVICE_DATE),
+        (dag.dbt_test_pipeline_status_prior, dag.PRIOR_SERVICE_DATE),
     ]
 
     for task, expected_start_date in expected_aggregation_vars:
@@ -368,6 +380,9 @@ def test_dag_uses_bounded_mart_windows() -> None:
     assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_test_serving_marts_prior.kwargs["bash_command"]
     assert '"max_gps_date": "' + dag.PROCESSING_DATE in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
     assert dag.SERVING_UNIVERSE_MODEL in dag.dbt_run_serving_universe.kwargs["bash_command"]
+    assert dag.COVERAGE_SCHEDULE_MODELS in dag.dbt_run_prior_coverage_schedule.kwargs["bash_command"]
+    assert dag.SELECTED_PRIOR_GTFS_SNAPSHOT_ID in dag.dbt_run_prior_coverage_schedule.kwargs["bash_command"]
+    assert dag.SELECTED_GTFS_SNAPSHOT_ID in dag.dbt_restore_current_coverage_schedule.kwargs["bash_command"]
     assert dag.SERVING_MODELS in dag.dbt_run_serving_marts.kwargs["bash_command"]
     assert dag.PRIOR_SERVING_MODELS in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
 
@@ -536,7 +551,7 @@ def _install_airflow_stubs() -> None:
     airflow_sdk_module.PartitionedAssetTimetable = FakePartitionedAssetTimetable
     airflow_sdk_module.StartOfDayMapper = FakeStartOfDayMapper
     airflow_sdk_module.TaskGroup = FakeTaskGroup
-    airflow_sdk_module.TriggerRule = types.SimpleNamespace(ONE_FAILED="one_failed")
+    airflow_sdk_module.TriggerRule = types.SimpleNamespace(ALL_DONE="all_done", ONE_FAILED="one_failed")
     airflow_sdk_module.get_current_context = lambda: {"dag_run": FakeDagRun()}
     airflow_sdk_module.task = FakeTaskDecorator()
     bash_module.BashOperator = FakeOperator
