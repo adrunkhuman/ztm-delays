@@ -118,7 +118,7 @@ Normal Airflow cadence must stay bounded and deliberate:
 
 - Hourly raw GPS loading only loads immutable GCS parts into raw BigQuery.
 - Nightly GPS warehouse work runs one processing date and its prior service-date fact publication.
-- `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` replace the prior/current date partitions during normal nightly runs.
+- `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` replace current and prior partitions independently with each date's governing GTFS snapshot. The DAG restores current-snapshot schedule views before serving models run.
 - Incremental serving marts rebuild the prior date before the current date after pipeline status succeeds; full-table serving models run only with the current date.
 - GTFS load runs raw load, staging, dimensions, and cheap/default dimension tests.
 
@@ -146,7 +146,7 @@ dbt test --select fct_trip fct_stop_arrival mart_day_completeness agg_service_co
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"YYYY-MM-DD","aggregation_start_date":"YYYY-MM-DD"}'
 ```
 
-For `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`, normal recovery should rerun each affected processing date so the prior/current partition pair is replaced. Wider manual backfills can pass a wider `aggregation_start_date`, but dry-run first because every date in that inclusive range becomes an overwrite partition.
+For `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`, normal recovery should rerun each affected date with `processing_date` and `aggregation_start_date` set to that same date and with that date's governing snapshot. Do not rebuild a multi-date range under one snapshot. Wider manual backfills must switch the schedule views and snapshot variable per date.
 
 After `dag_daily_gps` finishes its normal dbt phases, it logs a BigQuery dbt cost summary from `INFORMATION_SCHEMA.JOBS_BY_USER`: job count, total bytes processed, total bytes billed, and top jobs by bytes. This is visibility only. Metadata collection failure is logged but does not block asset publication. Attribution is best-effort: it is scoped to the same BigQuery principal, project, and region, and filters on dbt query comments, so concurrent dbt jobs from the same principal can be included while jobs from another principal or without dbt comments can be missed.
 
