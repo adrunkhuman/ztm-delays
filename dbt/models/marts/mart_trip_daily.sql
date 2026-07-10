@@ -8,19 +8,20 @@
         partitions=["date('" ~ processing_date ~ "')"],
         cluster_by=["mode", "line"],
         require_partition_filter=true,
+        on_schema_change='append_new_columns',
         post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
 with trips as (
     select *
-    from {{ ref('fct_trip') }}
+    from {{ ref('int_serving_trip_execution') }}
     where service_date = date('{{ processing_date }}')
-      and mode in ('bus', 'tram')
 ),
 
 profiles as (
     select
+        gtfs_snapshot_id,
         service_date,
         trip_id,
         vehicle_number,
@@ -28,7 +29,7 @@ profiles as (
     from {{ ref('fct_expected_stop_event') }}
     where service_date = date('{{ processing_date }}')
       and observation_status = 'observed'
-    group by service_date, trip_id, vehicle_number
+    group by gtfs_snapshot_id, service_date, trip_id, vehicle_number
 ),
 
 profile_scores as (
@@ -51,12 +52,14 @@ joined as (
         coalesce(profile_scores.erratic_score, 0) as erratic_score
     from trips
     left join profile_scores
-        on trips.service_date = profile_scores.service_date
+        on trips.gtfs_snapshot_id = profile_scores.gtfs_snapshot_id
+        and trips.service_date = profile_scores.service_date
         and trips.trip_id = profile_scores.trip_id
         and trips.vehicle_number = profile_scores.vehicle_number
 )
 
 select
+    gtfs_snapshot_id,
     service_date,
     gps_date,
     trip_id,

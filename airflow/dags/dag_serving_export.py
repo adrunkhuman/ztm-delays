@@ -89,6 +89,7 @@ PARTITIONED_EXPORT_TABLES = {
     "mart_entity_timeline_daily": "service_date",
     "mart_hour_window_summary": "source_end_date",
 }
+PARTITION_CACHE_MANIFEST = "_MANIFEST.json"
 DERIVED_TABLES: tuple[str, ...] = ()
 EXPORTED_TABLES = MART_TABLES + DERIVED_TABLES
 DATE_RANGE_SQL_BY_TABLE = {
@@ -130,7 +131,7 @@ class ExportConfig:
     max_source_bytes: int
     max_duckdb_bytes: int
     cleanup_gcs_staging: bool
-    changed_partition_date: str | None = None
+    changed_partition_dates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -210,39 +211,51 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
             os.getenv("SERVING_EXPORT_MAX_DUCKDB_BYTES", str(SERVING_EXPORT_MAX_BYTES)),
         ),
         cleanup_gcs_staging=_bool_config(conf, "cleanup_gcs_staging", True),
-        changed_partition_date=_changed_partition_date(context, conf),
+        changed_partition_dates=_changed_partition_dates(context, conf),
     )
 
 
-def _changed_partition_date(context: dict[str, object], conf: dict[str, object]) -> str | None:
+def _changed_partition_dates(context: dict[str, object], conf: dict[str, object]) -> tuple[str, ...]:
+    configured_dates = _date_list_config(conf, "changed_partition_dates")
     configured_date = _date_config(
         conf,
         "changed_partition_date",
         os.getenv("SERVING_EXPORT_CHANGED_PARTITION_DATE", ""),
     )
+    if configured_dates and configured_date is not None:
+        raise ValueError("changed_partition_dates and changed_partition_date cannot both be configured")
+    if configured_dates:
+        return configured_dates
     if configured_date is not None:
-        return configured_date
-    return _asset_processing_date(context)
+        return (configured_date,)
+    return _asset_changed_partition_dates(context)
 
 
-def _asset_processing_date(context: dict[str, object]) -> str | None:
+def _asset_changed_partition_dates(context: dict[str, object]) -> tuple[str, ...]:
     triggering_asset_events = context.get("triggering_asset_events")
     if not isinstance(triggering_asset_events, Mapping) or GPS_MODELS_DATE_ASSET not in triggering_asset_events:
-        return None
+        return ()
 
     asset_events = triggering_asset_events[GPS_MODELS_DATE_ASSET]
     if not isinstance(asset_events, Sequence) or isinstance(asset_events, (str, bytes)) or not asset_events:
         raise RuntimeError("dag_serving_export requires a GPS models asset event with processing_date")
 
-    latest_event = asset_events[-1]
-    extra = getattr(latest_event, "extra", None)
-    if not isinstance(extra, dict):
-        raise TypeError("dag_serving_export requires a GPS models asset event with processing_date")
-    processing_date = extra.get("processing_date")
-    if not isinstance(processing_date, str) or not EXPORT_DATE_PATTERN.fullmatch(processing_date):
-        raise RuntimeError("dag_serving_export requires a GPS models asset event with processing_date")
-    date.fromisoformat(processing_date)
-    return processing_date
+    changed_partition_dates = []
+    for asset_event in asset_events:
+        extra = getattr(asset_event, "extra", None)
+        if not isinstance(extra, dict):
+            raise TypeError("dag_serving_export requires GPS models asset events with processing_date")
+        event_dates = _date_list_config(extra, "changed_partition_dates")
+        if not event_dates:
+            processing_date = extra.get("processing_date")
+            if not isinstance(processing_date, str) or not EXPORT_DATE_PATTERN.fullmatch(processing_date):
+                raise RuntimeError("dag_serving_export requires GPS models asset events with processing_date")
+            date.fromisoformat(processing_date)
+            event_dates = (processing_date,)
+        for partition_date in event_dates:
+            if partition_date not in changed_partition_dates:
+                changed_partition_dates.append(partition_date)
+    return tuple(changed_partition_dates)
 
 
 def _default_export_id(now: datetime) -> str:
@@ -280,6 +293,23 @@ def _date_config(conf: dict[str, object], key: str, default: str) -> str | None:
         raise ValueError(f"{key} must be an ISO date string")
     date.fromisoformat(value)
     return value
+
+
+def _date_list_config(conf: dict[str, object], key: str) -> tuple[str, ...]:
+    value = conf.get(key)
+    if value in (None, []):
+        return ()
+    if not isinstance(value, list):
+        raise TypeError(f"{key} must be a list of ISO date strings")
+
+    dates = []
+    for item in value:
+        if not isinstance(item, str) or not EXPORT_DATE_PATTERN.fullmatch(item):
+            raise ValueError(f"{key} must contain only ISO date strings")
+        date.fromisoformat(item)
+        if item not in dates:
+            dates.append(item)
+    return tuple(dates)
 
 
 def _run_serving_export(config: ExportConfig) -> ExportResult:
@@ -408,9 +438,8 @@ def _extract_and_download_marts(
 ) -> dict[str, list[Path]]:
     parquet_paths_by_table = {}
     for table_name in MART_TABLES:
-        if table_name in PARTITIONED_EXPORT_TABLES and config.changed_partition_date:
-            _extract_partitioned_mart_to_gcs(bigquery_client, storage_client, config, table_name)
-            _ensure_partition_cache_complete(bigquery_client, storage_client, config, table_name)
+        if table_name in PARTITIONED_EXPORT_TABLES and config.changed_partition_dates:
+            _sync_partition_cache(bigquery_client, storage_client, config, table_name)
             parquet_paths_by_table[table_name] = _download_partitioned_mart_parquet(
                 storage_client, config, table_name, local_export_dir
             )
@@ -439,38 +468,48 @@ def _extract_mart_to_gcs(client: bigquery.Client, config: ExportConfig, table_na
     job.result()
 
 
-def _extract_partitioned_mart_to_gcs(
+def _sync_partition_cache(
     bigquery_client: bigquery.Client,
     storage_client: storage.Client,
     config: ExportConfig,
     table_name: str,
 ) -> None:
-    partition_date = config.changed_partition_date
-    if partition_date is None:
-        raise RuntimeError("partitioned mart export requires changed_partition_date")
-
-    _extract_mart_partition_to_cache(bigquery_client, storage_client, config, table_name, partition_date)
-
-
-def _ensure_partition_cache_complete(
-    bigquery_client: bigquery.Client,
-    storage_client: storage.Client,
-    config: ExportConfig,
-    table_name: str,
-) -> None:
+    partition_dates = tuple(
+        partition_date.isoformat() for partition_date in _table_partition_dates(bigquery_client, table_name)
+    )
+    actual_partition_dates = set(partition_dates)
     date_column = PARTITIONED_EXPORT_TABLES[table_name]
     cached_dates = _cached_partition_dates(storage_client, config, table_name, date_column)
-    for partition_date in _table_partition_dates(bigquery_client, table_name):
-        partition_date_value = partition_date.isoformat()
-        if partition_date_value in cached_dates:
+    for partition_date in cached_dates - actual_partition_dates:
+        _delete_partition_cache(storage_client, config, table_name, date_column, partition_date)
+
+    for partition_date in config.changed_partition_dates:
+        if partition_date in actual_partition_dates:
+            _extract_mart_partition_to_cache(bigquery_client, storage_client, config, table_name, partition_date)
+
+    for partition_date in partition_dates:
+        if partition_date in cached_dates or partition_date in config.changed_partition_dates:
             continue
         _extract_mart_partition_to_cache(
             bigquery_client,
             storage_client,
             config,
             table_name,
-            partition_date_value,
+            partition_date,
         )
+
+
+def _delete_partition_cache(
+    storage_client: storage.Client,
+    config: ExportConfig,
+    table_name: str,
+    date_column: str,
+    partition_date: str,
+) -> None:
+    bucket = storage_client.bucket(config.gcs_bucket)
+    cache_prefix = _partition_cache_prefix(config, table_name, date_column, partition_date)
+    for blob in list(bucket.list_blobs(prefix=f"{cache_prefix}/")):
+        bucket.blob(blob.name).delete()
 
 
 def _extract_mart_partition_to_cache(
@@ -508,15 +547,21 @@ def _cached_partition_dates(
     date_column: str,
 ) -> set[str]:
     bucket = storage_client.bucket(config.gcs_bucket)
-    partition_dates = set()
-    for blob in bucket.list_blobs(prefix=_partition_table_cache_prefix(config, table_name)):
-        if not blob.name.endswith(".parquet"):
+    table_prefix = _partition_table_cache_prefix(config, table_name)
+    blobs_by_date: dict[str, list[storage.Blob]] = {}
+    partition_prefix = f"{date_column}="
+    for blob in bucket.list_blobs(prefix=table_prefix):
+        relative_name = blob.name.removeprefix(table_prefix)
+        partition_dir = relative_name.split("/", maxsplit=1)[0]
+        if not partition_dir.startswith(partition_prefix):
             continue
-        partition_dir = Path(blob.name).parent.name
-        partition_prefix = f"{date_column}="
-        if partition_dir.startswith(partition_prefix):
-            partition_dates.add(partition_dir.removeprefix(partition_prefix))
-    return partition_dates
+        partition_date = partition_dir.removeprefix(partition_prefix)
+        blobs_by_date.setdefault(partition_date, []).append(blob)
+    return {
+        partition_date
+        for partition_date, blobs in blobs_by_date.items()
+        if _active_partition_blob_names(blobs, _partition_cache_prefix(config, table_name, date_column, partition_date))
+    }
 
 
 def _replace_partition_cache(
@@ -528,19 +573,50 @@ def _replace_partition_cache(
 ) -> None:
     bucket = storage_client.bucket(config.gcs_bucket)
     cache_prefix = _partition_cache_prefix(config, table_name, date_column, partition_date)
-    for blob in list(bucket.list_blobs(prefix=f"{cache_prefix}/")):
-        bucket.blob(blob.name).delete()
-
     staging_prefix = _partition_staging_prefix(config, table_name, date_column, partition_date)
-    copied = 0
-    for blob in list(bucket.list_blobs(prefix=f"{staging_prefix}/")):
-        if not blob.name.endswith(".parquet"):
-            continue
-        destination_name = f"{cache_prefix}/{Path(blob.name).name}"
-        bucket.copy_blob(blob, bucket, destination_name)
-        copied += 1
-    if copied == 0:
+    staging_blobs = [blob for blob in bucket.list_blobs(prefix=f"{staging_prefix}/") if blob.name.endswith(".parquet")]
+    if not staging_blobs:
         raise RuntimeError(f"Partitioned export produced no parquet files for {table_name} {partition_date}")
+
+    old_blobs = list(bucket.list_blobs(prefix=f"{cache_prefix}/"))
+    generation_prefix = f"{cache_prefix}/generation={config.export_id}"
+    new_blob_names = []
+    for blob in staging_blobs:
+        destination_name = f"{generation_prefix}/{Path(blob.name).name}"
+        bucket.copy_blob(blob, bucket, destination_name)
+        new_blob_names.append(destination_name)
+
+    manifest_name = f"{cache_prefix}/{PARTITION_CACHE_MANIFEST}"
+    bucket.blob(manifest_name).upload_from_string(
+        json.dumps({"parquet_blobs": new_blob_names}, sort_keys=True),
+        content_type="application/json",
+    )
+    for blob in old_blobs:
+        if blob.name != manifest_name and blob.name not in new_blob_names:
+            bucket.blob(blob.name).delete()
+
+
+def _active_partition_blob_names(blobs: Sequence[storage.Blob], cache_prefix: str) -> list[str]:
+    manifest_name = f"{cache_prefix}/{PARTITION_CACHE_MANIFEST}"
+    manifest = next((blob for blob in blobs if blob.name == manifest_name), None)
+    available_names = {blob.name for blob in blobs}
+    if manifest is not None:
+        payload = json.loads(manifest.download_as_bytes())
+        blob_names = payload.get("parquet_blobs") if isinstance(payload, dict) else None
+        if not isinstance(blob_names, list) or not blob_names or not all(isinstance(name, str) for name in blob_names):
+            raise RuntimeError(f"Invalid partition cache manifest: {manifest_name}")
+        if not set(blob_names) <= available_names:
+            raise RuntimeError(f"Incomplete partition cache generation: {manifest_name}")
+        return sorted(blob_names)
+
+    legacy_prefix = f"{cache_prefix}/"
+    return sorted(
+        blob.name
+        for blob in blobs
+        if blob.name.startswith(legacy_prefix)
+        and "/" not in blob.name.removeprefix(legacy_prefix)
+        and blob.name.endswith(".parquet")
+    )
 
 
 def _table_extract_uri(config: ExportConfig, table_name: str) -> str:
@@ -608,19 +684,24 @@ def _download_partitioned_mart_parquet(
     bucket = storage_client.bucket(config.gcs_bucket)
     table_dir = local_export_dir / table_name
     table_dir.mkdir(parents=True, exist_ok=True)
-    blob_names = [
-        blob.name
-        for blob in bucket.list_blobs(prefix=_partition_table_cache_prefix(config, table_name))
-        if blob.name.endswith(".parquet")
-    ]
+    table_prefix = _partition_table_cache_prefix(config, table_name)
+    blobs_by_partition: dict[str, list[storage.Blob]] = {}
+    for blob in bucket.list_blobs(prefix=table_prefix):
+        relative_name = blob.name.removeprefix(table_prefix)
+        partition_dir = relative_name.split("/", maxsplit=1)[0]
+        if "=" not in partition_dir:
+            continue
+        blobs_by_partition.setdefault(partition_dir, []).append(blob)
 
     paths = []
-    for blob_name in sorted(blob_names):
-        partition_dir = table_dir / Path(blob_name).parent.name
-        partition_dir.mkdir(parents=True, exist_ok=True)
-        path = partition_dir / Path(blob_name).name
-        bucket.blob(blob_name).download_to_filename(str(path))
-        paths.append(path)
+    for partition_dir, blobs in sorted(blobs_by_partition.items()):
+        cache_prefix = f"{table_prefix}{partition_dir}"
+        for blob_name in _active_partition_blob_names(blobs, cache_prefix):
+            local_partition_dir = table_dir / partition_dir
+            local_partition_dir.mkdir(parents=True, exist_ok=True)
+            path = local_partition_dir / Path(blob_name).name
+            bucket.blob(blob_name).download_to_filename(str(path))
+            paths.append(path)
 
     if not paths:
         raise RuntimeError(f"No cached partition parquet files found for {table_name}")

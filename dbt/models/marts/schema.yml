@@ -1483,7 +1483,7 @@ unit_tests:
     model: fct_stop_arrival
     overrides:
       vars:
-        processing_date: '2026-01-15'
+        processing_date: '2026-01-16'
         publish_service_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
     given:
@@ -1529,6 +1529,14 @@ unit_tests:
             timestamp('2026-01-15 08:15:00+01'), timestamp('2026-01-15 08:15:20+01'),
             timestamp('2026-01-15 08:09:00+01'), -360, 'segment_within_75m', 75.0, 9.0, 4.0, 5.0,
             timestamp('2026-01-15 08:08:30+01'), timestamp('2026-01-15 08:09:30+01'), 60
+          union all
+          select
+            'snapshot-prior', '187', '9', 1001, 1, date '2026-01-15', date '2026-01-15', 'weekday',
+            'trip-1', 'shape-prior', 'svc-prior', 0, '100101', 'Prior 01', 1,
+            0, 0, 'regular',
+            timestamp('2026-01-15 07:10:00+01'), timestamp('2026-01-15 07:10:20+01'),
+            timestamp('2026-01-15 07:11:00+01'), 60, 'segment_within_75m', 75.0, 8.0, 9.0, 10.0,
+            timestamp('2026-01-15 07:10:30+01'), timestamp('2026-01-15 07:11:30+01'), 60
       - input: ref('fct_trip')
         format: sql
         rows: |
@@ -1588,6 +1596,15 @@ unit_tests:
             1200, -1260, 10, 5, 0.5, 5, 1, 4, 120, 10.0, false, false, true, false, false,
             'broken', ['non_monotonic_stop_progression', 'likely_wrong_trip_assignment'],
             'matching_failure', ['short_start', 'short_end', 'bad_assignment_evidence']
+          union all
+          select
+            'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
+            '187', '187', 'bus', '9', 1, 0, 'svc-prior', 'Prior', 'shape-prior', 'weekday', 'thursday',
+            'svc-prior', '187|0|thursday|2026-01-15', '100101', 'Prior 01', '100102', 'Prior 02',
+            timestamp('2026-01-15 07:00:00+01'), timestamp('2026-01-15 07:30:00+01'),
+            timestamp('2026-01-15 07:01:00+01'), timestamp('2026-01-15 07:31:00+01'),
+            60, 60, 2, 2, 1.0, 0, 1, 1, 60, 10.0, true, true, false, false, false,
+            'complete', array<string>[], 'regular', array<string>[]
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1596,6 +1613,7 @@ unit_tests:
           union all select '100103', 'Main 02', 52.3, 21.3, 'snapshot-valid'
           union all select '200101', 'Reverse 01', 52.4, 21.4, 'snapshot-valid'
           union all select '100101', 'Old Main', 52.0, 21.0, 'snapshot-old'
+          union all select '100101', 'Prior 01', 52.5, 21.5, 'snapshot-prior'
       - input: ref('dim_date')
         format: sql
         rows: |
@@ -1652,12 +1670,22 @@ unit_tests:
           timestamp('2026-01-15 08:19:00+01') as segment_start_time,
           timestamp('2026-01-15 08:20:00+01') as segment_end_time,
           60 as segment_duration_seconds
+        union all
+        select
+          'snapshot-prior', date '2026-01-15', date '2026-01-15', date '2026-01-15',
+          'trip-1', 1001, '187', '187', 'bus', '9', 1, 0, 'svc-prior', 'Prior', 'shape-prior',
+          'weekday', false, 'thursday', 'svc-prior', '187|0|thursday|2026-01-15', 'complete',
+          array<string>[], 'regular', array<string>[], '100101', '1001', '01', 'Prior 01', 52.5, 21.5,
+          'Prior 01', 1, 0, 0, 'regular', timestamp('2026-01-15 07:10:00+01'),
+          timestamp('2026-01-15 07:10:20+01'), timestamp('2026-01-15 07:11:00+01'), 60,
+          timestamp('2026-01-15 07:00:00+01'), 'segment_within_75m', 75.0, 8.0, 9.0, 10.0,
+          timestamp('2026-01-15 07:10:30+01'), timestamp('2026-01-15 07:11:30+01'), 60
 
   - name: fct_expected_stop_event_emits_observed_missed_and_uncertain_rows
     model: fct_expected_stop_event
     overrides:
       vars:
-        processing_date: '2026-01-15'
+        processing_date: '2026-01-16'
         publish_service_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
     given:
@@ -1702,6 +1730,11 @@ unit_tests:
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-4', 1004, '187', '187', 'bus', '4',
             1, 0, 'svc', 'Central', 'shape-4', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'broken', ['likely_wrong_trip_assignment'],
             'matching_failure', ['bad_assignment_evidence']
+          union all
+          select
+            'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, '187', '187', 'bus', '9',
+            1, 0, 'svc-prior', 'Prior', 'shape-prior', 'weekday', 'thursday', 'svc-prior', 'schedule-version-prior',
+            'complete', array<string>[], 'regular', array<string>[]
       - input: ref('int_ping_trip')
         format: sql
         rows: |
@@ -1731,6 +1764,10 @@ unit_tests:
           select
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-4', 1004, 'settled_duty_chain',
             'chain-4', 'block_id', 'block-4', 1, 1, 1, array<string>[]
+          union all
+          select
+            'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 'settled_duty_chain',
+            'chain-prior', 'block_id', 'block-prior', 1, 1, 1, array<string>[]
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
@@ -1742,6 +1779,7 @@ unit_tests:
           union all select 'trip-2', '100107', 1, 30700, 30700, 0, 0, 'regular', 'snapshot-valid'
           union all select 'trip-3', '100104', 0, 30900, 30900, 0, 0, 'regular', 'snapshot-valid'
           union all select 'trip-4', '100108', 0, 31200, 31200, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-1', '100101', 0, 27000, 27000, 0, 0, 'regular', 'snapshot-prior'
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1753,6 +1791,7 @@ unit_tests:
           union all select '100106', 'Request Stop', 52.6, 21.6, 'snapshot-valid'
           union all select '100107', 'Main 07', 52.7, 21.7, 'snapshot-valid'
           union all select '100108', 'Main 08', 52.8, 21.8, 'snapshot-valid'
+          union all select '100101', 'Prior 01', 52.9, 21.9, 'snapshot-prior'
       - input: ref('dim_date')
         format: sql
         rows: |
@@ -1792,6 +1831,11 @@ unit_tests:
             'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 3,
             timestamp('2026-01-15 08:28:25+01'), 5, 'segment_within_250m', 250.0, 100.0, 120.0, 130.0,
             timestamp('2026-01-15 08:28:00+01'), timestamp('2026-01-15 08:28:30+01'), 30
+          union all
+          select
+            'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 0,
+            timestamp('2026-01-15 07:30:30+01'), 30, 'segment_within_75m', 75.0, 8.0, 9.0, 10.0,
+            timestamp('2026-01-15 07:30:00+01'), timestamp('2026-01-15 07:31:00+01'), 60
     expect:
       format: sql
       rows: |
@@ -1925,6 +1969,17 @@ unit_tests:
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
           false, false, 'uncertain'
+        union all
+        select
+          'snapshot-prior', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
+          '187', '187', 'bus', '9', 1, 0, 'svc-prior', 'Prior', 'shape-prior', 'weekday', false, 'thursday',
+          'svc-prior', 'schedule-version-prior', 'complete', array<string>[], 'regular', array<string>[],
+          'settled_duty_chain', 'chain-prior', 'block_id', 'block-prior', 1, 1, 1, array<string>[],
+          '100101', '1001', '01', 'Prior 01', 52.9, 21.9, 'Prior 01', 0, 0, 0, 'regular',
+          timestamp('2026-01-15 07:30:00+01'), timestamp('2026-01-15 07:30:00+01'),
+          timestamp('2026-01-15 07:30:30+01'), 30, timestamp('2026-01-15 07:00:00+01'),
+          'segment_within_75m', 75.0, 8.0, 9.0, 10.0, timestamp('2026-01-15 07:30:00+01'),
+          timestamp('2026-01-15 07:31:00+01'), 60, true, false, 'observed'
 
   - name: dim_line_current_uses_selected_snapshot_and_collects_headsigns
     model: dim_line_current

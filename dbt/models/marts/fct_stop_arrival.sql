@@ -1,5 +1,4 @@
 {% set publish_service_date = var("publish_service_date", var("processing_date")) %}
-{% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
 
 {{
     config(
@@ -50,7 +49,6 @@ with arrivals as (
     where service_date = date('{{ publish_service_date }}')
       and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
       and gps_date <= date('{{ var("processing_date") }}')
-      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
     qualify row_number() over (
         partition by gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence
         order by stop_distance_m, abs(arrival_delay_seconds), actual_arrival_time, gps_date desc
@@ -78,7 +76,6 @@ trip_facts as (
         has_non_monotonic_stop_progression
     from {{ ref('fct_trip') }}
     where service_date = date('{{ publish_service_date }}')
-      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
       and not has_non_monotonic_stop_progression
 ),
 
@@ -91,7 +88,6 @@ stops as (
         stop_lon,
         gtfs_snapshot_id
     from {{ ref('stg_gtfs__stops') }}
-    where gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
 ),
 
 stop_group_names as (

@@ -14,7 +14,7 @@
 
 with base as (
     select *
-    from {{ ref('fct_stop_arrival') }}
+    from {{ ref('int_serving_stop_arrival') }}
     where service_date between date_sub(date('{{ processing_date }}'), interval 60 day) and date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')

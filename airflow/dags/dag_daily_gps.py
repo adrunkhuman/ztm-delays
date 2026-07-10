@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha1
 from typing import TYPE_CHECKING
 
@@ -64,8 +64,10 @@ EXPECTED_STOP_EVENT_FACT_MODEL = "fct_expected_stop_event"
 DAY_COMPLETENESS_MODEL = "mart_day_completeness"
 SERVICE_COVERAGE_MODEL = "agg_service_coverage"
 PIPELINE_STATUS_MODEL = "mart_pipeline_status"
+SERVING_UNIVERSE_MODEL = "int_serving_trip_universe"
+SERVING_TRIP_EXECUTION_MODEL = "int_serving_trip_execution"
 SERVING_MODELS = (
-    "int_serving_trip_universe "
+    "int_serving_trip_execution int_serving_stop_arrival "
     "dim_serving_date "
     "mart_mode_window_summary mart_entity_daily_summary mart_line_window_summary "
     "mart_stop_group_window_summary mart_stop_post_window_summary mart_hour_window_summary "
@@ -75,6 +77,16 @@ SERVING_MODELS = (
     "mart_line_course_stop_window mart_stop_line_window_summary "
     "mart_stop_post_line_group_window mart_stop_group_line_group_window "
     "mart_pipeline_status_recent_summary rpt_schedule_day_mapping_evidence rpt_ranking_universe_evidence"
+)
+PRIOR_SERVING_MODELS = (
+    "int_serving_trip_execution int_serving_stop_arrival "
+    "mart_mode_window_summary mart_entity_daily_summary mart_line_window_summary "
+    "mart_stop_group_window_summary mart_stop_post_window_summary mart_hour_window_summary "
+    "mart_entity_rankings mart_entity_timeline_daily mart_worst_delay_event "
+    "mart_line_reliability_daily mart_trip_daily mart_trip_mode_daily_summary "
+    "mart_trip_line_daily mart_line_trip_group_daily mart_line_course_window "
+    "mart_line_course_stop_window mart_stop_line_window_summary "
+    "mart_stop_post_line_group_window mart_stop_group_line_group_window"
 )
 WAREHOUSE_HISTORY_START_DATE = "2026-06-25"
 BIGQUERY_DBT_COST_LOOKBACK_HOURS = 12
@@ -106,7 +118,11 @@ COMPLETENESS_COVERAGE_DBT_VARS = dbt_vars(
 MART_DBT_VARS = dbt_vars(
     processing_date=PROCESSING_DATE,
     gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
-    aggregation_start_date=WAREHOUSE_HISTORY_START_DATE,
+)
+PRIOR_MART_DBT_VARS = dbt_vars(
+    processing_date=PRIOR_SERVICE_DATE,
+    gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
+    max_gps_date=PROCESSING_DATE,
 )
 
 
@@ -388,6 +404,20 @@ with DAG(
         )
 
     with TaskGroup("serving_marts", group_display_name="Serving marts", prefix_group_id=False) as serving_group:
+        dbt_run_serving_universe, dbt_test_serving_universe = _dbt_run_test_pair(
+            "serving_universe",
+            SERVING_UNIVERSE_MODEL,
+            SERVING_UNIVERSE_MODEL,
+            MART_DBT_VARS,
+            "--indirect-selection cautious --exclude test_type:generic",
+        )
+        dbt_run_serving_marts_prior, dbt_test_serving_marts_prior = _dbt_run_test_pair(
+            "serving_marts_prior",
+            PRIOR_SERVING_MODELS,
+            PRIOR_SERVING_MODELS,
+            PRIOR_MART_DBT_VARS,
+            "--indirect-selection cautious --exclude test_type:generic",
+        )
         dbt_run_serving_marts, dbt_test_serving_marts = _dbt_run_test_pair(
             "serving_marts",
             SERVING_MODELS,
@@ -435,7 +465,16 @@ with DAG(
         @task(outlets=[GPS_MODELS_DATE_ASSET])
         def emit_gps_models_date_asset(processing_date: str) -> Iterator[Metadata]:
             """Emit the completed GPS warehouse partition."""
-            yield Metadata(GPS_MODELS_DATE_ASSET, {"processing_date": processing_date})
+            yield Metadata(
+                GPS_MODELS_DATE_ASSET,
+                {
+                    "processing_date": processing_date,
+                    "changed_partition_dates": [
+                        (date.fromisoformat(processing_date) - timedelta(days=1)).isoformat(),
+                        processing_date,
+                    ],
+                },
+            )
 
         @task(trigger_rule=TriggerRule.ONE_FAILED, retries=0)
         def fail_on_any_task_failure() -> None:
@@ -464,7 +503,9 @@ with DAG(
         upstream_task >> dbt_run_completeness_and_coverage
     dbt_run_completeness_and_coverage >> dbt_test_completeness_and_coverage >> dbt_run_pipeline_status
     dbt_run_pipeline_status >> dbt_test_pipeline_status
-    dbt_test_pipeline_status >> dbt_run_serving_marts >> dbt_test_serving_marts
+    dbt_test_pipeline_status >> dbt_run_serving_universe >> dbt_test_serving_universe
+    dbt_test_serving_universe >> dbt_run_serving_marts_prior >> dbt_test_serving_marts_prior
+    dbt_test_serving_marts_prior >> dbt_run_serving_marts >> dbt_test_serving_marts
     gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE)
     if LOG_BIGQUERY_DBT_JOB_COSTS:
         cost_summary = log_bigquery_dbt_job_costs()

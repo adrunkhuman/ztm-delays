@@ -14,7 +14,7 @@
 
 with base as (
     select *, concat(gtfs_snapshot_id, '|', trip_id, '|', coalesce(vehicle_number, '')) as trip_key
-    from {{ ref('fct_stop_arrival') }}
+    from {{ ref('int_serving_stop_arrival') }}
     where service_date between date_sub(date('{{ processing_date }}'), interval 60 day) and date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')
@@ -39,7 +39,7 @@ zone1_windowed as (
         and windowed.service_date = universe.service_date
         and windowed.trip_id = universe.trip_id
     where universe.processing_date between date_sub(date('{{ processing_date }}'), interval 60 day)
-        and date('{{ processing_date }}')
+        and date('{{ var("max_gps_date", processing_date) }}')
       and universe.is_zone1_public_ranking_trip
 ),
 

@@ -33,7 +33,7 @@ arrival_base as (
     select
         arrivals.*,
         window_trip_universe.is_zone1_public_ranking_trip
-    from {{ ref('fct_stop_arrival') }} as arrivals
+    from {{ ref('int_serving_stop_arrival') }} as arrivals
     inner join window_trip_universe
         on arrivals.gtfs_snapshot_id = window_trip_universe.gtfs_snapshot_id
         and arrivals.gps_date = window_trip_universe.processing_date

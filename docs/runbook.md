@@ -45,7 +45,7 @@ dbt build --select fct_trip fct_stop_arrival \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"PRIOR_SERVICE_DATE","aggregation_start_date":"PRIOR_SERVICE_DATE"}'
 ```
 
-GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the production DAG publishes both the current service date and the prior service date for each GPS processing date.
+GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the production DAG publishes both the current service date and the prior service date for each GPS processing date. A prior service-date partition can contain rows from two GPS dates with different governing GTFS snapshots; fact publication preserves each row's snapshot lineage and joins schedule metadata on `gtfs_snapshot_id`.
 
 `insert_overwrite` replaces the listed partitions even when the compiled source query returns zero rows. Historical reruns must derive the governing GTFS snapshot from the warehouse processing-date mapping, not from the latest snapshot, and must stop on schedule-version or snapshot-lineage test failures before continuing to later dates. Those expensive lineage checks are tagged `audit`, excluded from normal DAG test paths, and run by `dag_weekly_audit`; if you run recovery manually, run the audit selector explicitly rather than relying on default DAG tests.
 
@@ -53,7 +53,7 @@ GPS staging and intermediate models use static-partition `insert_overwrite` for 
 
 Loop over dates in order. For every GPS processing date, ensure at least one GTFS snapshot has been loaded and its schedule dimensions have been built. Nightly rebuilds use the latest built snapshot available at rebuild time, not a same-day cutoff rule.
 
-For each GPS processing date, rebuild the GPS/intermediate models, then publish facts for the current service date and the prior service date. Publishing the prior date is the cheap drift guard: if a late GTFS snapshot changes yesterday's schedule before the nightly run, yesterday is replaced with the same latest schedule as today. After detail exists, rebuild completeness, coverage, aggregate, and pipeline-status marts over the collected-history window.
+For each GPS processing date, rebuild the GPS/intermediate models, then publish facts for the current service date and the prior service date. Publishing the prior date incorporates after-midnight observations without relabeling prior-day rows to the current processing date's snapshot. After detail exists, rebuild completeness, coverage, aggregate, and pipeline-status marts over the collected-history window.
 
 After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each processing batch and that `schedule_version_id` resolves to a version covering the row's GPS processing date. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
 
@@ -108,7 +108,7 @@ DAG boundaries follow schedule, retry, and recovery semantics. TaskGroups may im
 - `dag_gtfs_poll` produces `gtfs_snapshot` only when the GTFS ZIP hash changes.
 - `dag_gtfs_load` consumes `gtfs_snapshot` and loads/tests the exact emitted snapshot.
 - `dag_gps_raw_load` produces partitioned `raw_gps_date` events keyed by Warsaw-local GPS date. This records an hourly raw-load attempt, not a complete-day guarantee; completeness/status marts determine health.
-- `dag_daily_gps` runs nightly at `04:00 Europe/Warsaw`, rebuilds one GPS processing date, and emits `gps_models_date` after marts/status succeed. The DAG ID is historical; hourly raw GPS asset events no longer trigger full warehouse rebuilds.
+- `dag_daily_gps` runs nightly at `04:00 Europe/Warsaw`, rebuilds one GPS processing date plus prior-date facts/serving partitions, and emits `gps_models_date` with both changed partition dates after marts/status succeed. The DAG ID is historical; hourly raw GPS asset events no longer trigger full warehouse rebuilds.
 
 Manual recovery remains explicit: trigger `dag_gtfs_load` with `snapshot_id`, `gcs_path`, and `processing_date`, or trigger `dag_daily_gps` with `processing_date` / partition key for the failed date. GTFS manual config must use `snapshot_id=YYYY-MM-DDTHH:MM:SSZ_<12 hex>`, `gcs_path=gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip`, and `processing_date=YYYY-MM-DD`. Rerun failed date partitions rather than clearing unrelated dates.
 
@@ -119,7 +119,7 @@ Normal Airflow cadence must stay bounded and deliberate:
 - Hourly raw GPS loading only loads immutable GCS parts into raw BigQuery.
 - Nightly GPS warehouse work runs one processing date and its prior service-date fact publication.
 - `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` replace the prior/current date partitions during normal nightly runs.
-- Serving marts build from warehouse facts after pipeline status succeeds.
+- Incremental serving marts rebuild the prior date before the current date after pipeline status succeeds; full-table serving models run only with the current date.
 - GTFS load runs raw load, staging, dimensions, and cheap/default dimension tests.
 
 Expensive tests are audit jobs until operational maturity is higher. Do not add them back to default Airflow DAG paths.
@@ -150,9 +150,9 @@ For `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`,
 
 After `dag_daily_gps` finishes its normal dbt phases, it logs a BigQuery dbt cost summary from `INFORMATION_SCHEMA.JOBS_BY_USER`: job count, total bytes processed, total bytes billed, and top jobs by bytes. This is visibility only. Metadata collection failure is logged but does not block asset publication. Attribution is best-effort: it is scoped to the same BigQuery principal, project, and region, and filters on dbt query comments, so concurrent dbt jobs from the same principal can be included while jobs from another principal or without dbt comments can be missed.
 
-## Manual Serving Export
+## Serving Export
 
-`dag_serving_export` is manual-only for the alpha serving path. Run it after the mart tables are built and validated for the archive window you want to expose. It exports the fixed frontend source-table allowlist to GCS Parquet under `gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds page-shaped DuckDB serving tables locally, validates the artifact, and atomically swaps the stable serving file. When changing the frontend serving surface, update the DAG source allowlist, derived-table SQL, tests, and `docs/serving_contract.md` together.
+`dag_serving_export` normally consumes the `gps_models_date` asset after nightly marts succeed. It can also be triggered manually after a wider mart rebuild. It exports the fixed frontend source-table allowlist to GCS Parquet under `gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds page-shaped DuckDB serving tables locally, validates the artifact, and atomically swaps the stable serving file. When changing the frontend serving surface, update the DAG source allowlist, derived-table SQL, tests, and `docs/serving_contract.md` together.
 
 Default output path inside the Airflow container:
 
@@ -169,11 +169,16 @@ Useful manual config:
   "export_id": "alpha-20260702",
   "output_dir": "/opt/airflow/serving",
   "output_filename": "ztm.duckdb",
+  "changed_partition_dates": ["2026-07-01", "2026-07-02"],
   "max_source_bytes": 21474836480,
   "max_duckdb_bytes": 21474836480,
   "cleanup_gcs_staging": false
 }
 ```
+
+Manual partition-cache exports must list every date changed by the preceding rebuild. Omit `changed_partition_dates` to extract complete source tables when the changed set is unknown.
+
+Deployments that introduce or change canonical serving models must rebuild `int_serving_trip_execution`, `int_serving_stop_arrival`, and their dependent serving marts for every retained serving date before unpausing `dag_serving_export`. Verify `mart_trip_daily.gtfs_snapshot_id` is non-null across the retained range before publication. This is a one-time migration; normal nightly runs replace only prior/current serving partitions.
 
 The Airflow image must include the `duckdb` Python package. The export fails before publication if required mart tables are missing, required serving tables are empty, source bytes exceed the configured guardrail, the built DuckDB file exceeds its guardrail, or validation cannot query the expected tables.
 

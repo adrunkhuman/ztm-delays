@@ -414,7 +414,13 @@ def get_schedule(  # noqa: PLR0913
             selected_vehicle = trips[0]["vehicle_number"]
         selected_trip = _find_trip(trips, selected_trip_id, selected_vehicle)
         if selected_trip is not None:
-            trip_stops = _trip_stops(db_path, selected_date, selected_trip["trip_id"], selected_trip["vehicle_number"])
+            trip_stops = _trip_stops(
+                db_path,
+                selected_date,
+                selected_trip.get("gtfs_snapshot_id"),
+                selected_trip["trip_id"],
+                selected_trip["vehicle_number"],
+            )
     return {
         "date_options": date_options,
         "selected_date": selected_date,
@@ -457,7 +463,13 @@ def get_trip_detail(
     trip_stops = []
     if trip is not None:
         trip["trace"] = _trip_trace(trip.get("delay_profile") or [])
-        trip_stops = _trip_stops(db_path, selected_date, trip["trip_id"], trip["vehicle_number"])
+        trip_stops = _trip_stops(
+            db_path,
+            selected_date,
+            trip.get("gtfs_snapshot_id"),
+            trip["trip_id"],
+            trip["vehicle_number"],
+        )
     return {"selected_date": selected_date, "trip": trip, "trip_stops": trip_stops}
 
 
@@ -869,18 +881,25 @@ def _trip_groups(
     return groups
 
 
-def _trip_stops(db_path: Path, selected_date: str | None, trip_id: str, vehicle_number: str) -> list[dict[str, Any]]:
+def _trip_stops(
+    db_path: Path,
+    selected_date: str | None,
+    gtfs_snapshot_id: str | None,
+    trip_id: str,
+    vehicle_number: str,
+) -> list[dict[str, Any]]:
     rows = fetch_all(
         db_path,
         """
         select stop_sequence, stop_id, stop_group_id, stop_post_code, stop_name, scheduled_arrival_time, actual_arrival_time, delay_seconds, observation_status
         from fct_expected_stop_event
         where service_date = ?
+          and (? is null or gtfs_snapshot_id = ?)
           and trip_id = ?
           and vehicle_number = ?
         order by stop_sequence
         """,
-        [selected_date, trip_id, vehicle_number],
+        [selected_date, gtfs_snapshot_id, gtfs_snapshot_id, trip_id, vehicle_number],
     )
     for row in rows:
         row["post_label"] = row.get("stop_post_code") or _stop_post_label(row["stop_id"], row["stop_group_id"])
