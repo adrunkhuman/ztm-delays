@@ -47,6 +47,29 @@ def test_get_export_metadata_ignores_stale_sidecar(tmp_path: Path) -> None:
     assert "poller_status" not in metadata
 
 
+def test_trip_stops_use_selected_trip_snapshot(tmp_path: Path) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table fct_expected_stop_event as
+            select * from (
+                values
+                    ('snapshot-a', date '2026-06-30', 'trip-1', '1001', 0, '100101', '1001', '01', 'Old stop', timestamp '2026-06-30 08:00:00', timestamp '2026-06-30 08:01:00', 60, 'observed'),
+                    ('snapshot-b', date '2026-06-30', 'trip-1', '1001', 0, '100101', '1001', '01', 'Current stop', timestamp '2026-06-30 08:00:00', timestamp '2026-06-30 08:02:00', 120, 'observed')
+            ) as rows(
+                gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence, stop_id,
+                stop_group_id, stop_post_code, stop_name, scheduled_arrival_time, actual_arrival_time,
+                delay_seconds, observation_status
+            )
+            """
+        )
+
+    rows = queries._trip_stops(db_path, "2026-06-30", "snapshot-b", "trip-1", "1001")  # noqa: SLF001
+
+    assert [(row["stop_name"], row["delay_seconds"]) for row in rows] == [("Current stop", 120)]
+
+
 def _create_line_smoke_db(db_path: Path) -> None:
     with duckdb.connect(str(db_path)) as connection:
         _execute_many(

@@ -20,7 +20,7 @@ with trips as (
             when trip_quality = 'broken' then 'broken'
             else 'partial'
         end as outcome
-    from {{ ref('fct_trip') }}
+    from {{ ref('int_serving_trip_execution') }}
     where service_date = date('{{ processing_date }}')
       and mode in ('bus', 'tram')
 ),

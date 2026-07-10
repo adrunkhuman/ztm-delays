@@ -22,7 +22,7 @@ with base as (
         {{ stop_post_code('stop_id') }} as stop_post_code,
         line,
         route_short_name
-    from {{ ref('fct_stop_arrival') }}
+    from {{ ref('int_serving_stop_arrival') }}
     where service_date = date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')

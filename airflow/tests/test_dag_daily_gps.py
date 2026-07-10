@@ -283,10 +283,12 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert "--exclude tag:audit" in dag.dbt_test_int_ping_trip.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_int_gps_hourly_completeness.kwargs["bash_command"]
+    assert "--exclude test_type:generic" in dag.dbt_test_serving_universe.kwargs["bash_command"]
+    assert "--exclude test_type:generic" in dag.dbt_test_serving_marts_prior.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_serving_marts.kwargs["bash_command"]
     assert "--exclude tag:audit" in dag.dbt_test_serving_marts.kwargs["bash_command"]
     for serving_model in [
-        "int_serving_trip_universe",
+        "int_serving_trip_execution",
         "mart_line_window_summary",
         "mart_stop_group_window_summary",
         "mart_stop_post_window_summary",
@@ -326,7 +328,11 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
 
     assert not hasattr(dag, "dbt_test_aggregate_marts")
     assert dag.dbt_run_pipeline_status in dag.dbt_test_completeness_and_coverage.downstream
-    assert dag.dbt_run_serving_marts in dag.dbt_test_pipeline_status.downstream
+    assert dag.dbt_run_serving_universe in dag.dbt_test_pipeline_status.downstream
+    assert dag.dbt_test_serving_universe in dag.dbt_run_serving_universe.downstream
+    assert dag.dbt_run_serving_marts_prior in dag.dbt_test_serving_universe.downstream
+    assert dag.dbt_test_serving_marts_prior in dag.dbt_run_serving_marts_prior.downstream
+    assert dag.dbt_run_serving_marts in dag.dbt_test_serving_marts_prior.downstream
     assert dag.dbt_test_serving_marts in dag.dbt_run_serving_marts.downstream
     assert dag.LOG_BIGQUERY_DBT_JOB_COSTS is False
     assert dag.log_bigquery_dbt_job_costs not in dag.dbt_test_serving_marts.downstream
@@ -352,13 +358,31 @@ def test_dag_uses_bounded_mart_windows() -> None:
         (dag.dbt_test_completeness_and_coverage, dag.PRIOR_SERVICE_DATE),
         (dag.dbt_run_pipeline_status, dag.PRIOR_SERVICE_DATE),
         (dag.dbt_test_pipeline_status, dag.PRIOR_SERVICE_DATE),
-        (dag.dbt_run_serving_marts, dag.WAREHOUSE_HISTORY_START_DATE),
-        (dag.dbt_test_serving_marts, dag.WAREHOUSE_HISTORY_START_DATE),
     ]
 
     for task, expected_start_date in expected_aggregation_vars:
         assert '"aggregation_start_date": "' + expected_start_date in task.kwargs["bash_command"]
+    assert "aggregation_start_date" not in dag.dbt_run_serving_marts.kwargs["bash_command"]
+    assert "aggregation_start_date" not in dag.dbt_test_serving_marts.kwargs["bash_command"]
+    assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
+    assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_test_serving_marts_prior.kwargs["bash_command"]
+    assert '"max_gps_date": "' + dag.PROCESSING_DATE in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
+    assert dag.SERVING_UNIVERSE_MODEL in dag.dbt_run_serving_universe.kwargs["bash_command"]
     assert dag.SERVING_MODELS in dag.dbt_run_serving_marts.kwargs["bash_command"]
+    assert dag.PRIOR_SERVING_MODELS in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
+
+
+def test_gps_models_asset_reports_current_and_prior_changed_partitions() -> None:
+    dag = _load_dag_module()
+
+    metadata = list(dag.emit_gps_models_date_asset.function("2026-07-08"))
+
+    assert len(metadata) == 1
+    assert metadata[0].asset == dag.GPS_MODELS_DATE_ASSET
+    assert metadata[0].extra == {
+        "processing_date": "2026-07-08",
+        "changed_partition_dates": ["2026-07-07", "2026-07-08"],
+    }
 
 
 @dataclass

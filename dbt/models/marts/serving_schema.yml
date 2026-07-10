@@ -243,9 +243,53 @@ models:
           - not_null:
               config: *source_end_date_filter
 
+  - name: int_serving_trip_execution
+    description: Canonical snapshot-aware observed trip execution used by trip-level serving marts.
+    columns:
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null:
+              config: *service_date_filter
+      - name: service_date
+        tests:
+          - not_null:
+              config: *service_date_filter
+      - name: trip_id
+        tests:
+          - not_null:
+              config: *service_date_filter
+      - name: vehicle_number
+        tests:
+          - not_null:
+              config: *service_date_filter
+
+  - name: int_serving_stop_arrival
+    description: Stop arrivals restricted to the canonical snapshot selected for each serving trip execution.
+    columns:
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null:
+              config: *service_date_filter
+      - name: service_date
+        tests:
+          - not_null:
+              config: *service_date_filter
+      - name: trip_id
+        tests:
+          - not_null:
+              config: *service_date_filter
+      - name: vehicle_number
+        tests:
+          - not_null:
+              config: *service_date_filter
+
   - name: mart_trip_daily
     description: Trip display mart with warehouse-computed delay profiles, erratic scores, and ranks.
     columns:
+      - name: gtfs_snapshot_id
+        tests:
+          - not_null:
+              config: *service_date_filter
       - name: service_date
         tests:
           - not_null:

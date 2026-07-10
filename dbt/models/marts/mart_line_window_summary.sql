@@ -17,7 +17,7 @@ with base as (
         arrivals.*,
         versions.valid_from_date as schedule_version_start_date,
         concat(arrivals.gtfs_snapshot_id, '|', arrivals.trip_id, '|', coalesce(arrivals.vehicle_number, '')) as trip_key
-    from {{ ref('fct_stop_arrival') }} as arrivals
+    from {{ ref('int_serving_stop_arrival') }} as arrivals
     left join {{ ref('dim_schedule_version') }} as versions
         on arrivals.schedule_version_id = versions.schedule_version_id
     where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval 60 day) and date('{{ processing_date }}')
@@ -60,7 +60,7 @@ zone1_windowed as (
         and windowed.service_date = universe.service_date
         and windowed.trip_id = universe.trip_id
     where universe.processing_date between date_sub(date('{{ processing_date }}'), interval 60 day)
-        and date('{{ processing_date }}')
+        and date('{{ var("max_gps_date", processing_date) }}')
       and universe.is_zone1_public_ranking_trip
 ),
 

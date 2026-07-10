@@ -22,7 +22,7 @@ with grouped as (
         any_value(origin_stop_name) as origin_stop_name,
         any_value(destination_stop_name) as destination_stop_name,
         count(*) as trip_count
-    from {{ ref('fct_trip') }}
+    from {{ ref('int_serving_trip_execution') }}
     where service_date = date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')

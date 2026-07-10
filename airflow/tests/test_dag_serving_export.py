@@ -64,21 +64,89 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.max_source_bytes == 20 * 1024 * 1024 * 1024
     assert config.max_duckdb_bytes == 20 * 1024 * 1024 * 1024
     assert config.cleanup_gcs_staging is True
-    assert config.changed_partition_date is None
+    assert config.changed_partition_dates == ()
 
 
-def test_export_config_uses_gps_models_asset_processing_date() -> None:
+def test_export_config_uses_gps_models_asset_changed_partition_dates() -> None:
+    dag = _load_dag_module()
+
+    config = dag._export_config(
+        {
+            "dag_run": FakeDagRun({}),
+            "triggering_asset_events": {
+                dag.GPS_MODELS_DATE_ASSET: [
+                    FakeAssetEvent(
+                        {
+                            "processing_date": "2026-07-08",
+                            "changed_partition_dates": ["2026-07-07", "2026-07-08"],
+                        }
+                    )
+                ]
+            },
+        },
+        datetime(2026, 7, 9, 5, 0, tzinfo=UTC),
+    )
+
+    assert config.changed_partition_dates == ("2026-07-07", "2026-07-08")
+
+
+def test_export_config_falls_back_to_asset_processing_date() -> None:
     dag = _load_dag_module()
 
     config = dag._export_config(
         {
             "dag_run": FakeDagRun({}),
             "triggering_asset_events": {dag.GPS_MODELS_DATE_ASSET: [FakeAssetEvent({"processing_date": "2026-07-08"})]},
-        },
-        datetime(2026, 7, 9, 5, 0, tzinfo=UTC),
+        }
     )
 
-    assert config.changed_partition_date == "2026-07-08"
+    assert config.changed_partition_dates == ("2026-07-08",)
+
+
+def test_export_config_combines_coalesced_asset_events() -> None:
+    dag = _load_dag_module()
+
+    config = dag._export_config(
+        {
+            "dag_run": FakeDagRun({}),
+            "triggering_asset_events": {
+                dag.GPS_MODELS_DATE_ASSET: [
+                    FakeAssetEvent({"processing_date": "2026-07-07"}),
+                    FakeAssetEvent(
+                        {
+                            "processing_date": "2026-07-08",
+                            "changed_partition_dates": ["2026-07-07", "2026-07-08"],
+                        }
+                    ),
+                ]
+            },
+        }
+    )
+
+    assert config.changed_partition_dates == ("2026-07-07", "2026-07-08")
+
+
+def test_export_config_accepts_legacy_changed_partition_date() -> None:
+    dag = _load_dag_module()
+
+    config = dag._export_config({"dag_run": FakeDagRun({"changed_partition_date": "2026-07-08"})})
+
+    assert config.changed_partition_dates == ("2026-07-08",)
+
+
+@pytest.mark.parametrize(
+    "conf",
+    [
+        {"changed_partition_dates": "2026-07-08"},
+        {"changed_partition_dates": ["not-a-date"]},
+        {"changed_partition_dates": ["2026-07-07"], "changed_partition_date": "2026-07-08"},
+    ],
+)
+def test_export_config_rejects_invalid_changed_partition_dates(conf: dict[str, object]) -> None:
+    dag = _load_dag_module()
+
+    with pytest.raises((TypeError, ValueError)):
+        dag._export_config({"dag_run": FakeDagRun(conf)})
 
 
 def test_export_config_uses_shared_max_bytes_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,7 +174,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
                     "max_source_bytes": 123,
                     "max_duckdb_bytes": "456",
                     "cleanup_gcs_staging": False,
-                    "changed_partition_date": "2026-07-07",
+                    "changed_partition_dates": ["2026-07-06", "2026-07-07", "2026-07-07"],
                 }
             )
         }
@@ -120,7 +188,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
     assert config.max_source_bytes == 123
     assert config.max_duckdb_bytes == 456
     assert config.cleanup_gcs_staging is False
-    assert config.changed_partition_date == "2026-07-07"
+    assert config.changed_partition_dates == ("2026-07-06", "2026-07-07")
 
 
 @pytest.mark.parametrize(
@@ -239,11 +307,14 @@ def test_extract_mart_to_gcs_rejects_existing_job_after_conflict() -> None:
     assert client.existing_job.result_called is False
 
 
-def test_extract_partitioned_mart_to_gcs_updates_partition_cache() -> None:
+def test_sync_partition_cache_updates_changed_partitions() -> None:
     dag = _load_dag_module()
-    client = FakeBigQueryClient()
+    client = FakeBigQueryClient(partition_ids=["20260701", "20260702"])
     storage_client = FakeStorageClient(
         [
+            FakeBlob(
+                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-01/part-000.parquet"
+            ),
             FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet"),
             FakeBlob(
                 "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet"
@@ -259,34 +330,40 @@ def test_extract_partitioned_mart_to_gcs_updates_partition_cache() -> None:
         max_source_bytes=1000,
         max_duckdb_bytes=1000,
         cleanup_gcs_staging=False,
-        changed_partition_date="2026-07-02",
+        changed_partition_dates=("2026-07-01", "2026-07-02"),
     )
 
-    dag._extract_partitioned_mart_to_gcs(client, storage_client, config, "fct_expected_stop_event")
+    dag._sync_partition_cache(client, storage_client, config, "fct_expected_stop_event")
 
     assert client.query_call is None
-    assert client.extract_call is not None
-    assert client.extract_call.source_table == "ztm-data.ztm_marts.fct_expected_stop_event$20260702"
-    assert client.extract_call.destination_uri == (
+    assert [call.source_table for call in client.extract_calls] == [
+        "ztm-data.ztm_marts.fct_expected_stop_event$20260701",
+        "ztm-data.ztm_marts.fct_expected_stop_event$20260702",
+    ]
+    assert client.extract_calls[-1].destination_uri == (
         "gs://bucket/prefix/partition_staging/export_id=export-1/fct_expected_stop_event/"
         "service_date=2026-07-02/part-*.parquet"
     )
-    assert client.extract_call.job_config.destination_format == dag.bigquery.DestinationFormat.PARQUET
-    assert client.extract_call.job_id == "serving_export_partition_export_1_fct_expected_stop_event_2026_07_02"
-    assert client.extract_call.location == dag.BIGQUERY_LOCATION
-    assert client.extract_call.job.result_called is True
+    assert client.extract_calls[-1].job_config.destination_format == dag.bigquery.DestinationFormat.PARQUET
+    assert client.extract_calls[-1].job_id == "serving_export_partition_export_1_fct_expected_stop_event_2026_07_02"
+    assert client.extract_calls[-1].location == dag.BIGQUERY_LOCATION
+    assert all(call.job.result_called for call in client.extract_calls)
     assert storage_client.deleted_blob_names == [
-        "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet"
+        "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet",
     ]
     assert storage_client.copied_blob_names == [
         (
+            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-01/part-000.parquet",
+            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-01/generation=export-1/part-000.parquet",
+        ),
+        (
             "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
-            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
-        )
+            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/generation=export-1/part-000.parquet",
+        ),
     ]
 
 
-def test_ensure_partition_cache_complete_extracts_missing_partitions() -> None:
+def test_sync_partition_cache_extracts_missing_partitions() -> None:
     dag = _load_dag_module()
     client = FakeBigQueryClient(partition_ids=["20260701", "20260702", "20260703"])
     storage_client = FakeStorageClient(
@@ -309,26 +386,93 @@ def test_ensure_partition_cache_complete_extracts_missing_partitions() -> None:
         max_source_bytes=1000,
         max_duckdb_bytes=1000,
         cleanup_gcs_staging=False,
-        changed_partition_date="2026-07-03",
+        changed_partition_dates=("2026-07-03",),
     )
 
-    dag._ensure_partition_cache_complete(client, storage_client, config, "fct_expected_stop_event")
+    dag._sync_partition_cache(client, storage_client, config, "fct_expected_stop_event")
 
     assert client.partition_table_refs == ["ztm-data.ztm_marts.fct_expected_stop_event"]
     assert [call.source_table for call in client.extract_calls] == [
-        "ztm-data.ztm_marts.fct_expected_stop_event$20260702",
         "ztm-data.ztm_marts.fct_expected_stop_event$20260703",
+        "ztm-data.ztm_marts.fct_expected_stop_event$20260702",
     ]
     assert storage_client.copied_blob_names == [
         (
-            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
-            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
+            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-03/part-000.parquet",
+            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-03/generation=export-1/part-000.parquet",
         ),
         (
-            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-03/part-000.parquet",
-            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-03/part-000.parquet",
+            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
+            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/generation=export-1/part-000.parquet",
         ),
     ]
+
+
+def test_sync_partition_cache_skips_changed_dates_absent_from_source() -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient(partition_ids=["20260701"])
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-06-30/stale.parquet"),
+            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-01/part-000.parquet"),
+        ]
+    )
+    config = dag.ExportConfig(
+        export_id="export-1",
+        output_dir=Path("export"),
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=1000,
+        cleanup_gcs_staging=False,
+        changed_partition_dates=("2026-06-30",),
+    )
+
+    dag._sync_partition_cache(client, storage_client, config, "fct_expected_stop_event")
+
+    assert client.extract_calls == []
+    assert storage_client.deleted_blob_names == [
+        "prefix/partition_cache/fct_expected_stop_event/service_date=2026-06-30/stale.parquet"
+    ]
+
+
+def test_partition_cache_copy_failure_keeps_previous_generation_active(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient(partition_ids=["20260701"])
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-01/old.parquet"),
+            FakeBlob(
+                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-01/part-000.parquet"
+            ),
+            FakeBlob(
+                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-01/part-001.parquet",
+                fail_copy=True,
+            ),
+        ]
+    )
+    config = dag.ExportConfig(
+        export_id="export-1",
+        output_dir=Path("export"),
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=1000,
+        cleanup_gcs_staging=False,
+        changed_partition_dates=("2026-07-01",),
+    )
+
+    with pytest.raises(RuntimeError, match="copy failed"):
+        dag._sync_partition_cache(client, storage_client, config, "fct_expected_stop_event")
+
+    assert storage_client.deleted_blob_names == []
+    assert dag._cached_partition_dates(storage_client, config, "fct_expected_stop_event", "service_date") == {
+        "2026-07-01"
+    }
+    paths = dag._download_partitioned_mart_parquet(storage_client, config, "fct_expected_stop_event", tmp_path)
+    assert [path.name for path in paths] == ["old.parquet"]
 
 
 def test_download_mart_parquet_downloads_only_parquet_files(tmp_path: Path) -> None:
@@ -972,18 +1116,25 @@ class FakeBucket:
 
     def list_blobs(self, *, prefix: str) -> list[FakeBlob]:
         self.list_prefixes.append(prefix)
-        return [blob for blob in self.blobs if blob.name.startswith(prefix)]
+        return [
+            blob for blob in self.blobs if blob.name.startswith(prefix) and blob.name not in self.deleted_blob_names
+        ]
 
     def blob(self, blob_name: str) -> FakeBlob:
         matching_blob = next((blob for blob in self.blobs if blob.name == blob_name), None)
         if matching_blob is None:
-            raise RuntimeError(f"unexpected blob lookup: {blob_name}")
+            if not blob_name.endswith("/_MANIFEST.json"):
+                raise RuntimeError(f"unexpected blob lookup: {blob_name}")
+            matching_blob = FakeBlob(blob_name, deleted_blob_names=self.deleted_blob_names)
+            self.blobs.append(matching_blob)
         self.blob_names.append(blob_name)
         if matching_blob.data:
             return matching_blob
         return FakeBlob(blob_name, deleted_blob_names=self.deleted_blob_names)
 
     def copy_blob(self, blob: FakeBlob, _destination_bucket: FakeBucket, new_name: str) -> FakeBlob:
+        if blob.fail_copy:
+            raise RuntimeError("copy failed")
         self.copied_blob_names.append((blob.name, new_name))
         copied_blob = FakeBlob(new_name)
         self.blobs.append(copied_blob)
@@ -995,6 +1146,7 @@ class FakeBlob:
     name: str
     fail_download: bool = False
     fail_delete: bool = False
+    fail_copy: bool = False
     data: bytes = b""
     deleted_blob_names: list[str] | None = None
 
@@ -1011,6 +1163,10 @@ class FakeBlob:
 
     def download_as_bytes(self) -> bytes:
         return self.data
+
+    def upload_from_string(self, data: str, *, content_type: str) -> None:
+        assert content_type == "application/json"
+        self.data = data.encode()
 
 
 class Conflict(Exception):

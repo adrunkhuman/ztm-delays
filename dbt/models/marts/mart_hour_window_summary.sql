@@ -17,7 +17,7 @@ with base as (
         *,
         extract(hour from hour_bracket at time zone 'Europe/Warsaw') as local_hour,
         mod(extract(hour from hour_bracket at time zone 'Europe/Warsaw') + 20, 24) as service_hour_index
-    from {{ ref('fct_stop_arrival') }}
+    from {{ ref('int_serving_stop_arrival') }}
     where service_date between date_sub(date('{{ processing_date }}'), interval 60 day) and date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')

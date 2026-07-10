@@ -8,19 +8,23 @@
         partitions=["date('" ~ processing_date ~ "')"],
         cluster_by=["mode", "line"],
         require_partition_filter=true,
-        post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
 
-select
-    service_date,
-    mode,
-    line,
-    any_value(route_short_name) as route_short_name,
-    count(*) as trip_count,
-    row_number() over (partition by service_date, mode order by safe_cast(line as int64), line) as line_display_rank
-from {{ ref('int_serving_trip_execution') }}
+select *
+from {{ ref('fct_trip') }}
 where service_date = date('{{ processing_date }}')
-  and trip_quality = 'complete'
   and mode in ('bus', 'tram')
-group by service_date, mode, line
+qualify row_number() over (
+    partition by service_date, trip_id, vehicle_number
+    order by
+        case trip_quality
+            when 'complete' then 3
+            when 'partial' then 2
+            when 'broken' then 1
+            else 0
+        end desc,
+        gps_date desc,
+        actual_end_time desc,
+        gtfs_snapshot_id desc
+) = 1

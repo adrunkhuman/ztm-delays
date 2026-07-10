@@ -14,7 +14,7 @@
 
 with arrivals as (
     select *
-    from {{ ref('fct_stop_arrival') }}
+    from {{ ref('int_serving_stop_arrival') }}
     where service_date = date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')
