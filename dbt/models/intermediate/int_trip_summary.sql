@@ -167,27 +167,29 @@ ping_diagnostics as (
 
 stop_extents as (
     select
-        stop_times.gtfs_snapshot_id,
-        stop_times.trip_id,
+        stop_semantics.gtfs_snapshot_id,
+        stop_semantics.service_date,
+        stop_semantics.trip_id,
         count(*) as required_stop_count,
-        min(stop_times.stop_sequence) as first_required_stop_sequence,
-        max(stop_times.stop_sequence) as last_required_stop_sequence,
-        array_agg(stop_times.stop_id order by stop_times.stop_sequence)[offset(0)] as origin_stop_id,
-        array_agg(stops.stop_name order by stop_times.stop_sequence)[offset(0)] as origin_stop_name,
-        array_agg(stop_times.stop_id order by stop_times.stop_sequence desc)[offset(0)] as destination_stop_id,
-        array_agg(stops.stop_name order by stop_times.stop_sequence desc)[offset(0)] as destination_stop_name,
-        array_agg(stop_times.arrival_time_seconds order by stop_times.stop_sequence)[offset(0)]
+        min(stop_semantics.stop_sequence) as first_required_stop_sequence,
+        max(stop_semantics.stop_sequence) as last_required_stop_sequence,
+        array_agg(stop_semantics.stop_id order by stop_semantics.stop_sequence)[offset(0)] as origin_stop_id,
+        array_agg(stops.stop_name order by stop_semantics.stop_sequence)[offset(0)] as origin_stop_name,
+        array_agg(stop_semantics.stop_id order by stop_semantics.stop_sequence desc)[offset(0)] as destination_stop_id,
+        array_agg(stops.stop_name order by stop_semantics.stop_sequence desc)[offset(0)] as destination_stop_name,
+        array_agg(stop_semantics.arrival_time_seconds order by stop_semantics.stop_sequence)[offset(0)]
             as origin_arrival_time_seconds,
-        array_agg(stop_times.arrival_time_seconds order by stop_times.stop_sequence desc)[offset(0)]
+        array_agg(stop_semantics.arrival_time_seconds order by stop_semantics.stop_sequence desc)[offset(0)]
             as destination_arrival_time_seconds
-    from {{ ref('stg_gtfs__stop_times') }} as stop_times
+    from {{ ref('int_gtfs_trip_stop_semantics') }} as stop_semantics
     inner join {{ ref('stg_gtfs__stops') }} as stops
-        on stop_times.stop_id = stops.stop_id
-        and stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
+        on stop_semantics.stop_id = stops.stop_id
+        and stop_semantics.gtfs_snapshot_id = stops.gtfs_snapshot_id
         and stops.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-    where stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-      and stop_times.stop_service_class = 'regular'
-    group by stop_times.gtfs_snapshot_id, stop_times.trip_id
+    where stop_semantics.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+      and stop_semantics.is_passenger_stop
+      and stop_semantics.stop_service_class = 'regular'
+    group by stop_semantics.gtfs_snapshot_id, stop_semantics.service_date, stop_semantics.trip_id
 ),
 
 summarized as (
@@ -288,6 +290,7 @@ summarized as (
         and arrivals.gtfs_snapshot_id = routes.gtfs_snapshot_id
     left join stop_extents
         on arrivals.gtfs_snapshot_id = stop_extents.gtfs_snapshot_id
+        and arrivals.service_date = stop_extents.service_date
         and arrivals.trip_id = stop_extents.trip_id
     left join arrival_progression
         on arrivals.gtfs_snapshot_id = arrival_progression.gtfs_snapshot_id

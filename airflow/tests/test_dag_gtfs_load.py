@@ -382,6 +382,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
         "int_gtfs_trip_schedule",
         "int_gtfs_trip_schedule_history",
         "int_gtfs_duty_chain",
+        "int_gtfs_trip_stop_semantics",
         "int_schedule_version",
         "dim_schedule_version",
         "dim_line_current",
@@ -394,6 +395,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
         "int_gtfs_trip_schedule",
         "int_gtfs_trip_schedule_history",
         "int_gtfs_duty_chain",
+        "int_gtfs_trip_stop_semantics",
         "int_schedule_version",
     }
     _assert_dbt_command(dag.dbt_run_gtfs_staging.bash_command, "run", dag.GTFS_STAGING_MODELS)
@@ -412,6 +414,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
         "int_gtfs_trip_schedule",
         "int_gtfs_trip_schedule_history",
         "int_gtfs_duty_chain",
+        "int_gtfs_trip_stop_semantics",
         "int_schedule_version",
     }:
         assert model_name in dag.dbt_test_gtfs_dimensions.bash_command

@@ -573,6 +573,12 @@ models:
         description: GTFS drop_off_type for this trip-stop row.
       - name: stop_service_class
         description: Passenger-service class for this trip-stop row. Observed stop arrivals exclude not_in_passenger_service rows.
+      - name: stop_execution_class
+        description: Settled trip-relative execution class. Published arrivals are passenger rows only.
+      - name: classification_confidence
+      - name: classification_reason
+      - name: classification_evidence
+      - name: are_passenger_boundaries_settled
       - name: scheduled_arrival_time
         description: Scheduled arrival timestamp reconstructed from service_date and GTFS arrival seconds.
       - name: scheduled_departure_time
@@ -689,6 +695,16 @@ models:
         description: GTFS drop_off_type for this trip-stop row.
       - name: stop_service_class
         description: "Passenger-service class derived from pickup/drop-off rules: regular, request, or not_in_passenger_service."
+      - name: stop_execution_class
+        description: Trip-relative passenger, technical, or unknown execution class.
+      - name: classification_confidence
+      - name: classification_reason
+      - name: classification_evidence
+      - name: is_passenger_stop
+        description: True only for a settled passenger stop row.
+      - name: are_passenger_boundaries_settled
+      - name: first_passenger_stop_sequence
+      - name: last_passenger_stop_sequence
       - name: scheduled_arrival_time
         description: Scheduled arrival timestamp reconstructed from service_date and GTFS arrival seconds.
       - name: scheduled_departure_time
@@ -1509,6 +1525,11 @@ unit_tests:
             0 as pickup_type,
             0 as drop_off_type,
             'regular' as stop_service_class,
+            'passenger' as stop_execution_class,
+            'high' as classification_confidence,
+            'gtfs_passenger_stop' as classification_reason,
+            ['gtfs_passenger_eligible'] as classification_evidence,
+            true as are_passenger_boundaries_settled,
             timestamp('2026-01-15 08:17:00+01') as scheduled_arrival_time,
             timestamp('2026-01-15 08:17:20+01') as scheduled_departure_time,
             timestamp('2026-01-15 08:19:30+01') as actual_arrival_time,
@@ -1525,7 +1546,7 @@ unit_tests:
           select
             'snapshot-valid', '118', '2', 1904, 1, date '2026-01-15', date '2026-01-15', 'weekday',
             'trip-non-monotonic', 'shape-2', 'svc', 0, '200101', 'Reverse 01', 5,
-            0, 0, 'regular',
+            0, 0, 'regular', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true,
             timestamp('2026-01-15 08:15:00+01'), timestamp('2026-01-15 08:15:20+01'),
             timestamp('2026-01-15 08:09:00+01'), -360, 'segment_within_75m', 75.0, 9.0, 4.0, 5.0,
             timestamp('2026-01-15 08:08:30+01'), timestamp('2026-01-15 08:09:30+01'), 60
@@ -1533,7 +1554,7 @@ unit_tests:
           select
             'snapshot-prior', '187', '9', 1001, 1, date '2026-01-15', date '2026-01-15', 'weekday',
             'trip-1', 'shape-prior', 'svc-prior', 0, '100101', 'Prior 01', 1,
-            0, 0, 'regular',
+            0, 0, 'regular', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true,
             timestamp('2026-01-15 07:10:00+01'), timestamp('2026-01-15 07:10:20+01'),
             timestamp('2026-01-15 07:11:00+01'), 60, 'segment_within_75m', 75.0, 8.0, 9.0, 10.0,
             timestamp('2026-01-15 07:10:30+01'), timestamp('2026-01-15 07:11:30+01'), 60
@@ -1657,6 +1678,11 @@ unit_tests:
           0 as pickup_type,
           0 as drop_off_type,
           'regular' as stop_service_class,
+          'passenger' as stop_execution_class,
+          'high' as classification_confidence,
+          'gtfs_passenger_stop' as classification_reason,
+          ['gtfs_passenger_eligible'] as classification_evidence,
+          true as are_passenger_boundaries_settled,
           timestamp('2026-01-15 08:17:00+01') as scheduled_arrival_time,
           timestamp('2026-01-15 08:17:20+01') as scheduled_departure_time,
           timestamp('2026-01-15 08:19:30+01') as actual_arrival_time,
@@ -1676,7 +1702,8 @@ unit_tests:
           'trip-1', 1001, '187', '187', 'bus', '9', 1, 0, 'svc-prior', 'Prior', 'shape-prior',
           'weekday', false, 'thursday', 'svc-prior', '187|0|thursday|2026-01-15', 'complete',
           array<string>[], 'regular', array<string>[], '100101', '1001', '01', 'Prior 01', 52.5, 21.5,
-          'Prior 01', 1, 0, 0, 'regular', timestamp('2026-01-15 07:10:00+01'),
+          'Prior 01', 1, 0, 0, 'regular', 'passenger', 'high', 'gtfs_passenger_stop',
+          ['gtfs_passenger_eligible'], true, timestamp('2026-01-15 07:10:00+01'),
           timestamp('2026-01-15 07:10:20+01'), timestamp('2026-01-15 07:11:00+01'), 60,
           timestamp('2026-01-15 07:00:00+01'), 'segment_within_75m', 75.0, 8.0, 9.0, 10.0,
           timestamp('2026-01-15 07:10:30+01'), timestamp('2026-01-15 07:11:30+01'), 60
@@ -1768,9 +1795,21 @@ unit_tests:
           select
             'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 'settled_duty_chain',
             'chain-prior', 'block_id', 'block-prior', 1, 1, 1, array<string>[]
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
+          select
+            base.*,
+            date '2026-01-15' as service_date,
+            if(stop_service_class = 'not_in_passenger_service', 'technical_suffix', 'passenger') as stop_execution_class,
+            'high' as classification_confidence,
+            if(stop_service_class = 'not_in_passenger_service', 'explicit_non_passenger_suffix', 'gtfs_passenger_stop') as classification_reason,
+            if(stop_service_class = 'not_in_passenger_service', ['explicit_non_passenger_service'], ['gtfs_passenger_eligible']) as classification_evidence,
+            stop_service_class != 'not_in_passenger_service' as is_passenger_stop,
+            true as are_passenger_boundaries_settled,
+            min(if(stop_service_class != 'not_in_passenger_service', stop_sequence, null)) over (partition by gtfs_snapshot_id, trip_id) as first_passenger_stop_sequence,
+            max(if(stop_service_class != 'not_in_passenger_service', stop_sequence, null)) over (partition by gtfs_snapshot_id, trip_id) as last_passenger_stop_sequence
+          from (
           select 'trip-1' as trip_id, '100101' as stop_id, 0 as stop_sequence, 30000 as arrival_time_seconds, 30000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'trip-1', '100102', 1, 30300, 30300, 0, 0, 'regular', 'snapshot-valid'
           union all select 'trip-1', '100105', 2, 30400, 30400, 1, 1, 'not_in_passenger_service', 'snapshot-valid'
@@ -1780,6 +1819,7 @@ unit_tests:
           union all select 'trip-3', '100104', 0, 30900, 30900, 0, 0, 'regular', 'snapshot-valid'
           union all select 'trip-4', '100108', 0, 31200, 31200, 0, 0, 'regular', 'snapshot-valid'
           union all select 'trip-1', '100101', 0, 27000, 27000, 0, 0, 'regular', 'snapshot-prior'
+          ) as base
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1883,6 +1923,14 @@ unit_tests:
           0 as pickup_type,
           0 as drop_off_type,
           'regular' as stop_service_class,
+          'passenger' as stop_execution_class,
+          'high' as classification_confidence,
+          'gtfs_passenger_stop' as classification_reason,
+          ['gtfs_passenger_eligible'] as classification_evidence,
+          true as is_passenger_stop,
+          true as are_passenger_boundaries_settled,
+          0 as first_passenger_stop_sequence,
+          3 as last_passenger_stop_sequence,
           timestamp('2026-01-15 08:20:00+01') as scheduled_arrival_time,
           timestamp('2026-01-15 08:20:00+01') as scheduled_departure_time,
           timestamp('2026-01-15 08:20:05+01') as actual_arrival_time,
@@ -1905,6 +1953,7 @@ unit_tests:
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
           1, 1, 1, array<string>[], '100102', '1001', '02', 'Main 02', 52.2, 21.2, 'Main 01', 1, 0, 0, 'regular',
+          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 3,
           timestamp('2026-01-15 08:25:00+01'), timestamp('2026-01-15 08:25:00+01'), cast(null as timestamp),
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
@@ -1915,6 +1964,7 @@ unit_tests:
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
           1, 1, 1, array<string>[], '100105', '1001', '05', 'Depot', 52.5, 21.5, 'Main 01', 2, 1, 1, 'not_in_passenger_service',
+          'technical_suffix', 'high', 'explicit_non_passenger_suffix', ['explicit_non_passenger_service'], false, true, 0, 3,
           timestamp('2026-01-15 08:26:40+01'), timestamp('2026-01-15 08:26:40+01'), cast(null as timestamp),
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
@@ -1925,6 +1975,7 @@ unit_tests:
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
           1, 1, 1, array<string>[], '100106', '1001', '06', 'Request Stop', 52.6, 21.6, 'Main 01', 3, 3, 3, 'request',
+          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 3,
           timestamp('2026-01-15 08:28:20+01'), timestamp('2026-01-15 08:28:20+01'),
           timestamp('2026-01-15 08:28:25+01'), 5, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_250m', 250.0, 100.0, 120.0, 130.0, timestamp('2026-01-15 08:28:00+01'),
@@ -1935,6 +1986,7 @@ unit_tests:
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
           1, 2, 1, ['uncertain_assignment'], '100103', '1001', '03', 'Main 03', 52.3, 21.3, 'Main 01', 0, 0, 0, 'regular',
+          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1,
           timestamp('2026-01-15 08:30:00+01'), timestamp('2026-01-15 08:30:00+01'),
           timestamp('2026-01-15 08:30:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:30:00+01'),
@@ -1945,6 +1997,7 @@ unit_tests:
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
           1, 2, 1, ['uncertain_assignment'], '100107', '1001', '07', 'Main 07', 52.7, 21.7, 'Main 01', 1, 0, 0, 'regular',
+          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1,
           timestamp('2026-01-15 08:31:40+01'), timestamp('2026-01-15 08:31:40+01'), cast(null as timestamp),
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
@@ -1955,6 +2008,7 @@ unit_tests:
           '187', '187', 'bus', '3', 1, 0, 'svc', 'Central', 'shape-3', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', ['stale_stop_progression'], 'modified', ['stale_progress'], 'settled_duty_chain', 'chain-3', 'block_id', 'block-3',
           1, 1, 1, array<string>[], '100104', '1001', '04', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
+          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
           timestamp('2026-01-15 08:35:00+01'), timestamp('2026-01-15 08:35:00+01'),
           timestamp('2026-01-15 08:35:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:35:00+01'),
@@ -1965,6 +2019,7 @@ unit_tests:
           '187', '187', 'bus', '4', 1, 0, 'svc', 'Central', 'shape-4', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'broken', ['likely_wrong_trip_assignment'], 'matching_failure', ['bad_assignment_evidence'], 'settled_duty_chain', 'chain-4', 'block_id', 'block-4',
           1, 1, 1, array<string>[], '100108', '1001', '08', 'Main 08', 52.8, 21.8, 'Main 01', 0, 0, 0, 'regular',
+          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
           timestamp('2026-01-15 08:40:00+01'), timestamp('2026-01-15 08:40:00+01'), cast(null as timestamp),
           cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
@@ -1976,6 +2031,7 @@ unit_tests:
           'svc-prior', 'schedule-version-prior', 'complete', array<string>[], 'regular', array<string>[],
           'settled_duty_chain', 'chain-prior', 'block_id', 'block-prior', 1, 1, 1, array<string>[],
           '100101', '1001', '01', 'Prior 01', 52.9, 21.9, 'Prior 01', 0, 0, 0, 'regular',
+          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
           timestamp('2026-01-15 07:30:00+01'), timestamp('2026-01-15 07:30:00+01'),
           timestamp('2026-01-15 07:30:30+01'), 30, timestamp('2026-01-15 07:00:00+01'),
           'segment_within_75m', 75.0, 8.0, 9.0, 10.0, timestamp('2026-01-15 07:30:00+01'),

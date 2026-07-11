@@ -38,6 +38,11 @@ with grouped_arrivals as (
             or pickup_type is null
             or drop_off_type is null
             or stop_service_class is null
+            or stop_execution_class is null
+            or classification_confidence is null
+            or classification_reason is null
+            or classification_evidence is null
+            or are_passenger_boundaries_settled is null
             or scheduled_arrival_time is null
             or actual_arrival_time is null
             or delay_seconds is null
@@ -51,6 +56,8 @@ with grouped_arrivals as (
             or direction_id not in (0, 1)
             or trip_quality not in ('complete', 'partial', 'broken')
             or detection_method not in ('segment_within_75m', 'segment_within_250m')
+            or stop_execution_class != 'passenger'
+            or not are_passenger_boundaries_settled
         ) as enum_violations,
         countif(delay_seconds != timestamp_diff(actual_arrival_time, scheduled_arrival_time, second)) as delay_violations,
         countif(hour_bracket != timestamp_trunc(scheduled_arrival_time, hour, 'Europe/Warsaw')) as hour_bracket_violations,

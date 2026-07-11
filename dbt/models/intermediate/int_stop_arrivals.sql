@@ -69,15 +69,13 @@ valid_segments as (
 passenger_stop_times as (
     select
         *,
-        min(stop_sequence) over (partition by gtfs_snapshot_id, trip_id) as first_passenger_stop_sequence,
-        max(stop_sequence) over (partition by gtfs_snapshot_id, trip_id) as last_passenger_stop_sequence,
-        lag(stop_sequence) over (partition by gtfs_snapshot_id, trip_id order by stop_sequence)
+        lag(stop_sequence) over (partition by gtfs_snapshot_id, service_date, trip_id order by stop_sequence)
             as previous_passenger_stop_sequence,
-        lead(stop_sequence) over (partition by gtfs_snapshot_id, trip_id order by stop_sequence)
+        lead(stop_sequence) over (partition by gtfs_snapshot_id, service_date, trip_id order by stop_sequence)
             as next_passenger_stop_sequence
-    from {{ ref('stg_gtfs__stop_times') }}
+    from {{ ref('int_gtfs_trip_stop_semantics') }}
     where gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-      and stop_service_class != 'not_in_passenger_service'
+      and is_passenger_stop
 ),
 
 scheduled_stops as (
@@ -91,6 +89,11 @@ scheduled_stops as (
         stop_times.pickup_type,
         stop_times.drop_off_type,
         stop_times.stop_service_class,
+        stop_times.stop_execution_class,
+        stop_times.classification_confidence,
+        stop_times.classification_reason,
+        stop_times.classification_evidence,
+        stop_times.are_passenger_boundaries_settled,
         stop_times.gtfs_snapshot_id,
         stop_times.first_passenger_stop_sequence,
         stop_times.last_passenger_stop_sequence,
@@ -140,6 +143,11 @@ candidate_crossings as (
         scheduled_stops.pickup_type,
         scheduled_stops.drop_off_type,
         scheduled_stops.stop_service_class,
+        scheduled_stops.stop_execution_class,
+        scheduled_stops.classification_confidence,
+        scheduled_stops.classification_reason,
+        scheduled_stops.classification_evidence,
+        scheduled_stops.are_passenger_boundaries_settled,
         scheduled_stops.first_passenger_stop_sequence,
         scheduled_stops.last_passenger_stop_sequence,
         scheduled_stops.previous_passenger_stop_sequence,
@@ -266,6 +274,11 @@ select
     pickup_type,
     drop_off_type,
     stop_service_class,
+    stop_execution_class,
+    classification_confidence,
+    classification_reason,
+    classification_evidence,
+    are_passenger_boundaries_settled,
     scheduled_arrival_time,
     scheduled_departure_time,
     actual_arrival_time,
