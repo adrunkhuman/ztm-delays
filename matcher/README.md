@@ -23,7 +23,13 @@ partial-day diagnostic run must opt in with `--allow-missing-hours`; the missing
 inventory remains recorded in its manifest.
 
 Success atomically publishes normalized GPS, duty schedule, stop semantics,
-manifest, and metrics. Failed `.incomplete-*` work directories are preserved.
+`duty_execution.parquet`, manifest, and metrics. `duty_execution` has exactly
+one outcome per scheduled course: `executed`, `missed`, `skipped`,
+`short_turned`, `vehicle_change_signal`, or `uncertain`. A vehicle-change
+signal is competing GPS evidence, not a claim that a physical vehicle swap
+occurred. It retains source observation bounds, candidate counts, reasons, and
+evidence; ownership intervals are emitted only for confident executed courses.
+Failed `.incomplete-*` work directories are preserved.
 Errors use stable codes: `missing_input`, `schema_drift`, `invalid_data`,
 `snapshot_mismatch`, `resource_limit`, and `invalid_output`.
 
@@ -34,7 +40,14 @@ retains only services active on the required current/prior dates so Python
 schedule preparation remains bounded outside DuckDB; stop semantics are written
 in 10,000-row Parquet batches. Metrics include wall and CPU time,
 peak RSS and swap where the OS exposes them, temporary and artifact disk use,
-and vehicle-group sizes.
+and vehicle-group sizes plus execution-status counts. Terminal visits use a
+250 m radius and start a new episode after a GPS gap over 180 seconds. The
+runtime processes one normalized vehicle Arrow stream and only its matching
+schedule subset at a time; final allocation reads one duty at a time. Allocation
+does not reject late journeys by a fixed lateness cutoff: it evolves observed
+delay through ordered courses, has an explicit skipped-course state, and never
+reuses a terminal traversal. Unknown passenger boundaries and `line_brigade`
+duty fallback cannot receive high confidence.
 
 The July 9 VPS proof measured about 1.56 GiB peak process RSS with this limit,
 zero swap, and roughly 90 seconds wall time. The lower DuckDB allowance trades

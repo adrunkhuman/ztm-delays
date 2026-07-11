@@ -164,6 +164,8 @@ def iter_stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> 
                 "trip_id": trip_id,
                 "stop_id": row.stop_id,
                 "stop_group_id": row.stop_id[:4],
+                "stop_lat": snapshot.stops.get(row.stop_id, {}).get("stop_lat"),
+                "stop_lon": snapshot.stops.get(row.stop_id, {}).get("stop_lon"),
                 "stop_sequence": row.stop_sequence,
                 "arrival_time_seconds": row.arrival_time_seconds,
                 "departure_time_seconds": row.departure_time_seconds,

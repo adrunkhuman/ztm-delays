@@ -15,16 +15,20 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from ztm_matcher.alignment import extract_evidence, settle_duty, terminal_courses
 from ztm_matcher.config import RunConfig
 from ztm_matcher.errors import fail
 from ztm_matcher.gps import discover, hourly_counts, normalize
 from ztm_matcher.gtfs import load, select
 from ztm_matcher.schemas import (
+    DUTY_EXECUTION_SCHEMA,
+    EXECUTION_SCHEMA_VERSION,
     MANIFEST_VERSION,
     NORMALIZED_GPS_SCHEMA,
     NORMALIZED_GPS_SCHEMA_VERSION,
     SCHEDULE_SCHEMA_VERSION,
     SEMANTICS_SCHEMA_VERSION,
+    TRAVERSAL_EVIDENCE_SCHEMA,
 )
 from ztm_matcher.semantics import duties, iter_stop_semantics
 
@@ -172,6 +176,7 @@ class ReconstructionRun:
         schedule_rows = self.prepare_schedule()
         self.normalized_path = work / "normalized_gps.parquet"
         normalized_rows = normalize(connection, files, self.config.processing_date, self.normalized_path)
+        execution_counts = self.align_execution()
         input_rows = sum(pq.ParquetFile(file).metadata.num_rows for file in files)
         if pq.read_schema(self.normalized_path) != NORMALIZED_GPS_SCHEMA:
             raise fail("invalid_output", "normalized GPS artifact schema validation failed", 15)
@@ -184,12 +189,14 @@ class ReconstructionRun:
                 "normalized_gps": NORMALIZED_GPS_SCHEMA_VERSION,
                 "schedule": SCHEDULE_SCHEMA_VERSION,
                 "stop_semantics": SEMANTICS_SCHEMA_VERSION,
+                "duty_execution": EXECUTION_SCHEMA_VERSION,
             },
             "inputs": {"gps": [_identity(file) for file in files], "gtfs_zip": _identity(self.config.gtfs_zip)},
             "outputs": {
                 "normalized_gps": _identity(self.normalized_path, relative=True),
                 "duty_schedule": _identity(work / "duty_schedule.parquet", relative=True),
                 "stop_semantics": _identity(work / "stop_semantics.parquet", relative=True),
+                "duty_execution": _identity(work / "duty_execution.parquet", relative=True),
             },
             "missing_hours": missing,
         }
@@ -210,12 +217,161 @@ class ReconstructionRun:
             "artifact_disk_bytes": artifact_bytes,
             "vehicle_groups": int(vehicle_stats[0]) if vehicle_stats else 0,
             "max_vehicle_rows": int(vehicle_stats[1]) if vehicle_stats else 0,
+            "duty_execution_rows": sum(execution_counts.values()),
+            "duty_execution_status_counts": dict(sorted(execution_counts.items())),
             "swapping_observed": None if process["current_swap_bytes"] is None else process["current_swap_bytes"] > 0,
             **process,
         }
         _write_json(work / "manifest.json", manifest)
         _write_json(work / "metrics.json", metrics)
         return {"manifest": manifest, "metrics": metrics}
+
+    def align_execution(self) -> dict[str, int]:
+        """Persist per-vehicle evidence, then settle one bounded duty at a time."""
+        work = self._work()
+        evidence_path = work / ".traversal_evidence.parquet"
+        evidence_writer = pq.ParquetWriter(evidence_path, TRAVERSAL_EVIDENCE_SCHEMA, compression="zstd")
+        try:
+            for stream in self.iter_vehicle_streams():
+                pings = stream.pings.to_pylist()
+                rows = self._schedule_rows_for_stream(stream)
+                batch = []
+                courses = terminal_courses(rows)
+                patterns: dict[tuple[object, ...], list[dict[str, Any]]] = {}
+                for course in courses:
+                    pattern = (
+                        course["line"],
+                        course["brigade"],
+                        course["mode"],
+                        course["origin_lat"],
+                        course["origin_lon"],
+                        course["destination_lat"],
+                        course["destination_lon"],
+                    )
+                    patterns.setdefault(pattern, []).append(course)
+                for pattern_courses in patterns.values():
+                    pattern_evidence = extract_evidence(pattern_courses[0], pings)
+                    for course in pattern_courses:
+                        lineage = {
+                            name: course[name]
+                            for name in (
+                                "service_date",
+                                "processing_date",
+                                "gtfs_snapshot_id",
+                                "duty_chain_id",
+                                "trip_id",
+                            )
+                        }
+                        batch.extend({**item, **lineage} for item in pattern_evidence)
+                if batch:
+                    evidence_writer.write_table(pa.Table.from_pylist(batch, schema=TRAVERSAL_EVIDENCE_SCHEMA))
+        finally:
+            evidence_writer.close()
+
+        output_path = work / "duty_execution.parquet"
+        output_writer = pq.ParquetWriter(output_path, DUTY_EXECUTION_SCHEMA, compression="zstd")
+        counts: dict[str, int] = {}
+        try:
+            for service_date, snapshot_id, duty_id in self._duty_keys():
+                courses = terminal_courses(self._schedule_rows_for_duty(service_date, snapshot_id, duty_id))
+                evidence = self._evidence_for_duty(evidence_path, service_date, snapshot_id, duty_id)
+                outcomes = settle_duty(courses, evidence)
+                output_writer.write_table(pa.Table.from_pylist(outcomes, schema=DUTY_EXECUTION_SCHEMA))
+                for outcome in outcomes:
+                    status = str(outcome["execution_status"])
+                    counts[status] = counts.get(status, 0) + 1
+        finally:
+            output_writer.close()
+            evidence_path.unlink(missing_ok=True)
+        return counts
+
+    def _schedule_rows_for_stream(self, stream: VehicleStream) -> list[dict[str, Any]]:
+        """Read only courses whose line/brigade/mode occurs in this vehicle stream."""
+        connection = self._connection()
+        schedule, semantics = self._work() / "duty_schedule.parquet", self._work() / "stop_semantics.parquet"
+        connection.register("alignment_stream", stream.pings)
+        try:
+            return (
+                connection.execute(
+                    f"""
+                with stream_lines as (
+                    select distinct line, brigade, vehicle_type from alignment_stream
+                )
+                select schedule.*, semantics.stop_id, semantics.stop_sequence, semantics.stop_lat, semantics.stop_lon,
+                    semantics.is_passenger_stop, semantics.are_passenger_boundaries_settled
+                from read_parquet('{str(schedule).replace("'", "''")}') as schedule
+                inner join stream_lines on schedule.line = stream_lines.line
+                    and schedule.brigade = stream_lines.brigade
+                    and ((schedule.mode = 'bus' and stream_lines.vehicle_type = 1)
+                        or (schedule.mode = 'tram' and stream_lines.vehicle_type = 2))
+                inner join read_parquet('{str(semantics).replace("'", "''")}') as semantics
+                    on schedule.service_date = semantics.service_date
+                    and schedule.processing_date = semantics.processing_date
+                    and schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
+                    and schedule.duty_chain_id = semantics.duty_chain_id
+                    and schedule.trip_id = semantics.trip_id
+                order by schedule.service_date, schedule.duty_chain_id, schedule.trip_order, schedule.trip_id,
+                    semantics.stop_sequence, semantics.stop_id
+                """
+                )
+                .to_arrow_table()
+                .to_pylist()
+            )
+        finally:
+            connection.unregister("alignment_stream")
+
+    def _duty_keys(self) -> list[tuple[object, str, str]]:
+        schedule = str(self._work() / "duty_schedule.parquet").replace("'", "''")
+        return [
+            (row[0], str(row[1]), str(row[2]))
+            for row in self._connection()
+            .execute(
+                f"select distinct service_date, gtfs_snapshot_id, duty_chain_id from read_parquet('{schedule}') "
+                "order by service_date, gtfs_snapshot_id, duty_chain_id"
+            )
+            .fetchall()
+        ]
+
+    def _schedule_rows_for_duty(self, service_date: object, snapshot_id: str, duty_id: str) -> list[dict[str, Any]]:
+        schedule, semantics = self._work() / "duty_schedule.parquet", self._work() / "stop_semantics.parquet"
+        return (
+            self._connection()
+            .execute(
+                f"""
+            select schedule.*, semantics.stop_id, semantics.stop_sequence, semantics.stop_lat, semantics.stop_lon,
+                semantics.is_passenger_stop, semantics.are_passenger_boundaries_settled
+            from read_parquet('{str(schedule).replace("'", "''")}') as schedule
+            inner join read_parquet('{str(semantics).replace("'", "''")}') as semantics
+                on schedule.service_date = semantics.service_date
+                and schedule.processing_date = semantics.processing_date
+                and schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
+                and schedule.duty_chain_id = semantics.duty_chain_id
+                and schedule.trip_id = semantics.trip_id
+            where schedule.service_date = ? and schedule.gtfs_snapshot_id = ? and schedule.duty_chain_id = ?
+            order by schedule.trip_order, schedule.trip_id, semantics.stop_sequence, semantics.stop_id
+            """,
+                [service_date, snapshot_id, duty_id],
+            )
+            .to_arrow_table()
+            .to_pylist()
+        )
+
+    def _evidence_for_duty(
+        self, path: Path, service_date: object, snapshot_id: str, duty_id: str
+    ) -> list[dict[str, Any]]:
+        return (
+            self._connection()
+            .execute(
+                f"""
+            select * from read_parquet('{str(path).replace("'", "''")}')
+            where service_date = ? and gtfs_snapshot_id = ? and duty_chain_id = ?
+            order by trip_id, vehicle_number, candidate_kind, origin_event_time, traversal_id
+            """,
+                [service_date, snapshot_id, duty_id],
+            )
+            .to_arrow_table()
+            .to_pylist()
+        )
 
     def iter_vehicle_streams(self) -> Iterator[VehicleStream]:
         """Fetch exactly one vehicle group per query, in deterministic order."""

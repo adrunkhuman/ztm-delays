@@ -113,6 +113,8 @@ def test_prepares_normalized_gps_schedule_semantics_manifest_and_groups(tmp_path
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["missing_hours"]["tram"] == list(range(24))
     assert (output / "duty_schedule.parquet").is_file()
+    assert (output / "duty_execution.parquet").is_file()
+    assert result["metrics"]["duty_execution_rows"] == 2
     semantics = pq.read_table(output / "stop_semantics.parquet").to_pylist()
     assert any(row["stop_execution_class"] == "technical_suffix" for row in semantics)
 
@@ -171,10 +173,9 @@ def test_rejects_a_vehicle_group_over_its_bound(tmp_path: Path) -> None:
         max_vehicle_rows=1,
         allow_missing_hours=True,
     )
-    with ReconstructionRun(config) as run:
-        run.prepare()
-        with pytest.raises(MatcherError, match="resource_limit"):
-            list(run.iter_vehicle_streams())
+    with pytest.raises(MatcherError, match="resource_limit"):
+        with ReconstructionRun(config) as run:
+            run.prepare()
 
 
 def test_cli_uses_stable_missing_input_exit(tmp_path: Path) -> None:
