@@ -15,7 +15,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ztm_matcher.alignment import extract_evidence, settle_duty, terminal_courses
+from ztm_matcher.alignment import extract_evidence, settle_duty
 from ztm_matcher.config import RunConfig
 from ztm_matcher.errors import fail
 from ztm_matcher.gps import discover, hourly_counts, normalize
@@ -159,6 +159,43 @@ class ReconstructionRun:
         }
         if semantics_columns is None or not required_semantics.issubset(semantics_columns):
             raise fail("invalid_output", "stop semantics do not satisfy stop-semantics-v1", 15)
+        schedule_sql = str(work / "duty_schedule.parquet").replace("'", "''")
+        semantics_sql = str(semantics_path).replace("'", "''")
+        terminal_sql = str(work / ".terminal_courses.parquet").replace("'", "''")
+        self._connection().execute(
+            f"""
+            copy (
+                with course_stops as (
+                    select schedule.*, semantics.stop_id, semantics.stop_sequence,
+                        semantics.stop_lat, semantics.stop_lon, semantics.is_passenger_stop,
+                        semantics.are_passenger_boundaries_settled,
+                        case when semantics.are_passenger_boundaries_settled
+                            then semantics.is_passenger_stop else true end as endpoint_eligible
+                    from read_parquet('{schedule_sql}') as schedule
+                    inner join read_parquet('{semantics_sql}') as semantics
+                        on schedule.service_date = semantics.service_date
+                        and schedule.processing_date = semantics.processing_date
+                        and schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
+                        and schedule.duty_chain_id = semantics.duty_chain_id
+                        and schedule.trip_id = semantics.trip_id
+                )
+                select * exclude (stop_id, stop_sequence, stop_lat, stop_lon, is_passenger_stop,
+                        are_passenger_boundaries_settled, endpoint_eligible),
+                    bool_and(are_passenger_boundaries_settled) as are_passenger_boundaries_settled,
+                    arg_min(stop_lat, stop_sequence)
+                        filter (where endpoint_eligible and stop_lat is not null) as origin_lat,
+                    arg_min(stop_lon, stop_sequence)
+                        filter (where endpoint_eligible and stop_lon is not null) as origin_lon,
+                    arg_max(stop_lat, stop_sequence)
+                        filter (where endpoint_eligible and stop_lat is not null) as destination_lat,
+                    arg_max(stop_lon, stop_sequence)
+                        filter (where endpoint_eligible and stop_lon is not null) as destination_lon
+                from course_stops
+                group by all
+                order by service_date, duty_chain_id, trip_order, trip_id
+            ) to '{terminal_sql}' (format parquet, compression zstd)
+            """
+        )
         return len(rows)
 
     def prepare(self) -> dict[str, Any]:
@@ -234,9 +271,8 @@ class ReconstructionRun:
         try:
             for stream in self.iter_vehicle_streams():
                 pings = stream.pings.to_pylist()
-                rows = self._schedule_rows_for_stream(stream)
+                courses = self._schedule_rows_for_stream(stream)
                 batch = []
-                courses = terminal_courses(rows)
                 patterns: dict[tuple[object, ...], list[dict[str, Any]]] = {}
                 for course in courses:
                     pattern = (
@@ -273,7 +309,7 @@ class ReconstructionRun:
         counts: dict[str, int] = {}
         try:
             for service_date, snapshot_id, duty_id in self._duty_keys():
-                courses = terminal_courses(self._schedule_rows_for_duty(service_date, snapshot_id, duty_id))
+                courses = self._schedule_rows_for_duty(service_date, snapshot_id, duty_id)
                 evidence = self._evidence_for_duty(evidence_path, service_date, snapshot_id, duty_id)
                 outcomes = settle_duty(courses, evidence)
                 output_writer.write_table(pa.Table.from_pylist(outcomes, schema=DUTY_EXECUTION_SCHEMA))
@@ -283,12 +319,13 @@ class ReconstructionRun:
         finally:
             output_writer.close()
             evidence_path.unlink(missing_ok=True)
+            (work / ".terminal_courses.parquet").unlink(missing_ok=True)
         return counts
 
     def _schedule_rows_for_stream(self, stream: VehicleStream) -> list[dict[str, Any]]:
         """Read only courses whose line/brigade/mode occurs in this vehicle stream."""
         connection = self._connection()
-        schedule, semantics = self._work() / "duty_schedule.parquet", self._work() / "stop_semantics.parquet"
+        courses = self._work() / ".terminal_courses.parquet"
         connection.register("alignment_stream", stream.pings)
         try:
             return (
@@ -297,21 +334,13 @@ class ReconstructionRun:
                 with stream_lines as (
                     select distinct line, brigade, vehicle_type from alignment_stream
                 )
-                select schedule.*, semantics.stop_id, semantics.stop_sequence, semantics.stop_lat, semantics.stop_lon,
-                    semantics.is_passenger_stop, semantics.are_passenger_boundaries_settled
-                from read_parquet('{str(schedule).replace("'", "''")}') as schedule
-                inner join stream_lines on schedule.line = stream_lines.line
-                    and schedule.brigade = stream_lines.brigade
-                    and ((schedule.mode = 'bus' and stream_lines.vehicle_type = 1)
-                        or (schedule.mode = 'tram' and stream_lines.vehicle_type = 2))
-                inner join read_parquet('{str(semantics).replace("'", "''")}') as semantics
-                    on schedule.service_date = semantics.service_date
-                    and schedule.processing_date = semantics.processing_date
-                    and schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
-                    and schedule.duty_chain_id = semantics.duty_chain_id
-                    and schedule.trip_id = semantics.trip_id
-                order by schedule.service_date, schedule.duty_chain_id, schedule.trip_order, schedule.trip_id,
-                    semantics.stop_sequence, semantics.stop_id
+                select courses.*
+                from read_parquet('{str(courses).replace("'", "''")}') as courses
+                inner join stream_lines on courses.line = stream_lines.line
+                    and courses.brigade = stream_lines.brigade
+                    and ((courses.mode = 'bus' and stream_lines.vehicle_type = 1)
+                        or (courses.mode = 'tram' and stream_lines.vehicle_type = 2))
+                order by courses.service_date, courses.duty_chain_id, courses.trip_order, courses.trip_id
                 """
                 )
                 .to_arrow_table()
@@ -333,22 +362,14 @@ class ReconstructionRun:
         ]
 
     def _schedule_rows_for_duty(self, service_date: object, snapshot_id: str, duty_id: str) -> list[dict[str, Any]]:
-        schedule, semantics = self._work() / "duty_schedule.parquet", self._work() / "stop_semantics.parquet"
+        courses = self._work() / ".terminal_courses.parquet"
         return (
             self._connection()
             .execute(
                 f"""
-            select schedule.*, semantics.stop_id, semantics.stop_sequence, semantics.stop_lat, semantics.stop_lon,
-                semantics.is_passenger_stop, semantics.are_passenger_boundaries_settled
-            from read_parquet('{str(schedule).replace("'", "''")}') as schedule
-            inner join read_parquet('{str(semantics).replace("'", "''")}') as semantics
-                on schedule.service_date = semantics.service_date
-                and schedule.processing_date = semantics.processing_date
-                and schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
-                and schedule.duty_chain_id = semantics.duty_chain_id
-                and schedule.trip_id = semantics.trip_id
-            where schedule.service_date = ? and schedule.gtfs_snapshot_id = ? and schedule.duty_chain_id = ?
-            order by schedule.trip_order, schedule.trip_id, semantics.stop_sequence, semantics.stop_id
+            select * from read_parquet('{str(courses).replace("'", "''")}')
+            where service_date = ? and gtfs_snapshot_id = ? and duty_chain_id = ?
+            order by trip_order, trip_id
             """,
                 [service_date, snapshot_id, duty_id],
             )
