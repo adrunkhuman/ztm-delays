@@ -27,7 +27,7 @@ manifest, and metrics. Failed `.incomplete-*` work directories are preserved.
 Errors use stable codes: `missing_input`, `schema_drift`, `invalid_data`,
 `snapshot_mismatch`, `resource_limit`, and `invalid_output`.
 
-DuckDB defaults to two threads, 1024 MB of managed memory, and 20 GB of
+DuckDB defaults to two threads, 512 MB of managed memory, and 20 GB of
 temporary disk. The loader additionally rejects GTFS archives above 640 MB
 uncompressed or 1,800,000 selected stop rows. It streams the rolling feed and
 retains only services active on the required current/prior dates so Python
@@ -35,3 +35,7 @@ schedule preparation remains bounded outside DuckDB; stop semantics are written
 in 10,000-row Parquet batches. Metrics include wall and CPU time,
 peak RSS and swap where the OS exposes them, temporary and artifact disk use,
 and vehicle-group sizes.
+
+The July 9 VPS proof measured about 1.56 GiB peak process RSS with this limit,
+zero swap, and roughly 90 seconds wall time. The lower DuckDB allowance trades
+some bounded temporary I/O for enough memory headroom to add matching stages.
