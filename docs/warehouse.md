@@ -66,7 +66,7 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 | `stg_gtfs__*` | Snapshot-aware GTFS staging across all loaded snapshots. |
 | `int_gtfs_trip_schedule` | Scheduled trips under the selected snapshot, scoped to processing/service-date overlap. |
 | `int_gtfs_duty_chain` | Ordered scheduled duty segments by snapshot, service date, and duty identity. |
-| `int_ping_trip` | Settled GPS ping assignment to duty-chain trip candidates. |
+| `int_ping_trip` | Settled GPS ping assignment to duty-chain trip candidates, plus diagnostic-only uncertain schedule-window fallback rows. |
 | `int_schedule_version` | Timetable-version ranges by `line`, `direction_id`, and `schedule_day_type`. |
 | `int_stop_arrivals` | Reconstructed scheduled stop arrivals from GPS movement. |
 | `int_trip_summary` | Observed vehicle trip candidates with quality flags. |
@@ -139,7 +139,7 @@ When `block_id` is missing, the model falls back to `line:brigade`. Treat fallba
 
 Depot pull-out and pull-in trips stay in `int_gtfs_duty_chain` for matcher continuity. Use `is_public_service_segment` to exclude depot-only service from public views.
 
-`int_ping_trip` is the settled archive matcher. It assigns each eligible GPS ping to one duty-chain trip candidate using line, timing, duty-chain continuity, and overlap diagnostics.
+`int_ping_trip` is the settled archive matcher. It assigns each eligible GPS ping to one duty-chain trip candidate using line, timing, duty-chain continuity, and overlap diagnostics. `uncertain_window_fallback` rows are retained for matcher diagnostics, but never feed stop-arrival reconstruction, trip-summary ping statistics, or serving trip/arrival observations.
 
 Spatial and stop-progression scores are reserved for later matcher work. Stop-event reconstruction stays in `int_stop_arrivals`.
 

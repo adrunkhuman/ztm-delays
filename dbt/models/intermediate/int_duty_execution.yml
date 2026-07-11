@@ -1,0 +1,330 @@
+version: 2
+
+models:
+  - name: int_duty_execution
+    description: >
+      Ownership-independent scheduled-course execution spine. Raw GPS is settled from ordered passenger-terminal
+      origin, departure, and destination evidence, not scheduled time windows or downstream ping ownership. A
+      shared handoff terminal closes the previous course and starts the next course after that raw ping.
+    columns:
+      - name: service_date
+        description: GTFS service date for the scheduled course. It can precede processing_date for overnight service.
+        tests: [not_null]
+      - name: processing_date
+        description: Warsaw-local GPS date rebuilt by this partition.
+        tests: [not_null]
+      - name: gtfs_snapshot_id
+        description: Governing GTFS snapshot for the duty-chain schedule.
+        tests: [not_null]
+      - name: duty_chain_id
+        description: Stable selected duty-chain identity.
+        tests: [not_null]
+      - name: duty_chain_source
+        description: Duty identity source. line_brigade evidence is retained but has lower confidence than block_id.
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['block_id', 'line_brigade']
+      - name: duty_chain_source_id
+        description: Raw block or line-brigade identity before hashing.
+        tests: [not_null]
+      - name: trip_order
+        description: Scheduled course order within the duty chain.
+        tests: [not_null]
+      - name: trip_id
+        description: Scheduled GTFS trip identifier. Together with schedule lineage this is the course key.
+        tests: [not_null]
+      - name: vehicle_number
+        description: Sole vehicle with settled terminal progression. Null for missed, uncertain, and multi-vehicle courses.
+      - name: observed_start_time
+        description: First source ping after the deterministic ownership lower bound.
+      - name: observed_end_time
+        description: Last source ping at or before the first confirmed destination terminal.
+      - name: source_ping_start_time
+        description: Explicit lower source-ping evidence bound. Null when no terminal progression was settled.
+      - name: source_ping_end_time
+        description: Explicit upper source-ping evidence bound. Null when no terminal progression was settled.
+      - name: source_ping_count
+        description: Number of raw line-matched pings inside the settled ownership interval.
+        tests: [not_null]
+      - name: execution_status
+        description: >
+          executed has one vehicle with origin-departure-destination evidence; missed has no matching line observation;
+          skipped has settled adjacent courses; short_turned reaches the next line-changing course origin without this
+          course's destination; vehicle_swap has multiple terminal-progressed vehicles; uncertain keeps unresolved
+          terminal or passenger-boundary evidence explicit.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['executed', 'missed', 'skipped', 'short_turned', 'vehicle_swap', 'uncertain']
+      - name: confidence
+        description: Conservative execution confidence. line_brigade fallback is low even when terminal progression exists.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['high', 'medium', 'low']
+      - name: execution_reason
+        description: Stable primary reason code for execution_status.
+        tests: [not_null]
+      - name: execution_evidence
+        description: Stable supporting evidence flags, independent of downstream ping-to-course ownership.
+        tests: [not_null]
+      - name: ownership_interval_start_time
+        description: Inclusive lower raw-ping ownership bound for one settled executed course. Short turns remain unowned.
+      - name: ownership_interval_end_time
+        description: Inclusive upper raw-ping ownership bound, cut at the first confirmed destination terminal.
+
+unit_tests:
+  - name: int_duty_execution_settles_terminal_progression_cases
+    model: int_duty_execution
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: snapshot-valid
+        duty_execution_terminal_radius_m: 250
+        duty_execution_unit_test: true
+        duty_execution_unit_test_output_course_count: 2
+    given:
+      - input: ref('int_gtfs_duty_chain')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'snapshot-valid' as gtfs_snapshot_id, 'duty-same' as duty_chain_id, 'block_id' as duty_chain_source, 'block-same' as duty_chain_source_id, 1 as trip_order, '10' as line, '10' as route_short_name, 'bus' as mode, '1' as brigade, 'same-a' as trip_id, 'svc' as service_id, 0 as direction_id, 'shape-same-a' as shape_id, 32400 as trip_start_seconds, 34200 as trip_end_seconds, timestamp('2026-01-15 09:00:00+00:00') as scheduled_start_time, timestamp('2026-01-15 09:30:00+00:00') as scheduled_end_time, cast(null as string) as previous_trip_id, 'same-b' as next_trip_id, cast(null as int64) as layover_from_previous_seconds, 600 as layover_to_next_seconds, false as line_changed_from_previous, false as line_changes_to_next, false as is_malformed_duty_segment
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-same', 'block_id', 'block-same', 2, '10', '10', 'bus', '1', 'same-b', 'svc', 0, 'shape-same-b', 34800, 36600, timestamp('2026-01-15 09:40:00+00:00'), timestamp('2026-01-15 10:10:00+00:00'), 'same-a', cast(null as string), 600, cast(null as int64), false, false, false
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-handoff', 'block_id', 'block-handoff', 1, '20', '20', 'bus', '2', 'handoff-a', 'svc', 0, 'shape-handoff-a', 39600, 40800, timestamp('2026-01-15 11:00:00+00:00'), timestamp('2026-01-15 11:20:00+00:00'), cast(null as string), 'handoff-b', cast(null as int64), 600, false, true, false
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-handoff', 'block_id', 'block-handoff', 2, '30', '30', 'bus', '2', 'handoff-b', 'svc', 0, 'shape-handoff-b', 41400, 42600, timestamp('2026-01-15 11:30:00+00:00'), timestamp('2026-01-15 11:50:00+00:00'), 'handoff-a', cast(null as string), 600, cast(null as int64), true, false, false
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-skip', 'block_id', 'block-skip', 1, '60', '60', 'bus', '6', 'skip-a', 'svc', 0, 'shape-skip-a', 54000, 54600, timestamp('2026-01-15 15:00:00+00:00'), timestamp('2026-01-15 15:10:00+00:00'), cast(null as string), 'skip-middle', cast(null as int64), 600, false, false, false
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-skip', 'block_id', 'block-skip', 2, '60', '60', 'bus', '6', 'skip-middle', 'svc', 0, 'shape-skip-middle', 55800, 56400, timestamp('2026-01-15 15:30:00+00:00'), timestamp('2026-01-15 15:40:00+00:00'), 'skip-a', 'skip-b', 1200, 1200, false, false, false
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-skip', 'block_id', 'block-skip', 3, '60', '60', 'bus', '6', 'skip-b', 'svc', 0, 'shape-skip-b', 57600, 58200, timestamp('2026-01-15 16:00:00+00:00'), timestamp('2026-01-15 16:10:00+00:00'), 'skip-middle', cast(null as string), 1200, cast(null as int64), false, false, false
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-missed', 'block_id', 'block-missed', 1, '50', '50', 'bus', '5', 'missed', 'svc', 0, 'shape-missed', 61200, 61800, timestamp('2026-01-15 17:00:00+00:00'), timestamp('2026-01-15 17:10:00+00:00'), cast(null as string), cast(null as string), cast(null as int64), cast(null as int64), false, false, false
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-swap', 'block_id', 'block-swap', 1, '40', '40', 'bus', '4', 'swap', 'svc', 0, 'shape-swap', 64800, 65400, timestamp('2026-01-15 18:00:00+00:00'), timestamp('2026-01-15 18:10:00+00:00'), cast(null as string), cast(null as string), cast(null as int64), cast(null as int64), false, false, false
+          union all select date '2026-01-14', date '2026-01-15', 'snapshot-valid', 'duty-night', 'block_id', 'block-night', 1, 'N1', 'N1', 'bus', '8', 'overnight', 'svc', 0, 'shape-night', 87000, 87600, timestamp('2026-01-15 00:10:00+00:00'), timestamp('2026-01-15 00:20:00+00:00'), cast(null as string), cast(null as string), cast(null as int64), cast(null as int64), false, false, false
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'duty-unknown', 'line_brigade', '70:7', 1, '70', '70', 'bus', '7', 'unknown-boundary', 'svc', 0, 'shape-unknown', 68400, 69000, timestamp('2026-01-15 19:00:00+00:00'), timestamp('2026-01-15 19:10:00+00:00'), cast(null as string), cast(null as string), cast(null as int64), cast(null as int64), false, false, false
+      - input: ref('int_gtfs_trip_stop_semantics')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, date '2026-01-15' as processing_date, trip_id, stop_id, stop_sequence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 'passenger' as stop_execution_class from unnest([
+            struct('same-a' as trip_id, 'SAO' as stop_id, 0 as stop_sequence), struct('same-a', 'SAB', 1), struct('same-b', 'SAB', 0), struct('same-b', 'SBC', 1), struct('handoff-a', 'HAO', 0), struct('handoff-a', 'HAB', 1), struct('handoff-b', 'HAB', 0), struct('handoff-b', 'HBC', 1), struct('skip-a', 'SKA0', 0), struct('skip-a', 'SKA1', 1), struct('skip-middle', 'SKM0', 0), struct('skip-middle', 'SKM1', 1), struct('skip-b', 'SKB0', 0), struct('skip-b', 'SKB1', 1), struct('missed', 'MO', 0), struct('missed', 'MD', 1), struct('swap', 'WO', 0), struct('swap', 'WD', 1)
+          ])
+          union all select 'snapshot-valid', date '2026-01-14', date '2026-01-15', trip_id, stop_id, stop_sequence, true, true, 'passenger' from unnest([struct('overnight' as trip_id, 'NO' as stop_id, 0 as stop_sequence), struct('overnight', 'ND', 1)])
+          union all select 'snapshot-valid', date '2026-01-15', date '2026-01-15', trip_id, stop_id, stop_sequence, false, false, stop_execution_class from unnest([struct('unknown-boundary' as trip_id, 'UO' as stop_id, 0 as stop_sequence, 'passenger' as stop_execution_class), struct('unknown-boundary', 'UD', 1, 'unknown')])
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select stop_id, stop_lat, stop_lon, 'snapshot-valid' as gtfs_snapshot_id from unnest([
+            struct('SAO' as stop_id, 52.0 as stop_lat, 21.0 as stop_lon), struct('SAB', 52.0, 21.1), struct('SBC', 52.0, 21.2), struct('HAO', 52.1, 20.0), struct('HAB', 52.1, 20.1), struct('HBC', 52.1, 20.2), struct('SKA0', 52.2, 20.0), struct('SKA1', 52.2, 20.1), struct('SKM0', 52.2, 20.4), struct('SKM1', 52.2, 20.5), struct('SKB0', 52.2, 20.8), struct('SKB1', 52.2, 20.9), struct('MO', 52.3, 20.0), struct('MD', 52.3, 20.1), struct('WO', 52.4, 20.0), struct('WD', 52.4, 20.1), struct('NO', 52.5, 20.0), struct('ND', 52.5, 20.1), struct('UO', 52.6, 20.0), struct('UD', 52.6, 20.1)
+          ])
+      - input: ref('stg_gps__pings')
+        format: sql
+        rows: |
+          select line, brigade, lat, lon, gps_time, vehicle_number, 1 as vehicle_type, timestamp_add(gps_time, interval 1 minute) as ingested_at, date '2026-01-15' as gps_date from unnest([
+            struct('10' as line, '1' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 08:55:00+00:00') as gps_time, '100' as vehicle_number), struct('10', '1', 52.0, 21.05, timestamp('2026-01-15 10:19:00+00:00'), '100'), struct('10', '1', 52.0, 21.1, timestamp('2026-01-15 10:20:00+00:00'), '100'), struct('10', '1', 52.0, 21.15, timestamp('2026-01-15 10:21:00+00:00'), '100'), struct('10', '1', 52.0, 21.2, timestamp('2026-01-15 10:35:00+00:00'), '100'), struct('20', '2', 52.1, 20.0, timestamp('2026-01-15 11:00:00+00:00'), '200'), struct('20', '2', 52.1, 20.05, timestamp('2026-01-15 11:10:00+00:00'), '200'), struct('20', '2', 52.1, 20.1, timestamp('2026-01-15 11:16:00+00:00'), '200'), struct('30', '2', 52.1, 20.1, timestamp('2026-01-15 11:17:00+00:00'), '200'), struct('30', '2', 52.1, 20.15, timestamp('2026-01-15 11:20:00+00:00'), '200'), struct('30', '2', 52.1, 20.2, timestamp('2026-01-15 11:35:00+00:00'), '200'), struct('60', '6', 52.2, 20.0, timestamp('2026-01-15 15:00:00+00:00'), '600'), struct('60', '6', 52.2, 20.1, timestamp('2026-01-15 15:10:00+00:00'), '600'), struct('60', '6', 52.2, 20.8, timestamp('2026-01-15 16:00:00+00:00'), '600'), struct('60', '6', 52.2, 20.9, timestamp('2026-01-15 16:10:00+00:00'), '600'), struct('40', '4', 52.4, 20.0, timestamp('2026-01-15 18:00:00+00:00'), '401'), struct('40', '4', 52.4, 20.05, timestamp('2026-01-15 18:05:00+00:00'), '401'), struct('40', '4', 52.4, 20.1, timestamp('2026-01-15 18:10:00+00:00'), '401'), struct('40', '4', 52.4, 20.0, timestamp('2026-01-15 18:00:00+00:00'), '402'), struct('40', '4', 52.4, 20.05, timestamp('2026-01-15 18:05:00+00:00'), '402'), struct('40', '4', 52.4, 20.1, timestamp('2026-01-15 18:10:00+00:00'), '402'), struct('N1', '8', 52.5, 20.0, timestamp('2026-01-15 00:10:00+00:00'), '800'), struct('N1', '8', 52.5, 20.05, timestamp('2026-01-15 00:15:00+00:00'), '800'), struct('N1', '8', 52.5, 20.1, timestamp('2026-01-15 00:20:00+00:00'), '800'), struct('70', '7', 52.6, 20.0, timestamp('2026-01-15 19:00:00+00:00'), '700'), struct('70', '7', 52.6, 20.05, timestamp('2026-01-15 19:05:00+00:00'), '700'), struct('70', '7', 52.6, 20.1, timestamp('2026-01-15 19:10:00+00:00'), '700')
+          ])
+    expect:
+      rows:
+        - {trip_id: same-a, execution_status: executed, vehicle_number: '100', confidence: high}
+        - {trip_id: same-b, execution_status: executed, vehicle_number: '100', confidence: high}
+        - {trip_id: handoff-a, execution_status: executed, vehicle_number: '200', confidence: high}
+        - {trip_id: handoff-b, execution_status: executed, vehicle_number: '200', confidence: high}
+        - {trip_id: skip-a, execution_status: executed, vehicle_number: '600', confidence: high}
+        - {trip_id: skip-middle, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: skip-b, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: missed, execution_status: missed, vehicle_number: null, confidence: medium}
+        - {trip_id: swap, execution_status: vehicle_swap, vehicle_number: null, confidence: low}
+        - {trip_id: overnight, execution_status: executed, vehicle_number: '800', confidence: high}
+        - {trip_id: unknown-boundary, execution_status: uncertain, vehicle_number: '700', confidence: low}
+
+  - name: int_duty_execution_settles_monotonic_terminal_sequences
+    model: int_duty_execution
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: snapshot-valid
+        duty_execution_terminal_radius_m: 250
+        duty_execution_unit_test: true
+        duty_execution_unit_test_output_course_count: 2
+    given:
+      - input: ref('int_gtfs_duty_chain')
+        format: sql
+        rows: |
+          select service_date, date '2026-01-15' as processing_date, 'snapshot-valid' as gtfs_snapshot_id, duty_chain_id, 'block_id' as duty_chain_source, duty_chain_source_id, trip_order, line, line as route_short_name, 'bus' as mode, brigade, trip_id, 'svc' as service_id, 0 as direction_id, concat('shape-', trip_id) as shape_id, 0 as trip_start_seconds, 600 as trip_end_seconds, scheduled_start_time, scheduled_end_time, previous_trip_id, next_trip_id, cast(null as int64) as layover_from_previous_seconds, cast(null as int64) as layover_to_next_seconds, false as line_changed_from_previous, false as line_changes_to_next, false as is_malformed_duty_segment
+          from unnest([
+            struct(date '2026-01-15' as service_date, 'progress' as duty_chain_id, 'progress-block' as duty_chain_source_id, 1 as trip_order, '10' as line, '1' as brigade, 'progress-ab-1' as trip_id, timestamp('2026-01-15 09:00:00+00:00') as scheduled_start_time, timestamp('2026-01-15 09:15:00+00:00') as scheduled_end_time, cast(null as string) as previous_trip_id, 'progress-ba' as next_trip_id),
+            struct(date '2026-01-15', 'progress', 'progress-block', 2, '10', '1', 'progress-ba', timestamp('2026-01-15 09:20:00+00:00'), timestamp('2026-01-15 09:35:00+00:00'), 'progress-ab-1', 'progress-ab-2'),
+            struct(date '2026-01-15', 'progress', 'progress-block', 3, '10', '1', 'progress-ab-2', timestamp('2026-01-15 09:40:00+00:00'), timestamp('2026-01-15 09:55:00+00:00'), 'progress-ba', 'progress-ba-2'),
+            struct(date '2026-01-15', 'progress', 'progress-block', 4, '10', '1', 'progress-ba-2', timestamp('2026-01-15 10:00:00+00:00'), timestamp('2026-01-15 10:15:00+00:00'), 'progress-ab-2', cast(null as string)),
+            struct(date '2026-01-15', 'repeat', 'repeat-block', 1, '20', '2', 'repeat-ab-1', timestamp('2026-01-15 10:00:00+00:00'), timestamp('2026-01-15 10:15:00+00:00'), cast(null as string), 'repeat-ab-2'),
+            struct(date '2026-01-15', 'repeat', 'repeat-block', 2, '20', '2', 'repeat-ab-2', timestamp('2026-01-15 10:20:00+00:00'), timestamp('2026-01-15 10:35:00+00:00'), 'repeat-ab-1', 'repeat-ab-3'),
+            struct(date '2026-01-15', 'repeat', 'repeat-block', 3, '20', '2', 'repeat-ab-3', timestamp('2026-01-15 10:40:00+00:00'), timestamp('2026-01-15 10:55:00+00:00'), 'repeat-ab-2', cast(null as string)),
+            struct(date '2026-01-15', 'loop', 'loop-block', 1, '30', '3', 'loop', timestamp('2026-01-15 11:00:00+00:00'), timestamp('2026-01-15 11:15:00+00:00'), cast(null as string), cast(null as string)),
+            struct(date '2026-01-15', 'short-turn', 'short-block', 1, '40', '4', 'short-ac', timestamp('2026-01-15 12:00:00+00:00'), timestamp('2026-01-15 12:15:00+00:00'), cast(null as string), 'short-bd'),
+            struct(date '2026-01-15', 'short-turn', 'short-block', 2, '40', '4', 'short-bd', timestamp('2026-01-15 12:20:00+00:00'), timestamp('2026-01-15 12:35:00+00:00'), 'short-ac', cast(null as string)),
+            struct(date '2026-01-15', 'vehicle-swap', 'swap-block', 1, '50', '5', 'swap-ab', timestamp('2026-01-15 13:00:00+00:00'), timestamp('2026-01-15 13:15:00+00:00'), cast(null as string), 'swap-bc'),
+            struct(date '2026-01-15', 'vehicle-swap', 'swap-block', 2, '50', '5', 'swap-bc', timestamp('2026-01-15 13:20:00+00:00'), timestamp('2026-01-15 13:35:00+00:00'), 'swap-ab', 'swap-cd'),
+            struct(date '2026-01-15', 'vehicle-swap', 'swap-block', 3, '50', '5', 'swap-cd', timestamp('2026-01-15 13:40:00+00:00'), timestamp('2026-01-15 13:55:00+00:00'), 'swap-bc', cast(null as string)),
+            struct(date '2026-01-15', 'delayed-repeat', 'delayed-repeat-block', 1, '70', '7', 'delayed-repeat-1', timestamp('2026-01-15 14:00:00+00:00'), timestamp('2026-01-15 14:15:00+00:00'), cast(null as string), 'delayed-repeat-2'),
+            struct(date '2026-01-15', 'delayed-repeat', 'delayed-repeat-block', 2, '70', '7', 'delayed-repeat-2', timestamp('2026-01-15 14:20:00+00:00'), timestamp('2026-01-15 14:35:00+00:00'), 'delayed-repeat-1', cast(null as string)),
+            struct(date '2026-01-15', 'missing-middle', 'missing-middle-block', 1, '80', '8', 'missing-middle-1', timestamp('2026-01-15 16:00:00+00:00'), timestamp('2026-01-15 16:15:00+00:00'), cast(null as string), 'missing-middle-2'),
+            struct(date '2026-01-15', 'missing-middle', 'missing-middle-block', 2, '80', '8', 'missing-middle-2', timestamp('2026-01-15 16:20:00+00:00'), timestamp('2026-01-15 16:35:00+00:00'), 'missing-middle-1', 'missing-middle-3'),
+            struct(date '2026-01-15', 'missing-middle', 'missing-middle-block', 3, '80', '8', 'missing-middle-3', timestamp('2026-01-15 16:40:00+00:00'), timestamp('2026-01-15 16:55:00+00:00'), 'missing-middle-2', cast(null as string)),
+            struct(date '2026-01-14', 'overnight', 'shared-block', 1, '60', '6', 'overnight', timestamp('2026-01-15 00:10:00+00:00'), timestamp('2026-01-15 00:25:00+00:00'), cast(null as string), cast(null as string)),
+            struct(date '2026-01-15', 'current', 'shared-block', 1, '60', '6', 'current', timestamp('2026-01-15 00:30:00+00:00'), timestamp('2026-01-15 00:45:00+00:00'), cast(null as string), cast(null as string))
+          ])
+      - input: ref('int_gtfs_trip_stop_semantics')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as gtfs_snapshot_id, service_date, date '2026-01-15' as processing_date, trip_id, stop_id, stop_sequence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 'passenger' as stop_execution_class
+          from unnest([
+            struct(date '2026-01-15' as service_date, 'progress-ab-1' as trip_id, 'PA' as origin_stop_id, 'PB' as destination_stop_id), struct(date '2026-01-15', 'progress-ba', 'PB', 'PA'), struct(date '2026-01-15', 'progress-ab-2', 'PA', 'PB'), struct(date '2026-01-15', 'progress-ba-2', 'PB', 'PA'),
+            struct(date '2026-01-15', 'repeat-ab-1', 'RA', 'RB'), struct(date '2026-01-15', 'repeat-ab-2', 'RA', 'RB'), struct(date '2026-01-15', 'repeat-ab-3', 'RA', 'RB'), struct(date '2026-01-15', 'loop', 'LOOP', 'LOOP'),
+            struct(date '2026-01-15', 'short-ac', 'SA', 'SC'), struct(date '2026-01-15', 'short-bd', 'SB', 'SD'), struct(date '2026-01-15', 'swap-ab', 'WA', 'WB'), struct(date '2026-01-15', 'swap-bc', 'WB', 'WC'), struct(date '2026-01-15', 'swap-cd', 'WC', 'WD'),
+            struct(date '2026-01-15', 'delayed-repeat-1', 'DA', 'DB'), struct(date '2026-01-15', 'delayed-repeat-2', 'DA', 'DB'),
+            struct(date '2026-01-15', 'missing-middle-1', 'MA', 'MB'), struct(date '2026-01-15', 'missing-middle-2', 'MC', 'MD'), struct(date '2026-01-15', 'missing-middle-3', 'ME', 'MF'),
+            struct(date '2026-01-14', 'overnight', 'NA', 'NB'), struct(date '2026-01-15', 'current', 'NA', 'NB')
+          ]), unnest([struct(origin_stop_id as stop_id, 0 as stop_sequence), struct(destination_stop_id, 1)])
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select stop_id, stop_lat, stop_lon, 'snapshot-valid' as gtfs_snapshot_id from unnest([
+            struct('PA' as stop_id, 52.0 as stop_lat, 21.0 as stop_lon), struct('PB', 52.0, 21.1), struct('RA', 52.1, 21.0), struct('RB', 52.1, 21.1), struct('LOOP', 52.2, 21.0),
+            struct('SA', 52.3, 21.0), struct('SB', 52.3, 21.1), struct('SC', 52.3, 21.2), struct('SD', 52.3, 21.3), struct('WA', 52.4, 21.0), struct('WB', 52.4, 21.1), struct('WC', 52.4, 21.2), struct('WD', 52.4, 21.3), struct('DA', 52.5, 21.0), struct('DB', 52.5, 21.1), struct('MA', 52.6, 21.0), struct('MB', 52.6, 21.1), struct('MC', 52.6, 21.2), struct('MD', 52.6, 21.3), struct('ME', 52.6, 21.4), struct('MF', 52.6, 21.5), struct('NA', 52.7, 21.0), struct('NB', 52.7, 21.1)
+          ])
+      - input: ref('stg_gps__pings')
+        format: sql
+        rows: |
+          select line, brigade, lat, lon, gps_time, vehicle_number, 1 as vehicle_type, timestamp_add(gps_time, interval 1 minute) as ingested_at, date '2026-01-15' as gps_date from unnest([
+            struct('10' as line, '1' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '100' as vehicle_number), struct('10', '1', 52.0, 21.05, timestamp('2026-01-15 09:05:00+00:00'), '100'), struct('10', '1', 52.0, 21.1, timestamp('2026-01-15 09:10:00+00:00'), '100'), struct('10', '1', 52.0, 21.05, timestamp('2026-01-15 09:15:00+00:00'), '100'), struct('10', '1', 52.0, 21.0, timestamp('2026-01-15 09:20:00+00:00'), '100'), struct('10', '1', 52.0, 21.05, timestamp('2026-01-15 09:25:00+00:00'), '100'), struct('10', '1', 52.0, 21.1, timestamp('2026-01-15 09:30:00+00:00'), '100'), struct('10', '1', 52.0, 21.05, timestamp('2026-01-15 09:35:00+00:00'), '100'), struct('10', '1', 52.0, 21.0, timestamp('2026-01-15 09:40:00+00:00'), '100'),
+            struct('20', '2', 52.1, 21.0, timestamp('2026-01-15 10:00:00+00:00'), '200'), struct('20', '2', 52.1, 21.05, timestamp('2026-01-15 10:05:00+00:00'), '200'), struct('20', '2', 52.1, 21.1, timestamp('2026-01-15 10:10:00+00:00'), '200'), struct('20', '2', 52.1, 21.0, timestamp('2026-01-15 10:20:00+00:00'), '200'), struct('20', '2', 52.1, 21.05, timestamp('2026-01-15 10:25:00+00:00'), '200'), struct('20', '2', 52.1, 21.1, timestamp('2026-01-15 10:30:00+00:00'), '200'), struct('20', '2', 52.1, 21.0, timestamp('2026-01-15 10:40:00+00:00'), '200'), struct('20', '2', 52.1, 21.05, timestamp('2026-01-15 10:45:00+00:00'), '200'), struct('20', '2', 52.1, 21.1, timestamp('2026-01-15 10:50:00+00:00'), '200'),
+            struct('30', '3', 52.2, 21.0, timestamp('2026-01-15 11:00:00+00:00'), '300'), struct('30', '3', 52.2, 21.05, timestamp('2026-01-15 11:05:00+00:00'), '300'), struct('30', '3', 52.2, 21.0, timestamp('2026-01-15 11:10:00+00:00'), '300'),
+            struct('40', '4', 52.3, 21.0, timestamp('2026-01-15 12:00:00+00:00'), '400'), struct('40', '4', 52.3, 21.05, timestamp('2026-01-15 12:05:00+00:00'), '400'), struct('40', '4', 52.3, 21.1, timestamp('2026-01-15 12:10:00+00:00'), '400'), struct('40', '4', 52.3, 21.15, timestamp('2026-01-15 12:15:00+00:00'), '400'), struct('40', '4', 52.3, 21.3, timestamp('2026-01-15 12:20:00+00:00'), '400'),
+            struct('50', '5', 52.4, 21.0, timestamp('2026-01-15 13:00:00+00:00'), '501'), struct('50', '5', 52.4, 21.05, timestamp('2026-01-15 13:05:00+00:00'), '501'), struct('50', '5', 52.4, 21.1, timestamp('2026-01-15 13:10:00+00:00'), '501'), struct('50', '5', 52.4, 21.2, timestamp('2026-01-15 13:40:00+00:00'), '502'), struct('50', '5', 52.4, 21.25, timestamp('2026-01-15 13:45:00+00:00'), '502'), struct('50', '5', 52.4, 21.3, timestamp('2026-01-15 13:50:00+00:00'), '502'),
+            struct('70', '7', 52.5, 21.0, timestamp('2026-01-15 14:30:00+00:00'), '700'), struct('70', '7', 52.5, 21.05, timestamp('2026-01-15 14:35:00+00:00'), '700'), struct('70', '7', 52.5, 21.1, timestamp('2026-01-15 14:40:00+00:00'), '700'), struct('70', '7', 52.5, 21.0, timestamp('2026-01-15 14:50:00+00:00'), '700'), struct('70', '7', 52.5, 21.05, timestamp('2026-01-15 14:55:00+00:00'), '700'), struct('70', '7', 52.5, 21.1, timestamp('2026-01-15 15:00:00+00:00'), '700'),
+            struct('80', '8', 52.6, 21.0, timestamp('2026-01-15 16:00:00+00:00'), '800'), struct('80', '8', 52.6, 21.05, timestamp('2026-01-15 16:05:00+00:00'), '800'), struct('80', '8', 52.6, 21.1, timestamp('2026-01-15 16:10:00+00:00'), '800'), struct('80', '8', 52.6, 21.4, timestamp('2026-01-15 16:40:00+00:00'), '800'), struct('80', '8', 52.6, 21.45, timestamp('2026-01-15 16:45:00+00:00'), '800'), struct('80', '8', 52.6, 21.5, timestamp('2026-01-15 16:50:00+00:00'), '800'),
+            struct('60', '6', 52.7, 21.0, timestamp('2026-01-15 00:12:00+00:00'), '600'), struct('60', '6', 52.7, 21.05, timestamp('2026-01-15 00:15:00+00:00'), '600'), struct('60', '6', 52.7, 21.1, timestamp('2026-01-15 00:20:00+00:00'), '600')
+          ])
+    expect:
+      rows:
+        - {trip_id: progress-ab-1, execution_status: executed, vehicle_number: '100', confidence: high}
+        - {trip_id: progress-ba, execution_status: executed, vehicle_number: '100', confidence: high}
+        - {trip_id: progress-ab-2, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: progress-ba-2, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: repeat-ab-1, execution_status: executed, vehicle_number: '200', confidence: high}
+        - {trip_id: repeat-ab-2, execution_status: executed, vehicle_number: '200', confidence: high}
+        - {trip_id: repeat-ab-3, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: loop, execution_status: executed, vehicle_number: '300', confidence: high}
+        - {trip_id: short-ac, execution_status: short_turned, vehicle_number: '400', confidence: high}
+        - {trip_id: short-bd, execution_status: executed, vehicle_number: '400', confidence: high}
+        - {trip_id: swap-ab, execution_status: executed, vehicle_number: '501', confidence: high}
+        - {trip_id: swap-bc, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: swap-cd, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: delayed-repeat-1, execution_status: executed, vehicle_number: '700', confidence: high}
+        - {trip_id: delayed-repeat-2, execution_status: executed, vehicle_number: '700', confidence: high}
+        - {trip_id: missing-middle-1, execution_status: executed, vehicle_number: '800', confidence: high}
+        - {trip_id: missing-middle-2, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: missing-middle-3, execution_status: uncertain, vehicle_number: null, confidence: low}
+        - {trip_id: overnight, execution_status: executed, vehicle_number: '600', confidence: high}
+        - {trip_id: current, execution_status: uncertain, vehicle_number: null, confidence: low}
+
+  - name: int_duty_execution_allocates_delayed_repeated_traversals
+    model: int_duty_execution
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: snapshot-valid
+        duty_execution_terminal_radius_m: 250
+        duty_execution_unit_test: true
+        duty_execution_unit_test_output_course_count: 2
+    given:
+      - input: ref('int_gtfs_duty_chain')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'snapshot-valid' as gtfs_snapshot_id, 'delayed-repeat' as duty_chain_id, 'block_id' as duty_chain_source, 'delayed-repeat-block' as duty_chain_source_id, trip_order, '70' as line, '70' as route_short_name, 'bus' as mode, '7' as brigade, trip_id, 'svc' as service_id, 0 as direction_id, concat('shape-', trip_id) as shape_id, 0 as trip_start_seconds, 600 as trip_end_seconds, scheduled_start_time, scheduled_end_time, previous_trip_id, next_trip_id, cast(null as int64) as layover_from_previous_seconds, cast(null as int64) as layover_to_next_seconds, false as line_changed_from_previous, false as line_changes_to_next, false as is_malformed_duty_segment
+          from unnest([
+            struct(1 as trip_order, 'delayed-repeat-1' as trip_id, timestamp('2026-01-15 14:00:00+00:00') as scheduled_start_time, timestamp('2026-01-15 14:15:00+00:00') as scheduled_end_time, cast(null as string) as previous_trip_id, 'delayed-repeat-2' as next_trip_id),
+            struct(2, 'delayed-repeat-2', timestamp('2026-01-15 14:20:00+00:00'), timestamp('2026-01-15 14:35:00+00:00'), 'delayed-repeat-1', cast(null as string))
+          ])
+      - input: ref('int_gtfs_trip_stop_semantics')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, date '2026-01-15' as processing_date, trip_id, stop_id, stop_sequence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 'passenger' as stop_execution_class
+          from unnest(['delayed-repeat-1', 'delayed-repeat-2']) as trip_id, unnest([struct('DA' as stop_id, 0 as stop_sequence), struct('DB', 1)])
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select stop_id, stop_lat, stop_lon, 'snapshot-valid' as gtfs_snapshot_id from unnest([struct('DA' as stop_id, 52.5 as stop_lat, 21.0 as stop_lon), struct('DB', 52.5, 21.1)])
+      - input: ref('stg_gps__pings')
+        format: sql
+        rows: |
+          select '70' as line, '7' as brigade, lat, lon, gps_time, '700' as vehicle_number, 1 as vehicle_type, timestamp_add(gps_time, interval 1 minute) as ingested_at, date '2026-01-15' as gps_date
+          from unnest([
+            struct(52.5 as lat, 21.0 as lon, timestamp('2026-01-15 14:30:00+00:00') as gps_time), struct(52.5, 21.05, timestamp('2026-01-15 14:35:00+00:00')), struct(52.5, 21.1, timestamp('2026-01-15 14:40:00+00:00')),
+            struct(52.5, 21.0, timestamp('2026-01-15 14:50:00+00:00')), struct(52.5, 21.05, timestamp('2026-01-15 14:55:00+00:00')), struct(52.5, 21.1, timestamp('2026-01-15 15:00:00+00:00'))
+          ])
+    expect:
+      rows:
+        - {trip_id: delayed-repeat-1, execution_status: executed, vehicle_number: '700', ownership_interval_start_time: '2026-01-15 14:30:00+00:00', ownership_interval_end_time: '2026-01-15 14:40:00+00:00'}
+        - {trip_id: delayed-repeat-2, execution_status: executed, vehicle_number: '700', ownership_interval_start_time: '2026-01-15 14:50:00+00:00', ownership_interval_end_time: '2026-01-15 15:00:00+00:00'}
+
+  - name: int_duty_execution_collapses_terminal_dwell_into_one_traversal
+    model: int_duty_execution
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: snapshot-valid
+        duty_execution_terminal_radius_m: 250
+        duty_execution_terminal_visit_gap_seconds: 180
+        duty_execution_unit_test: true
+        duty_execution_unit_test_output_course_count: 1
+    given:
+      - input: ref('int_gtfs_duty_chain')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'snapshot-valid' as gtfs_snapshot_id, 'dwell' as duty_chain_id, 'block_id' as duty_chain_source, 'dwell-block' as duty_chain_source_id, 1 as trip_order, '90' as line, '90' as route_short_name, 'bus' as mode, '9' as brigade, 'dwell-trip' as trip_id, 'svc' as service_id, 0 as direction_id, 'shape-dwell' as shape_id, 32400 as trip_start_seconds, 34200 as trip_end_seconds, timestamp('2026-01-15 09:00:00+00:00') as scheduled_start_time, timestamp('2026-01-15 09:30:00+00:00') as scheduled_end_time, cast(null as string) as previous_trip_id, cast(null as string) as next_trip_id, cast(null as int64) as layover_from_previous_seconds, cast(null as int64) as layover_to_next_seconds, false as line_changed_from_previous, false as line_changes_to_next, false as is_malformed_duty_segment
+      - input: ref('int_gtfs_trip_stop_semantics')
+        format: sql
+        rows: |
+          select 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'dwell-trip' as trip_id, stop_id, stop_sequence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 'passenger' as stop_execution_class
+          from unnest([struct('DO' as stop_id, 0 as stop_sequence), struct('DD', 1)])
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select stop_id, stop_lat, stop_lon, 'snapshot-valid' as gtfs_snapshot_id from unnest([struct('DO' as stop_id, 52.8 as stop_lat, 21.0 as stop_lon), struct('DD', 52.8, 21.1)])
+      - input: ref('stg_gps__pings')
+        format: sql
+        rows: |
+          select '90' as line, '9' as brigade, 52.8 as lat, 21.0 as lon, timestamp_add(timestamp('2026-01-15 09:00:00+00:00'), interval dwell_second second) as gps_time, '900' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:10:00+00:00') as ingested_at, date '2026-01-15' as gps_date from unnest(generate_array(0, 50, 10)) as dwell_second
+          union all select '90', '9', 52.8, 21.05, timestamp('2026-01-15 09:01:00+00:00'), '900', 1, timestamp('2026-01-15 09:10:00+00:00'), date '2026-01-15'
+          union all select '90', '9', 52.8, 21.1, timestamp_add(timestamp('2026-01-15 09:02:00+00:00'), interval dwell_second second), '900', 1, timestamp('2026-01-15 09:10:00+00:00'), date '2026-01-15' from unnest(generate_array(0, 50, 10)) as dwell_second
+    expect:
+      rows:
+        - {trip_id: dwell-trip, execution_status: executed, vehicle_number: '900', confidence: high, ownership_interval_start_time: '2026-01-15 09:00:00+00:00', ownership_interval_end_time: '2026-01-15 09:02:00+00:00'}
+
+  - name: int_ping_trip_preserves_unsettled_window_evidence_without_overriding_settled_ownership
+    model: int_ping_trip
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: snapshot-valid
+    given:
+      - input: ref('int_duty_execution')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'snapshot-valid' as gtfs_snapshot_id, 'chain-1' as duty_chain_id, 'block_id' as duty_chain_source, 'block-1' as duty_chain_source_id, 1 as trip_order, '10' as line, 'bus' as mode, '1' as brigade, 'trip-1' as trip_id, 'svc' as service_id, 0 as direction_id, 'shape-1' as shape_id, 32400 as trip_start_seconds, 34200 as trip_end_seconds, timestamp('2026-01-15 09:00:00+00:00') as scheduled_start_time, timestamp('2026-01-15 09:30:00+00:00') as scheduled_end_time, '100' as vehicle_number, 'executed' as execution_status, 'high' as confidence, 'terminal_progression' as execution_reason, ['origin_departure_destination_progression'] as execution_evidence, timestamp('2026-01-15 09:10:00+00:00') as ownership_interval_start_time, timestamp('2026-01-15 10:20:00+00:00') as ownership_interval_end_time
+          union all select date '2026-01-15', date '2026-01-15', 'snapshot-valid', 'chain-2', 'block_id', 'block-2', 1, '10', 'bus', '1', 'trip-uncertain', 'svc', 0, 'shape-2', 32400, 34200, timestamp('2026-01-15 09:00:00+00:00'), timestamp('2026-01-15 09:30:00+00:00'), '100', 'uncertain', 'low', 'terminal_progression_incomplete', ['line_observation_without_terminal_progression'], cast(null as timestamp), cast(null as timestamp)
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select 'svc' as service_id, date '2026-01-15' as service_date, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+      - input: ref('stg_gps__pings')
+        format: sql
+        rows: |
+          select '10' as line, '1' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 08:30:00+00:00') as gps_time, '100' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 08:30:10+00:00') as ingested_at, date '2026-01-15' as gps_date
+          union all select '10', '1', 52.0, 21.0, timestamp('2026-01-15 09:05:00+00:00'), '100', 1, timestamp('2026-01-15 09:05:10+00:00'), date '2026-01-15'
+          union all select '10', '1', 52.05, 21.05, timestamp('2026-01-15 09:50:00+00:00'), '100', 1, timestamp('2026-01-15 09:50:10+00:00'), date '2026-01-15'
+          union all select '10', '1', 52.1, 21.1, timestamp('2026-01-15 10:15:00+00:00'), '100', 1, timestamp('2026-01-15 10:15:10+00:00'), date '2026-01-15'
+    expect:
+      rows:
+        - {trip_id: trip-uncertain, vehicle_number: '100', gps_time: '2026-01-15 09:05:00+00:00', matching_method: uncertain_window_fallback, execution_status: uncertain, execution_confidence: low, execution_reason: window_fallback_unsettled, execution_evidence: [window_fallback_unsettled], ownership_interval_start_time: null, ownership_interval_end_time: null}
+        - {trip_id: trip-1, vehicle_number: '100', gps_time: '2026-01-15 09:50:00+00:00', matching_method: settled_duty_execution, execution_status: executed, execution_confidence: high, execution_reason: terminal_progression, execution_evidence: [origin_departure_destination_progression], ownership_interval_start_time: '2026-01-15 09:10:00+00:00', ownership_interval_end_time: '2026-01-15 10:20:00+00:00'}
+        - {trip_id: trip-1, vehicle_number: '100', gps_time: '2026-01-15 10:15:00+00:00', matching_method: settled_duty_execution, execution_status: executed, execution_confidence: high, execution_reason: terminal_progression, execution_evidence: [origin_departure_destination_progression], ownership_interval_start_time: '2026-01-15 09:10:00+00:00', ownership_interval_end_time: '2026-01-15 10:20:00+00:00'}

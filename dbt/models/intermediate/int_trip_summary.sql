@@ -144,6 +144,8 @@ ping_segments as (
           and service_date between date_sub(date('{{ var("processing_date") }}'), interval 1 day)
             and date('{{ var("processing_date") }}')
           and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+          -- Window fallback rows are diagnostics and do not contribute trip-quality ping statistics.
+          and matching_method = 'settled_duty_execution'
         window trip_vehicle_window as (
             partition by gtfs_snapshot_id, service_date, trip_id, vehicle_number
             order by gps_time

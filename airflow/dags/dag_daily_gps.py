@@ -53,7 +53,8 @@ GTFS_TRIP_MATCHING_STAGING_MODELS = (
 )
 TRIP_MATCHING_SCHEDULE_MODELS = (
     "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history "
-    "int_gtfs_trip_schedule int_gtfs_duty_chain int_schedule_version dim_schedule_version"
+    "int_gtfs_trip_schedule int_gtfs_duty_chain int_gtfs_trip_stop_semantics "
+    "int_duty_execution int_schedule_version dim_schedule_version"
 )
 GTFS_STOP_ARRIVAL_STAGING_MODELS = "stg_gtfs__stop_times stg_gtfs__stops"
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"

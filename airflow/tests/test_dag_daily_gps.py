@@ -269,6 +269,8 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         "stg_gtfs__routes",
         "stg_gtfs__calendar_dates",
         "int_gtfs_duty_chain",
+        "int_gtfs_trip_stop_semantics",
+        "int_duty_execution",
         "int_gtfs_processing_snapshot",
         "int_gtfs_trip_schedule_history",
         "dim_schedule_version",

@@ -34,6 +34,8 @@ with pings as (
     from {{ ref('int_ping_trip') }}
     where gps_date = date('{{ var("processing_date") }}')
       and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+      -- Window fallback rows are diagnostics, not physical trip observations.
+      and matching_method = 'settled_duty_execution'
 ),
 
 matching_thresholds as (
