@@ -6,7 +6,7 @@ import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 
-from ztm_matcher.gtfs import load, select
+from ztm_matcher.gtfs import StopTime, load, select
 from ztm_matcher.semantics import _depot, duties, stop_semantics
 
 
@@ -70,6 +70,17 @@ def test_exact_block_handoff_is_technical_and_fallback_is_unknown(tmp_path: Path
     boundary = next(row for row in fallback_rows if row["trip_id"] == "two" and row["stop_sequence"] == 1)
     assert boundary["stop_execution_class"] == "unknown"
     assert not boundary["is_passenger_stop"]
+
+
+def test_stop_times_are_compact_records_indexed_by_trip(tmp_path: Path) -> None:
+    path = tmp_path / "schedule.zip"
+    _zip(path)
+    snapshot = load(path, "synthetic")
+
+    assert set(snapshot.stop_times) == {"one", "two"}
+    assert all(isinstance(row, StopTime) for rows in snapshot.stop_times.values() for row in rows)
+    assert not hasattr(snapshot.stop_times["one"][0], "__dict__")
+    assert snapshot.stop_times["one"][0].stop_id == "200001"
 
 
 def test_same_trip_ids_remain_distinct_across_service_dates(tmp_path: Path) -> None:

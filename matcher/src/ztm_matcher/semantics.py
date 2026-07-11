@@ -2,11 +2,10 @@
 
 import math
 import re
-from collections import defaultdict
 from collections.abc import Iterator
 from typing import Any
 
-from ztm_matcher.gtfs import Snapshot, chain_id
+from ztm_matcher.gtfs import Snapshot, StopTime, chain_id
 
 
 def _depot(name: str | None) -> bool:
@@ -25,14 +24,11 @@ def _distance(left: dict[str, Any] | None, right: dict[str, Any] | None) -> floa
 
 def duties(schedule: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str, Any]]:
     """Prefer block IDs, otherwise use namespaced line:brigade duty groups."""
-    stops: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in snapshot.stop_times:
-        stops[row["trip_id"]].append(row)
-    groups: dict[tuple[object, ...], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[object, ...], list[dict[str, Any]]] = {}
     for trip in schedule:
         source = "block_id" if trip["block_id"] else "line_brigade"
         source_id = trip["block_id"] or f"{trip['line']}:{trip['brigade']}"
-        groups[(trip["service_date"], source, source_id)].append(
+        groups.setdefault((trip["service_date"], source, source_id), []).append(
             {**trip, "duty_chain_source": source, "duty_chain_source_id": source_id}
         )
     result = []
@@ -40,8 +36,8 @@ def duties(schedule: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str,
         source = str(source_value)
         group.sort(key=lambda row: (row["trip_start_seconds"], row["trip_end_seconds"], row["trip_id"]))
         for index, trip in enumerate(group):
-            endpoints = sorted(stops[trip["trip_id"]], key=lambda row: row["stop_sequence"])
-            origin, destination = (endpoints[0]["stop_id"], endpoints[-1]["stop_id"]) if endpoints else (None, None)
+            endpoints = sorted(snapshot.stop_times.get(trip["trip_id"], []), key=lambda row: row.stop_sequence)
+            origin, destination = (endpoints[0].stop_id, endpoints[-1].stop_id) if endpoints else (None, None)
             previous, next_trip = (
                 (group[index - 1] if index else None),
                 (group[index + 1] if index + 1 < len(group) else None),
@@ -87,13 +83,9 @@ def duties(schedule: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str,
 def iter_stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> Iterator[dict[str, Any]]:
     """Keep every operational stop; unknown endpoint evidence cannot be passenger output."""
     duty = {(row["service_date"], row["trip_id"]): row for row in duty_rows}
-    stop_times: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in snapshot.stop_times:
-        stop_times[row["trip_id"]].append(row)
     for (service_date, trip_id), current in sorted(duty.items()):
-        rows = list(stop_times[trip_id])
-        rows.sort(key=lambda row: row["stop_sequence"])
-        eligible = [row for row in rows if row["stop_service_class"] != "not_in_passenger_service"]
+        rows = sorted(snapshot.stop_times.get(trip_id, []), key=lambda row: row.stop_sequence)
+        eligible = [row for row in rows if row.stop_service_class != "not_in_passenger_service"]
         classified = []
         for index, row in enumerate(rows):
             before, after = rows[index - 1] if index else None, rows[index + 1] if index + 1 < len(rows) else None
@@ -102,31 +94,29 @@ def iter_stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> 
             prefix = bool(
                 index == 0
                 and prior
-                and row["stop_id"] == prior["destination_stop_id"]
+                and row.stop_id == prior["destination_stop_id"]
                 and after
-                and after["stop_id"] != row["stop_id"]
-                and after["stop_id"][:4] == row["stop_id"][:4]
+                and after.stop_id != row.stop_id
+                and after.stop_id[:4] == row.stop_id[:4]
             )
             suffix = bool(
                 index == len(rows) - 1
                 and following
-                and row["stop_id"] == following["origin_stop_id"]
+                and row.stop_id == following["origin_stop_id"]
                 and before
-                and before["stop_id"] != row["stop_id"]
-                and before["stop_id"][:4] == row["stop_id"][:4]
+                and before.stop_id != row.stop_id
+                and before.stop_id[:4] == row.stop_id[:4]
             )
-            explicit = row["stop_service_class"] == "not_in_passenger_service"
+            explicit = row.stop_service_class == "not_in_passenger_service"
             if current["is_depot_segment"] or not eligible:
                 kind, reason = (
                     "technical_trip",
                     "depot_segment" if current["is_depot_segment"] else "no_gtfs_passenger_stops",
                 )
             elif explicit:
-                before_passenger = any(
-                    item["stop_service_class"] != "not_in_passenger_service" for item in rows[:index]
-                )
+                before_passenger = any(item.stop_service_class != "not_in_passenger_service" for item in rows[:index])
                 after_passenger = any(
-                    item["stop_service_class"] != "not_in_passenger_service" for item in rows[index + 1 :]
+                    item.stop_service_class != "not_in_passenger_service" for item in rows[index + 1 :]
                 )
                 kind = (
                     "technical_prefix"
@@ -146,16 +136,14 @@ def iter_stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> 
                 prefix
                 and current["duty_chain_source"] == "block_id"
                 and (current["layover_from_previous_seconds"] or 0) >= 0
-                and (_distance(snapshot.stops.get(row["stop_id"]), snapshot.stops.get(after["stop_id"])) or math.inf)
-                <= 250
+                and (_distance(snapshot.stops.get(row.stop_id), snapshot.stops.get(after.stop_id)) or math.inf) <= 250
             ):
                 kind, reason = "technical_prefix", "adjacent_duty_origin_handoff"
             elif (
                 suffix
                 and current["duty_chain_source"] == "block_id"
                 and (current["layover_to_next_seconds"] or 0) >= 0
-                and (_distance(snapshot.stops.get(before["stop_id"]), snapshot.stops.get(row["stop_id"])) or math.inf)
-                <= 250
+                and (_distance(snapshot.stops.get(before.stop_id), snapshot.stops.get(row.stop_id)) or math.inf) <= 250
             ):
                 kind, reason = "technical_suffix", "adjacent_duty_destination_handoff"
             elif prefix or suffix:
@@ -164,24 +152,24 @@ def iter_stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> 
                 kind, reason = "passenger", "gtfs_passenger_stop"
             classified.append((row, kind, reason))
         settled = not any(
-            kind == "unknown" and row["stop_sequence"] in {rows[0]["stop_sequence"], rows[-1]["stop_sequence"]}
+            kind == "unknown" and row.stop_sequence in {rows[0].stop_sequence, rows[-1].stop_sequence}
             for row, kind, _ in classified
         )
-        passenger = [row["stop_sequence"] for row, kind, _ in classified if kind == "passenger"]
+        passenger = [row.stop_sequence for row, kind, _ in classified if kind == "passenger"]
         for row, kind, reason in classified:
             yield {
                 "gtfs_snapshot_id": current["gtfs_snapshot_id"],
                 "service_date": current["service_date"],
                 "processing_date": current["processing_date"],
                 "trip_id": trip_id,
-                "stop_id": row["stop_id"],
-                "stop_group_id": row["stop_id"][:4],
-                "stop_sequence": row["stop_sequence"],
-                "arrival_time_seconds": row["arrival_time_seconds"],
-                "departure_time_seconds": row["departure_time_seconds"],
-                "pickup_type": row["pickup_type"],
-                "drop_off_type": row["drop_off_type"],
-                "stop_service_class": row["stop_service_class"],
+                "stop_id": row.stop_id,
+                "stop_group_id": row.stop_id[:4],
+                "stop_sequence": row.stop_sequence,
+                "arrival_time_seconds": row.arrival_time_seconds,
+                "departure_time_seconds": row.departure_time_seconds,
+                "pickup_type": row.pickup_type,
+                "drop_off_type": row.drop_off_type,
+                "stop_service_class": row.stop_service_class,
                 "duty_chain_id": current["duty_chain_id"],
                 "duty_chain_source": current["duty_chain_source"],
                 "duty_chain_source_id": current["duty_chain_source_id"],
@@ -204,12 +192,12 @@ def stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> list[
     return list(iter_stop_semantics(duty_rows, snapshot))
 
 
-def _classification_evidence(current: dict[str, Any], row: dict[str, Any], kind: str) -> list[str]:
+def _classification_evidence(current: dict[str, Any], row: StopTime, kind: str) -> list[str]:
     if current["is_depot_segment"]:
         return ["depot_terminal_name"]
     if kind == "technical_trip":
         return ["explicit_non_passenger_service"]
-    if row["stop_service_class"] == "not_in_passenger_service":
+    if row.stop_service_class == "not_in_passenger_service":
         return ["explicit_non_passenger_service"]
     if kind in {"technical_prefix", "technical_suffix"}:
         return sorted(

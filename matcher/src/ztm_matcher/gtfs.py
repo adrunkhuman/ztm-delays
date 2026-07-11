@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from ztm_matcher.errors import fail
@@ -56,14 +56,42 @@ MAX_GTFS_ROWS = 1_800_000
 SNAPSHOT_ID_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z_([0-9a-f]{12})$")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class StopTime:
+    """Normalized fields needed from one selected stop_times.txt row."""
+
+    stop_id: str
+    stop_sequence: int
+    arrival_time_seconds: int
+    departure_time_seconds: int
+    pickup_type: int
+    drop_off_type: int
+    stop_service_class: str
+
+
+@dataclass(frozen=True, slots=True)
+class Trip:
+    """Normalized fields needed from one selected trips.txt row."""
+
+    trip_id: str
+    line: str
+    service_id: str
+    trip_headsign: str
+    direction_id: int
+    block_id: str | None
+    block_short_name: str | None
+    brigade: str
+    shape_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     """Validated snapshot rows with explicit lineage."""
 
     snapshot_id: str
     sha256: str
-    trips: list[dict[str, Any]]
-    stop_times: list[dict[str, Any]]
+    trips: list[Trip]
+    stop_times: dict[str, list[StopTime]]
     stops: dict[str, dict[str, Any]]
     routes: dict[str, dict[str, Any]]
     active: set[tuple[str, date]]
@@ -126,6 +154,84 @@ def _read_member(
         raise fail("missing_input", f"GTFS ZIP missing required member: {name}", 10) from exc
 
 
+def _read_trips(archive: zipfile.ZipFile, active_service_ids: set[str]) -> list[Trip]:
+    """Stream active trips into compact records rather than retaining CSV dictionaries."""
+    try:
+        with archive.open("trips.txt") as member:
+            reader = csv.DictReader(io.TextIOWrapper(member, encoding="utf-8-sig", newline=""))
+            missing = REQUIRED["trips.txt"] - set(reader.fieldnames or [])
+            if missing:
+                raise fail("schema_drift", f"trips.txt missing columns: {', '.join(sorted(missing))}", 11)
+            trips = []
+            input_rows = 0
+            for row in reader:
+                if input_rows >= MAX_GTFS_ROWS:
+                    raise fail("resource_limit", f"GTFS input exceeds {MAX_GTFS_ROWS:,} rows", 14)
+                input_rows += 1
+                service_id = _string(row["service_id"])
+                if service_id not in active_service_ids:
+                    continue
+                block_id = _string(row["block_id"]) or None
+                block_short_name = _string(row["block_short_name"]) or None
+                trips.append(
+                    Trip(
+                        trip_id=_string(row["trip_id"]),
+                        line=_string(row["route_id"]),
+                        service_id=service_id,
+                        trip_headsign=_string(row["trip_headsign"]),
+                        direction_id=_integer(row["direction_id"], "direction_id"),
+                        block_id=block_id,
+                        block_short_name=block_short_name,
+                        brigade=(block_short_name or "0").lstrip("0") or "0",
+                        shape_id=_string(row["shape_id"]),
+                    )
+                )
+            return trips
+    except KeyError as exc:
+        raise fail("missing_input", "GTFS ZIP missing required member: trips.txt", 10) from exc
+
+
+def _read_stop_times(archive: zipfile.ZipFile, selected_trip_ids: set[str]) -> dict[str, list[StopTime]]:
+    """Stream selected stop times into compact, trip-indexed records."""
+    try:
+        with archive.open("stop_times.txt") as member:
+            reader = csv.DictReader(io.TextIOWrapper(member, encoding="utf-8-sig", newline=""))
+            missing = REQUIRED["stop_times.txt"] - set(reader.fieldnames or [])
+            if missing:
+                raise fail("schema_drift", f"stop_times.txt missing columns: {', '.join(sorted(missing))}", 11)
+            stop_times: dict[str, list[StopTime]] = defaultdict(list)
+            selected_rows = 0
+            for row in reader:
+                trip_id = _string(row["trip_id"])
+                if trip_id not in selected_trip_ids:
+                    continue
+                if selected_rows >= MAX_GTFS_ROWS:
+                    raise fail("resource_limit", f"selected GTFS schedule exceeds {MAX_GTFS_ROWS:,} stop rows", 14)
+                pickup_type = _integer(row["pickup_type"] or "0", "pickup_type")
+                drop_off_type = _integer(row["drop_off_type"] or "0", "drop_off_type")
+                stop_times[trip_id].append(
+                    StopTime(
+                        stop_id=_string(row["stop_id"]),
+                        stop_sequence=_integer(row["stop_sequence"], "stop_sequence"),
+                        arrival_time_seconds=_seconds(row["arrival_time"], "arrival_time"),
+                        departure_time_seconds=_seconds(row["departure_time"], "departure_time"),
+                        pickup_type=pickup_type,
+                        drop_off_type=drop_off_type,
+                        stop_service_class=(
+                            "not_in_passenger_service"
+                            if pickup_type == drop_off_type == 1
+                            else "request"
+                            if pickup_type in {2, 3} or drop_off_type in {2, 3}
+                            else "regular"
+                        ),
+                    )
+                )
+                selected_rows += 1
+            return dict(stop_times)
+    except KeyError as exc:
+        raise fail("missing_input", "GTFS ZIP missing required member: stop_times.txt", 10) from exc
+
+
 def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> Snapshot:
     """Load exactly six UTF-8 GTFS tables and verify hash-bearing snapshot IDs."""
     if not path.is_file():
@@ -159,20 +265,9 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
                 for service_id, service_date in active
                 if required_dates is None or service_date in required_dates
             }
-            trip_rows = [
-                row
-                for row in _read_member(archive, "trips.txt", MAX_GTFS_ROWS)
-                if _string(row["service_id"]) in active_service_ids
-            ]
-            selected_trip_ids = {_string(row["trip_id"]) for row in trip_rows}
-            stop_time_rows = _read_member(
-                archive,
-                "stop_times.txt",
-                MAX_GTFS_ROWS,
-                lambda row: _string(row["trip_id"]) in selected_trip_ids,
-            )
-            if len(stop_time_rows) >= MAX_GTFS_ROWS:
-                raise fail("resource_limit", f"selected GTFS schedule exceeds {MAX_GTFS_ROWS:,} stop rows", 14)
+            trips = _read_trips(archive, active_service_ids)
+            selected_trip_ids = {trip.trip_id for trip in trips}
+            stop_times = _read_stop_times(archive, selected_trip_ids)
             stop_rows = _read_member(archive, "stops.txt", MAX_GTFS_ROWS)
             route_rows = _read_member(archive, "routes.txt", MAX_GTFS_ROWS)
             # Shapes are not needed for runtime preparation, but their header remains an input gate.
@@ -194,46 +289,6 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
             raise fail("invalid_data", "invalid stops.txt coordinates", 12) from exc
         if 51.0 <= lat <= 53.5 and 19.5 <= lon <= 22.5:
             stops[_string(row["stop_id"])] = {"stop_name": _string(row["stop_name"]), "stop_lat": lat, "stop_lon": lon}
-    stop_times = cast(list[dict[str, Any]], stop_time_rows)
-    for index, row in enumerate(stop_times):
-        pickup, dropoff = (
-            _integer(row.get("pickup_type") or "0", "pickup_type"),
-            _integer(row.get("drop_off_type") or "0", "drop_off_type"),
-        )
-        klass = (
-            "not_in_passenger_service"
-            if pickup == dropoff == 1
-            else "request"
-            if pickup in {2, 3} or dropoff in {2, 3}
-            else "regular"
-        )
-        stop_times[index] = {
-            "trip_id": _string(row["trip_id"]),
-            "stop_id": _string(row["stop_id"]),
-            "stop_sequence": _integer(row["stop_sequence"], "stop_sequence"),
-            "arrival_time_seconds": _seconds(row["arrival_time"], "arrival_time"),
-            "departure_time_seconds": _seconds(row["departure_time"], "departure_time"),
-            "pickup_type": pickup,
-            "drop_off_type": dropoff,
-            "stop_service_class": klass,
-        }
-    trips = []
-    for row in trip_rows:
-        block = _string(row["block_id"]) or None
-        short = _string(row["block_short_name"]) or None
-        trips.append(
-            {
-                "trip_id": _string(row["trip_id"]),
-                "line": _string(row["route_id"]),
-                "service_id": _string(row["service_id"]),
-                "trip_headsign": _string(row["trip_headsign"]),
-                "direction_id": _integer(row["direction_id"], "direction_id"),
-                "block_id": block,
-                "block_short_name": short,
-                "brigade": (short or "0").lstrip("0") or "0",
-                "shape_id": _string(row["shape_id"]),
-            }
-        )
     if not trips or not stop_times or not active:
         raise fail("invalid_data", "GTFS snapshot has no trips, stop times, or active dates", 12)
     return Snapshot(snapshot_id, digest, trips, stop_times, stops, routes, active)
@@ -245,27 +300,32 @@ def select(snapshot: Snapshot, processing_date: date) -> list[dict[str, Any]]:
     for service_date in dates:
         if not any(active_date == service_date for _, active_date in snapshot.active):
             raise fail("snapshot_mismatch", f"no active GTFS service on required date {service_date}", 13)
-    by_trip: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in snapshot.stop_times:
-        by_trip[row["trip_id"]].append(row)
     day_start = datetime.combine(processing_date, time.min, WARSAW).astimezone(UTC)
     day_end = datetime.combine(processing_date + timedelta(days=1), time.min, WARSAW).astimezone(UTC)
     selected: list[dict[str, Any]] = []
     for trip in snapshot.trips:
-        times = by_trip.get(trip["trip_id"], [])
+        times = snapshot.stop_times.get(trip.trip_id, [])
         if not times:
             continue
-        start = min(min(row["arrival_time_seconds"], row["departure_time_seconds"]) for row in times)
-        end = max(max(row["arrival_time_seconds"], row["departure_time_seconds"]) for row in times)
+        start = min(min(row.arrival_time_seconds, row.departure_time_seconds) for row in times)
+        end = max(max(row.arrival_time_seconds, row.departure_time_seconds) for row in times)
         for service_date in dates:
-            if (trip["service_id"], service_date) not in snapshot.active:
+            if (trip.service_id, service_date) not in snapshot.active:
                 continue
             midnight = datetime.combine(service_date, time.min, WARSAW).astimezone(UTC)
             if midnight + timedelta(seconds=end) >= day_start and midnight + timedelta(seconds=start) < day_end:
-                route = snapshot.routes.get(trip["line"], {})
+                route = snapshot.routes.get(trip.line, {})
                 selected.append(
                     {
-                        **trip,
+                        "trip_id": trip.trip_id,
+                        "line": trip.line,
+                        "service_id": trip.service_id,
+                        "trip_headsign": trip.trip_headsign,
+                        "direction_id": trip.direction_id,
+                        "block_id": trip.block_id,
+                        "block_short_name": trip.block_short_name,
+                        "brigade": trip.brigade,
+                        "shape_id": trip.shape_id,
                         "service_date": service_date,
                         "processing_date": processing_date,
                         "gtfs_snapshot_id": snapshot.snapshot_id,
