@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from ztm_matcher.errors import fail
@@ -165,15 +165,12 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
                 if _string(row["service_id"]) in active_service_ids
             ]
             selected_trip_ids = {_string(row["trip_id"]) for row in trip_rows}
-            stop_time_rows = [
-                row
-                for row in _read_member(
-                    archive,
-                    "stop_times.txt",
-                    MAX_GTFS_ROWS,
-                    lambda row: _string(row["trip_id"]) in selected_trip_ids,
-                )
-            ]
+            stop_time_rows = _read_member(
+                archive,
+                "stop_times.txt",
+                MAX_GTFS_ROWS,
+                lambda row: _string(row["trip_id"]) in selected_trip_ids,
+            )
             if len(stop_time_rows) >= MAX_GTFS_ROWS:
                 raise fail("resource_limit", f"selected GTFS schedule exceeds {MAX_GTFS_ROWS:,} stop rows", 14)
             stop_rows = _read_member(archive, "stops.txt", MAX_GTFS_ROWS)
@@ -197,8 +194,8 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
             raise fail("invalid_data", "invalid stops.txt coordinates", 12) from exc
         if 51.0 <= lat <= 53.5 and 19.5 <= lon <= 22.5:
             stops[_string(row["stop_id"])] = {"stop_name": _string(row["stop_name"]), "stop_lat": lat, "stop_lon": lon}
-    stop_times = []
-    for row in stop_time_rows:
+    stop_times = cast(list[dict[str, Any]], stop_time_rows)
+    for index, row in enumerate(stop_times):
         pickup, dropoff = (
             _integer(row.get("pickup_type") or "0", "pickup_type"),
             _integer(row.get("drop_off_type") or "0", "drop_off_type"),
@@ -210,18 +207,16 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
             if pickup in {2, 3} or dropoff in {2, 3}
             else "regular"
         )
-        stop_times.append(
-            {
-                "trip_id": _string(row["trip_id"]),
-                "stop_id": _string(row["stop_id"]),
-                "stop_sequence": _integer(row["stop_sequence"], "stop_sequence"),
-                "arrival_time_seconds": _seconds(row["arrival_time"], "arrival_time"),
-                "departure_time_seconds": _seconds(row["departure_time"], "departure_time"),
-                "pickup_type": pickup,
-                "drop_off_type": dropoff,
-                "stop_service_class": klass,
-            }
-        )
+        stop_times[index] = {
+            "trip_id": _string(row["trip_id"]),
+            "stop_id": _string(row["stop_id"]),
+            "stop_sequence": _integer(row["stop_sequence"], "stop_sequence"),
+            "arrival_time_seconds": _seconds(row["arrival_time"], "arrival_time"),
+            "departure_time_seconds": _seconds(row["departure_time"], "departure_time"),
+            "pickup_type": pickup,
+            "drop_off_type": dropoff,
+            "stop_service_class": klass,
+        }
     trips = []
     for row in trip_rows:
         block = _string(row["block_id"]) or None
