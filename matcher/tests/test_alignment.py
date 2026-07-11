@@ -162,7 +162,7 @@ def test_line_change_same_line_handoff_short_turn_unknown_and_overnight() -> Non
     )
 
 
-def test_ambiguous_vehicles_emit_signal_without_ownership() -> None:
+def test_exact_path_ties_emit_signal_without_ownership() -> None:
     course = _course("ambiguous")
     evidence = _evidence(course, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)]) + _evidence(
         course, [_ping(0, 0.0, vehicle="200"), _ping(1, 0.01, vehicle="200"), _ping(2, 0.02, vehicle="200")]
@@ -172,3 +172,48 @@ def test_ambiguous_vehicles_emit_signal_without_ownership() -> None:
     assert outcome["execution_status"] == "vehicle_change_signal"
     assert outcome["competing_candidate_count"] == 2
     assert outcome["ownership_interval_start_time"] is None
+    assert settle_duty([course], list(reversed(evidence)))[0] == outcome
+
+
+def test_coherent_vehicle_path_beats_a_competing_single_course_candidate() -> None:
+    first, second, third = _course("first"), _course("second", 2), _course("third", 3)
+    coherent_pings = [
+        _ping(0, 0.0),
+        _ping(1, 0.01),
+        _ping(2, 0.02),
+        _ping(20, 0.0),
+        _ping(21, 0.01),
+        _ping(22, 0.02),
+        _ping(40, 0.0),
+        _ping(41, 0.01),
+        _ping(42, 0.02),
+    ]
+    competing_pings = [_ping(20, 0.0, vehicle="200"), _ping(21, 0.01, vehicle="200"), _ping(22, 0.02, vehicle="200")]
+    evidence = [
+        item
+        for course in (first, second, third)
+        for item in _evidence(course, coherent_pings) + _evidence(course, competing_pings)
+    ]
+
+    outcomes = settle_duty([first, second, third], evidence)
+
+    assert [row["execution_status"] for row in outcomes] == ["executed", "executed", "executed"]
+    assert [row["vehicle_number"] for row in outcomes] == ["100", "100", "100"]
+    assert outcomes[1]["competing_candidate_count"] == 4
+
+
+def test_long_consistent_delay_and_skipped_middle_retain_later_traversal() -> None:
+    first, missing, last = _course("first"), _course("missing", 2), _course("last", 3)
+    delayed_pings = [
+        _ping(100, 0.0),
+        _ping(101, 0.01),
+        _ping(102, 0.02),
+        _ping(140, 0.0),
+        _ping(141, 0.01),
+        _ping(142, 0.02),
+    ]
+    outcomes = settle_duty([first, missing, last], _evidence(first, delayed_pings) + _evidence(last, delayed_pings))
+
+    assert [row["execution_status"] for row in outcomes] == ["executed", "skipped", "executed"]
+    assert outcomes[0]["ownership_interval_start_time"] == BASE + timedelta(minutes=101)
+    assert outcomes[2]["ownership_interval_start_time"] == BASE + timedelta(minutes=141)

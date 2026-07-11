@@ -9,6 +9,7 @@ from typing import Any
 
 TERMINAL_RADIUS_METERS = 250
 TERMINAL_EPISODE_GAP_SECONDS = 180
+PATH_TIMING_TIE_SECONDS = 30
 
 
 def _distance_meters(lat: float, lon: float, stop_lat: float, stop_lon: float) -> float:
@@ -150,46 +151,102 @@ def extract_evidence(course: dict[str, Any], pings: list[dict[str, Any]]) -> lis
 
 
 def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Allocate a full duty in trip order with deterministic skip states and no traversal reuse."""
+    """Allocate a duty by comparing coherent, vehicle-specific paths."""
     by_trip: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in evidence:
         by_trip[item["trip_id"]].append(item)
-    selected: dict[str, dict[str, Any]] = {}
-    allocation_state: dict[str, str] = {}
-    used: set[str] = set()
-    delay_by_vehicle: dict[str, float] = {}
-    previous: dict[str, Any] | None = None
-    for course in sorted(courses, key=lambda row: (row["trip_order"], row["trip_id"])):
-        allocation_state[course["trip_id"]] = "skip_course"
-        candidates = [item for item in by_trip[course["trip_id"]] if item["candidate_kind"] == "candidate"]
-        vehicles = {item["vehicle_number"] for item in candidates}
-        if len(vehicles) != 1:
-            continue
-        vehicle = next(iter(vehicles))
-        feasible = [item for item in candidates if item["traversal_id"] not in used]
-        if previous and previous["vehicle_number"] == vehicle:
-            feasible = [item for item in feasible if item["origin_event_time"] > previous["destination_event_time"]]
-        if not feasible:
-            continue
-        expected_delay = delay_by_vehicle.get(vehicle, 0.0)
-        chosen = min(
-            feasible,
-            key=lambda item: (
-                0 if previous and previous["vehicle_number"] == vehicle else 1,
-                abs((item["origin_event_time"] - course["scheduled_start_time"]).total_seconds() - expected_delay),
-                item["origin_event_time"],
-                item["vehicle_number"],
-                item["traversal_id"],
-            ),
+    ordered = sorted(courses, key=lambda row: (row["trip_order"], row["trip_id"]))
+    vehicles = sorted(
+        {
+            item["vehicle_number"]
+            for items in by_trip.values()
+            for item in items
+            if item["candidate_kind"] == "candidate"
+        }
+    )
+
+    def path_signature(path: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (course["trip_id"], str(path["selected"][course["trip_id"]]["traversal_id"]))
+            for course in ordered
+            if course["trip_id"] in path["selected"]
         )
-        selected[course["trip_id"]] = chosen
-        allocation_state[course["trip_id"]] = "traversal"
-        used.add(str(chosen["traversal_id"]))
-        delay_by_vehicle[vehicle] = (chosen["origin_event_time"] - course["scheduled_start_time"]).total_seconds()
-        previous = chosen
+
+    def better_path(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        return (-left["executed"], left["timing_cost"], path_signature(left)) < (
+            -right["executed"],
+            right["timing_cost"],
+            path_signature(right),
+        )
+
+    paths: list[dict[str, Any]] = []
+    for vehicle in vehicles:
+        states: dict[tuple[str | None, float | None], dict[str, Any]] = {
+            (None, None): {
+                "selected": {},
+                "used_traversal_ids": frozenset(),
+                "previous_destination": None,
+                "delay": None,
+                "executed": 0,
+                "timing_cost": 0.0,
+            }
+        }
+        for course in ordered:
+            next_states = dict(states)
+            candidates = sorted(
+                (
+                    item
+                    for item in by_trip[course["trip_id"]]
+                    if item["candidate_kind"] == "candidate" and item["vehicle_number"] == vehicle
+                ),
+                key=lambda item: (item["origin_event_time"], str(item["traversal_id"])),
+            )
+            for state in states.values():
+                for candidate in candidates:
+                    traversal_id = str(candidate["traversal_id"])
+                    if traversal_id in state["used_traversal_ids"] or (
+                        state["previous_destination"] is not None
+                        and candidate["origin_event_time"] <= state["previous_destination"]
+                    ):
+                        continue
+                    delay = (candidate["origin_event_time"] - course["scheduled_start_time"]).total_seconds()
+                    timing_cost = state["timing_cost"] + abs(
+                        delay if state["delay"] is None else delay - state["delay"]
+                    )
+                    path = {
+                        "selected": {**state["selected"], course["trip_id"]: candidate},
+                        "used_traversal_ids": state["used_traversal_ids"] | {traversal_id},
+                        "previous_destination": candidate["destination_event_time"],
+                        "delay": delay,
+                        "executed": state["executed"] + 1,
+                        "timing_cost": timing_cost,
+                    }
+                    key = (traversal_id, delay)
+                    if key not in next_states or better_path(path, next_states[key]):
+                        next_states[key] = path
+            # A skipped course deliberately retains timing, destination, and traversal state.
+            states = next_states
+        best = min(states.values(), key=lambda path: (-path["executed"], path["timing_cost"], path_signature(path)))
+        if best["executed"]:
+            paths.append({**best, "vehicle_number": vehicle})
+
+    paths.sort(key=lambda path: (-path["executed"], path["timing_cost"], path["vehicle_number"], path_signature(path)))
+    winning_path = paths[0] if paths else None
+    selected = winning_path["selected"] if winning_path else {}
+    ambiguous_trip_ids: set[str] = set()
+    if winning_path:
+        for path in paths[1:]:
+            if path["executed"] != winning_path["executed"]:
+                break
+            if path["timing_cost"] - winning_path["timing_cost"] > PATH_TIMING_TIE_SECONDS:
+                break
+            for course in ordered:
+                winner = winning_path["selected"].get(course["trip_id"])
+                contender = path["selected"].get(course["trip_id"])
+                if winner != contender:
+                    ambiguous_trip_ids.add(course["trip_id"])
 
     outcomes = []
-    ordered = sorted(courses, key=lambda row: (row["trip_order"], row["trip_id"]))
     for index, course in enumerate(ordered):
         items = by_trip[course["trip_id"]]
         candidates = [item for item in items if item["candidate_kind"] == "candidate"]
@@ -201,7 +258,7 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
         if not course["are_passenger_boundaries_settled"]:
             status, confidence, reason = "uncertain", "low", "passenger_boundaries_unknown"
             evidence_flags.append("passenger_boundaries_unknown")
-        elif len({item["vehicle_number"] for item in candidates}) > 1:
+        elif course["trip_id"] in ambiguous_trip_ids:
             status, confidence, reason = "vehicle_change_signal", "low", "multiple_vehicles_terminal_progression"
             evidence_flags.append("multiple_vehicles")
         elif chosen:
@@ -214,8 +271,7 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
             status, confidence, reason = "short_turned", "medium", "next_course_origin_before_destination"
             evidence_flags.append("next_course_origin_before_destination")
         elif (
-            allocation_state[course["trip_id"]] == "skip_course"
-            and index > 0
+            index > 0
             and index + 1 < len(ordered)
             and (before := selected.get(ordered[index - 1]["trip_id"])) is not None
             and (after := selected.get(ordered[index + 1]["trip_id"])) is not None
