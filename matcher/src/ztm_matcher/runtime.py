@@ -28,7 +28,7 @@ from ztm_matcher.schemas import (
 )
 from ztm_matcher.semantics import duties, iter_stop_semantics
 
-SEMANTICS_BATCH_ROWS = 50_000
+SEMANTICS_BATCH_ROWS = 10_000
 
 
 @dataclass(frozen=True)
