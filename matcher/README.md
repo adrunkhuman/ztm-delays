@@ -29,8 +29,9 @@ Errors use stable codes: `missing_input`, `schema_drift`, `invalid_data`,
 
 DuckDB defaults to two threads, 1024 MB of managed memory, and 20 GB of
 temporary disk. The loader additionally rejects GTFS archives above 640 MB
-uncompressed or 750,000 selected stop rows. It streams the rolling feed and
+uncompressed or 1,800,000 selected stop rows. It streams the rolling feed and
 retains only services active on the required current/prior dates so Python
-schedule preparation remains bounded outside DuckDB. Metrics include wall and CPU time,
+schedule preparation remains bounded outside DuckDB; stop semantics are written
+in 50,000-row Parquet batches. Metrics include wall and CPU time,
 peak RSS and swap where the OS exposes them, temporary and artifact disk use,
 and vehicle-group sizes.

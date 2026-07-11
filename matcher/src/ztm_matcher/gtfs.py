@@ -52,7 +52,7 @@ REQUIRED = {
     "calendar_dates.txt": {"service_id", "date", "exception_type"},
 }
 MAX_GTFS_UNCOMPRESSED_BYTES = 640 * 1024 * 1024
-MAX_GTFS_ROWS = 750_000
+MAX_GTFS_ROWS = 1_800_000
 SNAPSHOT_ID_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z_([0-9a-f]{12})$")
 
 

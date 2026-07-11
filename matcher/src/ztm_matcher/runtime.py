@@ -26,7 +26,9 @@ from ztm_matcher.schemas import (
     SCHEDULE_SCHEMA_VERSION,
     SEMANTICS_SCHEMA_VERSION,
 )
-from ztm_matcher.semantics import duties, stop_semantics
+from ztm_matcher.semantics import duties, iter_stop_semantics
+
+SEMANTICS_BATCH_ROWS = 50_000
 
 
 @dataclass(frozen=True)
@@ -117,10 +119,31 @@ class ReconstructionRun:
         if not required_schedule.issubset(schedule_table.column_names):
             raise fail("invalid_output", "duty schedule does not satisfy schedule-v1", 15)
         pq.write_table(schedule_table, work / "duty_schedule.parquet", compression="zstd")
-        semantics_rows = stop_semantics(rows, snapshot)
-        if not semantics_rows:
+        semantics_path = work / "stop_semantics.parquet"
+        semantics_batch: list[dict[str, Any]] = []
+        semantics_writer: pq.ParquetWriter | None = None
+        semantics_columns: set[str] | None = None
+        semantics_count = 0
+        for semantic in iter_stop_semantics(rows, snapshot):
+            semantics_batch.append(semantic)
+            if len(semantics_batch) < SEMANTICS_BATCH_ROWS:
+                continue
+            table = pa.Table.from_pylist(semantics_batch)
+            semantics_columns = set(table.column_names)
+            semantics_writer = semantics_writer or pq.ParquetWriter(semantics_path, table.schema, compression="zstd")
+            semantics_writer.write_table(table)
+            semantics_count += table.num_rows
+            semantics_batch.clear()
+        if semantics_batch:
+            table = pa.Table.from_pylist(semantics_batch)
+            semantics_columns = set(table.column_names)
+            semantics_writer = semantics_writer or pq.ParquetWriter(semantics_path, table.schema, compression="zstd")
+            semantics_writer.write_table(table)
+            semantics_count += table.num_rows
+        if semantics_writer is not None:
+            semantics_writer.close()
+        if semantics_count == 0:
             raise fail("invalid_output", "pinned snapshot produced no stop semantics", 15)
-        semantics_table = pa.Table.from_pylist(semantics_rows)
         required_semantics = {
             "service_date",
             "processing_date",
@@ -130,9 +153,8 @@ class ReconstructionRun:
             "stop_execution_class",
             "classification_evidence",
         }
-        if not required_semantics.issubset(semantics_table.column_names):
+        if semantics_columns is None or not required_semantics.issubset(semantics_columns):
             raise fail("invalid_output", "stop semantics do not satisfy stop-semantics-v1", 15)
-        pq.write_table(semantics_table, work / "stop_semantics.parquet", compression="zstd")
         return len(rows)
 
     def prepare(self) -> dict[str, Any]:

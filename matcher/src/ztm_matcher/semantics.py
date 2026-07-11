@@ -3,6 +3,7 @@
 import math
 import re
 from collections import defaultdict
+from collections.abc import Iterator
 from typing import Any
 
 from ztm_matcher.gtfs import Snapshot, chain_id
@@ -83,13 +84,12 @@ def duties(schedule: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str,
     return result
 
 
-def stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str, Any]]:
+def iter_stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> Iterator[dict[str, Any]]:
     """Keep every operational stop; unknown endpoint evidence cannot be passenger output."""
     duty = {(row["service_date"], row["trip_id"]): row for row in duty_rows}
     stop_times: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in snapshot.stop_times:
         stop_times[row["trip_id"]].append(row)
-    output = []
     for (service_date, trip_id), current in sorted(duty.items()):
         rows = list(stop_times[trip_id])
         rows.sort(key=lambda row: row["stop_sequence"])
@@ -169,37 +169,39 @@ def stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> list[
         )
         passenger = [row["stop_sequence"] for row, kind, _ in classified if kind == "passenger"]
         for row, kind, reason in classified:
-            output.append(
-                {
-                    "gtfs_snapshot_id": current["gtfs_snapshot_id"],
-                    "service_date": current["service_date"],
-                    "processing_date": current["processing_date"],
-                    "trip_id": trip_id,
-                    "stop_id": row["stop_id"],
-                    "stop_group_id": row["stop_id"][:4],
-                    "stop_sequence": row["stop_sequence"],
-                    "arrival_time_seconds": row["arrival_time_seconds"],
-                    "departure_time_seconds": row["departure_time_seconds"],
-                    "pickup_type": row["pickup_type"],
-                    "drop_off_type": row["drop_off_type"],
-                    "stop_service_class": row["stop_service_class"],
-                    "duty_chain_id": current["duty_chain_id"],
-                    "duty_chain_source": current["duty_chain_source"],
-                    "duty_chain_source_id": current["duty_chain_source_id"],
-                    "trip_order": current["trip_order"],
-                    "previous_trip_id": current["previous_trip_id"],
-                    "next_trip_id": current["next_trip_id"],
-                    "stop_execution_class": kind,
-                    "classification_confidence": "low" if kind == "unknown" else "high",
-                    "classification_reason": reason,
-                    "classification_evidence": _classification_evidence(current, row, kind),
-                    "is_passenger_stop": kind == "passenger" and settled,
-                    "are_passenger_boundaries_settled": settled,
-                    "first_passenger_stop_sequence": min(passenger) if settled and passenger else None,
-                    "last_passenger_stop_sequence": max(passenger) if settled and passenger else None,
-                }
-            )
-    return sorted(output, key=lambda row: (row["service_date"], row["trip_id"], row["stop_sequence"]))
+            yield {
+                "gtfs_snapshot_id": current["gtfs_snapshot_id"],
+                "service_date": current["service_date"],
+                "processing_date": current["processing_date"],
+                "trip_id": trip_id,
+                "stop_id": row["stop_id"],
+                "stop_group_id": row["stop_id"][:4],
+                "stop_sequence": row["stop_sequence"],
+                "arrival_time_seconds": row["arrival_time_seconds"],
+                "departure_time_seconds": row["departure_time_seconds"],
+                "pickup_type": row["pickup_type"],
+                "drop_off_type": row["drop_off_type"],
+                "stop_service_class": row["stop_service_class"],
+                "duty_chain_id": current["duty_chain_id"],
+                "duty_chain_source": current["duty_chain_source"],
+                "duty_chain_source_id": current["duty_chain_source_id"],
+                "trip_order": current["trip_order"],
+                "previous_trip_id": current["previous_trip_id"],
+                "next_trip_id": current["next_trip_id"],
+                "stop_execution_class": kind,
+                "classification_confidence": "low" if kind == "unknown" else "high",
+                "classification_reason": reason,
+                "classification_evidence": _classification_evidence(current, row, kind),
+                "is_passenger_stop": kind == "passenger" and settled,
+                "are_passenger_boundaries_settled": settled,
+                "first_passenger_stop_sequence": min(passenger) if settled and passenger else None,
+                "last_passenger_stop_sequence": max(passenger) if settled and passenger else None,
+            }
+
+
+def stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str, Any]]:
+    """Materialize compact fixture output; production uses the bounded iterator."""
+    return list(iter_stop_semantics(duty_rows, snapshot))
 
 
 def _classification_evidence(current: dict[str, Any], row: dict[str, Any], kind: str) -> list[str]:
