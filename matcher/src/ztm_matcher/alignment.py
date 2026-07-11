@@ -208,7 +208,7 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                     traversal_id = str(candidate["traversal_id"])
                     if traversal_id in state["used_traversal_ids"] or (
                         state["previous_destination"] is not None
-                        and candidate["origin_event_time"] <= state["previous_destination"]
+                        and candidate["departure_event_time"] <= state["previous_destination"]
                     ):
                         continue
                     delay = (candidate["departure_event_time"] - course["scheduled_start_time"]).total_seconds()
@@ -281,8 +281,8 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                 if item["candidate_kind"] == "candidate"
                 and item["vehicle_number"] == winning_path["vehicle_number"]
                 and str(item["traversal_id"]) not in used
-                and (preceding is None or item["origin_event_time"] > preceding["destination_event_time"])
-                and (following is None or item["destination_event_time"] < following["origin_event_time"])
+                and (preceding is None or item["departure_event_time"] > preceding["destination_event_time"])
+                and (following is None or item["destination_event_time"] < following["departure_event_time"])
             ]
             if not candidates:
                 continue
