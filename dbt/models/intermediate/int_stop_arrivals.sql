@@ -66,6 +66,20 @@ valid_segments as (
       and timestamp_diff(gps_time, prev_gps_time, second) between 1 and 180
 ),
 
+passenger_stop_times as (
+    select
+        *,
+        min(stop_sequence) over (partition by gtfs_snapshot_id, trip_id) as first_passenger_stop_sequence,
+        max(stop_sequence) over (partition by gtfs_snapshot_id, trip_id) as last_passenger_stop_sequence,
+        lag(stop_sequence) over (partition by gtfs_snapshot_id, trip_id order by stop_sequence)
+            as previous_passenger_stop_sequence,
+        lead(stop_sequence) over (partition by gtfs_snapshot_id, trip_id order by stop_sequence)
+            as next_passenger_stop_sequence
+    from {{ ref('stg_gtfs__stop_times') }}
+    where gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+      and stop_service_class != 'not_in_passenger_service'
+),
+
 scheduled_stops as (
     select
         stop_times.trip_id,
@@ -78,35 +92,25 @@ scheduled_stops as (
         stop_times.drop_off_type,
         stop_times.stop_service_class,
         stop_times.gtfs_snapshot_id,
+        stop_times.first_passenger_stop_sequence,
+        stop_times.last_passenger_stop_sequence,
+        stop_times.previous_passenger_stop_sequence,
+        stop_times.next_passenger_stop_sequence,
         st_geogpoint(stops.stop_lon, stops.stop_lat) as stop_point,
         case
             when stop_times.stop_service_class = 'request'
-                or stop_times.stop_sequence <= trip_stop_bounds.first_passenger_stop_sequence + matching_thresholds.terminal_stop_tolerance
-                or stop_times.stop_sequence >= trip_stop_bounds.last_passenger_stop_sequence - matching_thresholds.terminal_stop_tolerance
+                or stop_times.stop_sequence <= stop_times.first_passenger_stop_sequence + matching_thresholds.terminal_stop_tolerance
+                or stop_times.stop_sequence >= stop_times.last_passenger_stop_sequence - matching_thresholds.terminal_stop_tolerance
                 then matching_thresholds.expanded_stop_radius_m
             else matching_thresholds.regular_stop_radius_m
         end as stop_match_radius_m
-    from {{ ref('stg_gtfs__stop_times') }} as stop_times
+    from passenger_stop_times as stop_times
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.stop_id = stops.stop_id
         and stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
         and stops.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-    inner join (
-        select
-            gtfs_snapshot_id,
-            trip_id,
-            min(stop_sequence) as first_passenger_stop_sequence,
-            max(stop_sequence) as last_passenger_stop_sequence
-        from {{ ref('stg_gtfs__stop_times') }}
-        where gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-          and stop_service_class != 'not_in_passenger_service'
-        group by gtfs_snapshot_id, trip_id
-    ) as trip_stop_bounds
-        on stop_times.gtfs_snapshot_id = trip_stop_bounds.gtfs_snapshot_id
-        and stop_times.trip_id = trip_stop_bounds.trip_id
     cross join matching_thresholds
     where stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-      and stop_times.stop_service_class != 'not_in_passenger_service'
 ),
 
 candidate_crossings as (
@@ -136,6 +140,10 @@ candidate_crossings as (
         scheduled_stops.pickup_type,
         scheduled_stops.drop_off_type,
         scheduled_stops.stop_service_class,
+        scheduled_stops.first_passenger_stop_sequence,
+        scheduled_stops.last_passenger_stop_sequence,
+        scheduled_stops.previous_passenger_stop_sequence,
+        scheduled_stops.next_passenger_stop_sequence,
         scheduled_stops.stop_match_radius_m,
         timestamp_add(
             timestamp(valid_segments.service_date, 'Europe/Warsaw'),
@@ -168,6 +176,75 @@ estimated_crossings as (
             ) as int64) second
         ) as actual_arrival_time
     from candidate_crossings
+),
+
+distance_selected_crossings as (
+    select *
+    from estimated_crossings
+    qualify row_number() over (
+        partition by gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence
+        order by stop_distance_m, abs(timestamp_diff(actual_arrival_time, scheduled_arrival_time, second)), actual_arrival_time
+    ) = 1
+),
+
+progression_ranked_crossings as (
+    select
+        estimated_crossings.*,
+        row_number() over (
+            partition by
+                estimated_crossings.gtfs_snapshot_id,
+                estimated_crossings.service_date,
+                estimated_crossings.trip_id,
+                estimated_crossings.vehicle_number,
+                estimated_crossings.stop_sequence
+            order by
+                case
+                    when estimated_crossings.stop_sequence = estimated_crossings.first_passenger_stop_sequence
+                        and next_stop.actual_arrival_time is not null
+                        and estimated_crossings.actual_arrival_time > next_stop.actual_arrival_time
+                        then 1
+                    when estimated_crossings.stop_sequence = estimated_crossings.last_passenger_stop_sequence
+                        and previous_stop.actual_arrival_time is not null
+                        and estimated_crossings.actual_arrival_time < previous_stop.actual_arrival_time
+                        then 1
+                    else 0
+                end,
+                case
+                    when (
+                        estimated_crossings.stop_sequence = estimated_crossings.first_passenger_stop_sequence
+                        and next_stop.actual_arrival_time is not null
+                    ) or (
+                        estimated_crossings.stop_sequence = estimated_crossings.last_passenger_stop_sequence
+                        and previous_stop.actual_arrival_time is not null
+                    )
+                        then abs(timestamp_diff(
+                        estimated_crossings.actual_arrival_time,
+                        estimated_crossings.scheduled_arrival_time,
+                        second
+                    ))
+                    else 0
+                end,
+                estimated_crossings.stop_distance_m,
+                abs(timestamp_diff(
+                    estimated_crossings.actual_arrival_time,
+                    estimated_crossings.scheduled_arrival_time,
+                    second
+                )),
+                estimated_crossings.actual_arrival_time
+        ) as progression_candidate_rank
+    from estimated_crossings
+    left join distance_selected_crossings as next_stop
+        on estimated_crossings.gtfs_snapshot_id = next_stop.gtfs_snapshot_id
+        and estimated_crossings.service_date = next_stop.service_date
+        and estimated_crossings.trip_id = next_stop.trip_id
+        and estimated_crossings.vehicle_number = next_stop.vehicle_number
+        and estimated_crossings.next_passenger_stop_sequence = next_stop.stop_sequence
+    left join distance_selected_crossings as previous_stop
+        on estimated_crossings.gtfs_snapshot_id = previous_stop.gtfs_snapshot_id
+        and estimated_crossings.service_date = previous_stop.service_date
+        and estimated_crossings.trip_id = previous_stop.trip_id
+        and estimated_crossings.vehicle_number = previous_stop.vehicle_number
+        and estimated_crossings.previous_passenger_stop_sequence = previous_stop.stop_sequence
 )
 
 select
@@ -204,8 +281,5 @@ select
     prev_gps_time as segment_start_time,
     gps_time as segment_end_time,
     segment_duration_seconds
-from estimated_crossings
-qualify row_number() over (
-    partition by gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence
-    order by stop_distance_m, abs(timestamp_diff(actual_arrival_time, scheduled_arrival_time, second)), actual_arrival_time
-) = 1
+from progression_ranked_crossings
+where progression_candidate_rank = 1
