@@ -9,7 +9,9 @@ from typing import Any
 
 TERMINAL_RADIUS_METERS = 250
 TERMINAL_EPISODE_GAP_SECONDS = 180
-MAX_PATH_STATES = 32
+MAX_PATH_STATES = 64
+DELAY_DIVERSE_STATES = 32
+DELAY_BUCKET_SECONDS = 300
 PATH_TIMING_TIE_SECONDS = 30
 
 
@@ -225,17 +227,33 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                     if key not in next_states or better_path(path, next_states[key]):
                         next_states[key] = path
             # A skipped course deliberately retains timing, destination, and traversal state.
-            states = dict(
-                sorted(
-                    next_states.items(),
-                    key=lambda item: (
-                        -item[1]["executed"],
-                        item[1]["timing_cost"],
-                        path_signature(item[1]),
-                        str(item[0]),
-                    ),
-                )[:MAX_PATH_STATES]
+            ranked_states = sorted(
+                next_states.items(),
+                key=lambda item: (
+                    -item[1]["executed"],
+                    item[1]["timing_cost"],
+                    path_signature(item[1]),
+                    str(item[0]),
+                ),
             )
+            by_delay_bucket: dict[int | None, tuple[tuple[str | None, float | None], dict[str, Any]]] = {}
+            for item in ranked_states:
+                delay = item[1]["delay"]
+                bucket = None if delay is None else round(delay / DELAY_BUCKET_SECONDS)
+                by_delay_bucket.setdefault(bucket, item)
+            diverse = sorted(
+                by_delay_bucket.items(),
+                key=lambda item: (
+                    math.inf if item[0] is None else abs(item[0]),
+                    -item[1][1]["executed"],
+                    item[1][1]["timing_cost"],
+                    path_signature(item[1][1]),
+                ),
+            )[:DELAY_DIVERSE_STATES]
+            retained = [item for _, item in diverse]
+            retained_keys = {item[0] for item in retained}
+            retained.extend(item for item in ranked_states if item[0] not in retained_keys)
+            states = dict(retained[:MAX_PATH_STATES])
         best = min(states.values(), key=lambda path: (-path["executed"], path["timing_cost"], path_signature(path)))
         if best["executed"]:
             paths.append({**best, "vehicle_number": vehicle})
