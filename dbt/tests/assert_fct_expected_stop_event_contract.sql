@@ -43,6 +43,12 @@ with grouped_events as (
             or pickup_type is null
             or drop_off_type is null
             or stop_service_class is null
+            or stop_execution_class is null
+            or classification_confidence is null
+            or classification_reason is null
+            or classification_evidence is null
+            or is_passenger_stop is null
+            or are_passenger_boundaries_settled is null
             or scheduled_arrival_time is null
             or scheduled_departure_time is null
             or hour_bracket is null
@@ -58,6 +64,10 @@ with grouped_events as (
             or (actual_arrival_time is not null and observation_status != 'observed')
             or (observation_status = 'missed' and (actual_arrival_time is not null or delay_seconds is not null))
             or (observation_status in ('skipped_optional', 'not_in_passenger_service') and actual_arrival_time is not null)
+            or (stop_execution_class in ('technical_prefix', 'technical_suffix', 'technical_trip')
+                and observation_status != 'not_in_passenger_service')
+            or ((stop_execution_class = 'unknown' or not are_passenger_boundaries_settled)
+                and observation_status != 'uncertain')
         ) as status_violations
     from {{ ref('fct_expected_stop_event') }}
     where service_date = date('{{ test_service_date }}')

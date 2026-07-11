@@ -130,6 +130,16 @@ models:
         description: GTFS drop_off_type for this trip-stop row.
       - name: stop_service_class
         description: Passenger-service class derived from pickup/drop-off rules. int_stop_arrivals only emits regular and request rows.
+      - name: stop_execution_class
+        description: Settled trip-relative execution class. int_stop_arrivals emits passenger rows only.
+      - name: classification_confidence
+        description: Confidence in the trip-relative stop classification.
+      - name: classification_reason
+        description: Stable primary reason code for the stop classification.
+      - name: classification_evidence
+        description: Sorted evidence codes supporting the stop classification.
+      - name: are_passenger_boundaries_settled
+        description: True for all emitted arrivals; unsettled trips are excluded before crossing selection.
       - name: scheduled_arrival_time
         description: Scheduled arrival timestamp reconstructed from service_date and GTFS arrival seconds.
       - name: scheduled_departure_time
@@ -903,7 +913,7 @@ unit_tests:
         format: sql
         rows: |
           select '187' as route_id, '187' as route_short_name, 3 as route_type, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
           select
@@ -911,7 +921,16 @@ unit_tests:
             if(trip_id = 'trip-complete' and stop_sequence = 6, 3, 0) as pickup_type,
             if(trip_id = 'trip-complete' and stop_sequence = 6, 3, 0) as drop_off_type,
             if(trip_id = 'trip-complete' and stop_sequence = 6, 'request', 'regular') as stop_service_class,
-            'snapshot-valid' as gtfs_snapshot_id
+            'snapshot-valid' as gtfs_snapshot_id,
+            date '2026-01-15' as service_date,
+            'passenger' as stop_execution_class,
+            'high' as classification_confidence,
+            'gtfs_passenger_stop' as classification_reason,
+            ['gtfs_passenger_eligible'] as classification_evidence,
+            true as is_passenger_stop,
+            true as are_passenger_boundaries_settled,
+            min(stop_sequence) over (partition by trip_id) as first_passenger_stop_sequence,
+            max(stop_sequence) over (partition by trip_id) as last_passenger_stop_sequence
           from (
             select 'trip-complete' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds
             union all select 'trip-complete', '100102', 2, 36600, 36600
@@ -1195,12 +1214,12 @@ unit_tests:
         format: sql
         rows: |
           select '187' as route_id, '187' as route_short_name, 3 as route_type, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
-          select 'trip-request-only' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-request-only', '100102', 2, 36600, 36600, 3, 3, 'request', 'snapshot-valid'
-          union all select 'trip-request-only', '100103', 3, 37200, 37200, 0, 0, 'regular', 'snapshot-valid'
+          select 'trip-request-only' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, 'passenger' as stop_execution_class, 'high' as classification_confidence, 'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 1 as first_passenger_stop_sequence, 3 as last_passenger_stop_sequence
+          union all select 'trip-request-only', '100102', 2, 36600, 36600, 3, 3, 'request', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 3
+          union all select 'trip-request-only', '100103', 3, 37200, 37200, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 3
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1530,10 +1549,10 @@ unit_tests:
         rows: |
           select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-1' as trip_id, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
           union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-1', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
-          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
+          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, 'passenger' as stop_execution_class, 'high' as classification_confidence, 'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 1 as first_passenger_stop_sequence, 1 as last_passenger_stop_sequence
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1578,10 +1597,10 @@ unit_tests:
         rows: |
           select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-1' as trip_id, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
           union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-1', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
-          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
+          select 'trip-1' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, 'passenger' as stop_execution_class, 'high' as classification_confidence, 'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 1 as first_passenger_stop_sequence, 1 as last_passenger_stop_sequence
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1626,11 +1645,11 @@ unit_tests:
         rows: |
           select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-reused' as trip_id, 'shape-valid' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
           union all select '187', '12', 52.0, 21.0005, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-reused', 'shape-valid', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
-          select 'trip-reused' as trip_id, 'stop-valid' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-reused', 'stop-other', 2, 36005, 36005, 0, 0, 'regular', 'snapshot-other'
+          select 'trip-reused' as trip_id, 'stop-valid' as stop_id, 1 as stop_sequence, 36005 as arrival_time_seconds, 36005 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, 'passenger' as stop_execution_class, 'high' as classification_confidence, 'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 1 as first_passenger_stop_sequence, 1 as last_passenger_stop_sequence
+          union all select 'trip-reused', 'stop-other', 2, 36005, 36005, 0, 0, 'regular', 'snapshot-other', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 2, 2
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1676,18 +1695,18 @@ unit_tests:
         rows: |
           select '187' as line, '12' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 09:00:00+00:00') as gps_time, '1001' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 09:00:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-service-class' as trip_id, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36600 as trip_end_seconds, 36000 as gps_time_seconds
           union all select '187', '12', 52.0, 21.0100, timestamp('2026-01-15 09:00:10+00:00'), '1001', 1, timestamp('2026-01-15 09:00:11+00:00'), date '2026-01-15', 'trip-service-class', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36600, 36010
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
-          select 'trip-service-class' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36001 as arrival_time_seconds, 36001 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-service-class', 'stop-2', 2, 36002, 36002, 0, 0, 'regular', 'snapshot-valid'
-          union all select 'trip-service-class', 'stop-3', 3, 36003, 36003, 0, 0, 'regular', 'snapshot-valid'
-          union all select 'trip-service-class', 'stop-4', 4, 36004, 36004, 1, 1, 'not_in_passenger_service', 'snapshot-valid'
-          union all select 'trip-service-class', 'stop-5', 5, 36005, 36005, 0, 0, 'regular', 'snapshot-valid'
-          union all select 'trip-service-class', 'stop-6', 6, 36006, 36006, 3, 3, 'request', 'snapshot-valid'
-          union all select 'trip-service-class', 'stop-7', 7, 36007, 36007, 0, 0, 'regular', 'snapshot-valid'
-          union all select 'trip-service-class', 'stop-8', 8, 36008, 36008, 0, 0, 'regular', 'snapshot-valid'
-          union all select 'trip-service-class', 'stop-9', 9, 36009, 36009, 0, 0, 'regular', 'snapshot-valid'
+          select 'trip-service-class' as trip_id, 'stop-1' as stop_id, 1 as stop_sequence, 36001 as arrival_time_seconds, 36001 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, 'passenger' as stop_execution_class, 'high' as classification_confidence, 'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 1 as first_passenger_stop_sequence, 9 as last_passenger_stop_sequence
+          union all select 'trip-service-class', 'stop-2', 2, 36002, 36002, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 9
+          union all select 'trip-service-class', 'stop-3', 3, 36003, 36003, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 9
+          union all select 'trip-service-class', 'stop-4', 4, 36004, 36004, 1, 1, 'not_in_passenger_service', 'snapshot-valid', date '2026-01-15', 'unknown', 'low', 'explicit_internal_non_passenger', ['explicit_non_passenger_service'], false, true, 1, 9
+          union all select 'trip-service-class', 'stop-5', 5, 36005, 36005, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 9
+          union all select 'trip-service-class', 'stop-6', 6, 36006, 36006, 3, 3, 'request', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 9
+          union all select 'trip-service-class', 'stop-7', 7, 36007, 36007, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 9
+          union all select 'trip-service-class', 'stop-8', 8, 36008, 36008, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 9
+          union all select 'trip-service-class', 'stop-9', 9, 36009, 36009, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 1, 9
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1733,11 +1752,11 @@ unit_tests:
           union all select '145', '8', 52.0, 21.0001, timestamp('2026-01-15 09:00:05+00:00'), '5426', 1, timestamp('2026-01-15 09:00:06+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36120, 36005
           union all select '145', '8', 52.0, 21.0095, timestamp('2026-01-15 09:01:55+00:00'), '5426', 1, timestamp('2026-01-15 09:01:56+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36120, 36115
           union all select '145', '8', 52.0, 21.01, timestamp('2026-01-15 09:02:00+00:00'), '5426', 1, timestamp('2026-01-15 09:02:01+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36120, 36120
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
-          select 'trip-terminal' as trip_id, 'origin' as stop_id, 0 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-terminal', 'second', 1, 36120, 36120, 0, 0, 'regular', 'snapshot-valid'
+          select 'trip-terminal' as trip_id, 'origin' as stop_id, 0 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, 'passenger' as stop_execution_class, 'high' as classification_confidence, 'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 0 as first_passenger_stop_sequence, 1 as last_passenger_stop_sequence
+          union all select 'trip-terminal', 'second', 1, 36120, 36120, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1770,12 +1789,12 @@ unit_tests:
           union all select '145', '8', 52.0, 21.0101, timestamp('2026-01-15 09:10:05+00:00'), '5426', 1, timestamp('2026-01-15 09:10:06+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 37200, 36605
           union all select '145', '8', 52.0, 21.0201, timestamp('2026-01-15 09:19:55+00:00'), '5426', 1, timestamp('2026-01-15 09:19:56+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 37200, 37195
           union all select '145', '8', 52.0, 21.0201, timestamp('2026-01-15 09:20:05+00:00'), '5426', 1, timestamp('2026-01-15 09:20:06+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 37200, 37205
-      - input: ref('stg_gtfs__stop_times')
+      - input: ref('int_gtfs_trip_stop_semantics')
         format: sql
         rows: |
-          select 'trip-terminal' as trip_id, 'origin' as stop_id, 0 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-terminal', 'previous', 1, 36600, 36600, 0, 0, 'regular', 'snapshot-valid'
-          union all select 'trip-terminal', 'destination', 2, 37200, 37200, 0, 0, 'regular', 'snapshot-valid'
+          select 'trip-terminal' as trip_id, 'origin' as stop_id, 0 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as service_date, 'passenger' as stop_execution_class, 'high' as classification_confidence, 'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop, true as are_passenger_boundaries_settled, 0 as first_passenger_stop_sequence, 2 as last_passenger_stop_sequence
+          union all select 'trip-terminal', 'previous', 1, 36600, 36600, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 2
+          union all select 'trip-terminal', 'destination', 2, 37200, 37200, 0, 0, 'regular', 'snapshot-valid', date '2026-01-15', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 2
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |

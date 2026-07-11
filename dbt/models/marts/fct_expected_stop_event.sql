@@ -87,6 +87,14 @@ scheduled_stops as (
         stop_times.pickup_type,
         stop_times.drop_off_type,
         stop_times.stop_service_class,
+        stop_times.stop_execution_class,
+        stop_times.classification_confidence,
+        stop_times.classification_reason,
+        stop_times.classification_evidence,
+        stop_times.is_passenger_stop,
+        stop_times.are_passenger_boundaries_settled,
+        stop_times.first_passenger_stop_sequence,
+        stop_times.last_passenger_stop_sequence,
         timestamp_add(
             timestamp(trip_spine.service_date, 'Europe/Warsaw'),
             interval stop_times.arrival_time_seconds second
@@ -99,8 +107,9 @@ scheduled_stops as (
         select distinct gtfs_snapshot_id, service_date, trip_id
         from trip_facts
     ) as trip_spine
-    inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
+    inner join {{ ref('int_gtfs_trip_stop_semantics') }} as stop_times
         on trip_spine.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
+        and trip_spine.service_date = stop_times.service_date
         and trip_spine.trip_id = stop_times.trip_id
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
@@ -211,6 +220,14 @@ expected_events as (
         scheduled_stops.pickup_type,
         scheduled_stops.drop_off_type,
         scheduled_stops.stop_service_class,
+        scheduled_stops.stop_execution_class,
+        scheduled_stops.classification_confidence,
+        scheduled_stops.classification_reason,
+        scheduled_stops.classification_evidence,
+        scheduled_stops.is_passenger_stop,
+        scheduled_stops.are_passenger_boundaries_settled,
+        scheduled_stops.first_passenger_stop_sequence,
+        scheduled_stops.last_passenger_stop_sequence,
         scheduled_stops.scheduled_arrival_time,
         scheduled_stops.scheduled_departure_time,
         observed_arrivals.actual_arrival_time,
@@ -297,6 +314,14 @@ select
     pickup_type,
     drop_off_type,
     stop_service_class,
+    stop_execution_class,
+    classification_confidence,
+    classification_reason,
+    classification_evidence,
+    is_passenger_stop,
+    are_passenger_boundaries_settled,
+    first_passenger_stop_sequence,
+    last_passenger_stop_sequence,
     scheduled_arrival_time,
     scheduled_departure_time,
     actual_arrival_time,
@@ -313,7 +338,10 @@ select
     is_observed,
     is_match_uncertain,
     case
-        when stop_service_class = 'not_in_passenger_service' then 'not_in_passenger_service'
+        when stop_execution_class in ('technical_prefix', 'technical_suffix', 'technical_trip')
+            or stop_service_class = 'not_in_passenger_service'
+            then 'not_in_passenger_service'
+        when stop_execution_class = 'unknown' or not are_passenger_boundaries_settled then 'uncertain'
         when is_observed then 'observed'
         when is_match_uncertain or service_observation_class = 'matching_failure' then 'uncertain'
         when stop_service_class = 'request' then 'skipped_optional'
