@@ -9,6 +9,7 @@ from typing import Any
 
 TERMINAL_RADIUS_METERS = 250
 TERMINAL_EPISODE_GAP_SECONDS = 180
+MAX_PATH_STATES = 32
 PATH_TIMING_TIE_SECONDS = 30
 
 
@@ -225,7 +226,17 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                     if key not in next_states or better_path(path, next_states[key]):
                         next_states[key] = path
             # A skipped course deliberately retains timing, destination, and traversal state.
-            states = next_states
+            states = dict(
+                sorted(
+                    next_states.items(),
+                    key=lambda item: (
+                        -item[1]["executed"],
+                        item[1]["timing_cost"],
+                        path_signature(item[1]),
+                        str(item[0]),
+                    ),
+                )[:MAX_PATH_STATES]
+            )
         best = min(states.values(), key=lambda path: (-path["executed"], path["timing_cost"], path_signature(path)))
         if best["executed"]:
             paths.append({**best, "vehicle_number": vehicle})
@@ -265,7 +276,14 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
             status, confidence, reason = "executed", "high", "terminal_progression"
             evidence_flags.append("origin_departure_destination_progression")
         elif index + 1 < len(ordered) and any(
-            partial["vehicle_number"] == selected.get(ordered[index + 1]["trip_id"], {}).get("vehicle_number")
+            partial["vehicle_number"]
+            == (following := selected.get(ordered[index + 1]["trip_id"], {})).get("vehicle_number")
+            and partial["departure_event_time"] < following["origin_event_time"]
+            and (
+                index == 0
+                or (preceding := selected.get(ordered[index - 1]["trip_id"])) is None
+                or partial["origin_event_time"] > preceding["destination_event_time"]
+            )
             for partial in partials
         ):
             status, confidence, reason = "short_turned", "medium", "next_course_origin_before_destination"
