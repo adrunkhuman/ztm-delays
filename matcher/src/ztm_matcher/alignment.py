@@ -260,7 +260,52 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
 
     paths.sort(key=lambda path: (-path["executed"], path["timing_cost"], path["vehicle_number"], path_signature(path)))
     winning_path = paths[0] if paths else None
-    selected = winning_path["selected"] if winning_path else {}
+    selected = dict(winning_path["selected"]) if winning_path else {}
+    if winning_path:
+        course_by_trip = {course["trip_id"]: course for course in ordered}
+        used = {str(candidate["traversal_id"]) for candidate in selected.values()}
+        for index, course in enumerate(ordered):
+            if course["trip_id"] in selected:
+                continue
+            preceding = next(
+                (selected[row["trip_id"]] for row in reversed(ordered[:index]) if row["trip_id"] in selected),
+                None,
+            )
+            following = next(
+                (selected[row["trip_id"]] for row in ordered[index + 1 :] if row["trip_id"] in selected),
+                None,
+            )
+            candidates = [
+                item
+                for item in by_trip[course["trip_id"]]
+                if item["candidate_kind"] == "candidate"
+                and item["vehicle_number"] == winning_path["vehicle_number"]
+                and str(item["traversal_id"]) not in used
+                and (preceding is None or item["origin_event_time"] > preceding["destination_event_time"])
+                and (following is None or item["destination_event_time"] < following["origin_event_time"])
+            ]
+            if not candidates:
+                continue
+            neighboring_delays = [
+                (candidate["departure_event_time"] - neighbor["scheduled_start_time"]).total_seconds()
+                for candidate in (preceding, following)
+                if candidate is not None
+                for neighbor in (course_by_trip[candidate["trip_id"]],)
+            ]
+            expected_delay = sum(neighboring_delays) / len(neighboring_delays) if neighboring_delays else 0.0
+            chosen = min(
+                candidates,
+                key=lambda item: (
+                    abs(
+                        (item["departure_event_time"] - course["scheduled_start_time"]).total_seconds() - expected_delay
+                    ),
+                    item["origin_event_time"],
+                    item["destination_event_time"],
+                    str(item["traversal_id"]),
+                ),
+            )
+            selected[course["trip_id"]] = chosen
+            used.add(str(chosen["traversal_id"]))
     ambiguous_trip_ids: set[str] = set()
     if winning_path:
         for path in paths[1:]:
