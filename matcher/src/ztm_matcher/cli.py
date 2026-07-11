@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
         prepare.add_argument(f"--{name}", required=True)
     prepare.add_argument("--metrics-json")
     prepare.add_argument("--threads", type=int, default=2)
-    prepare.add_argument("--memory-limit", default="1536MB")
+    prepare.add_argument("--memory-limit", default="1024MB")
     prepare.add_argument("--temp-limit", default="20GB")
     prepare.add_argument("--max-vehicle-rows", type=int, default=1_000_000)
     prepare.add_argument(

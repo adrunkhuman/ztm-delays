@@ -18,7 +18,7 @@ class RunConfig:
     output_dir: Path
     metrics_json: Path
     threads: int = 2
-    memory_limit: str = "1536MB"
+    memory_limit: str = "1024MB"
     temp_limit: str = "20GB"
     max_vehicle_rows: int = 1_000_000
     allow_missing_hours: bool = False

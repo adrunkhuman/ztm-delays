@@ -96,10 +96,10 @@ class ReconstructionRun:
         if exc_type is None:
             self._publish()
 
-    def prepare_schedule(self) -> list[dict[str, Any]]:
+    def prepare_schedule(self) -> int:
         """Load pinned schedule, duty chains, and passenger-stop semantics."""
         work = self._work()
-        snapshot = load(self.config.gtfs_zip, self.config.snapshot_id)
+        snapshot = load(self.config.gtfs_zip, self.config.snapshot_id, self.config.processing_date)
         selected = select(snapshot, self.config.processing_date)
         if not selected:
             raise fail("invalid_output", "pinned snapshot has no trips overlapping the processing date", 15)
@@ -133,7 +133,7 @@ class ReconstructionRun:
         if not required_semantics.issubset(semantics_table.column_names):
             raise fail("invalid_output", "stop semantics do not satisfy stop-semantics-v1", 15)
         pq.write_table(semantics_table, work / "stop_semantics.parquet", compression="zstd")
-        return rows
+        return len(rows)
 
     def prepare(self) -> dict[str, Any]:
         """Produce validated artifacts plus deterministic lineage and resource metrics."""
@@ -147,10 +147,10 @@ class ReconstructionRun:
                 f"{mode}: {','.join(f'{hour:02d}' for hour in hours)}" for mode, hours in missing_modes.items()
             )
             raise fail("missing_input", f"GPS input has missing hourly partitions ({detail})", 10)
+        schedule_rows = self.prepare_schedule()
         self.normalized_path = work / "normalized_gps.parquet"
         normalized_rows = normalize(connection, files, self.config.processing_date, self.normalized_path)
         input_rows = sum(pq.ParquetFile(file).metadata.num_rows for file in files)
-        schedule = self.prepare_schedule()
         if pq.read_schema(self.normalized_path) != NORMALIZED_GPS_SCHEMA:
             raise fail("invalid_output", "normalized GPS artifact schema validation failed", 15)
         manifest = {
@@ -180,7 +180,7 @@ class ReconstructionRun:
         metrics = {
             "input_rows": input_rows,
             "normalized_rows": normalized_rows,
-            "schedule_rows": len(schedule),
+            "schedule_rows": schedule_rows,
             "hourly_rows": hourly_counts(connection),
             "wall_seconds": round(time.perf_counter() - started, 6),
             "cpu_seconds": round(time.process_time() - cpu_started, 6),

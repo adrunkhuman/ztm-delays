@@ -7,6 +7,7 @@ import json
 import re
 import zipfile
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -50,7 +51,7 @@ REQUIRED = {
     "routes.txt": {"route_id", "route_short_name", "route_type"},
     "calendar_dates.txt": {"service_id", "date", "exception_type"},
 }
-MAX_GTFS_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_GTFS_UNCOMPRESSED_BYTES = 640 * 1024 * 1024
 MAX_GTFS_ROWS = 750_000
 SNAPSHOT_ID_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z_([0-9a-f]{12})$")
 
@@ -100,7 +101,12 @@ def _service_date(value: str | None) -> date:
         raise fail("invalid_data", f"invalid calendar date {raw!r}", 12) from exc
 
 
-def _read_member(archive: zipfile.ZipFile, name: str, remaining_rows: int) -> list[dict[str, str]]:
+def _read_member(
+    archive: zipfile.ZipFile,
+    name: str,
+    remaining_rows: int,
+    predicate: Callable[[dict[str, str]], bool] | None = None,
+) -> list[dict[str, str]]:
     try:
         with archive.open(name) as member:
             reader = csv.DictReader(io.TextIOWrapper(member, encoding="utf-8-sig", newline=""))
@@ -109,15 +115,18 @@ def _read_member(archive: zipfile.ZipFile, name: str, remaining_rows: int) -> li
                 raise fail("schema_drift", f"{name} missing columns: {', '.join(sorted(missing))}", 11)
             rows = []
             for row in reader:
+                value = dict(row)
+                if predicate is not None and not predicate(value):
+                    continue
                 if len(rows) >= remaining_rows:
                     raise fail("resource_limit", f"GTFS input exceeds {MAX_GTFS_ROWS:,} rows", 14)
-                rows.append(dict(row))
+                rows.append(value)
             return rows
     except KeyError as exc:
         raise fail("missing_input", f"GTFS ZIP missing required member: {name}", 10) from exc
 
 
-def load(path: Path, snapshot_id: str) -> Snapshot:
+def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> Snapshot:
     """Load exactly six UTF-8 GTFS tables and verify hash-bearing snapshot IDs."""
     if not path.is_file():
         raise fail("missing_input", f"GTFS ZIP does not exist: {path}", 10)
@@ -137,12 +146,40 @@ def load(path: Path, snapshot_id: str) -> Snapshot:
             total_size = sum(members[name].file_size for name in REQUIRED if name in members)
             if total_size > MAX_GTFS_UNCOMPRESSED_BYTES:
                 raise fail("resource_limit", "GTFS ZIP exceeds the uncompressed input limit", 14)
-            raw: dict[str, list[dict[str, str]]] = {}
-            row_count = 0
-            for name in REQUIRED:
-                rows = _read_member(archive, name, MAX_GTFS_ROWS - row_count)
-                row_count += len(rows)
-                raw[name] = rows
+            calendar_rows = _read_member(archive, "calendar_dates.txt", MAX_GTFS_ROWS)
+            active: set[tuple[str, date]] = set()
+            for row in calendar_rows:
+                if _integer(row["exception_type"], "exception_type") == 1:
+                    active.add((_string(row["service_id"]), _service_date(row["date"])))
+            required_dates = (
+                {processing_date - timedelta(days=1), processing_date} if processing_date is not None else None
+            )
+            active_service_ids = {
+                service_id
+                for service_id, service_date in active
+                if required_dates is None or service_date in required_dates
+            }
+            trip_rows = [
+                row
+                for row in _read_member(archive, "trips.txt", MAX_GTFS_ROWS)
+                if _string(row["service_id"]) in active_service_ids
+            ]
+            selected_trip_ids = {_string(row["trip_id"]) for row in trip_rows}
+            stop_time_rows = [
+                row
+                for row in _read_member(
+                    archive,
+                    "stop_times.txt",
+                    MAX_GTFS_ROWS,
+                    lambda row: _string(row["trip_id"]) in selected_trip_ids,
+                )
+            ]
+            if len(stop_time_rows) >= MAX_GTFS_ROWS:
+                raise fail("resource_limit", f"selected GTFS schedule exceeds {MAX_GTFS_ROWS:,} stop rows", 14)
+            stop_rows = _read_member(archive, "stops.txt", MAX_GTFS_ROWS)
+            route_rows = _read_member(archive, "routes.txt", MAX_GTFS_ROWS)
+            # Shapes are not needed for runtime preparation, but their header remains an input gate.
+            _read_member(archive, "shapes.txt", 0, lambda _row: False)
     except zipfile.BadZipFile as exc:
         raise fail("invalid_data", f"corrupt GTFS ZIP: {path}", 12) from exc
     routes = {
@@ -150,17 +187,10 @@ def load(path: Path, snapshot_id: str) -> Snapshot:
             "route_short_name": _string(row["route_short_name"]),
             "route_type": _integer(row["route_type"], "route_type"),
         }
-        for row in raw["routes.txt"]
+        for row in route_rows
     }
-    for row in raw["shapes.txt"]:
-        _integer(row["shape_pt_sequence"], "shape_pt_sequence")
-        try:
-            float(_string(row["shape_pt_lat"]))
-            float(_string(row["shape_pt_lon"]))
-        except ValueError as exc:
-            raise fail("invalid_data", "invalid shapes.txt coordinates", 12) from exc
     stops: dict[str, dict[str, Any]] = {}
-    for row in raw["stops.txt"]:
+    for row in stop_rows:
         try:
             lat, lon = float(_string(row["stop_lat"])), float(_string(row["stop_lon"]))
         except ValueError as exc:
@@ -168,7 +198,7 @@ def load(path: Path, snapshot_id: str) -> Snapshot:
         if 51.0 <= lat <= 53.5 and 19.5 <= lon <= 22.5:
             stops[_string(row["stop_id"])] = {"stop_name": _string(row["stop_name"]), "stop_lat": lat, "stop_lon": lon}
     stop_times = []
-    for row in raw["stop_times.txt"]:
+    for row in stop_time_rows:
         pickup, dropoff = (
             _integer(row.get("pickup_type") or "0", "pickup_type"),
             _integer(row.get("drop_off_type") or "0", "drop_off_type"),
@@ -193,7 +223,7 @@ def load(path: Path, snapshot_id: str) -> Snapshot:
             }
         )
     trips = []
-    for row in raw["trips.txt"]:
+    for row in trip_rows:
         block = _string(row["block_id"]) or None
         short = _string(row["block_short_name"]) or None
         trips.append(
@@ -209,10 +239,6 @@ def load(path: Path, snapshot_id: str) -> Snapshot:
                 "shape_id": _string(row["shape_id"]),
             }
         )
-    active: set[tuple[str, date]] = set()
-    for row in raw["calendar_dates.txt"]:
-        if _integer(row["exception_type"], "exception_type") == 1:
-            active.add((_string(row["service_id"]), _service_date(row["date"])))
     if not trips or not stop_times or not active:
         raise fail("invalid_data", "GTFS snapshot has no trips, stop times, or active dates", 12)
     return Snapshot(snapshot_id, digest, trips, stop_times, stops, routes, active)

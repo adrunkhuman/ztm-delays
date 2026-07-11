@@ -27,9 +27,10 @@ manifest, and metrics. Failed `.incomplete-*` work directories are preserved.
 Errors use stable codes: `missing_input`, `schema_drift`, `invalid_data`,
 `snapshot_mismatch`, `resource_limit`, and `invalid_output`.
 
-DuckDB defaults to two threads, 1536 MB of managed memory, and 20 GB of
-temporary disk. The loader additionally rejects GTFS archives above 256 MB
-uncompressed or 750,000 source rows so ZIP expansion and Python schedule
-preparation remain bounded outside DuckDB. Metrics include wall and CPU time,
+DuckDB defaults to two threads, 1024 MB of managed memory, and 20 GB of
+temporary disk. The loader additionally rejects GTFS archives above 640 MB
+uncompressed or 750,000 selected stop rows. It streams the rolling feed and
+retains only services active on the required current/prior dates so Python
+schedule preparation remains bounded outside DuckDB. Metrics include wall and CPU time,
 peak RSS and swap where the OS exposes them, temporary and artifact disk use,
 and vehicle-group sizes.
