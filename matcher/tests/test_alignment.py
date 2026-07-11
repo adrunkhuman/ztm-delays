@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from ztm_matcher.alignment import extract_evidence, settle_duty
+from ztm_matcher.alignment import extract_evidence, resolve_competing_ownership, settle_duty
 
 BASE = datetime(2026, 1, 15, 9, tzinfo=UTC)
 
@@ -94,6 +94,25 @@ def test_loop_terminal_requires_departure_and_return() -> None:
 
     assert len([item for item in evidence if item["candidate_kind"] == "candidate"]) == 1
     assert settle_duty([course], evidence)[0]["execution_status"] == "executed"
+
+
+def test_return_to_origin_ends_partial_before_later_complete_traversal() -> None:
+    course = _course("return")
+    evidence = _evidence(
+        course,
+        [
+            _ping(0, 0.0),
+            _ping(1, 0.01),
+            _ping(2, 0.0),
+            _ping(10, 0.01),
+            _ping(11, 0.02),
+        ],
+    )
+    partials = [item for item in evidence if item["candidate_kind"] == "partial"]
+    candidates = [item for item in evidence if item["candidate_kind"] == "candidate"]
+    assert len(partials) == 1
+    assert candidates[0]["origin_event_time"] == BASE + timedelta(minutes=2)
+    assert candidates[0]["destination_event_time"] == BASE + timedelta(minutes=11)
 
 
 def test_missing_first_middle_and_partial_gps_have_conservative_outcomes() -> None:
@@ -217,3 +236,39 @@ def test_long_consistent_delay_and_skipped_middle_retain_later_traversal() -> No
     assert [row["execution_status"] for row in outcomes] == ["executed", "skipped", "executed"]
     assert outcomes[0]["ownership_interval_start_time"] == BASE + timedelta(minutes=101)
     assert outcomes[2]["ownership_interval_start_time"] == BASE + timedelta(minutes=141)
+
+
+def test_competing_duties_cannot_own_the_same_physical_interval() -> None:
+    course = _course("one")
+    pings = [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)]
+    first = settle_duty([course], _evidence(course, pings))[0]
+    second = {**first, "trip_id": "two", "duty_chain_id": "other-duty"}
+    resolved = resolve_competing_ownership([first, second])
+    assert [row["execution_status"] for row in resolved] == ["uncertain", "uncertain"]
+    assert all(row["ownership_interval_start_time"] is None for row in resolved)
+    assert all("competing_duty_ownership" in row["execution_evidence"] for row in resolved)
+
+
+def test_delay_state_uses_departure_not_terminal_arrival() -> None:
+    course = _course("dwell")
+    template = next(
+        item
+        for item in _evidence(course, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)])
+        if item["candidate_kind"] == "candidate"
+    )
+    long_dwell = {
+        **template,
+        "traversal_id": "long-dwell",
+        "origin_event_time": BASE - timedelta(minutes=30),
+        "departure_event_time": BASE + timedelta(minutes=10),
+        "destination_event_time": BASE + timedelta(minutes=20),
+    }
+    later_departure = {
+        **template,
+        "traversal_id": "later-departure",
+        "origin_event_time": BASE,
+        "departure_event_time": BASE + timedelta(minutes=20),
+        "destination_event_time": BASE + timedelta(minutes=30),
+    }
+    outcome = settle_duty([course], [long_dwell, later_departure])[0]
+    assert outcome["ownership_interval_start_time"] == BASE + timedelta(minutes=10)

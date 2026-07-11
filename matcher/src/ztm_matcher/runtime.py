@@ -15,7 +15,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ztm_matcher.alignment import extract_evidence, settle_duty
+from ztm_matcher.alignment import extract_evidence, resolve_competing_ownership, settle_duty
 from ztm_matcher.config import RunConfig
 from ztm_matcher.errors import fail
 from ztm_matcher.gps import discover, hourly_counts, normalize
@@ -307,15 +307,22 @@ class ReconstructionRun:
         output_path = work / "duty_execution.parquet"
         output_writer = pq.ParquetWriter(output_path, DUTY_EXECUTION_SCHEMA, compression="zstd")
         counts: dict[str, int] = {}
+        all_outcomes: list[dict[str, Any]] = []
         try:
             for service_date, snapshot_id, duty_id in self._duty_keys():
                 courses = self._schedule_rows_for_duty(service_date, snapshot_id, duty_id)
                 evidence = self._evidence_for_duty(evidence_path, service_date, snapshot_id, duty_id)
-                outcomes = settle_duty(courses, evidence)
-                output_writer.write_table(pa.Table.from_pylist(outcomes, schema=DUTY_EXECUTION_SCHEMA))
-                for outcome in outcomes:
-                    status = str(outcome["execution_status"])
-                    counts[status] = counts.get(status, 0) + 1
+                all_outcomes.extend(settle_duty(courses, evidence))
+            all_outcomes = resolve_competing_ownership(all_outcomes)
+            for start in range(0, len(all_outcomes), SEMANTICS_BATCH_ROWS):
+                output_writer.write_table(
+                    pa.Table.from_pylist(
+                        all_outcomes[start : start + SEMANTICS_BATCH_ROWS], schema=DUTY_EXECUTION_SCHEMA
+                    )
+                )
+            for outcome in all_outcomes:
+                status = str(outcome["execution_status"])
+                counts[status] = counts.get(status, 0) + 1
         finally:
             output_writer.close()
             evidence_path.unlink(missing_ok=True)

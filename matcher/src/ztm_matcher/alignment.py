@@ -122,14 +122,13 @@ def extract_evidence(course: dict[str, Any], pings: list[dict[str, Any]]) -> lis
             continue
         departure_index = origin_index + 1
         departure = episodes[departure_index]
-        destination = next(
-            (
-                episode
-                for episode in episodes[departure_index + 1 :]
-                if episode["state"] in {"destination", "origin_destination"}
-            ),
-            None,
-        )
+        destination = None
+        for episode in episodes[departure_index + 1 :]:
+            if episode["state"] in {"destination", "origin_destination"}:
+                destination = episode
+                break
+            if episode["state"] == "origin":
+                break
         kind = "candidate" if destination else "partial"
         end = destination["start"] if destination else departure["start"]
         bounded = [ping for ping in selected if origin_episode["start"] <= ping["gps_time"] <= end]
@@ -210,7 +209,7 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                         and candidate["origin_event_time"] <= state["previous_destination"]
                     ):
                         continue
-                    delay = (candidate["origin_event_time"] - course["scheduled_start_time"]).total_seconds()
+                    delay = (candidate["departure_event_time"] - course["scheduled_start_time"]).total_seconds()
                     timing_cost = state["timing_cost"] + abs(
                         delay if state["delay"] is None else delay - state["delay"]
                     )
@@ -265,7 +264,9 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
         partials = [item for item in items if item["candidate_kind"] == "partial"]
         chosen = selected.get(course["trip_id"])
         evidence_flags: list[str] = []
-        source = chosen or (observations[0] if observations else partials[0] if partials else None)
+        source = chosen or (
+            candidates[0] if candidates else partials[0] if partials else observations[0] if observations else None
+        )
         if not course["are_passenger_boundaries_settled"]:
             status, confidence, reason = "uncertain", "low", "passenger_boundaries_unknown"
             evidence_flags.append("passenger_boundaries_unknown")
@@ -345,4 +346,47 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                 else None,
             }
         )
+    return outcomes
+
+
+def resolve_competing_ownership(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Downgrade physical intervals claimed by more than one scheduled course."""
+    by_vehicle: dict[tuple[str, int], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    for index, outcome in enumerate(outcomes):
+        if outcome["execution_status"] != "executed":
+            continue
+        by_vehicle[(outcome["vehicle_number"], outcome["vehicle_type"])].append((index, outcome))
+    conflicts: set[int] = set()
+    for intervals in by_vehicle.values():
+        intervals.sort(
+            key=lambda item: (
+                item[1]["ownership_interval_start_time"],
+                item[1]["ownership_interval_end_time"],
+                item[1]["service_date"],
+                item[1]["duty_chain_id"],
+                item[1]["trip_order"],
+                item[1]["trip_id"],
+            )
+        )
+        active: list[tuple[int, dict[str, Any]]] = []
+        for current in intervals:
+            start = current[1]["ownership_interval_start_time"]
+            active = [item for item in active if item[1]["ownership_interval_end_time"] >= start]
+            if active:
+                conflicts.add(current[0])
+                conflicts.update(item[0] for item in active)
+            active.append(current)
+    for index in conflicts:
+        outcome = outcomes[index]
+        outcomes[index] = {
+            **outcome,
+            "vehicle_number": None,
+            "vehicle_type": None,
+            "execution_status": "uncertain",
+            "confidence": "low",
+            "execution_reason": "competing_duty_ownership",
+            "execution_evidence": sorted({*outcome["execution_evidence"], "competing_duty_ownership"}),
+            "ownership_interval_start_time": None,
+            "ownership_interval_end_time": None,
+        }
     return outcomes

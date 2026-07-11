@@ -15,7 +15,7 @@ from ztm_matcher import ReconstructionRun, RunConfig
 from ztm_matcher.cli import main
 from ztm_matcher.errors import MatcherError
 from ztm_matcher.gtfs import load
-from ztm_matcher.schemas import RAW_GPS_SCHEMA
+from ztm_matcher.schemas import DUTY_EXECUTION_SCHEMA, RAW_GPS_SCHEMA
 
 
 def _gps(root: Path, rows: list[dict[str, object]]) -> None:
@@ -115,6 +115,14 @@ def test_prepares_normalized_gps_schedule_semantics_manifest_and_groups(tmp_path
     assert (output / "duty_schedule.parquet").is_file()
     assert (output / "duty_execution.parquet").is_file()
     assert result["metrics"]["duty_execution_rows"] == 2
+    execution = pq.read_table(output / "duty_execution.parquet")
+    assert execution.schema == DUTY_EXECUTION_SCHEMA
+    assert execution.num_rows == 2
+    assert all(
+        row["ownership_interval_start_time"] is None
+        or row["ownership_interval_start_time"] <= row["ownership_interval_end_time"]
+        for row in execution.to_pylist()
+    )
     semantics = pq.read_table(output / "stop_semantics.parquet").to_pylist()
     assert any(row["stop_execution_class"] == "technical_suffix" for row in semantics)
 
