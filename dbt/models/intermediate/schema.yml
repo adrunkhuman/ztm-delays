@@ -92,7 +92,7 @@ models:
         description: "Matcher caveats: early_origin_censored, late_tail_censored, delayed_same_line_tail, candidate_overlap, likely_previous_trip_tail, likely_vehicle_swap, uncertain_assignment."
 
   - name: int_stop_arrivals
-    description: Realized passenger-service stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment passes within the stop's adaptive radius and the scheduled arrival is within a +/-30 minute window around the segment. Non-passenger GTFS stop-time rows are excluded from observed arrivals.
+    description: Realized passenger-service stop arrivals reconstructed from matched GPS ping segments and scheduled GTFS stop times. One Warsaw-local GPS date is processed at a time. A stop arrival is emitted when a consecutive GPS segment passes within the stop's adaptive radius and the scheduled arrival is within a +/-30 minute window around the segment. Non-passenger GTFS stop-time rows are excluded from observed arrivals. First and last passenger-stop candidates must preserve chronology with the adjacent selected passenger stop, then prefer schedule proximity before segment distance; when the adjacent stop is unobserved, selection retains distance-first behavior.
     columns:
       - name: gtfs_snapshot_id
         description: Selected GTFS snapshot used for stop-arrival reconstruction.
@@ -1716,6 +1716,82 @@ unit_tests:
           stop_service_class: 'request'
           detection_method: 'segment_within_250m'
           stop_match_radius_m: 250.0
+
+  - name: int_stop_arrivals_rejects_early_origin_crossing
+    model: int_stop_arrivals
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select '145' as line, '8' as brigade, 52.0 as lat, 21.0 as lon, timestamp('2026-01-15 08:50:00+00:00') as gps_time, '5426' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 08:50:01+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-terminal' as trip_id, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 36120 as trip_end_seconds, 35400 as gps_time_seconds
+          union all select '145', '8', 52.0, 21.0001, timestamp('2026-01-15 08:50:10+00:00'), '5426', 1, timestamp('2026-01-15 08:50:11+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36120, 35410
+          union all select '145', '8', 52.0, 21.0001, timestamp('2026-01-15 08:59:55+00:00'), '5426', 1, timestamp('2026-01-15 08:59:56+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36120, 35995
+          union all select '145', '8', 52.0, 21.0001, timestamp('2026-01-15 09:00:05+00:00'), '5426', 1, timestamp('2026-01-15 09:00:06+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36120, 36005
+          union all select '145', '8', 52.0, 21.0095, timestamp('2026-01-15 09:01:55+00:00'), '5426', 1, timestamp('2026-01-15 09:01:56+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36120, 36115
+          union all select '145', '8', 52.0, 21.01, timestamp('2026-01-15 09:02:00+00:00'), '5426', 1, timestamp('2026-01-15 09:02:01+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 36120, 36120
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-terminal' as trip_id, 'origin' as stop_id, 0 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-terminal', 'second', 1, 36120, 36120, 0, 0, 'regular', 'snapshot-valid'
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'origin' as stop_id, 'Origin' as stop_name, 52.0 as stop_lat, 21.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'second', 'Second', 52.0, 21.01, 'snapshot-valid'
+    expect:
+      rows:
+        - stop_id: 'origin'
+          stop_sequence: 0
+          actual_arrival_time: '2026-01-15 09:00:00+00:00'
+          arrival_delay_seconds: 0
+        - stop_id: 'second'
+          stop_sequence: 1
+          actual_arrival_time: '2026-01-15 09:02:00+00:00'
+          arrival_delay_seconds: 0
+
+  - name: int_stop_arrivals_rejects_destination_crossing_before_previous_stop
+    model: int_stop_arrivals
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+    given:
+      - input: ref('int_ping_trip')
+        format: sql
+        rows: |
+          select '145' as line, '8' as brigade, 52.0 as lat, 21.02 as lon, timestamp('2026-01-15 08:59:55+00:00') as gps_time, '5426' as vehicle_number, 1 as vehicle_type, timestamp('2026-01-15 08:59:56+00:00') as ingested_at, date '2026-01-15' as gps_date, 'trip-terminal' as trip_id, 'shape-1' as shape_id, 'snapshot-valid' as gtfs_snapshot_id, 'svc-weekday' as service_id, 0 as direction_id, date '2026-01-15' as service_date, 'weekday' as day_type, 36000 as trip_start_seconds, 37200 as trip_end_seconds, 35995 as gps_time_seconds
+          union all select '145', '8', 52.0, 21.0201, timestamp('2026-01-15 09:00:05+00:00'), '5426', 1, timestamp('2026-01-15 09:00:06+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 37200, 36005
+          union all select '145', '8', 52.0, 21.01, timestamp('2026-01-15 09:09:55+00:00'), '5426', 1, timestamp('2026-01-15 09:09:56+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 37200, 36595
+          union all select '145', '8', 52.0, 21.0101, timestamp('2026-01-15 09:10:05+00:00'), '5426', 1, timestamp('2026-01-15 09:10:06+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 37200, 36605
+          union all select '145', '8', 52.0, 21.0201, timestamp('2026-01-15 09:19:55+00:00'), '5426', 1, timestamp('2026-01-15 09:19:56+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 37200, 37195
+          union all select '145', '8', 52.0, 21.0201, timestamp('2026-01-15 09:20:05+00:00'), '5426', 1, timestamp('2026-01-15 09:20:06+00:00'), date '2026-01-15', 'trip-terminal', 'shape-1', 'snapshot-valid', 'svc-weekday', 0, date '2026-01-15', 'weekday', 36000, 37200, 37205
+      - input: ref('stg_gtfs__stop_times')
+        format: sql
+        rows: |
+          select 'trip-terminal' as trip_id, 'origin' as stop_id, 0 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'trip-terminal', 'previous', 1, 36600, 36600, 0, 0, 'regular', 'snapshot-valid'
+          union all select 'trip-terminal', 'destination', 2, 37200, 37200, 0, 0, 'regular', 'snapshot-valid'
+      - input: ref('stg_gtfs__stops')
+        format: sql
+        rows: |
+          select 'origin' as stop_id, 'Origin' as stop_name, 53.0 as stop_lat, 22.0 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
+          union all select 'previous', 'Previous', 52.0, 21.01, 'snapshot-valid'
+          union all select 'destination', 'Destination', 52.0, 21.02, 'snapshot-valid'
+    expect:
+      rows:
+        - stop_id: 'previous'
+          stop_sequence: 1
+          actual_arrival_time: '2026-01-15 09:09:55+00:00'
+          arrival_delay_seconds: -5
+        - stop_id: 'destination'
+          stop_sequence: 2
+          actual_arrival_time: '2026-01-15 09:20:00+00:00'
+          arrival_delay_seconds: 0
 
   - name: int_ping_trip_matches_route_changes_and_flags_settled_candidates
     model: int_ping_trip

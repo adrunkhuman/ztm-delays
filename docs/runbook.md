@@ -57,6 +57,8 @@ For each GPS processing date, rebuild the GPS/intermediate models, then publish 
 
 After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each processing batch and that `schedule_version_id` resolves to a version covering the row's GPS processing date. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
 
+Changes to stop-crossing reconstruction do not update existing incremental partitions on deployment. To apply such a correction historically, rerun each affected GPS processing date with its mapped GTFS snapshot through `int_stop_arrivals` and `int_trip_summary`, then republish both the current and prior service-date fact partitions before rebuilding dependent marts and serving exports. A full raw GPS or GTFS reload is not required.
+
 ## Raw GPS Volume
 
 Measure raw GPS object volume from GCS metadata before changing poller flush cadence or adding a local durable spool:
