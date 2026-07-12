@@ -25,7 +25,9 @@ inventory remains recorded in its manifest.
 
 Success atomically publishes normalized GPS, duty schedule, stop semantics,
 `duty_execution.parquet`, `operational_stop_crossings.parquet`,
-`passenger_stop_arrivals.parquet`, manifest, and metrics. `duty_execution` has exactly
+`passenger_stop_arrivals.parquet`, `reconstruction_trip_facts.parquet`,
+`reconstruction_stop_arrivals.parquet`, `reconstruction_expected_stop_events.parquet`,
+manifest, and metrics. `duty_execution` has exactly
 one outcome per scheduled course: `executed`, `missed`, `skipped`,
 `short_turned`, `vehicle_change_signal`, or `uncertain`. A vehicle-change
 signal is competing GPS evidence, not a claim that a physical vehicle swap
@@ -77,3 +79,37 @@ connection with one thread and the configured memory and temporary-disk caps;
 only compact counts return to the parent. Workers write private Parquet shards,
 which the parent merges in chunk order, so logical artifacts do not depend on
 worker count and each fixed worker-count run has deterministic output bytes.
+
+## Reconstruction Facts
+
+`reconstruction-trip-facts-v1`, `reconstruction-stop-arrivals-v1`, and
+`reconstruction-expected-stop-events-v1` are local Parquet adapters, not
+warehouse tables. Their published grains are respectively
+`snapshot/service_date/trip/vehicle`, that trip plus `stop_sequence`, and the
+same expected passenger-stop occurrence. They are ordered by those grains and
+their Arrow schemas are validated before publication.
+
+Only `executed` duty outcomes with `high` confidence and a concrete ownership
+interval enter the facts. `line_brigade` fallback, competing ownership, and
+ambiguous execution outcomes therefore cannot manufacture observed trips or
+arrivals. Fact construction uses a DuckDB interval join over normalized GPS to
+calculate each accepted ownership interval's max ping gap and speed; it never
+loads a GPS day into Python. Trip quality is then streamed one trip record at a
+time. Duplicate accepted trip or direct-arrival grains reject the run.
+
+The parity source is `dbt/models/intermediate/int_trip_summary.sql`. The Python
+port retains its thresholds: complete coverage `.80`, broken coverage `.30`,
+ping gap `900` seconds, zero-based-safe terminal tolerance `2`, stale lag
+`120` seconds, sequence gap `4`, speed `50 m/s`, and extreme delay `3600`
+seconds. It emits the same trip-quality, quality-flag, service-observation
+flag, and service-observation-class policy. Regular settled passenger stops
+alone determine coverage; request stops remain explicit optional expected
+events and their detections do not change regular coverage.
+
+Expected events contain one row for every settled passenger stop occurrence of
+an accepted trip. A high-confidence direct crossing is `observed`; a medium or
+ambiguous direct crossing is `uncertain`; absent request stops are
+`skipped_optional`; other absent passenger stops are `missed`. Technical stops
+are excluded. `interpolated` is deliberately not emitted before #102. Prior
+service dates remain intact through `processing_date`, `gps_date`, and, for
+direct arrival facts, `source_gps_date`.

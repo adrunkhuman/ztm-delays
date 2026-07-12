@@ -22,6 +22,9 @@ from ztm_matcher.schemas import (
     NORMALIZED_GPS_SCHEMA,
     PASSENGER_STOP_ARRIVAL_SCHEMA,
     RAW_GPS_SCHEMA,
+    RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA,
+    RECONSTRUCTION_STOP_ARRIVAL_SCHEMA,
+    RECONSTRUCTION_TRIP_FACT_SCHEMA,
     STOP_CROSSING_SCHEMA,
 )
 
@@ -416,6 +419,265 @@ def test_stop_alignment_enforces_vehicle_row_limit_while_grouping(tmp_path: Path
         _write_stop_alignment_fixture(run, ("1",))
         with pytest.raises(MatcherError, match="vehicle 1 exceeds max_vehicle_rows"):
             run.align_stops()
+
+
+def test_fact_construction_publishes_high_confidence_direct_adapters(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("1",))
+        run.align_stops()
+        counts = run.build_facts()
+        work = run._work()
+        trips = pq.read_table(work / "reconstruction_trip_facts.parquet")
+        arrivals = pq.read_table(work / "reconstruction_stop_arrivals.parquet")
+        expected = pq.read_table(work / "reconstruction_expected_stop_events.parquet")
+
+    assert counts["reconstruction_trip_facts"] == trips.num_rows == 1
+    assert trips.schema == RECONSTRUCTION_TRIP_FACT_SCHEMA
+    assert arrivals.schema == RECONSTRUCTION_STOP_ARRIVAL_SCHEMA
+    assert expected.schema == RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA
+    assert trips.to_pylist()[0]["trip_quality"] == "complete"
+    assert all(row["source_gps_date"] == date(2026, 1, 15) for row in arrivals.to_pylist())
+    assert [row["observation_status"] for row in expected.to_pylist()] == ["observed"]
+
+
+@pytest.mark.parametrize(
+    ("service_date", "scheduled_start", "scheduled_end"),
+    [
+        (
+            date(2026, 3, 29),
+            datetime(2026, 3, 29, 1, 30, tzinfo=UTC),
+            datetime(2026, 3, 29, 23, 0, tzinfo=UTC),
+        ),
+        (
+            date(2026, 10, 25),
+            datetime(2026, 10, 25, 0, 30, tzinfo=UTC),
+            datetime(2026, 10, 26, 0, 0, tzinfo=UTC),
+        ),
+    ],
+)
+def test_fact_scheduled_times_use_warsaw_wall_clock_across_dst_and_overnight(
+    tmp_path: Path, service_date: date, scheduled_start: datetime, scheduled_end: datetime
+) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("1",))
+        run.align_stops()
+        work = run._work()
+        execution_path = work / "duty_execution.parquet"
+        executions = pq.read_table(execution_path).to_pylist()
+        executions[0]["service_date"] = service_date
+        pq.write_table(pa.Table.from_pylist(executions, schema=DUTY_EXECUTION_SCHEMA), execution_path)
+
+        semantics_path = work / "stop_semantics.parquet"
+        semantic_table = pq.read_table(semantics_path)
+        semantics = semantic_table.to_pylist()
+        trip_semantics = [row for row in semantics if row["trip_id"] == executions[0]["trip_id"]]
+        for index, row in enumerate(trip_semantics):
+            row.update(
+                {
+                    "service_date": service_date,
+                    "arrival_time_seconds": 2 * 3600 + 30 * 60 if index == 0 else 25 * 3600,
+                    "departure_time_seconds": 2 * 3600 + 30 * 60 if index == 0 else 25 * 3600,
+                    "stop_execution_class": "passenger",
+                    "stop_service_class": "regular",
+                    "is_passenger_stop": True,
+                    "are_passenger_boundaries_settled": True,
+                    "first_passenger_stop_sequence": trip_semantics[0]["stop_sequence"],
+                    "last_passenger_stop_sequence": trip_semantics[-1]["stop_sequence"],
+                }
+            )
+        pq.write_table(pa.Table.from_pylist(semantics, schema=semantic_table.schema), semantics_path)
+
+        arrivals_path = work / "passenger_stop_arrivals.parquet"
+        arrival_table = pq.read_table(arrivals_path)
+        template = arrival_table.to_pylist()[0]
+        direct_arrivals = []
+        for index, semantic in enumerate(trip_semantics):
+            direct = template | {
+                "service_date": service_date,
+                "stop_id": semantic["stop_id"],
+                "stop_group_id": semantic["stop_group_id"],
+                "stop_sequence": semantic["stop_sequence"],
+                "pickup_type": semantic["pickup_type"],
+                "drop_off_type": semantic["drop_off_type"],
+                "stop_service_class": "regular",
+                "stop_execution_class": "passenger",
+                "is_passenger_stop": True,
+                "are_passenger_boundaries_settled": True,
+                "alignment_confidence": "high",
+                "actual_arrival_time": datetime(2026, 1, 15, 1, index, tzinfo=UTC),
+                "arrival_delay_seconds": 0,
+            }
+            direct_arrivals.append(direct)
+        pq.write_table(pa.Table.from_pylist(direct_arrivals, schema=arrival_table.schema), arrivals_path)
+
+        run.build_facts()
+        trips = pq.read_table(work / "reconstruction_trip_facts.parquet").to_pylist()
+        expected = pq.read_table(work / "reconstruction_expected_stop_events.parquet").to_pylist()
+
+    assert trips[0]["scheduled_start_time"] == scheduled_start
+    assert trips[0]["scheduled_end_time"] == scheduled_end
+    assert [row["scheduled_arrival_time"] for row in expected] == [scheduled_start, scheduled_end]
+    assert [row["scheduled_departure_time"] for row in expected] == [scheduled_start, scheduled_end]
+
+
+def test_medium_direct_arrivals_are_uncertain_not_fact_evidence(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("1",))
+        run.align_stops()
+        work = run._work()
+        semantics_path = work / "stop_semantics.parquet"
+        semantic_table = pq.read_table(semantics_path)
+        semantics = semantic_table.to_pylist()
+        trip_semantics = [row for row in semantics if row["trip_id"] == "today"]
+        for index, row in enumerate(trip_semantics):
+            row.update(
+                {
+                    "stop_execution_class": "passenger",
+                    "stop_service_class": "regular" if index == 0 else "request",
+                    "is_passenger_stop": True,
+                    "are_passenger_boundaries_settled": True,
+                    "first_passenger_stop_sequence": trip_semantics[0]["stop_sequence"],
+                    "last_passenger_stop_sequence": trip_semantics[-1]["stop_sequence"],
+                }
+            )
+        pq.write_table(pa.Table.from_pylist(semantics, schema=semantic_table.schema), semantics_path)
+
+        arrivals_path = work / "passenger_stop_arrivals.parquet"
+        arrival_table = pq.read_table(arrivals_path)
+        template = arrival_table.to_pylist()[0]
+        source_time = datetime(2026, 1, 14, 23, 30, tzinfo=UTC)
+        direct_arrivals = []
+        for index, semantic in enumerate(trip_semantics):
+            direct_arrivals.append(
+                template
+                | {
+                    "stop_id": semantic["stop_id"],
+                    "stop_group_id": semantic["stop_group_id"],
+                    "stop_sequence": semantic["stop_sequence"],
+                    "pickup_type": semantic["pickup_type"],
+                    "drop_off_type": semantic["drop_off_type"],
+                    "stop_service_class": "regular" if index == 0 else "request",
+                    "stop_execution_class": "passenger",
+                    "is_passenger_stop": True,
+                    "are_passenger_boundaries_settled": True,
+                    "alignment_confidence": "medium",
+                    "actual_arrival_time": datetime(2026, 1, 15, 1, index, tzinfo=UTC),
+                    "arrival_delay_seconds": index,
+                    "segment_start_time": source_time,
+                }
+            )
+        pq.write_table(pa.Table.from_pylist(direct_arrivals, schema=arrival_table.schema), arrivals_path)
+        gps_table = pq.read_table(run.normalized_path)
+        source_ping = gps_table.to_pylist()[0] | {"gps_time": source_time, "gps_date": date(2026, 1, 14)}
+        pq.write_table(
+            pa.Table.from_pylist([*gps_table.to_pylist(), source_ping], schema=NORMALIZED_GPS_SCHEMA),
+            run.normalized_path,
+        )
+
+        run.build_facts()
+        trips = pq.read_table(work / "reconstruction_trip_facts.parquet").to_pylist()
+        stop_arrivals = pq.read_table(work / "reconstruction_stop_arrivals.parquet").to_pylist()
+        expected = pq.read_table(work / "reconstruction_expected_stop_events.parquet").to_pylist()
+
+    trip = trips[0]
+    assert (trip["passenger_stops_detected"], trip["optional_passenger_stops_detected"]) == (0, 0)
+    assert (trip["actual_start_time"], trip["actual_end_time"]) == (None, None)
+    assert trip["trip_quality"] == "broken"
+    assert stop_arrivals == []
+    assert [row["observation_status"] for row in expected] == ["uncertain", "uncertain"]
+    assert all(row["actual_arrival_time"] is None and row["delay_seconds"] is None for row in expected)
+    assert all(row["uncertainty_evidence"] == ["alignment_ambiguous_or_medium"] for row in expected)
+    assert all(row["source_gps_date"] == date(2026, 1, 14) for row in expected)
+
+
+@pytest.mark.parametrize(
+    ("execution_status", "confidence", "duty_chain_source"),
+    [("executed", "high", "line_brigade"), ("vehicle_change_signal", "low", "block_id")],
+)
+def test_fallback_and_ambiguous_ownership_cannot_create_facts(
+    tmp_path: Path, execution_status: str, confidence: str, duty_chain_source: str
+) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("1",))
+        execution_path = run._work() / "duty_execution.parquet"
+        execution = pq.read_table(execution_path).to_pylist()
+        execution[0]["execution_status"] = execution_status
+        execution[0]["confidence"] = confidence
+        execution[0]["duty_chain_source"] = duty_chain_source
+        pq.write_table(pa.Table.from_pylist(execution, schema=DUTY_EXECUTION_SCHEMA), execution_path)
+        run.align_stops()
+        counts = run.build_facts()
+
+    assert counts == {
+        "reconstruction_trip_facts": 0,
+        "reconstruction_stop_arrivals": 0,
+        "reconstruction_expected_stop_events": 0,
+    }
+
+
+def test_duplicate_accepted_trip_grain_rejects_fact_construction(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("1",))
+        execution_path = run._work() / "duty_execution.parquet"
+        execution = pq.read_table(execution_path)
+        pq.write_table(pa.concat_tables([execution, execution]), execution_path)
+        with pytest.raises(MatcherError, match="duplicate accepted trip grain"):
+            run.build_facts()
 
 
 def test_rejects_required_prior_service_and_bounded_group(tmp_path: Path) -> None:

@@ -9,7 +9,10 @@ SEMANTICS_SCHEMA_VERSION = "stop-semantics-v2"
 EXECUTION_SCHEMA_VERSION = "duty-execution-v1"
 OPERATIONAL_CROSSING_SCHEMA_VERSION = "operational-stop-crossing-v1"
 PASSENGER_ARRIVAL_SCHEMA_VERSION = "passenger-stop-arrival-v1"
-MANIFEST_VERSION = 1
+TRIP_FACT_SCHEMA_VERSION = "reconstruction-trip-facts-v1"
+STOP_ARRIVAL_FACT_SCHEMA_VERSION = "reconstruction-stop-arrivals-v1"
+EXPECTED_STOP_EVENT_SCHEMA_VERSION = "reconstruction-expected-stop-events-v1"
+MANIFEST_VERSION = 2
 
 RAW_GPS_SCHEMA = pa.schema(
     [
@@ -133,3 +136,112 @@ STOP_CROSSING_SCHEMA = pa.schema(
 # Passenger arrivals intentionally retain the operational schema. Consumers can switch
 # from this adapter to fct_stop_arrival without losing direct-crossing diagnostics.
 PASSENGER_STOP_ARRIVAL_SCHEMA = STOP_CROSSING_SCHEMA
+
+RECONSTRUCTION_TRIP_FACT_SCHEMA = pa.schema(
+    [
+        pa.field("gtfs_snapshot_id", pa.string()),
+        pa.field("processing_date", pa.date32()),
+        pa.field("gps_date", pa.date32()),
+        pa.field("service_date", pa.date32()),
+        pa.field("trip_id", pa.string()),
+        pa.field("vehicle_number", pa.string()),
+        pa.field("line", pa.string()),
+        pa.field("brigade", pa.string()),
+        pa.field("mode", pa.string()),
+        pa.field("scheduled_start_time", pa.timestamp("us", tz="UTC")),
+        pa.field("scheduled_end_time", pa.timestamp("us", tz="UTC")),
+        pa.field("actual_start_time", pa.timestamp("us", tz="UTC")),
+        pa.field("actual_end_time", pa.timestamp("us", tz="UTC")),
+        pa.field("start_delay_seconds", pa.int64()),
+        pa.field("end_delay_seconds", pa.int64()),
+        pa.field("passenger_stops_expected", pa.int64()),
+        pa.field("passenger_stops_detected", pa.int64()),
+        pa.field("detected_stop_ratio", pa.float64()),
+        pa.field("optional_passenger_stops_expected", pa.int64()),
+        pa.field("optional_passenger_stops_detected", pa.int64()),
+        pa.field("first_detected_stop_sequence", pa.int64()),
+        pa.field("last_detected_stop_sequence", pa.int64()),
+        pa.field("max_stop_sequence_gap", pa.int64()),
+        pa.field("max_ping_gap_seconds", pa.int64()),
+        pa.field("max_speed_mps", pa.float64()),
+        pa.field("is_first_stop_observed", pa.bool_()),
+        pa.field("is_last_stop_observed", pa.bool_()),
+        pa.field("has_non_monotonic_stop_progression", pa.bool_()),
+        pa.field("has_impossible_speed_jump", pa.bool_()),
+        pa.field("has_stale_stop_progression", pa.bool_()),
+        pa.field("trip_quality", pa.string()),
+        pa.field("quality_flags", pa.list_(pa.string())),
+        pa.field("service_observation_class", pa.string()),
+        pa.field("service_observation_flags", pa.list_(pa.string())),
+    ]
+)
+
+RECONSTRUCTION_STOP_ARRIVAL_SCHEMA = pa.schema(
+    [
+        pa.field("gtfs_snapshot_id", pa.string()),
+        pa.field("processing_date", pa.date32()),
+        pa.field("gps_date", pa.date32()),
+        pa.field("source_gps_date", pa.date32()),
+        pa.field("service_date", pa.date32()),
+        pa.field("trip_id", pa.string()),
+        pa.field("vehicle_number", pa.string()),
+        pa.field("line", pa.string()),
+        pa.field("brigade", pa.string()),
+        pa.field("mode", pa.string()),
+        pa.field("stop_id", pa.string()),
+        pa.field("stop_group_id", pa.string()),
+        pa.field("stop_sequence", pa.int64()),
+        pa.field("pickup_type", pa.int64()),
+        pa.field("drop_off_type", pa.int64()),
+        pa.field("stop_service_class", pa.string()),
+        pa.field("scheduled_arrival_time", pa.timestamp("us", tz="UTC")),
+        pa.field("scheduled_departure_time", pa.timestamp("us", tz="UTC")),
+        pa.field("actual_arrival_time", pa.timestamp("us", tz="UTC")),
+        pa.field("delay_seconds", pa.int64()),
+        pa.field("detection_method", pa.string()),
+        pa.field("stop_match_radius_m", pa.float64()),
+        pa.field("stop_distance_m", pa.float64()),
+        pa.field("prev_ping_distance_m", pa.float64()),
+        pa.field("next_ping_distance_m", pa.float64()),
+        pa.field("segment_start_time", pa.timestamp("us", tz="UTC")),
+        pa.field("segment_end_time", pa.timestamp("us", tz="UTC")),
+        pa.field("segment_duration_seconds", pa.int64()),
+        pa.field("alignment_confidence", pa.string()),
+        pa.field("alignment_evidence", pa.list_(pa.string())),
+        pa.field("trip_quality", pa.string()),
+        pa.field("quality_flags", pa.list_(pa.string())),
+        pa.field("service_observation_class", pa.string()),
+        pa.field("service_observation_flags", pa.list_(pa.string())),
+    ]
+)
+
+RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA = pa.schema(
+    [
+        pa.field("gtfs_snapshot_id", pa.string()),
+        pa.field("processing_date", pa.date32()),
+        pa.field("gps_date", pa.date32()),
+        pa.field("source_gps_date", pa.date32()),
+        pa.field("service_date", pa.date32()),
+        pa.field("trip_id", pa.string()),
+        pa.field("vehicle_number", pa.string()),
+        pa.field("line", pa.string()),
+        pa.field("brigade", pa.string()),
+        pa.field("mode", pa.string()),
+        pa.field("stop_id", pa.string()),
+        pa.field("stop_group_id", pa.string()),
+        pa.field("stop_sequence", pa.int64()),
+        pa.field("pickup_type", pa.int64()),
+        pa.field("drop_off_type", pa.int64()),
+        pa.field("stop_service_class", pa.string()),
+        pa.field("scheduled_arrival_time", pa.timestamp("us", tz="UTC")),
+        pa.field("scheduled_departure_time", pa.timestamp("us", tz="UTC")),
+        pa.field("observation_status", pa.string()),
+        pa.field("actual_arrival_time", pa.timestamp("us", tz="UTC")),
+        pa.field("delay_seconds", pa.int64()),
+        pa.field("uncertainty_evidence", pa.list_(pa.string())),
+        pa.field("trip_quality", pa.string()),
+        pa.field("quality_flags", pa.list_(pa.string())),
+        pa.field("service_observation_class", pa.string()),
+        pa.field("service_observation_flags", pa.list_(pa.string())),
+    ]
+)

@@ -19,21 +19,28 @@ import pyarrow.parquet as pq
 from ztm_matcher.alignment import extract_evidence, resolve_competing_ownership, settle_duty
 from ztm_matcher.config import RunConfig
 from ztm_matcher.errors import fail
+from ztm_matcher.facts import build_facts
 from ztm_matcher.gps import discover, hourly_counts, normalize
 from ztm_matcher.gtfs import load, select
 from ztm_matcher.schemas import (
     DUTY_EXECUTION_SCHEMA,
     EXECUTION_SCHEMA_VERSION,
+    EXPECTED_STOP_EVENT_SCHEMA_VERSION,
     MANIFEST_VERSION,
     NORMALIZED_GPS_SCHEMA,
     NORMALIZED_GPS_SCHEMA_VERSION,
     OPERATIONAL_CROSSING_SCHEMA_VERSION,
     PASSENGER_ARRIVAL_SCHEMA_VERSION,
     PASSENGER_STOP_ARRIVAL_SCHEMA,
+    RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA,
+    RECONSTRUCTION_STOP_ARRIVAL_SCHEMA,
+    RECONSTRUCTION_TRIP_FACT_SCHEMA,
     SCHEDULE_SCHEMA_VERSION,
     SEMANTICS_SCHEMA_VERSION,
+    STOP_ARRIVAL_FACT_SCHEMA_VERSION,
     STOP_CROSSING_SCHEMA,
     TRAVERSAL_EVIDENCE_SCHEMA,
+    TRIP_FACT_SCHEMA_VERSION,
 )
 from ztm_matcher.semantics import duties, iter_stop_semantics
 from ztm_matcher.stop_alignment import align_stop_crossings
@@ -544,6 +551,7 @@ class ReconstructionRun:
         normalized_rows = normalize(connection, files, self.config.processing_date, self.normalized_path)
         execution_counts = self.align_execution()
         crossing_counts = self.align_stops()
+        fact_counts = self.build_facts()
         input_rows = sum(pq.ParquetFile(file).metadata.num_rows for file in files)
         if pq.read_schema(self.normalized_path) != NORMALIZED_GPS_SCHEMA:
             raise fail("invalid_output", "normalized GPS artifact schema validation failed", 15)
@@ -559,6 +567,9 @@ class ReconstructionRun:
                 "duty_execution": EXECUTION_SCHEMA_VERSION,
                 "operational_stop_crossings": OPERATIONAL_CROSSING_SCHEMA_VERSION,
                 "passenger_stop_arrivals": PASSENGER_ARRIVAL_SCHEMA_VERSION,
+                "reconstruction_trip_facts": TRIP_FACT_SCHEMA_VERSION,
+                "reconstruction_stop_arrivals": STOP_ARRIVAL_FACT_SCHEMA_VERSION,
+                "reconstruction_expected_stop_events": EXPECTED_STOP_EVENT_SCHEMA_VERSION,
             },
             "inputs": {"gps": [_identity(file) for file in files], "gtfs_zip": _identity(self.config.gtfs_zip)},
             "outputs": {
@@ -568,6 +579,11 @@ class ReconstructionRun:
                 "duty_execution": _identity(work / "duty_execution.parquet", relative=True),
                 "operational_stop_crossings": _identity(work / "operational_stop_crossings.parquet", relative=True),
                 "passenger_stop_arrivals": _identity(work / "passenger_stop_arrivals.parquet", relative=True),
+                "reconstruction_trip_facts": _identity(work / "reconstruction_trip_facts.parquet", relative=True),
+                "reconstruction_stop_arrivals": _identity(work / "reconstruction_stop_arrivals.parquet", relative=True),
+                "reconstruction_expected_stop_events": _identity(
+                    work / "reconstruction_expected_stop_events.parquet", relative=True
+                ),
             },
             "missing_hours": missing,
         }
@@ -598,12 +614,37 @@ class ReconstructionRun:
             "stop_alignment_execution_trips": crossing_counts["execution_trips"],
             "stop_alignment_workers": self.config.alignment_workers,
             "stop_alignment_worker_chunks": crossing_counts["worker_chunks"],
+            **fact_counts,
             "swapping_observed": None if process["current_swap_bytes"] is None else process["current_swap_bytes"] > 0,
             **process,
         }
         _write_json(work / "manifest.json", manifest)
         _write_json(work / "metrics.json", metrics)
         return {"manifest": manifest, "metrics": metrics}
+
+    def build_facts(self) -> dict[str, int]:
+        """Adapt accepted ownership and direct crossings into warehouse-shaped local facts."""
+        work = self._work()
+        try:
+            counts = build_facts(
+                self._connection(),
+                executions=work / "duty_execution.parquet",
+                semantics=work / "stop_semantics.parquet",
+                arrivals=work / "passenger_stop_arrivals.parquet",
+                normalized_gps=self.normalized_path or work / "normalized_gps.parquet",
+                output_dir=work,
+            )
+        except (duckdb.Error, ValueError) as exc:
+            raise fail("invalid_output", f"fact construction failed: {exc}", 15) from exc
+        expected_schemas = {
+            "reconstruction_trip_facts.parquet": RECONSTRUCTION_TRIP_FACT_SCHEMA,
+            "reconstruction_stop_arrivals.parquet": RECONSTRUCTION_STOP_ARRIVAL_SCHEMA,
+            "reconstruction_expected_stop_events.parquet": RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA,
+        }
+        for name, schema in expected_schemas.items():
+            if pq.read_schema(work / name) != schema:
+                raise fail("invalid_output", f"fact artifact schema validation failed: {name}", 15)
+        return counts
 
     def align_execution(self) -> dict[str, int]:
         """Persist per-vehicle evidence, then settle one bounded duty at a time."""
