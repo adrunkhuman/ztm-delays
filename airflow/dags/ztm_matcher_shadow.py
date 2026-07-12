@@ -950,12 +950,6 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
         status = "cast(null as string)" if spec.key != "expected_stop_event" else "observation_status"
         grain = ", ".join(spec.grain)
         for source, table in (("shadow", shadow), ("canonical", canonical)):
-            # Matcher expected-event artifacts already contain only settled passenger stops.
-            passenger_filter = (
-                "and is_passenger_stop and are_passenger_boundaries_settled"
-                if spec.key == "expected_stop_event" and source == "canonical"
-                else ""
-            )
             sections.append(
                 f"""
                 select '{spec.key}' as artifact, '{source}' as source, service_date, mode, line, gtfs_snapshot_id,
@@ -974,7 +968,6 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
                 from `{table}`
                 where service_date in unnest(@service_dates)
                   and {processing_field} = @processing_date
-                  {passenger_filter}
                 group by artifact, source, service_date, mode, line, gtfs_snapshot_id, trip_quality, observation_status
                 """
             )
