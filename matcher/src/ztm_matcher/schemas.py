@@ -5,14 +5,15 @@ import pyarrow as pa
 RAW_GPS_SCHEMA_VERSION = "raw-gps-v1"
 NORMALIZED_GPS_SCHEMA_VERSION = "normalized-gps-v1"
 SCHEDULE_SCHEMA_VERSION = "schedule-v1"
-SEMANTICS_SCHEMA_VERSION = "stop-semantics-v2"
+SEMANTICS_SCHEMA_VERSION = "stop-semantics-v3"
+TRIP_UNIVERSE_SCHEMA_VERSION = "trip-universe-v1"
 EXECUTION_SCHEMA_VERSION = "duty-execution-v1"
 OPERATIONAL_CROSSING_SCHEMA_VERSION = "operational-stop-crossing-v1"
 PASSENGER_ARRIVAL_SCHEMA_VERSION = "passenger-stop-arrival-v1"
-TRIP_FACT_SCHEMA_VERSION = "reconstruction-trip-facts-v1"
-STOP_ARRIVAL_FACT_SCHEMA_VERSION = "reconstruction-stop-arrivals-v1"
-EXPECTED_STOP_EVENT_SCHEMA_VERSION = "reconstruction-expected-stop-events-v1"
-MANIFEST_VERSION = 2
+TRIP_FACT_SCHEMA_VERSION = "reconstruction-trip-facts-v2"
+STOP_ARRIVAL_FACT_SCHEMA_VERSION = "reconstruction-stop-arrivals-v2"
+EXPECTED_STOP_EVENT_SCHEMA_VERSION = "reconstruction-expected-stop-events-v2"
+MANIFEST_VERSION = 3
 
 RAW_GPS_SCHEMA = pa.schema(
     [
@@ -137,6 +138,66 @@ STOP_CROSSING_SCHEMA = pa.schema(
 # from this adapter to fct_stop_arrival without losing direct-crossing diagnostics.
 PASSENGER_STOP_ARRIVAL_SCHEMA = STOP_CROSSING_SCHEMA
 
+STOP_SEMANTICS_SCHEMA = pa.schema(
+    [
+        pa.field("gtfs_snapshot_id", pa.string()),
+        pa.field("service_date", pa.date32()),
+        pa.field("processing_date", pa.date32()),
+        pa.field("trip_id", pa.string()),
+        pa.field("stop_id", pa.string()),
+        pa.field("stop_group_id", pa.string()),
+        pa.field("stop_lat", pa.float64()),
+        pa.field("stop_lon", pa.float64()),
+        pa.field("zone_id", pa.string()),
+        pa.field("effective_zone_id", pa.string()),
+        pa.field("stop_sequence", pa.int64()),
+        pa.field("arrival_time_seconds", pa.int64()),
+        pa.field("departure_time_seconds", pa.int64()),
+        pa.field("pickup_type", pa.int64()),
+        pa.field("drop_off_type", pa.int64()),
+        pa.field("stop_service_class", pa.string()),
+        pa.field("duty_chain_id", pa.string()),
+        pa.field("duty_chain_source", pa.string()),
+        pa.field("duty_chain_source_id", pa.string()),
+        pa.field("trip_order", pa.int64()),
+        pa.field("previous_trip_id", pa.string()),
+        pa.field("next_trip_id", pa.string()),
+        pa.field("stop_execution_class", pa.string()),
+        pa.field("classification_confidence", pa.string()),
+        pa.field("classification_reason", pa.string()),
+        pa.field("classification_evidence", pa.list_(pa.string())),
+        pa.field("is_passenger_stop", pa.bool_()),
+        pa.field("are_passenger_boundaries_settled", pa.bool_()),
+        pa.field("first_passenger_stop_sequence", pa.int64()),
+        pa.field("last_passenger_stop_sequence", pa.int64()),
+    ]
+)
+
+TRIP_UNIVERSE_SCHEMA = pa.schema(
+    [
+        pa.field("gtfs_snapshot_id", pa.string()),
+        pa.field("processing_date", pa.date32()),
+        pa.field("service_date", pa.date32()),
+        pa.field("duty_chain_id", pa.string()),
+        pa.field("trip_id", pa.string()),
+        pa.field("line", pa.string()),
+        pa.field("mode", pa.string()),
+        pa.field("direction_id", pa.int64()),
+        pa.field("origin_stop_id", pa.string()),
+        pa.field("destination_stop_id", pa.string()),
+        pa.field("ordered_stop_ids", pa.string()),
+        pa.field("stop_count", pa.int64()),
+        pa.field("non_zone1_stop_count", pa.int64()),
+        pa.field("is_public_service_segment", pa.bool_()),
+        pa.field("is_public_passenger_segment", pa.bool_()),
+        pa.field("terminal_pair_trip_count", pa.int64()),
+        pa.field("terminal_pair_rank", pa.int64()),
+        pa.field("is_short_turn_part_trip", pa.bool_()),
+        pa.field("is_zone1_only", pa.bool_()),
+        pa.field("is_zone1_public_ranking_trip", pa.bool_()),
+    ]
+)
+
 RECONSTRUCTION_TRIP_FACT_SCHEMA = pa.schema(
     [
         pa.field("gtfs_snapshot_id", pa.string()),
@@ -173,6 +234,7 @@ RECONSTRUCTION_TRIP_FACT_SCHEMA = pa.schema(
         pa.field("quality_flags", pa.list_(pa.string())),
         pa.field("service_observation_class", pa.string()),
         pa.field("service_observation_flags", pa.list_(pa.string())),
+        pa.field("is_zone1_public_ranking_trip", pa.bool_()),
     ]
 )
 
@@ -212,6 +274,7 @@ RECONSTRUCTION_STOP_ARRIVAL_SCHEMA = pa.schema(
         pa.field("quality_flags", pa.list_(pa.string())),
         pa.field("service_observation_class", pa.string()),
         pa.field("service_observation_flags", pa.list_(pa.string())),
+        pa.field("is_zone1_public_ranking_trip", pa.bool_()),
     ]
 )
 

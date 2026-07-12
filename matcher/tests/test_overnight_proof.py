@@ -13,6 +13,7 @@ from ztm_matcher.schemas import (
     RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA,
     RECONSTRUCTION_STOP_ARRIVAL_SCHEMA,
     RECONSTRUCTION_TRIP_FACT_SCHEMA,
+    TRIP_UNIVERSE_SCHEMA,
 )
 
 
@@ -22,11 +23,13 @@ def _write_artifacts(
     processing_date: date = date(2026, 7, 9),
     include_prior: bool = True,
     include_current_same_trip_id: bool = False,
+    ranking_eligible: bool = True,
 ) -> None:
     output.mkdir()
     trip_rows: list[dict[str, object]] = []
     arrival_rows: list[dict[str, object]] = []
     expected_rows: list[dict[str, object]] = []
+    universe_rows: list[dict[str, object]] = []
     service_dates = [processing_date - timedelta(days=1)] if include_prior else []
     if include_current_same_trip_id:
         service_dates.append(processing_date)
@@ -70,6 +73,7 @@ def _write_artifacts(
                 "quality_flags": [],
                 "service_observation_class": "regular",
                 "service_observation_flags": [],
+                "is_zone1_public_ranking_trip": ranking_eligible,
             }
         )
         trip_rows.append(trip)
@@ -101,6 +105,7 @@ def _write_artifacts(
                 "quality_flags": [],
                 "service_observation_class": "regular",
                 "service_observation_flags": [],
+                "is_zone1_public_ranking_trip": ranking_eligible,
             }
             arrival = dict.fromkeys(RECONSTRUCTION_STOP_ARRIVAL_SCHEMA.names)
             arrival.update(
@@ -122,6 +127,32 @@ def _write_artifacts(
             expected.update(common | {"observation_status": "observed", "uncertainty_evidence": []})
             arrival_rows.append(arrival)
             expected_rows.append(expected)
+        universe = dict.fromkeys(TRIP_UNIVERSE_SCHEMA.names)
+        universe.update(
+            {
+                "gtfs_snapshot_id": trip["gtfs_snapshot_id"],
+                "processing_date": processing_date,
+                "service_date": service_date,
+                "duty_chain_id": "duty-42",
+                "trip_id": trip["trip_id"],
+                "line": trip["line"],
+                "mode": trip["mode"],
+                "direction_id": 0,
+                "origin_stop_id": "stop-0",
+                "destination_stop_id": f"stop-{RANKING_ARRIVAL_FLOOR - 1}",
+                "ordered_stop_ids": "|".join(f"stop-{index}" for index in range(RANKING_ARRIVAL_FLOOR)),
+                "stop_count": RANKING_ARRIVAL_FLOOR,
+                "non_zone1_stop_count": 0,
+                "is_public_service_segment": True,
+                "is_public_passenger_segment": True,
+                "terminal_pair_trip_count": 1,
+                "terminal_pair_rank": 1,
+                "is_short_turn_part_trip": False,
+                "is_zone1_only": True,
+                "is_zone1_public_ranking_trip": ranking_eligible,
+            }
+        )
+        universe_rows.append(universe)
     pq.write_table(
         pa.Table.from_pylist(trip_rows, schema=RECONSTRUCTION_TRIP_FACT_SCHEMA),
         output / "reconstruction_trip_facts.parquet",
@@ -134,6 +165,7 @@ def _write_artifacts(
         pa.Table.from_pylist(expected_rows, schema=RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA),
         output / "reconstruction_expected_stop_events.parquet",
     )
+    pq.write_table(pa.Table.from_pylist(universe_rows, schema=TRIP_UNIVERSE_SCHEMA), output / "trip_universe.parquet")
 
 
 def test_overnight_proof_accepts_prior_service_lineage_and_reused_current_trip_id(tmp_path: Path) -> None:
@@ -145,7 +177,7 @@ def test_overnight_proof_accepts_prior_service_lineage_and_reused_current_trip_i
     assert report["passed"]
     assert report["processing_dates"] == ["2026-07-09"]
     assert report["prior_service_trip_quality_counts"] == {"complete": 1}
-    assert report["prior_n_line_complete_trip_arrival_counts"] == {"N42": 20}
+    assert report["prior_n_line_complete_ranking_arrival_counts"] == {"N42": 20}
     assert report["eligible_n_lines"] == ["N42"]
     assert report["ineligible_n_lines"] == []
 
@@ -171,6 +203,54 @@ def test_overnight_proof_requires_prior_service_evidence(tmp_path: Path) -> None
     assert not report["passed"]
     assert report["contract_violation_counts"]["no_prior_service_evidence"] == 1
     assert report["contract_violation_counts"]["no_healthy_n_line_at_ranking_floor"] == 1
+
+
+def test_overnight_proof_counts_only_persisted_ranking_universe_arrivals(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    _write_artifacts(artifacts, ranking_eligible=False)
+
+    report = build_overnight_proof_report(artifacts)
+
+    assert report["prior_n_line_complete_ranking_arrival_counts"] == {"N42": 0}
+    assert report["eligible_n_lines"] == []
+    assert report["ineligible_n_lines"] == ["N42"]
+    assert report["contract_violation_counts"]["no_healthy_n_line_at_ranking_floor"] == 1
+
+
+def test_overnight_proof_rejects_non_observed_event_data_and_gps_date_drift(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    _write_artifacts(artifacts)
+    expected_path = artifacts / "reconstruction_expected_stop_events.parquet"
+    expected_table = pq.read_table(expected_path)
+    expected_rows = expected_table.to_pylist()
+    expected_rows[0].update(
+        {
+            "observation_status": "missed",
+            "actual_arrival_time": None,
+            "delay_seconds": None,
+            "source_gps_date": date(2026, 7, 9),
+            "gps_date": date(2026, 7, 8),
+        }
+    )
+    pq.write_table(pa.Table.from_pylist(expected_rows, schema=expected_table.schema), expected_path)
+
+    report = build_overnight_proof_report(artifacts)
+
+    assert report["contract_violation_counts"]["non_observed_expected_has_observation_data"] == 1
+    assert report["contract_violation_counts"]["gps_date_processing_date_mismatch"] == 1
+
+
+def test_overnight_proof_cli_writes_stable_failed_report_for_corrupt_input(tmp_path: Path) -> None:
+    artifacts, report_json = tmp_path / "artifacts", tmp_path / "report.json"
+    _write_artifacts(artifacts)
+    (artifacts / "trip_universe.parquet").write_bytes(b"not parquet")
+
+    exit_code = main(["overnight-proof", "--input-dir", str(artifacts), "--report-json", str(report_json)])
+
+    report = json.loads(report_json.read_text())
+    assert exit_code == 12
+    assert not report["passed"]
+    assert report["error"]["code"] == "invalid_data"
 
 
 def test_overnight_proof_report_is_deterministic_and_keeps_ranking_floor(tmp_path: Path) -> None:

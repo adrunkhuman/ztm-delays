@@ -80,6 +80,79 @@ def _gtfs(path: Path, block: str = "block-1", prior: bool = True) -> None:
             archive.writestr(name, stream.getvalue())
 
 
+def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
+    """Schedule fixtures covering each local ranking-universe exclusion."""
+    tables = {
+        "trips.txt": [
+            [
+                "trip_id",
+                "route_id",
+                "service_id",
+                "trip_headsign",
+                "direction_id",
+                "block_id",
+                "block_short_name",
+                "shape_id",
+            ],
+            ["full-one", "n42", "svc", "Full", "0", "one", "1", "s"],
+            ["full-two", "n42", "svc", "Full", "0", "two", "2", "s"],
+            ["short", "n42", "svc", "Short", "0", "three", "3", "s"],
+            ["non-zone1", "n43", "svc", "Outside", "0", "four", "4", "s"],
+            ["depot", "n44", "svc", "Depot", "0", "five", "5", "s"],
+            ["technical", "n45", "svc", "Technical", "0", "six", "6", "s"],
+        ],
+        "stop_times.txt": [
+            ["trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time", "pickup_type", "drop_off_type"],
+            *[
+                [trip, stop, str(index), f"0{index}:00:00", f"0{index}:00:00", "0", "0"]
+                for trip in ("full-one", "full-two")
+                for index, stop in enumerate(("100001", "100002", "100003", "100004"), 1)
+            ],
+            ["short", "100002", "1", "01:00:00", "01:00:00", "0", "0"],
+            ["short", "100003", "2", "02:00:00", "02:00:00", "0", "0"],
+            ["non-zone1", "200001", "1", "01:00:00", "01:00:00", "0", "0"],
+            ["non-zone1", "200002", "2", "02:00:00", "02:00:00", "0", "0"],
+            ["depot", "300001", "1", "01:00:00", "01:00:00", "0", "0"],
+            ["depot", "300002", "2", "02:00:00", "02:00:00", "0", "0"],
+            ["technical", "400001", "1", "01:00:00", "01:00:00", "1", "1"],
+            ["technical", "400002", "2", "02:00:00", "02:00:00", "0", "0"],
+        ],
+        "stops.txt": [
+            ["stop_id", "stop_name", "stop_code", "stop_lat", "stop_lon", "zone_id", "stop_name_stem", "town_name"],
+            ["100001", "A", "1", "52.20", "21.00", "1", "A", "Warszawa"],
+            ["100002", "B", "2", "52.201", "21.001", "1+2", "B", "Warszawa"],
+            ["100003", "C", "3", "52.202", "21.002", "1", "C", "Warszawa"],
+            ["100004", "D", "4", "52.203", "21.003", "1", "D", "Warszawa"],
+            ["200001", "E", "5", "52.204", "21.004", "2", "E", "Warszawa"],
+            ["200002", "F", "6", "52.205", "21.005", "2", "F", "Warszawa"],
+            ["300001", "Zajezdnia", "7", "52.206", "21.006", "1", "Z", "Warszawa"],
+            ["300002", "G", "8", "52.207", "21.007", "1", "G", "Warszawa"],
+            ["400001", "H", "9", "52.208", "21.008", "1", "H", "Warszawa"],
+            ["400002", "I", "10", "52.209", "21.009", "1", "I", "Warszawa"],
+        ],
+        "shapes.txt": [["shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"], ["s", "52.2", "21", "1"]],
+        "routes.txt": [
+            ["route_id", "route_short_name", "route_type"],
+            ["n42", "N42", "3"],
+            ["n43", "N43", "3"],
+            ["n44", "N44", "3"],
+            ["n45", "N45", "3"],
+        ],
+        "calendar_dates.txt": [
+            ["service_id", "date", "exception_type"],
+            ["svc", "20260114", "1"],
+            ["svc", "20260115", "1"],
+        ],
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, rows in tables.items():
+            stream = io.StringIO()
+            if name == "stops.txt" and not include_zone_id:
+                rows = [row[:5] + row[6:] for row in rows]
+            csv.writer(stream).writerows(rows)
+            archive.writestr(name, stream.getvalue())
+
+
 def _row(**changes: object) -> dict[str, object]:
     row: dict[str, object] = {
         "Lines": "187",
@@ -448,9 +521,69 @@ def test_fact_construction_publishes_high_confidence_direct_adapters(tmp_path: P
     assert arrivals.schema == RECONSTRUCTION_STOP_ARRIVAL_SCHEMA
     assert expected.schema == RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA
     assert trips.to_pylist()[0]["trip_quality"] == "complete"
+    assert trips.to_pylist()[0]["is_zone1_public_ranking_trip"]
     assert all(row["source_gps_date"] == date(2026, 1, 15) for row in arrivals.to_pylist())
+    assert all(row["is_zone1_public_ranking_trip"] for row in arrivals.to_pylist())
     assert [row["observation_status"] for row in expected.to_pylist()] == ["observed"]
     assert all(row["source_gps_date"] == date(2026, 1, 15) for row in expected.to_pylist())
+
+
+def test_schedule_trip_universe_classifies_zone_depot_technical_and_short_turns(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _ranking_gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        run.prepare_schedule()
+        rows = [
+            row
+            for row in pq.read_table(run._work() / "trip_universe.parquet").to_pylist()
+            if row["service_date"] == date(2026, 1, 15)
+        ]
+        semantics = pq.read_table(run._work() / "stop_semantics.parquet").to_pylist()
+
+    universe = {row["trip_id"]: row for row in rows}
+    assert semantics[0]["zone_id"] is not None
+    assert next(row for row in semantics if row["stop_id"] == "100002")["effective_zone_id"] == "1"
+    assert universe["full-one"]["is_zone1_public_ranking_trip"]
+    assert universe["full-two"]["is_zone1_public_ranking_trip"]
+    assert universe["non-zone1"]["non_zone1_stop_count"] == 2
+    assert not universe["non-zone1"]["is_zone1_public_ranking_trip"]
+    assert not universe["depot"]["is_public_passenger_segment"]
+    assert universe["technical"]["is_public_passenger_segment"]
+    assert universe["short"]["is_short_turn_part_trip"]
+    assert universe["short"]["terminal_pair_rank"] == 2
+    assert not universe["short"]["is_zone1_public_ranking_trip"]
+
+
+def test_missing_zone_column_is_conservatively_non_eligible_in_trip_universe(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _ranking_gtfs(zip_path, include_zone_id=False)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        run.prepare_schedule()
+        universe = pq.read_table(run._work() / "trip_universe.parquet").to_pylist()
+
+    full_trip = next(
+        row for row in universe if row["trip_id"] == "full-one" and row["service_date"] == date(2026, 1, 15)
+    )
+    assert full_trip["non_zone1_stop_count"] == 4
+    assert not full_trip["is_zone1_public_ranking_trip"]
 
 
 def test_prior_service_gtfs_after_midnight_gps_produces_complete_lineage(tmp_path: Path) -> None:
@@ -601,7 +734,7 @@ def test_prior_service_gtfs_after_midnight_gps_produces_complete_lineage(tmp_pat
         datetime(2026, 1, 15, 0, 5, tzinfo=UTC),
     ]
     assert [row["source_gps_date"] for row in expected] == [date(2026, 1, 15)] * 2
-    assert report["prior_n_line_complete_trip_arrival_counts"] == {"N42": 2}
+    assert report["prior_n_line_complete_ranking_arrival_counts"] == {"N42": 2}
     assert report["contract_violation_counts"]["no_healthy_n_line_at_ranking_floor"] == 1
     assert all(
         count == 0
@@ -667,6 +800,13 @@ def test_fact_scheduled_times_use_warsaw_wall_clock_across_dst_and_overnight(
                 }
             )
         pq.write_table(pa.Table.from_pylist(semantics, schema=semantic_table.schema), semantics_path)
+        universe_path = work / "trip_universe.parquet"
+        universe_table = pq.read_table(universe_path)
+        universe_rows = universe_table.to_pylist()
+        for row in universe_rows:
+            if row["trip_id"] == executions[0]["trip_id"]:
+                row["service_date"] = service_date
+        pq.write_table(pa.Table.from_pylist(universe_rows, schema=universe_table.schema), universe_path)
 
         arrivals_path = work / "passenger_stop_arrivals.parquet"
         arrival_table = pq.read_table(arrivals_path)
@@ -779,7 +919,7 @@ def test_medium_direct_arrivals_are_uncertain_not_fact_evidence(tmp_path: Path) 
     assert [row["observation_status"] for row in expected] == ["uncertain", "uncertain"]
     assert all(row["actual_arrival_time"] is None and row["delay_seconds"] is None for row in expected)
     assert all(row["uncertainty_evidence"] == ["alignment_ambiguous_or_medium"] for row in expected)
-    assert all(row["source_gps_date"] == date(2026, 1, 14) for row in expected)
+    assert all(row["source_gps_date"] is None for row in expected)
 
 
 def test_matching_failure_absent_events_are_uncertain_without_lineage(tmp_path: Path) -> None:

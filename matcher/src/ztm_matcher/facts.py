@@ -194,10 +194,13 @@ def _install_warsaw_scheduled_time_macro(connection: duckdb.DuckDBPyConnection) 
     )
 
 
-def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Path) -> str:
+def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Path, trip_universe: Path) -> str:
     return f"""
         with accepted as (
-            select * from read_parquet('{_quoted(executions)}')
+            select executions.*, universe.is_zone1_public_ranking_trip
+            from read_parquet('{_quoted(executions)}') executions
+            inner join read_parquet('{_quoted(trip_universe)}') universe
+                using (gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id)
             where execution_status = 'executed' and confidence = 'high'
               and duty_chain_source != 'line_brigade'
               and ownership_interval_start_time is not null and ownership_interval_end_time is not null
@@ -292,7 +295,7 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
         select accepted.gtfs_snapshot_id, accepted.processing_date,
             coalesce(ping_metrics.gps_date, accepted.processing_date) gps_date,
             accepted.service_date, accepted.trip_id, accepted.vehicle_number, accepted.line, accepted.brigade,
-            accepted.mode,
+            accepted.mode, accepted.is_zone1_public_ranking_trip,
             regular_stop_metrics.scheduled_start_time, regular_stop_metrics.scheduled_end_time,
             regular_metrics.actual_start_time, regular_metrics.actual_end_time, regular_metrics.start_delay_seconds,
             regular_metrics.end_delay_seconds,
@@ -349,6 +352,7 @@ def build_facts(
     semantics: Path,
     arrivals: Path,
     normalized_gps: Path,
+    trip_universe: Path,
     output_dir: Path,
 ) -> dict[str, int]:
     """Write deterministic fact adapters, scanning raw GPS only through owned intervals."""
@@ -359,13 +363,27 @@ def build_facts(
         group by all having count(*) > 1"""
     direct = f"""select gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence, count(*) count
         from read_parquet('{_quoted(arrivals)}') group by all having count(*) > 1"""
+    universe = f"""select gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id, count(*) count
+        from read_parquet('{_quoted(trip_universe)}') group by all having count(*) > 1"""
+    missing_universe = f"""
+        select 1 from read_parquet('{_quoted(executions)}') executions
+        left join read_parquet('{_quoted(trip_universe)}') universe
+            using (gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id)
+        where executions.execution_status = 'executed' and executions.confidence = 'high'
+          and executions.duty_chain_source != 'line_brigade'
+          and universe.trip_id is null
+        limit 1
+    """
     _assert_unique(connection, accepted, "accepted trip")
     _assert_unique(connection, direct, "direct passenger arrival")
+    _assert_unique(connection, universe, "trip universe")
+    if connection.execute(missing_universe).fetchone() is not None:
+        raise ValueError("accepted trip has no schedule-derived ranking classification")
     trip_path = output_dir / "reconstruction_trip_facts.parquet"
     stop_path = output_dir / "reconstruction_stop_arrivals.parquet"
     expected_path = output_dir / "reconstruction_expected_stop_events.parquet"
     trip_count = _write_trip_facts(
-        connection, _trip_input_query(executions, semantics, arrivals, normalized_gps), trip_path
+        connection, _trip_input_query(executions, semantics, arrivals, normalized_gps, trip_universe), trip_path
     )
     trip_sql, arrival_sql, semantic_sql = _quoted(trip_path), _quoted(arrivals), _quoted(semantics)
     connection.execute(
@@ -384,7 +402,7 @@ def build_facts(
                 arrivals.segment_end_time,
                 arrivals.segment_duration_seconds::bigint segment_duration_seconds, arrivals.alignment_confidence,
                 arrivals.alignment_evidence, trips.trip_quality, trips.quality_flags, trips.service_observation_class,
-                trips.service_observation_flags
+                trips.service_observation_flags, trips.is_zone1_public_ranking_trip
             from read_parquet('{arrival_sql}') arrivals
             inner join read_parquet('{trip_sql}') trips
                 using (gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number)
@@ -400,7 +418,7 @@ def build_facts(
         f"""
         copy (
             select trips.gtfs_snapshot_id, trips.processing_date, trips.gps_date,
-                case when arrivals.alignment_confidence is not null then segment.gps_date end source_gps_date,
+                case when arrivals.alignment_confidence = 'high' then segment.gps_date end source_gps_date,
                 trips.service_date, trips.trip_id, trips.vehicle_number, trips.line, trips.brigade, trips.mode,
                 semantics.stop_id, semantics.stop_group_id, semantics.stop_sequence::bigint stop_sequence,
                 semantics.pickup_type::bigint pickup_type, semantics.drop_off_type::bigint drop_off_type,

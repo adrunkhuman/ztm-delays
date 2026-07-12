@@ -10,7 +10,7 @@ from ztm_matcher.gtfs import StopTime, load, select
 from ztm_matcher.semantics import _depot, duties, stop_semantics
 
 
-def _zip(path: Path, block: str = "block-a") -> None:
+def _zip(path: Path, block: str = "block-a", *, include_zone_id: bool = True) -> None:
     tables = {
         "trips.txt": [
             [
@@ -50,6 +50,8 @@ def _zip(path: Path, block: str = "block-a") -> None:
     with zipfile.ZipFile(path, "w") as archive:
         for name, rows in tables.items():
             stream = io.StringIO()
+            if name == "stops.txt" and not include_zone_id:
+                rows = [row[:5] + row[6:] for row in rows]
             csv.writer(stream).writerows(rows)
             archive.writestr(name, stream.getvalue())
 
@@ -81,6 +83,18 @@ def test_stop_times_are_compact_records_indexed_by_trip(tmp_path: Path) -> None:
     assert all(isinstance(row, StopTime) for rows in snapshot.stop_times.values() for row in rows)
     assert not hasattr(snapshot.stop_times["one"][0], "__dict__")
     assert snapshot.stop_times["one"][0].stop_id == "200001"
+
+
+def test_missing_stop_zone_is_retained_as_unknown_for_conservative_classification(tmp_path: Path) -> None:
+    path = tmp_path / "schedule.zip"
+    _zip(path, include_zone_id=False)
+
+    snapshot = load(path, "synthetic")
+    rows = stop_semantics(duties(select(snapshot, date(2026, 1, 15)), snapshot), snapshot)
+
+    assert snapshot.stops["200001"].zone_id is None
+    assert snapshot.stops["200001"].effective_zone_id is None
+    assert all(row["effective_zone_id"] is None for row in rows)
 
 
 def test_same_trip_ids_remain_distinct_across_service_dates(tmp_path: Path) -> None:

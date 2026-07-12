@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ztm_matcher.config import RunConfig, parse_date
 from ztm_matcher.errors import MatcherError, fail
-from ztm_matcher.overnight_proof import write_overnight_proof_report
+from ztm_matcher.overnight_proof import write_failed_overnight_proof_report, write_overnight_proof_report
 from ztm_matcher.runtime import ReconstructionRun
 
 
@@ -65,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result["metrics"], sort_keys=True))
         return 0
     except MatcherError as exc:
+        if args.command == "overnight-proof":
+            write_failed_overnight_proof_report(Path(args.report_json), exc)
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}, sort_keys=True), file=sys.stderr)
         return exc.exit_code
 

@@ -39,8 +39,11 @@ from ztm_matcher.schemas import (
     SEMANTICS_SCHEMA_VERSION,
     STOP_ARRIVAL_FACT_SCHEMA_VERSION,
     STOP_CROSSING_SCHEMA,
+    STOP_SEMANTICS_SCHEMA,
     TRAVERSAL_EVIDENCE_SCHEMA,
     TRIP_FACT_SCHEMA_VERSION,
+    TRIP_UNIVERSE_SCHEMA,
+    TRIP_UNIVERSE_SCHEMA_VERSION,
 )
 from ztm_matcher.semantics import duties, iter_stop_semantics
 from ztm_matcher.stop_alignment import align_stop_crossings
@@ -468,14 +471,14 @@ class ReconstructionRun:
             semantics_batch.append(semantic)
             if len(semantics_batch) < SEMANTICS_BATCH_ROWS:
                 continue
-            table = pa.Table.from_pylist(semantics_batch)
+            table = pa.Table.from_pylist(semantics_batch, schema=STOP_SEMANTICS_SCHEMA)
             semantics_columns = set(table.column_names)
             semantics_writer = semantics_writer or pq.ParquetWriter(semantics_path, table.schema, compression="zstd")
             semantics_writer.write_table(table)
             semantics_count += table.num_rows
             semantics_batch.clear()
         if semantics_batch:
-            table = pa.Table.from_pylist(semantics_batch)
+            table = pa.Table.from_pylist(semantics_batch, schema=STOP_SEMANTICS_SCHEMA)
             semantics_columns = set(table.column_names)
             semantics_writer = semantics_writer or pq.ParquetWriter(semantics_path, table.schema, compression="zstd")
             semantics_writer.write_table(table)
@@ -495,6 +498,9 @@ class ReconstructionRun:
         }
         if semantics_columns is None or not required_semantics.issubset(semantics_columns):
             raise fail("invalid_output", "stop semantics do not satisfy stop-semantics-v1", 15)
+        if pq.read_schema(semantics_path) != STOP_SEMANTICS_SCHEMA:
+            raise fail("invalid_output", "stop semantics schema validation failed", 15)
+        self._write_trip_universe(work / "duty_schedule.parquet", semantics_path, work / "trip_universe.parquet")
         schedule_sql = str(work / "duty_schedule.parquet").replace("'", "''")
         semantics_sql = str(semantics_path).replace("'", "''")
         terminal_sql = str(work / ".terminal_courses.parquet").replace("'", "''")
@@ -534,6 +540,89 @@ class ReconstructionRun:
         )
         return len(rows)
 
+    def _write_trip_universe(self, schedule: Path, semantics: Path, output: Path) -> None:
+        """Persist the schedule-derived local analogue of the serving ranking universe."""
+        schedule_sql, semantics_sql, output_sql = (
+            str(schedule).replace("'", "''"),
+            str(semantics).replace("'", "''"),
+            str(output).replace("'", "''"),
+        )
+        self._connection().execute(
+            f"""
+            copy (
+                with trip_stops as (
+                    select schedule.gtfs_snapshot_id, schedule.processing_date, schedule.service_date,
+                        schedule.duty_chain_id, schedule.trip_id, schedule.line, schedule.mode,
+                        schedule.direction_id::bigint direction_id, schedule.origin_stop_id,
+                        schedule.destination_stop_id, schedule.stop_count::bigint stop_count,
+                        schedule.is_public_service_segment, schedule.is_malformed_duty_segment,
+                        string_agg(semantics.stop_id, '|' order by semantics.stop_sequence) as ordered_stop_ids,
+                        countif(coalesce(semantics.effective_zone_id, '') != '1')::bigint as non_zone1_stop_count,
+                        bool_or(
+                            semantics.are_passenger_boundaries_settled
+                            and semantics.is_passenger_stop
+                            and semantics.stop_execution_class = 'passenger'
+                        ) as has_settled_passenger_stops
+                    from read_parquet('{schedule_sql}') schedule
+                    inner join read_parquet('{semantics_sql}') semantics
+                        on schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
+                        and schedule.processing_date = semantics.processing_date
+                        and schedule.service_date = semantics.service_date
+                        and schedule.duty_chain_id = semantics.duty_chain_id
+                        and schedule.trip_id = semantics.trip_id
+                    where schedule.mode in ('bus', 'tram')
+                    group by all
+                ), public_segments as (
+                    select *, coalesce(is_public_service_segment, false)
+                        and not coalesce(is_malformed_duty_segment, true)
+                        and coalesce(has_settled_passenger_stops, false) as is_public_passenger_segment
+                    from trip_stops
+                ), terminal_counts as (
+                    select gtfs_snapshot_id, service_date, line, direction_id, origin_stop_id, destination_stop_id,
+                        count(*)::bigint as terminal_pair_trip_count
+                    from public_segments
+                    where is_public_passenger_segment
+                    group by all
+                ), terminal_ranks as (
+                    select *, row_number() over (
+                        partition by gtfs_snapshot_id, service_date, line, direction_id
+                        order by terminal_pair_trip_count desc, origin_stop_id, destination_stop_id
+                    )::bigint as terminal_pair_rank
+                    from terminal_counts
+                ), classified as (
+                    select public_segments.*,
+                        coalesce(terminal_ranks.terminal_pair_trip_count, 0)::bigint as terminal_pair_trip_count,
+                        coalesce(terminal_ranks.terminal_pair_rank, 999999)::bigint as terminal_pair_rank,
+                        exists(
+                            select 1 from public_segments longer_trip
+                            where longer_trip.gtfs_snapshot_id = public_segments.gtfs_snapshot_id
+                              and longer_trip.service_date = public_segments.service_date
+                              and longer_trip.line = public_segments.line
+                              and longer_trip.direction_id = public_segments.direction_id
+                              and longer_trip.is_public_passenger_segment
+                              and longer_trip.stop_count > public_segments.stop_count
+                              and strpos(concat('|', longer_trip.ordered_stop_ids, '|'),
+                                  concat('|', public_segments.ordered_stop_ids, '|')) > 0
+                        ) and coalesce(terminal_ranks.terminal_pair_rank, 999999) > 1 as is_short_turn_part_trip
+                    from public_segments
+                    left join terminal_ranks
+                        using (gtfs_snapshot_id, service_date, line, direction_id, origin_stop_id, destination_stop_id)
+                )
+                select gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id, line, mode,
+                    direction_id, origin_stop_id, destination_stop_id, ordered_stop_ids, stop_count,
+                    non_zone1_stop_count, is_public_service_segment, is_public_passenger_segment,
+                    terminal_pair_trip_count, terminal_pair_rank, is_short_turn_part_trip,
+                    non_zone1_stop_count = 0 as is_zone1_only,
+                    is_public_passenger_segment and not is_short_turn_part_trip and non_zone1_stop_count = 0
+                        as is_zone1_public_ranking_trip
+                from classified
+                order by gtfs_snapshot_id, service_date, line, direction_id, trip_id, duty_chain_id
+            ) to '{output_sql}' (format parquet, compression zstd)
+            """
+        )
+        if pq.read_schema(output) != TRIP_UNIVERSE_SCHEMA:
+            raise fail("invalid_output", "trip universe schema validation failed", 15)
+
     def prepare(self) -> dict[str, Any]:
         """Produce validated artifacts plus deterministic lineage and resource metrics."""
         started = time.perf_counter()
@@ -564,6 +653,7 @@ class ReconstructionRun:
                 "normalized_gps": NORMALIZED_GPS_SCHEMA_VERSION,
                 "schedule": SCHEDULE_SCHEMA_VERSION,
                 "stop_semantics": SEMANTICS_SCHEMA_VERSION,
+                "trip_universe": TRIP_UNIVERSE_SCHEMA_VERSION,
                 "duty_execution": EXECUTION_SCHEMA_VERSION,
                 "operational_stop_crossings": OPERATIONAL_CROSSING_SCHEMA_VERSION,
                 "passenger_stop_arrivals": PASSENGER_ARRIVAL_SCHEMA_VERSION,
@@ -576,6 +666,7 @@ class ReconstructionRun:
                 "normalized_gps": _identity(self.normalized_path, relative=True),
                 "duty_schedule": _identity(work / "duty_schedule.parquet", relative=True),
                 "stop_semantics": _identity(work / "stop_semantics.parquet", relative=True),
+                "trip_universe": _identity(work / "trip_universe.parquet", relative=True),
                 "duty_execution": _identity(work / "duty_execution.parquet", relative=True),
                 "operational_stop_crossings": _identity(work / "operational_stop_crossings.parquet", relative=True),
                 "passenger_stop_arrivals": _identity(work / "passenger_stop_arrivals.parquet", relative=True),
@@ -632,6 +723,7 @@ class ReconstructionRun:
                 semantics=work / "stop_semantics.parquet",
                 arrivals=work / "passenger_stop_arrivals.parquet",
                 normalized_gps=self.normalized_path or work / "normalized_gps.parquet",
+                trip_universe=work / "trip_universe.parquet",
                 output_dir=work,
             )
         except (duckdb.Error, ValueError) as exc:

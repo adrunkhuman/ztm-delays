@@ -82,8 +82,8 @@ worker count and each fixed worker-count run has deterministic output bytes.
 
 ## Reconstruction Facts
 
-`reconstruction-trip-facts-v1`, `reconstruction-stop-arrivals-v1`, and
-`reconstruction-expected-stop-events-v1` are local Parquet adapters, not
+`reconstruction-trip-facts-v2`, `reconstruction-stop-arrivals-v2`, and
+`reconstruction-expected-stop-events-v2` are local Parquet adapters, not
 warehouse tables. Their published grains are respectively
 `snapshot/service_date/trip/vehicle`, that trip plus `stop_sequence`, and the
 same expected passenger-stop occurrence. They are ordered by those grains and
@@ -121,10 +121,24 @@ excluded. `interpolated` is deliberately not emitted before #102. Prior service
 dates remain intact through `processing_date`, `gps_date`, and, for direct
 arrival facts, `source_gps_date`.
 
+`trip-universe-v1` is a compact schedule-derived artifact. It preserves raw and
+effective stop zones (`1+2` normalizes to `1`; absent zones remain unknown and
+therefore fail the zone-1 check), ordered scheduled stop occurrences, terminal
+pair frequency/rank, and the persisted
+`is_zone1_public_ranking_trip` classification. It requires a settled,
+non-depot, non-technical, non-malformed passenger segment, all scheduled stops
+in effective zone 1, and no contained lower-ranked short-turn pattern. The
+local classifier groups terminal patterns by snapshot, line, direction, and
+actual `service_date`; warehouse `int_serving_trip_universe` groups by
+`schedule_day_type`, which is not available in the local artifacts. This is a
+documented conservative approximation, not a claim of byte-for-byte dbt
+parity. Eligibility is copied into trip and direct-arrival facts only through
+this persisted artifact.
+
 ## Overnight Evidence Gate
 
-Run the local proof against the three published reconstruction artifacts. It
-does not query BigQuery:
+Run the local proof against the three published reconstruction artifacts and
+`trip_universe.parquet`. It does not query BigQuery:
 
 ```shell
 uv run --project matcher ztm-matcher overnight-proof \
@@ -132,11 +146,15 @@ uv run --project matcher ztm-matcher overnight-proof \
   --report-json work/2026-07-09/overnight-proof.json
 ```
 
-The command writes deterministic JSON with SHA-256 artifact identities,
-processing and snapshot IDs, prior-service quality, N-line complete-trip
-arrival counts, the unchanged line-ranking floor of 20, eligibility, and every
-contract violation count. It returns nonzero unless the artifacts have no
-violations, include prior-service evidence, and include at least one healthy
+The command uses DuckDB aggregates over Parquet rather than loading artifacts
+into Python. It writes deterministic JSON with SHA-256 artifact identities,
+processing and snapshot IDs, prior-service quality, N-line complete
+ranking-universe arrival counts, the unchanged line-ranking floor of 20,
+eligibility, and every contract violation count. It verifies fact eligibility
+against the persisted schedule artifact, requires every artifact `gps_date` to
+equal its `processing_date`, and rejects any non-observed expected event with
+actual, delay, or source-GPS data. It returns nonzero unless the artifacts have
+no violations, include prior-service evidence, and include at least one healthy
 N line at the floor. It does not require every N line to meet the floor.
 
 Processing dates `2026-07-05` through `2026-07-07` are rejected as degraded

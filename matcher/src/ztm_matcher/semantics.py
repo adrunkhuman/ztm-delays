@@ -5,19 +5,17 @@ import re
 from collections.abc import Iterator
 from typing import Any
 
-from ztm_matcher.gtfs import Snapshot, StopTime, chain_id
+from ztm_matcher.gtfs import Snapshot, StopInfo, StopTime, chain_id
 
 
 def _depot(name: str | None) -> bool:
     return bool(name and re.search(r"(^R-[0-9]+\s+Zajezdnia|^Zajezdnia|\sZajezdnia)", name, re.IGNORECASE))
 
 
-def _distance(left: dict[str, Any] | None, right: dict[str, Any] | None) -> float | None:
+def _distance(left: StopInfo | None, right: StopInfo | None) -> float | None:
     if not left or not right:
         return None
-    lat1, lon1, lat2, lon2 = map(
-        math.radians, (left["stop_lat"], left["stop_lon"], right["stop_lat"], right["stop_lon"])
-    )
+    lat1, lon1, lat2, lon2 = map(math.radians, (left.stop_lat, left.stop_lon, right.stop_lat, right.stop_lon))
     a = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
     return 12_742_000 * math.asin(math.sqrt(a))
 
@@ -42,9 +40,10 @@ def duties(schedule: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str,
                 (group[index - 1] if index else None),
                 (group[index + 1] if index + 1 < len(group) else None),
             )
+            origin_info, destination_info = snapshot.stops.get(origin or ""), snapshot.stops.get(destination or "")
             origin_name, destination_name = (
-                snapshot.stops.get(origin or "", {}).get("stop_name"),
-                snapshot.stops.get(destination or "", {}).get("stop_name"),
+                origin_info.stop_name if origin_info else None,
+                destination_info.stop_name if destination_info else None,
             )
             missing = len(endpoints) < 2 or not origin or not destination
             overlap = bool(previous and trip["trip_start_seconds"] < previous["trip_end_seconds"])
@@ -164,8 +163,12 @@ def iter_stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> 
                 "trip_id": trip_id,
                 "stop_id": row.stop_id,
                 "stop_group_id": row.stop_id[:4],
-                "stop_lat": snapshot.stops.get(row.stop_id, {}).get("stop_lat"),
-                "stop_lon": snapshot.stops.get(row.stop_id, {}).get("stop_lon"),
+                "stop_lat": snapshot.stops[row.stop_id].stop_lat if row.stop_id in snapshot.stops else None,
+                "stop_lon": snapshot.stops[row.stop_id].stop_lon if row.stop_id in snapshot.stops else None,
+                "zone_id": snapshot.stops[row.stop_id].zone_id if row.stop_id in snapshot.stops else None,
+                "effective_zone_id": (
+                    snapshot.stops[row.stop_id].effective_zone_id if row.stop_id in snapshot.stops else None
+                ),
                 "stop_sequence": row.stop_sequence,
                 "arrival_time_seconds": row.arrival_time_seconds,
                 "departure_time_seconds": row.departure_time_seconds,

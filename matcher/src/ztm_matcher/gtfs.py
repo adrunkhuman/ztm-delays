@@ -43,7 +43,6 @@ REQUIRED = {
         "stop_code",
         "stop_lat",
         "stop_lon",
-        "zone_id",
         "stop_name_stem",
         "town_name",
     },
@@ -70,6 +69,17 @@ class StopTime:
 
 
 @dataclass(frozen=True, slots=True)
+class StopInfo:
+    """Compact validated stop metadata, including ranking-zone lineage."""
+
+    stop_name: str
+    stop_lat: float
+    stop_lon: float
+    zone_id: str | None
+    effective_zone_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class Trip:
     """Normalized fields needed from one selected trips.txt row."""
 
@@ -92,7 +102,7 @@ class Snapshot:
     sha256: str
     trips: list[Trip]
     stop_times: dict[str, list[StopTime]]
-    stops: dict[str, dict[str, Any]]
+    stops: dict[str, StopInfo]
     routes: dict[str, dict[str, Any]]
     active: set[tuple[str, date]]
 
@@ -281,14 +291,21 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
         }
         for row in route_rows
     }
-    stops: dict[str, dict[str, Any]] = {}
+    stops: dict[str, StopInfo] = {}
     for row in stop_rows:
         try:
             lat, lon = float(_string(row["stop_lat"])), float(_string(row["stop_lon"]))
         except ValueError as exc:
             raise fail("invalid_data", "invalid stops.txt coordinates", 12) from exc
         if 51.0 <= lat <= 53.5 and 19.5 <= lon <= 22.5:
-            stops[_string(row["stop_id"])] = {"stop_name": _string(row["stop_name"]), "stop_lat": lat, "stop_lon": lon}
+            zone_id = _string(row.get("zone_id")) or None
+            stops[_string(row["stop_id"])] = StopInfo(
+                stop_name=_string(row["stop_name"]),
+                stop_lat=lat,
+                stop_lon=lon,
+                zone_id=zone_id,
+                effective_zone_id="1" if zone_id == "1+2" else zone_id,
+            )
     if not trips or not stop_times or not active:
         raise fail("invalid_data", "GTFS snapshot has no trips, stop times, or active dates", 12)
     return Snapshot(snapshot_id, digest, trips, stop_times, stops, routes, active)
