@@ -979,7 +979,10 @@ def test_shadow_gate_requires_canonical_mode_retention_and_material_lines() -> N
     assert tram["shadow_rows"] == 0
     assert any(issue["message"] == "shadow mode is completely missing" for issue in gate["issues"])
     assert any(issue["category"] == "quality" and issue["level"] == "fail" for issue in gate["issues"])
-    assert any(issue["message"] == "material line retention below threshold" for issue in gate["issues"])
+    assert any(
+        issue["message"] == "material line retention below threshold" and issue["level"] == "warn"
+        for issue in gate["issues"]
+    )
     assert shadow._gate_has_hard_failure(gate) is True
 
 

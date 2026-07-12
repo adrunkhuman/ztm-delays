@@ -1353,7 +1353,9 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
             "minimum": threshold,
         }
         material_line_retention.append(evidence)
-        level = _retention_issue_level(artifact, service_date, current_date)
+        # Material lines are mandatory manual-review evidence; only mode-wide
+        # current-trip retention is a hard automated cutover gate.
+        level = "warn"
         mode_shadow_rows = mode_counts.get((artifact, service_date, mode, "shadow"), 0)
         if shadow_rows == 0 and mode_shadow_rows:
             issues.append(_gate_issue(level, "retention", "material line is completely missing", **evidence))
