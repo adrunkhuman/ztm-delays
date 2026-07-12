@@ -120,3 +120,26 @@ are `skipped_optional` and regular stops are `missed`. Technical stops are
 excluded. `interpolated` is deliberately not emitted before #102. Prior service
 dates remain intact through `processing_date`, `gps_date`, and, for direct
 arrival facts, `source_gps_date`.
+
+## Overnight Evidence Gate
+
+Run the local proof against the three published reconstruction artifacts. It
+does not query BigQuery:
+
+```shell
+uv run --project matcher ztm-matcher overnight-proof \
+  --input-dir work/2026-07-09 \
+  --report-json work/2026-07-09/overnight-proof.json
+```
+
+The command writes deterministic JSON with SHA-256 artifact identities,
+processing and snapshot IDs, prior-service quality, N-line complete-trip
+arrival counts, the unchanged line-ranking floor of 20, eligibility, and every
+contract violation count. It returns nonzero unless the artifacts have no
+violations, include prior-service evidence, and include at least one healthy
+N line at the floor. It does not require every N line to meet the floor.
+
+Processing dates `2026-07-05` through `2026-07-07` are rejected as degraded
+evidence. The expected real proof is the July 9, 2026 local matcher output:
+after-midnight GPS for the July 8 service date must retain July 9 processing and
+source GPS lineage while supplying a healthy prior-service N line.

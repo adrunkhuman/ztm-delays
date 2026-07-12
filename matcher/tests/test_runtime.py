@@ -16,6 +16,7 @@ from ztm_matcher import ReconstructionRun, RunConfig
 from ztm_matcher.cli import main
 from ztm_matcher.errors import MatcherError
 from ztm_matcher.gtfs import load
+from ztm_matcher.overnight_proof import build_overnight_proof_report
 from ztm_matcher.runtime import STOP_ALIGNMENT_ROW_GROUP_ROWS, _flush_stop_alignment_rows
 from ztm_matcher.schemas import (
     DUTY_EXECUTION_SCHEMA,
@@ -450,6 +451,163 @@ def test_fact_construction_publishes_high_confidence_direct_adapters(tmp_path: P
     assert all(row["source_gps_date"] == date(2026, 1, 15) for row in arrivals.to_pylist())
     assert [row["observation_status"] for row in expected.to_pylist()] == ["observed"]
     assert all(row["source_gps_date"] == date(2026, 1, 15) for row in expected.to_pylist())
+
+
+def test_prior_service_gtfs_after_midnight_gps_produces_complete_lineage(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        run.prepare_schedule()
+        work = run._work()
+        semantic_rows = [
+            row for row in pq.read_table(work / "stop_semantics.parquet").to_pylist() if row["trip_id"] == "overnight"
+        ]
+        semantic = semantic_rows[0]
+        start = datetime(2026, 1, 15, 0, 1, 30, tzinfo=UTC)
+        end = datetime(2026, 1, 15, 0, 7, 30, tzinfo=UTC)
+        execution = dict.fromkeys(DUTY_EXECUTION_SCHEMA.names)
+        execution.update(
+            {
+                "service_date": semantic["service_date"],
+                "processing_date": semantic["processing_date"],
+                "gtfs_snapshot_id": semantic["gtfs_snapshot_id"],
+                "duty_chain_id": semantic["duty_chain_id"],
+                "duty_chain_source": semantic["duty_chain_source"],
+                "duty_chain_source_id": semantic["duty_chain_source_id"],
+                "trip_order": semantic["trip_order"],
+                "trip_id": semantic["trip_id"],
+                "line": "N42",
+                "brigade": "0012",
+                "mode": "bus",
+                "vehicle_number": "42",
+                "vehicle_type": 1,
+                "execution_status": "executed",
+                "confidence": "high",
+                "execution_evidence": [],
+                "source_ping_start_time": start,
+                "source_ping_end_time": end,
+                "source_ping_count": 7,
+                "ownership_interval_start_time": start,
+                "ownership_interval_end_time": end,
+            }
+        )
+        pq.write_table(pa.Table.from_pylist([execution], schema=DUTY_EXECUTION_SCHEMA), work / "duty_execution.parquet")
+        run.normalized_path = work / "normalized_gps.parquet"
+        pings = []
+        for minute, lat, lon in (
+            (0, 52.1995, 20.9995),
+            (1, 52.2, 21.0),
+            (2, 52.20025, 21.00025),
+            (3, 52.2005, 21.0005),
+            (4, 52.20075, 21.00075),
+            (5, 52.201, 21.001),
+            (6, 52.2015, 21.0015),
+        ):
+            gps_time = start + timedelta(minutes=minute)
+            pings.append(
+                {
+                    "line": "N42",
+                    "brigade": "0012",
+                    "lat": lat,
+                    "lon": lon,
+                    "gps_time": gps_time,
+                    "vehicle_number": "42",
+                    "vehicle_type": 1,
+                    "ingested_at": gps_time,
+                    "gps_date": date(2026, 1, 15),
+                }
+            )
+        pq.write_table(pa.Table.from_pylist(pings, schema=NORMALIZED_GPS_SCHEMA), run.normalized_path)
+        direct_arrivals = []
+        for index, stop in enumerate(semantic_rows):
+            scheduled = datetime(2026, 1, 15, 0, index * 5, tzinfo=UTC)
+            actual = scheduled + timedelta(minutes=2)
+            direct = dict.fromkeys(PASSENGER_STOP_ARRIVAL_SCHEMA.names)
+            direct.update(
+                {
+                    "gtfs_snapshot_id": semantic["gtfs_snapshot_id"],
+                    "service_date": semantic["service_date"],
+                    "processing_date": semantic["processing_date"],
+                    "duty_chain_id": semantic["duty_chain_id"],
+                    "trip_id": semantic["trip_id"],
+                    "line": "N42",
+                    "brigade": "0012",
+                    "mode": "bus",
+                    "vehicle_number": "42",
+                    "vehicle_type": 1,
+                    "stop_id": stop["stop_id"],
+                    "stop_group_id": stop["stop_group_id"],
+                    "stop_sequence": stop["stop_sequence"],
+                    "pickup_type": stop["pickup_type"],
+                    "drop_off_type": stop["drop_off_type"],
+                    "stop_service_class": stop["stop_service_class"],
+                    "stop_execution_class": stop["stop_execution_class"],
+                    "classification_confidence": stop["classification_confidence"],
+                    "classification_reason": stop["classification_reason"],
+                    "classification_evidence": stop["classification_evidence"],
+                    "are_passenger_boundaries_settled": stop["are_passenger_boundaries_settled"],
+                    "is_passenger_stop": stop["is_passenger_stop"],
+                    "scheduled_arrival_time": scheduled,
+                    "scheduled_departure_time": scheduled,
+                    "actual_arrival_time": actual,
+                    "arrival_delay_seconds": 120,
+                    "segment_start_time": actual - timedelta(seconds=30),
+                    "segment_end_time": actual,
+                    "segment_duration_seconds": 30,
+                    "segment_distance_m": 2.0,
+                    "segment_start_distance_m": 20.0,
+                    "segment_end_distance_m": 20.0,
+                    "stop_match_radius_m": 50.0,
+                    "detection_method": "segment_crossing",
+                    "alignment_confidence": "high",
+                    "alignment_evidence": [],
+                }
+            )
+            direct_arrivals.append(direct)
+        pq.write_table(
+            pa.Table.from_pylist(direct_arrivals, schema=PASSENGER_STOP_ARRIVAL_SCHEMA),
+            work / "passenger_stop_arrivals.parquet",
+        )
+        run.build_facts()
+        trips = pq.read_table(work / "reconstruction_trip_facts.parquet").to_pylist()
+        arrivals = pq.read_table(work / "reconstruction_stop_arrivals.parquet").to_pylist()
+        expected = pq.read_table(work / "reconstruction_expected_stop_events.parquet").to_pylist()
+        report = build_overnight_proof_report(work)
+
+    assert trips[0]["service_date"] == date(2026, 1, 14)
+    assert trips[0]["processing_date"] == date(2026, 1, 15)
+    assert trips[0]["vehicle_number"] == "42"
+    assert trips[0]["line"] == "N42"
+    assert trips[0]["scheduled_start_time"] == datetime(2026, 1, 15, 0, 0, tzinfo=UTC)
+    assert trips[0]["scheduled_end_time"] == datetime(2026, 1, 15, 0, 5, tzinfo=UTC)
+    assert trips[0]["trip_quality"] == "complete"
+    assert trips[0]["start_delay_seconds"] == 120
+    assert trips[0]["end_delay_seconds"] == 120
+    assert [row["stop_sequence"] for row in arrivals] == [1, 2]
+    assert [row["actual_arrival_time"] for row in arrivals] == sorted(row["actual_arrival_time"] for row in arrivals)
+    assert [row["source_gps_date"] for row in arrivals] == [date(2026, 1, 15)] * 2
+    assert [row["observation_status"] for row in expected] == ["observed", "observed"]
+    assert [row["scheduled_arrival_time"] for row in expected] == [
+        datetime(2026, 1, 15, 0, 0, tzinfo=UTC),
+        datetime(2026, 1, 15, 0, 5, tzinfo=UTC),
+    ]
+    assert [row["source_gps_date"] for row in expected] == [date(2026, 1, 15)] * 2
+    assert report["prior_n_line_complete_trip_arrival_counts"] == {"N42": 2}
+    assert report["contract_violation_counts"]["no_healthy_n_line_at_ranking_floor"] == 1
+    assert all(
+        count == 0
+        for name, count in report["contract_violation_counts"].items()
+        if name != "no_healthy_n_line_at_ranking_floor"
+    )
 
 
 @pytest.mark.parametrize(

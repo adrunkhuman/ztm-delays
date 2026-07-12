@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ztm_matcher.config import RunConfig, parse_date
 from ztm_matcher.errors import MatcherError, fail
+from ztm_matcher.overnight_proof import write_overnight_proof_report
 from ztm_matcher.runtime import ReconstructionRun
 
 
@@ -33,8 +34,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Prepare a known partial day while retaining missing hours in the manifest.",
     )
+    overnight_proof = commands.add_parser("overnight-proof")
+    overnight_proof.add_argument("--input-dir", required=True)
+    overnight_proof.add_argument("--report-json", required=True)
     args = parser.parse_args(argv)
     try:
+        if args.command == "overnight-proof":
+            report = write_overnight_proof_report(Path(args.input_dir), Path(args.report_json))
+            print(json.dumps(report, sort_keys=True))
+            return 0 if report["passed"] else 1
         if args.threads < 1 or args.max_vehicle_rows < 1 or args.alignment_workers < 1:
             raise fail("invalid_configuration", "threads, max_vehicle_rows, and alignment_workers must be positive", 2)
         output = Path(args.output_dir)
