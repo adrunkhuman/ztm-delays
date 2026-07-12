@@ -993,7 +993,7 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
                       and fact.gps_date = @processing_date
                 """
             sections.append(
-                f"""
+                f"""(
                 with cohort as ({cohort})
                 select
                     '{spec.key}' as artifact,
@@ -1030,7 +1030,7 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
                     fact.gtfs_snapshot_id,
                     fact.trip_quality,
                     observation_status
-                """
+                )"""
             )
     return " union all ".join(sections)
 
