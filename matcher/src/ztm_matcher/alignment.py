@@ -13,6 +13,10 @@ MAX_PATH_STATES = 64
 DELAY_DIVERSE_STATES = 32
 DELAY_BUCKET_SECONDS = 300
 PATH_TIMING_TIE_SECONDS = 30
+MAX_EARLY_DEPARTURE_SECONDS = 15 * 60
+MAX_LATE_DEPARTURE_SECONDS = 2 * 60 * 60
+REPLACEMENT_MAX_EARLY_DEPARTURE_SECONDS = 30 * 60
+REPLACEMENT_MAX_LATE_DEPARTURE_SECONDS = 4 * 60 * 60
 
 
 def _distance_meters(lat: float, lon: float, stop_lat: float, stop_lon: float) -> float:
@@ -152,6 +156,14 @@ def extract_evidence(course: dict[str, Any], pings: list[dict[str, Any]]) -> lis
     return result
 
 
+def _plausible_schedule_offset(course: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    delay = (candidate["departure_event_time"] - course["scheduled_start_time"]).total_seconds()
+    replacement = str(course["line"]).upper().startswith("Z")
+    max_early = REPLACEMENT_MAX_EARLY_DEPARTURE_SECONDS if replacement else MAX_EARLY_DEPARTURE_SECONDS
+    max_late = REPLACEMENT_MAX_LATE_DEPARTURE_SECONDS if replacement else MAX_LATE_DEPARTURE_SECONDS
+    return -max_early <= delay <= max_late
+
+
 def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Allocate a duty by comparing coherent, vehicle-specific paths."""
     by_trip: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -199,7 +211,9 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                 (
                     item
                     for item in by_trip[course["trip_id"]]
-                    if item["candidate_kind"] == "candidate" and item["vehicle_number"] == vehicle
+                    if item["candidate_kind"] == "candidate"
+                    and item["vehicle_number"] == vehicle
+                    and _plausible_schedule_offset(course, item)
                 ),
                 key=lambda item: (item["origin_event_time"], str(item["traversal_id"])),
             )
@@ -280,6 +294,7 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                 for item in by_trip[course["trip_id"]]
                 if item["candidate_kind"] == "candidate"
                 and item["vehicle_number"] == winning_path["vehicle_number"]
+                and _plausible_schedule_offset(course, item)
                 and str(item["traversal_id"]) not in used
                 and (preceding is None or item["departure_event_time"] > preceding["destination_event_time"])
                 and (following is None or item["destination_event_time"] < following["departure_event_time"])
@@ -322,7 +337,8 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
     outcomes = []
     for index, course in enumerate(ordered):
         items = by_trip[course["trip_id"]]
-        candidates = [item for item in items if item["candidate_kind"] == "candidate"]
+        raw_candidates = [item for item in items if item["candidate_kind"] == "candidate"]
+        candidates = [item for item in raw_candidates if _plausible_schedule_offset(course, item)]
         observations = [item for item in items if item["candidate_kind"] == "observation"]
         partials = [item for item in items if item["candidate_kind"] == "partial"]
         chosen = selected.get(course["trip_id"])
@@ -363,6 +379,9 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
         ):
             status, confidence, reason = "skipped", "medium", "adjacent_courses_terminal_progression"
             evidence_flags.append("adjacent_course_executions")
+        elif raw_candidates and not candidates:
+            status, confidence, reason = "uncertain", "low", "implausible_schedule_offset"
+            evidence_flags.append("terminal_progression_outside_schedule_window")
         elif observations:
             status, confidence, reason = "uncertain", "low", "terminal_progression_incomplete"
             evidence_flags.append("line_observation_without_terminal_progression")
@@ -399,7 +418,7 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                 "confidence": confidence,
                 "execution_reason": reason,
                 "execution_evidence": sorted(evidence_flags),
-                "competing_candidate_count": len(candidates),
+                "competing_candidate_count": len(raw_candidates),
                 "source_ping_start_time": source["source_ping_start_time"] if source else None,
                 "source_ping_end_time": source["source_ping_end_time"] if source else None,
                 "source_ping_count": source["source_ping_count"] if source else 0,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -117,6 +118,21 @@ def _signature(selected: tuple[CrossingCandidate | None, ...]) -> tuple[tuple[in
         (-1, -1) if candidate is None else (candidate.segment_index, int(candidate.actual_time.timestamp()))
         for candidate in selected
     )
+
+
+def test_alignment_does_not_splice_abruptly_different_delay_regimes() -> None:
+    stops = [_stop(index, float(index) / 100) for index in range(3)]
+    early_first = replace(_candidate(0, 1), actual_time=BASE - timedelta(minutes=43), scheduled_time=BASE)
+    early_second = replace(
+        _candidate(1, 2), actual_time=BASE - timedelta(minutes=42), scheduled_time=BASE + timedelta(minutes=1)
+    )
+    current_third = replace(
+        _candidate(2, 3), actual_time=BASE + timedelta(minutes=2), scheduled_time=BASE + timedelta(minutes=2)
+    )
+
+    selected, _ = _align(stops, [[early_first], [early_second], [current_third]])
+
+    assert selected == (early_first, early_second, None)
 
 
 def _exhaustive_align(

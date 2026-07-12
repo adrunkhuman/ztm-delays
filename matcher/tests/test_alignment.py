@@ -280,3 +280,40 @@ def test_delay_state_uses_departure_not_terminal_arrival() -> None:
     }
     outcome = settle_duty([course], [long_dwell, later_departure])[0]
     assert outcome["ownership_interval_start_time"] == BASE + timedelta(minutes=10)
+
+
+def test_implausible_schedule_offsets_cannot_own_an_ordinary_course() -> None:
+    course = _course("ordinary")
+    template = next(
+        item
+        for item in _evidence(course, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)])
+        if item["candidate_kind"] == "candidate"
+    )
+    too_early = {
+        **template,
+        "traversal_id": "too-early",
+        "departure_event_time": BASE - timedelta(minutes=16),
+        "destination_event_time": BASE,
+    }
+    too_late = {
+        **template,
+        "traversal_id": "too-late",
+        "departure_event_time": BASE + timedelta(hours=2, minutes=1),
+        "destination_event_time": BASE + timedelta(hours=2, minutes=20),
+    }
+
+    outcome = settle_duty([course], [too_early, too_late])[0]
+
+    assert outcome["execution_status"] == "uncertain"
+    assert outcome["execution_reason"] == "implausible_schedule_offset"
+
+
+def test_replacement_course_has_a_wider_but_bounded_schedule_window() -> None:
+    course = _course("replacement", line="Z26")
+    evidence = _evidence(
+        course, [_ping(180, 0.0, line="Z26"), _ping(181, 0.01, line="Z26"), _ping(182, 0.02, line="Z26")]
+    )
+
+    outcome = settle_duty([course], evidence)[0]
+
+    assert outcome["execution_status"] == "executed"

@@ -17,6 +17,7 @@ MAX_ALIGNMENT_STATES = 64
 MAX_CANDIDATES_PER_STOP = 64
 SEGMENT_CANDIDATE_CHUNK_SIZE = 4096
 AMBIGUITY_COST = 0.25
+MAX_CONSECUTIVE_DELAY_CHANGE_SECONDS = 15 * 60
 WARSAW = ZoneInfo("Europe/Warsaw")
 
 
@@ -326,6 +327,37 @@ def _selected(state: _AlignmentState) -> tuple[CrossingCandidate | None, ...]:
     return tuple(reversed(selected))
 
 
+def _delay_coherent_selection(
+    selected: tuple[CrossingCandidate | None, ...],
+) -> tuple[CrossingCandidate | None, ...]:
+    regimes: list[list[int]] = []
+    previous_delay: float | None = None
+    for index, candidate in enumerate(selected):
+        if candidate is None:
+            continue
+        delay = (candidate.actual_time - candidate.scheduled_time).total_seconds()
+        if previous_delay is None or abs(delay - previous_delay) > MAX_CONSECUTIVE_DELAY_CHANGE_SECONDS:
+            regimes.append([])
+        regimes[-1].append(index)
+        previous_delay = delay
+    if len(regimes) <= 1:
+        return selected
+    retained = min(
+        regimes,
+        key=lambda regime: (
+            -len(regime),
+            sum(
+                abs((selected[index].actual_time - selected[index].scheduled_time).total_seconds())
+                for index in regime
+                if selected[index] is not None
+            ),
+            regime,
+        ),
+    )
+    retained_indexes = set(retained)
+    return tuple(candidate if index in retained_indexes else None for index, candidate in enumerate(selected))
+
+
 def _align(
     stops: list[dict[str, Any]], candidates: list[list[CrossingCandidate]]
 ) -> tuple[tuple[CrossingCandidate | None, ...], bool]:
@@ -391,11 +423,11 @@ def _align(
         states = _prune_states(next_states)
     states.sort(key=_state_key)
     best = states[0]
-    selected = _selected(best)
+    selected = _delay_coherent_selection(_selected(best))
     ambiguous = any(
         state.selected_count == best.selected_count
         and state.cost - best.cost <= AMBIGUITY_COST
-        and _selected(state) != selected
+        and _delay_coherent_selection(_selected(state)) != selected
         for state in states[1:]
     )
     return selected, ambiguous
