@@ -50,6 +50,7 @@ from ztm_matcher.stop_alignment import align_stop_crossings
 
 SEMANTICS_BATCH_ROWS = 10_000
 STOP_ALIGNMENT_ROW_GROUP_ROWS = 25_000
+TRIP_UNIVERSE_BATCH_ROWS = 10_000
 STOP_ALIGNMENT_SEMANTIC_COLUMNS = (
     "stop_id",
     "stop_group_id",
@@ -116,6 +117,43 @@ class OrderedArrowRows:
         row = self.current
         self.current = next(self._rows, None)
         return row
+
+
+def _write_trip_universe_group(
+    group: list[dict[str, Any]], output_rows: list[dict[str, Any]], writer: pq.ParquetWriter
+) -> None:
+    """Classify one line-direction group without retaining the full trip universe."""
+    candidates_by_length: dict[int, dict[tuple[str, ...], list[dict[str, Any]]]] = {}
+    for row in group:
+        if not row["is_public_passenger_segment"] or row["terminal_pair_rank"] <= 1:
+            continue
+        stop_ids = tuple(row["stop_ids"])
+        candidates_by_length.setdefault(len(stop_ids), {}).setdefault(stop_ids, []).append(row)
+
+    short_turn_parts: set[int] = set()
+    for longer_trip in group:
+        if not longer_trip["is_public_passenger_segment"]:
+            continue
+        longer_stop_ids = tuple(longer_trip["stop_ids"])
+        for length, candidates in candidates_by_length.items():
+            if length > len(longer_stop_ids):
+                continue
+            for start in range(len(longer_stop_ids) - length + 1):
+                for candidate in candidates.get(longer_stop_ids[start : start + length], []):
+                    if longer_trip["stop_count"] > candidate["stop_count"]:
+                        short_turn_parts.add(id(candidate))
+
+    for row in group:
+        is_short_turn_part_trip = id(row) in short_turn_parts
+        row["is_short_turn_part_trip"] = is_short_turn_part_trip
+        row["is_zone1_only"] = row["non_zone1_stop_count"] == 0
+        row["is_zone1_public_ranking_trip"] = (
+            row["is_public_passenger_segment"] and not is_short_turn_part_trip and row["is_zone1_only"]
+        )
+        output_rows.append({name: row[name] for name in TRIP_UNIVERSE_SCHEMA.names})
+        if len(output_rows) >= TRIP_UNIVERSE_BATCH_ROWS:
+            writer.write_table(pa.Table.from_pylist(output_rows, schema=TRIP_UNIVERSE_SCHEMA))
+            output_rows.clear()
 
 
 def _balanced_vehicle_chunks(vehicle_numbers: list[str], worker_count: int) -> list[tuple[str, ...]]:
@@ -542,84 +580,97 @@ class ReconstructionRun:
 
     def _write_trip_universe(self, schedule: Path, semantics: Path, output: Path) -> None:
         """Persist the schedule-derived local analogue of the serving ranking universe."""
-        schedule_sql, semantics_sql, output_sql = (
+        schedule_sql, semantics_sql = (
             str(schedule).replace("'", "''"),
             str(semantics).replace("'", "''"),
-            str(output).replace("'", "''"),
         )
-        self._connection().execute(
-            f"""
-            copy (
-                with trip_stops as (
-                    select schedule.gtfs_snapshot_id, schedule.processing_date, schedule.service_date,
-                        schedule.duty_chain_id, schedule.trip_id, schedule.line, schedule.mode,
-                        schedule.direction_id::bigint direction_id, schedule.origin_stop_id,
-                        schedule.destination_stop_id, schedule.stop_count::bigint stop_count,
-                        schedule.is_public_service_segment, schedule.is_malformed_duty_segment,
-                        string_agg(semantics.stop_id, '|' order by semantics.stop_sequence) as ordered_stop_ids,
-                        countif(coalesce(semantics.effective_zone_id, '') != '1')::bigint as non_zone1_stop_count,
-                        bool_or(
-                            semantics.are_passenger_boundaries_settled
-                            and semantics.is_passenger_stop
-                            and semantics.stop_execution_class = 'passenger'
-                        ) as has_settled_passenger_stops
-                    from read_parquet('{schedule_sql}') schedule
-                    inner join read_parquet('{semantics_sql}') semantics
-                        on schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
-                        and schedule.processing_date = semantics.processing_date
-                        and schedule.service_date = semantics.service_date
-                        and schedule.duty_chain_id = semantics.duty_chain_id
-                        and schedule.trip_id = semantics.trip_id
-                    where schedule.mode in ('bus', 'tram')
-                    group by all
-                ), public_segments as (
-                    select *, coalesce(is_public_service_segment, false)
-                        and not coalesce(is_malformed_duty_segment, true)
-                        and coalesce(has_settled_passenger_stops, false) as is_public_passenger_segment
-                    from trip_stops
-                ), terminal_counts as (
-                    select gtfs_snapshot_id, service_date, line, direction_id, origin_stop_id, destination_stop_id,
-                        count(*)::bigint as terminal_pair_trip_count
-                    from public_segments
-                    where is_public_passenger_segment
-                    group by all
-                ), terminal_ranks as (
-                    select *, row_number() over (
-                        partition by gtfs_snapshot_id, service_date, line, direction_id
-                        order by terminal_pair_trip_count desc, origin_stop_id, destination_stop_id
-                    )::bigint as terminal_pair_rank
-                    from terminal_counts
-                ), classified as (
-                    select public_segments.*,
+        compact = output.with_name(f".{output.stem}.compact.{uuid.uuid4().hex}.parquet")
+        temporary_output = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
+        compact_sql = str(compact).replace("'", "''")
+        writer: pq.ParquetWriter | None = None
+        try:
+            self._connection().execute(
+                f"""
+                copy (
+                    with trip_stops as (
+                        select schedule.gtfs_snapshot_id, schedule.processing_date, schedule.service_date,
+                            schedule.duty_chain_id, schedule.trip_id, schedule.line, schedule.mode,
+                            schedule.direction_id::bigint direction_id, schedule.origin_stop_id,
+                            schedule.destination_stop_id, schedule.stop_count::bigint stop_count,
+                            schedule.is_public_service_segment, schedule.is_malformed_duty_segment,
+                            string_agg(semantics.stop_id, '|' order by semantics.stop_sequence) as ordered_stop_ids,
+                            list(semantics.stop_id order by semantics.stop_sequence) as stop_ids,
+                            countif(coalesce(semantics.effective_zone_id, '') != '1')::bigint as non_zone1_stop_count,
+                            bool_or(
+                                semantics.are_passenger_boundaries_settled
+                                and semantics.is_passenger_stop
+                                and semantics.stop_execution_class = 'passenger'
+                            ) as has_settled_passenger_stops
+                        from read_parquet('{schedule_sql}') schedule
+                        inner join read_parquet('{semantics_sql}') semantics
+                            on schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
+                            and schedule.processing_date = semantics.processing_date
+                            and schedule.service_date = semantics.service_date
+                            and schedule.duty_chain_id = semantics.duty_chain_id
+                            and schedule.trip_id = semantics.trip_id
+                        where schedule.mode in ('bus', 'tram')
+                        group by all
+                    ), public_segments as (
+                        select *, coalesce(is_public_service_segment, false)
+                            and not coalesce(is_malformed_duty_segment, true)
+                            and coalesce(has_settled_passenger_stops, false) as is_public_passenger_segment
+                        from trip_stops
+                    ), terminal_counts as (
+                        select gtfs_snapshot_id, service_date, line, direction_id, origin_stop_id, destination_stop_id,
+                            count(*)::bigint as terminal_pair_trip_count
+                        from public_segments
+                        where is_public_passenger_segment
+                        group by all
+                    ), terminal_ranks as (
+                        select *, row_number() over (
+                            partition by gtfs_snapshot_id, service_date, line, direction_id
+                            order by terminal_pair_trip_count desc, origin_stop_id, destination_stop_id
+                        )::bigint as terminal_pair_rank
+                        from terminal_counts
+                    )
+                    select public_segments.* exclude (is_malformed_duty_segment, has_settled_passenger_stops),
                         coalesce(terminal_ranks.terminal_pair_trip_count, 0)::bigint as terminal_pair_trip_count,
-                        coalesce(terminal_ranks.terminal_pair_rank, 999999)::bigint as terminal_pair_rank,
-                        exists(
-                            select 1 from public_segments longer_trip
-                            where longer_trip.gtfs_snapshot_id = public_segments.gtfs_snapshot_id
-                              and longer_trip.service_date = public_segments.service_date
-                              and longer_trip.line = public_segments.line
-                              and longer_trip.direction_id = public_segments.direction_id
-                              and longer_trip.is_public_passenger_segment
-                              and longer_trip.stop_count > public_segments.stop_count
-                              and strpos(concat('|', longer_trip.ordered_stop_ids, '|'),
-                                  concat('|', public_segments.ordered_stop_ids, '|')) > 0
-                        ) and coalesce(terminal_ranks.terminal_pair_rank, 999999) > 1 as is_short_turn_part_trip
+                        coalesce(terminal_ranks.terminal_pair_rank, 999999)::bigint as terminal_pair_rank
                     from public_segments
                     left join terminal_ranks
                         using (gtfs_snapshot_id, service_date, line, direction_id, origin_stop_id, destination_stop_id)
-                )
-                select gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id, line, mode,
-                    direction_id, origin_stop_id, destination_stop_id, ordered_stop_ids, stop_count,
-                    non_zone1_stop_count, is_public_service_segment, is_public_passenger_segment,
-                    terminal_pair_trip_count, terminal_pair_rank, is_short_turn_part_trip,
-                    non_zone1_stop_count = 0 as is_zone1_only,
-                    is_public_passenger_segment and not is_short_turn_part_trip and non_zone1_stop_count = 0
-                        as is_zone1_public_ranking_trip
-                from classified
-                order by gtfs_snapshot_id, service_date, line, direction_id, trip_id, duty_chain_id
-            ) to '{output_sql}' (format parquet, compression zstd)
-            """
-        )
+                    order by gtfs_snapshot_id, service_date, line, direction_id, trip_id, duty_chain_id
+                ) to '{compact_sql}' (format parquet, compression zstd)
+                """
+            )
+            writer = pq.ParquetWriter(temporary_output, TRIP_UNIVERSE_SCHEMA, compression="zstd")
+            output_rows: list[dict[str, Any]] = []
+            group: list[dict[str, Any]] = []
+            group_key: tuple[Any, ...] | None = None
+            for batch in pq.ParquetFile(compact).iter_batches(batch_size=TRIP_UNIVERSE_BATCH_ROWS):
+                for row in batch.to_pylist():
+                    row_key = (row["gtfs_snapshot_id"], row["service_date"], row["line"], row["direction_id"])
+                    if group_key is not None and row_key != group_key:
+                        _write_trip_universe_group(group, output_rows, writer)
+                        group.clear()
+                    group_key = row_key
+                    group.append(row)
+            if group:
+                _write_trip_universe_group(group, output_rows, writer)
+            if output_rows:
+                writer.write_table(pa.Table.from_pylist(output_rows, schema=TRIP_UNIVERSE_SCHEMA))
+            writer.close()
+            writer = None
+            temporary_output.replace(output)
+        finally:
+            try:
+                if writer is not None:
+                    writer.close()
+            finally:
+                try:
+                    compact.unlink(missing_ok=True)
+                finally:
+                    temporary_output.unlink(missing_ok=True)
         if pq.read_schema(output) != TRIP_UNIVERSE_SCHEMA:
             raise fail("invalid_output", "trip universe schema validation failed", 15)
 

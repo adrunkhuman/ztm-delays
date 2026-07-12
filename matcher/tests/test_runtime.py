@@ -27,6 +27,7 @@ from ztm_matcher.schemas import (
     RECONSTRUCTION_STOP_ARRIVAL_SCHEMA,
     RECONSTRUCTION_TRIP_FACT_SCHEMA,
     STOP_CROSSING_SCHEMA,
+    TRIP_UNIVERSE_SCHEMA,
 )
 
 
@@ -542,6 +543,8 @@ def test_schedule_trip_universe_classifies_zone_depot_technical_and_short_turns(
     )
     with ReconstructionRun(config) as run:
         run.prepare_schedule()
+        assert not list(run._work().glob(".trip_universe.compact.*.parquet"))
+        assert not list(run._work().glob(".trip_universe.parquet.*.tmp"))
         rows = [
             row
             for row in pq.read_table(run._work() / "trip_universe.parquet").to_pylist()
@@ -561,6 +564,87 @@ def test_schedule_trip_universe_classifies_zone_depot_technical_and_short_turns(
     assert universe["short"]["is_short_turn_part_trip"]
     assert universe["short"]["terminal_pair_rank"] == 2
     assert not universe["short"]["is_zone1_public_ranking_trip"]
+
+
+def test_trip_universe_short_turns_compare_stop_id_occurrences(tmp_path: Path) -> None:
+    def trip(trip_id: str, stop_ids: list[str], rank: int) -> dict[str, object]:
+        row = dict.fromkeys(TRIP_UNIVERSE_SCHEMA.names)
+        row.update(
+            {
+                "trip_id": trip_id,
+                "stop_count": len(stop_ids),
+                "stop_ids": stop_ids,
+                "non_zone1_stop_count": 0,
+                "is_public_passenger_segment": True,
+                "terminal_pair_rank": rank,
+            }
+        )
+        return row
+
+    rows = [
+        trip("full-one", ["origin", "a|b", "destination"], 1),
+        trip("full-two", ["origin", "a|b", "destination"], 1),
+        trip("not-short", ["a", "b"], 2),
+        trip("short", ["a|b"], 2),
+    ]
+    output_rows: list[dict[str, object]] = []
+
+    with pq.ParquetWriter(tmp_path / "unused.parquet", TRIP_UNIVERSE_SCHEMA) as writer:
+        runtime._write_trip_universe_group(rows, output_rows, writer)
+
+    short_turn_parts = {row["trip_id"]: row["is_short_turn_part_trip"] for row in output_rows}
+    assert short_turn_parts == {"full-one": False, "full-two": False, "not-short": False, "short": True}
+
+
+def test_trip_universe_cleans_temporary_files_and_closes_writer_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _ranking_gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+
+    parquet_writer = pq.ParquetWriter
+
+    class FailingWriter:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self._writer = parquet_writer(*args, **kwargs)
+            self.closed = False
+
+        def write_table(self, table: pa.Table) -> None:
+            raise OSError("simulated parquet write failure")
+
+        def close(self) -> None:
+            self._writer.close()
+            self.closed = True
+
+    writer: FailingWriter | None = None
+
+    def failing_writer(*args: object, **kwargs: object) -> FailingWriter:
+        nonlocal writer
+        writer = FailingWriter(*args, **kwargs)
+        return writer
+
+    with ReconstructionRun(config) as run:
+        run.prepare_schedule()
+        work = run._work()
+        monkeypatch.setattr(runtime.pq, "ParquetWriter", failing_writer)
+        failed_output = work / "failed_trip_universe.parquet"
+        with pytest.raises(OSError, match="simulated parquet write failure"):
+            run._write_trip_universe(work / "duty_schedule.parquet", work / "stop_semantics.parquet", failed_output)
+
+    assert writer is not None
+    assert writer.closed
+    assert not failed_output.exists()
+    assert not list(work.glob(".failed_trip_universe.compact.*.parquet"))
+    assert not list(work.glob(".failed_trip_universe.parquet.*.tmp"))
 
 
 def test_missing_zone_column_is_conservatively_non_eligible_in_trip_universe(tmp_path: Path) -> None:
