@@ -28,6 +28,7 @@ FACT_ROW_GROUP_ROWS = 25_000
 
 def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
     """Port dbt ``int_trip_summary`` quality and service-observation policy."""
+    passenger_boundaries_unsettled = metrics.get("are_passenger_boundaries_settled") is False
     expected = int(metrics["passenger_stops_expected"])
     detected = int(metrics["passenger_stops_detected"])
     ratio = detected / expected if expected else None
@@ -60,6 +61,7 @@ def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
     )
     impossible_speed = max_speed > IMPOSSIBLE_SPEED_MPS
     flags = [
+        *(["unsettled_passenger_boundaries"] if passenger_boundaries_unsettled else []),
         *([] if first_observed else ["missing_first_stop"]),
         *([] if last_observed else ["missing_last_stop"]),
         *([] if ratio is None or ratio >= COMPLETE_STOP_RATIO else ["low_stop_coverage"]),
@@ -89,13 +91,14 @@ def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
         or impossible_speed
     )
     service_flags = [
+        *(["unsettled_passenger_boundaries"] if passenger_boundaries_unsettled else []),
         *([] if first_observed else ["short_start"]),
         *([] if last_observed else ["short_end"]),
         *([] if max_gap <= LARGE_STOP_SEQUENCE_GAP else ["large_internal_gap"]),
         *([] if not stale else ["stale_progress"]),
         *([] if not bad_assignment else ["bad_assignment_evidence"]),
     ]
-    if bad_assignment:
+    if passenger_boundaries_unsettled or bad_assignment:
         quality = "broken"
     elif (
         ratio is not None
@@ -110,7 +113,7 @@ def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
         quality = "partial"
     service_class = (
         "matching_failure"
-        if "bad_assignment_evidence" in service_flags
+        if passenger_boundaries_unsettled or "bad_assignment_evidence" in service_flags
         else "modified"
         if "large_internal_gap" in service_flags or "stale_progress" in service_flags
         else "regular"
@@ -295,7 +298,7 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
         select accepted.gtfs_snapshot_id, accepted.processing_date,
             coalesce(ping_metrics.gps_date, accepted.processing_date) gps_date,
             accepted.service_date, accepted.trip_id, accepted.vehicle_number, accepted.line, accepted.brigade,
-            accepted.mode, accepted.is_zone1_public_ranking_trip,
+            accepted.mode, accepted.is_zone1_public_ranking_trip, accepted.are_passenger_boundaries_settled,
             regular_stop_metrics.scheduled_start_time, regular_stop_metrics.scheduled_end_time,
             regular_metrics.actual_start_time, regular_metrics.actual_end_time, regular_metrics.start_delay_seconds,
             regular_metrics.end_delay_seconds,

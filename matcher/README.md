@@ -50,8 +50,10 @@ runtime processes one normalized vehicle Arrow stream and only its matching
 schedule subset at a time; final allocation reads one duty at a time. Allocation
 does not reject late journeys by a fixed lateness cutoff: it evolves observed
 delay through ordered courses, has an explicit skipped-course state, and never
-reuses a terminal traversal. Unknown passenger boundaries and `line_brigade`
-duty fallback cannot receive high confidence.
+reuses a terminal traversal. Unknown passenger boundaries do not invalidate a
+chosen vehicle traversal: it remains high-confidence execution ownership with
+`passenger_boundaries_unknown` evidence, while passenger semantics stay
+suppressed. `line_brigade` duty fallback cannot receive high confidence.
 
 The July 9 VPS proof with duty alignment measured about 1.63 GiB peak process
 RSS with this limit and zero matcher swap. The lower DuckDB allowance trades
@@ -67,10 +69,12 @@ time regression, and crossings outside ownership/source bounds are hard rejects.
 Distance, scheduled residual, and use of an expanded radius are soft costs.
 
 `operational_stop_crossings-v1` retains direct technical and passenger movement
-with segment diagnostics. `passenger_stop_arrivals-v1` is its settled-passenger
-subset and is the explicit Parquet adapter toward `fct_stop_arrival`. Unknown
-passenger boundaries cannot enter that subset. Missing stops produce no inferred
-arrival: #102 remains responsible for any separately qualified interpolation.
+with segment diagnostics for every high-confidence owned execution.
+`passenger_stop_arrivals-v1` is its settled-passenger subset and is the explicit
+Parquet adapter toward `fct_stop_arrival`. Unknown passenger boundaries cannot
+enter that subset or produce a confident passenger delay. Missing stops produce
+no inferred arrival: #102 remains responsible for any separately qualified
+interpolation.
 
 Stop alignment defaults to `--alignment-workers 1`, which is the VPS-safe
 setting. For local development, `--alignment-workers 8` splits the sorted active
@@ -105,7 +109,12 @@ ping gap `900` seconds, zero-based-safe terminal tolerance `2`, stale lag
 seconds. It emits the same trip-quality, quality-flag, service-observation
 flag, and service-observation-class policy. Regular settled passenger stops
 alone determine coverage; request stops remain explicit optional expected
-events and their detections do not change regular coverage.
+events and their detections do not change regular coverage. An owned execution
+with unsettled passenger boundaries still emits an operational trip fact, but is
+conservatively `broken`/`matching_failure` with
+`unsettled_passenger_boundaries` in both flag arrays; it has no passenger
+arrival or expected-event adapter rows. Full stop semantics remain available for
+a canonical expected-event adapter to publish unknown passenger status later.
 
 Scheduled timestamps intentionally use Python's Warsaw wall-clock policy as
 the authoritative internal semantics. This differs from legacy dbt elapsed-UTC

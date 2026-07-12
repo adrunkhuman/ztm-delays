@@ -79,14 +79,18 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 
 The local matcher can additionally emit `operational_stop_crossings-v1` and
 `passenger-stop-arrival-v1` Parquet artifacts. The first is complete operational
-lineage, including technical posts; the second is a settled-passenger-only adapter
-toward `fct_stop_arrival`. They are not yet a warehouse replacement.
+lineage, including technical posts, for high-confidence vehicle ownership even
+when passenger boundaries are unsettled. The second is a settled-passenger-only
+adapter toward `fct_stop_arrival`; unsettled rows intentionally emit no confident
+passenger arrival or delay. They are not yet a warehouse replacement.
 
 ## Matcher Shadow Boundary
 
 The optional Airflow matcher shadow path is a comparison harness, not an alternate warehouse path. When enabled, its load phase reads the mapped snapshot ZIP and immutable processing-date GPS objects, writes three local adapter facts only to a dedicated `BIGQUERY_MATCHER_SHADOW_DATASET`, and records replaceable run-scoped `pending.json` metadata. Its comparison phase waits for successful current/prior canonical fact tests, reads the same run-scoped shadow tables, then writes the immutable GCS commit marker. It never writes `ztm_raw`, `ztm_int`, `ztm_marts`, canonical dbt models, assets, or serving exports.
 
 Shadow tables are content-addressed by the validated artifact SHA-256 and collision-resistant run identity, and use explicit adapter schemas. They must not be queried as canonical facts: the local adapter does not include the canonical dimension enrichments. The marker records object generations/sizes/hashes, artifact rows/hashes, table/job IDs, matcher metrics, and partition-filtered current/prior comparison aggregates. It is uploaded with `if_generation_match=0`; an existing marker is accepted only when JSON-identical. A missing marker means the candidate run is incomplete or failed; `pending.json` alone does not signal completion. A changed artifact for an already committed run cannot replace the old table or marker; it can leave uncommitted content-addressed shadow tables. Retain those for investigation, then manually delete only tables not referenced by a retained marker or pending record. Prior markers and shadow tables are otherwise retained for inspection.
+
+Current-date trip mode and material-line retention are hard gate failures. Current-date `stop_arrival` and `expected_stop_event` retention differences are warnings requiring manual review because those local adapters are intentionally passenger-only and suppress unsettled passenger boundaries. All prior-service-date retention differences are warnings; the separate overnight proof gate owns that evidence. Structural and resource violations remain hard failures.
 
 Cutover requires a separate, reviewed change that defines canonical schema adaptation, partition replacement, service/rollback ownership, and comparison thresholds. Until then rollback is simply disabling `MATCHER_SHADOW_ENABLED`; it does not delete, replace, or restore canonical data.
 

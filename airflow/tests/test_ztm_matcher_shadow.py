@@ -980,6 +980,50 @@ def test_shadow_gate_requires_canonical_mode_retention_and_material_lines() -> N
     assert any(issue["message"] == "shadow mode is completely missing" for issue in gate["issues"])
     assert any(issue["category"] == "quality" and issue["level"] == "fail" for issue in gate["issues"])
     assert any(issue["message"] == "material line retention below threshold" for issue in gate["issues"])
+    assert shadow._gate_has_hard_failure(gate) is True
+
+
+def test_shadow_gate_warns_for_passenger_adapter_and_prior_retention_differences() -> None:
+    shadow = _load_shadow_module()
+
+    def aggregate(artifact: str, source: str, service_date: str, rows: int) -> dict[str, object]:
+        return {
+            "artifact": artifact,
+            "source": source,
+            "service_date": service_date,
+            "mode": "bus",
+            "line": "10",
+            "gtfs_snapshot_id": "snapshot",
+            "trip_quality": "complete" if artifact == "trip" else None,
+            "observation_status": None,
+            "row_count": rows,
+            "distinct_grains": rows,
+            "delay_p50_seconds": 0,
+            "delay_p90_seconds": 0,
+            "delay_p95_seconds": 0,
+            "abs_delay_over_3600_count": 0,
+        }
+
+    gate = shadow.evaluate_shadow_gate(
+        {
+            "service_dates": ["2026-07-08", "2026-07-09"],
+            "aggregates": [
+                aggregate("trip", "canonical", "2026-07-08", 20),
+                aggregate("trip", "shadow", "2026-07-08", 5),
+                aggregate("stop_arrival", "canonical", "2026-07-09", 20),
+                aggregate("stop_arrival", "shadow", "2026-07-09", 5),
+                aggregate("expected_stop_event", "canonical", "2026-07-09", 20),
+                aggregate("expected_stop_event", "shadow", "2026-07-09", 5),
+            ],
+            "differences": [],
+        },
+        {"peak_rss_bytes": 1, "swapping_observed": False},
+    )
+
+    assert gate["status"] == "warn"
+    assert gate["manual_review_required"] is True
+    assert shadow._gate_has_hard_failure(gate) is False
+    assert all(issue["level"] == "warn" for issue in gate["issues"])
 
 
 def test_shadow_gate_delay_zero_baseline_is_advisory_and_reports_absolute_deltas() -> None:

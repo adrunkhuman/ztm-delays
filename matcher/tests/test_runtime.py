@@ -1116,6 +1116,57 @@ def test_matching_failure_absent_events_are_uncertain_without_lineage(tmp_path: 
     assert all(row["source_gps_date"] is None for row in expected)
 
 
+def test_unsettled_passenger_boundaries_keep_operational_execution_but_suppress_passenger_facts(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("1",))
+        work = run._work()
+        semantics_path = work / "stop_semantics.parquet"
+        semantic_table = pq.read_table(semantics_path)
+        semantics = semantic_table.to_pylist()
+        for row in semantics:
+            if row["trip_id"] == "today":
+                row["are_passenger_boundaries_settled"] = False
+                row["is_passenger_stop"] = False
+        pq.write_table(pa.Table.from_pylist(semantics, schema=semantic_table.schema), semantics_path)
+        execution_path = work / "duty_execution.parquet"
+        executions = pq.read_table(execution_path).to_pylist()
+        executions[0]["are_passenger_boundaries_settled"] = False
+        pq.write_table(pa.Table.from_pylist(executions, schema=DUTY_EXECUTION_SCHEMA), execution_path)
+
+        run.align_stops()
+        counts = run.build_facts()
+        operational = pq.read_table(work / "operational_stop_crossings.parquet").to_pylist()
+        passenger = pq.read_table(work / "passenger_stop_arrivals.parquet").to_pylist()
+        trips = pq.read_table(work / "reconstruction_trip_facts.parquet").to_pylist()
+        stop_arrivals = pq.read_table(work / "reconstruction_stop_arrivals.parquet").to_pylist()
+        expected = pq.read_table(work / "reconstruction_expected_stop_events.parquet").to_pylist()
+
+    assert operational
+    assert passenger == []
+    assert counts == {
+        "reconstruction_trip_facts": 1,
+        "reconstruction_stop_arrivals": 0,
+        "reconstruction_expected_stop_events": 0,
+    }
+    assert trips[0]["trip_quality"] == "broken"
+    assert trips[0]["service_observation_class"] == "matching_failure"
+    assert "unsettled_passenger_boundaries" in trips[0]["quality_flags"]
+    assert "unsettled_passenger_boundaries" in trips[0]["service_observation_flags"]
+    assert stop_arrivals == []
+    assert expected == []
+
+
 @pytest.mark.parametrize(
     ("execution_status", "confidence", "duty_chain_source"),
     [("executed", "high", "line_brigade"), ("vehicle_change_signal", "low", "block_id")],

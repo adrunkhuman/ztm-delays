@@ -330,15 +330,17 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
         source = chosen or (
             candidates[0] if candidates else partials[0] if partials else observations[0] if observations else None
         )
-        if not course["are_passenger_boundaries_settled"]:
-            status, confidence, reason = "uncertain", "low", "passenger_boundaries_unknown"
-            evidence_flags.append("passenger_boundaries_unknown")
-        elif course["trip_id"] in ambiguous_trip_ids:
+        if course["trip_id"] in ambiguous_trip_ids:
             status, confidence, reason = "vehicle_change_signal", "low", "multiple_vehicles_terminal_progression"
             evidence_flags.append("multiple_vehicles")
         elif chosen:
             status, confidence, reason = "executed", "high", "terminal_progression"
             evidence_flags.append("origin_departure_destination_progression")
+            if not course["are_passenger_boundaries_settled"]:
+                evidence_flags.append("passenger_boundaries_unknown")
+        elif not course["are_passenger_boundaries_settled"]:
+            status, confidence, reason = "uncertain", "low", "passenger_boundaries_unknown"
+            evidence_flags.append("passenger_boundaries_unknown")
         elif index + 1 < len(ordered) and any(
             partial["vehicle_number"]
             == (following := selected.get(ordered[index + 1]["trip_id"], {})).get("vehicle_number")

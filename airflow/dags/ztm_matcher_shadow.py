@@ -1227,6 +1227,11 @@ def _ratio(numerator: float, denominator: float) -> float | None:
     return None if denominator == 0 else round(float(numerator) / float(denominator), 6)
 
 
+def _retention_issue_level(artifact: str, service_date: str, current_date: str) -> str:
+    """Only current-date trip retention can reject a strict shadow run."""
+    return "fail" if artifact == "trip" and service_date == current_date else "warn"
+
+
 def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, object]) -> dict[str, object]:
     """Evaluate deterministic shadow evidence; it never grants canonical ownership."""
     thresholds = _gate_thresholds()
@@ -1320,10 +1325,11 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
             "minimum": threshold,
         }
         retention.append(evidence)
+        level = _retention_issue_level(artifact, service_date, current_date)
         if shadow_rows == 0:
-            issues.append(_gate_issue("fail", "retention", "shadow mode is completely missing", **evidence))
+            issues.append(_gate_issue(level, "retention", "shadow mode is completely missing", **evidence))
         elif retention_ratio is not None and retention_ratio < threshold:
-            issues.append(_gate_issue("fail", "retention", "shadow mode row retention below threshold", **evidence))
+            issues.append(_gate_issue(level, "retention", "shadow mode row retention below threshold", **evidence))
     canonical_line_keys = {key[:4] for key in line_counts if key[4] == "canonical"}
     for artifact, service_date, mode, line in sorted(canonical_line_keys):
         canonical_rows = line_counts[(artifact, service_date, mode, line, "canonical")]
@@ -1347,11 +1353,12 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
             "minimum": threshold,
         }
         material_line_retention.append(evidence)
+        level = _retention_issue_level(artifact, service_date, current_date)
         mode_shadow_rows = mode_counts.get((artifact, service_date, mode, "shadow"), 0)
         if shadow_rows == 0 and mode_shadow_rows:
-            issues.append(_gate_issue("fail", "retention", "material line is completely missing", **evidence))
+            issues.append(_gate_issue(level, "retention", "material line is completely missing", **evidence))
         elif shadow_rows and retention_ratio is not None and retention_ratio < threshold:
-            issues.append(_gate_issue("warn", "retention", "material line retention below threshold", **evidence))
+            issues.append(_gate_issue(level, "retention", "material line retention below threshold", **evidence))
     for key, sources in sorted(paired.items()):
         shadow, canonical = sources.get("shadow"), sources.get("canonical")
         if shadow is None or canonical is None:
@@ -1469,7 +1476,7 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
     status = "fail" if any(issue["level"] == "fail" for issue in issues) else "warn" if issues else "pass"
     return {
         "status": status,
-        "manual_review_required": bool(differences),
+        "manual_review_required": bool(differences) or any(issue["level"] == "warn" for issue in issues),
         "comparison_contract_version": COMPARISON_CONTRACT_VERSION,
         "thresholds": thresholds,
         "structural_violations": [issue for issue in issues if issue["category"] == "structural"],
@@ -1488,7 +1495,9 @@ def _gate_has_hard_failure(gate: dict[str, object]) -> bool:
     if not isinstance(issues, list):
         return False
     return any(
-        isinstance(issue, dict) and issue.get("level") == "fail" and issue.get("category") in {"structural", "resource"}
+        isinstance(issue, dict)
+        and issue.get("level") == "fail"
+        and issue.get("category") in {"structural", "resource", "retention"}
         for issue in issues
     )
 
@@ -1632,7 +1641,7 @@ def run_matcher_shadow_compare_commit(
     metrics = cast("dict[str, object]", raw_metrics)
     gate = evaluate_shadow_gate(comparison, metrics)
     if config.strict and _gate_has_hard_failure(gate):
-        raise RuntimeError("Matcher shadow strict gate rejected a structural or resource failure")
+        raise RuntimeError("Matcher shadow strict gate rejected a structural, resource, or retention failure")
     marker_uri = _write_marker(
         storage_client,
         config,

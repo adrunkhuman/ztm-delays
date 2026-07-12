@@ -524,6 +524,7 @@ class ReconstructionRun:
 
     def __init__(self, config: RunConfig) -> None:
         self.config, self.connection, self.work_dir, self.normalized_path = config, None, None, None
+        self.semantics_rows = 0
 
     def __enter__(self) -> "ReconstructionRun":
         if self.config.alignment_workers < 1:
@@ -602,6 +603,7 @@ class ReconstructionRun:
             semantics_writer.close()
         if semantics_count == 0:
             raise fail("invalid_output", "pinned snapshot produced no stop semantics", 15)
+        self.semantics_rows = semantics_count
         required_semantics = {
             "service_date",
             "processing_date",
@@ -759,6 +761,7 @@ class ReconstructionRun:
             "input_rows": input_rows,
             "normalized_rows": normalized_rows,
             "schedule_rows": schedule_rows,
+            "stop_semantics": self.semantics_rows,
             "hourly_rows": hourly_counts(connection),
             "wall_seconds": round(time.perf_counter() - started, 6),
             "cpu_seconds": round(time.process_time() - cpu_started, 6),

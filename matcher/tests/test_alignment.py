@@ -162,10 +162,18 @@ def test_line_change_same_line_handoff_short_turn_unknown_and_overnight() -> Non
     ] == ["short_turned", "executed"]
 
     unknown = _course("unknown", settled=False)
-    assert (
-        settle_duty([unknown], _evidence(unknown, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)]))[0]["confidence"]
-        == "low"
-    )
+    unknown_outcome = settle_duty([unknown], _evidence(unknown, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)]))[0]
+    assert unknown_outcome["execution_status"] == "executed"
+    assert unknown_outcome["confidence"] == "high"
+    assert unknown_outcome["execution_reason"] == "terminal_progression"
+    assert unknown_outcome["vehicle_number"] == "100"
+    assert unknown_outcome["ownership_interval_start_time"] == BASE + timedelta(minutes=1)
+    assert "passenger_boundaries_unknown" in unknown_outcome["execution_evidence"]
+
+    weak_unknown = settle_duty([unknown], _evidence(unknown, [_ping(0, 0.01)]))[0]
+    assert (weak_unknown["execution_status"], weak_unknown["confidence"]) == ("uncertain", "low")
+    no_traversal_unknown = settle_duty([unknown], [])[0]
+    assert (no_traversal_unknown["execution_status"], no_traversal_unknown["confidence"]) == ("uncertain", "low")
 
     fallback = {**_course("fallback"), "duty_chain_source": "line_brigade"}
     fallback_outcome = settle_duty([fallback], _evidence(fallback, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)]))[0]

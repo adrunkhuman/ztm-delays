@@ -347,6 +347,16 @@ def test_technical_crossings_are_lineage_only_and_unknown_boundaries_emit_no_pas
     assert all(row["are_passenger_boundaries_settled"] for row in result.passenger_arrivals)
 
 
+def test_unsettled_boundaries_retain_operational_crossings_without_passenger_arrivals() -> None:
+    stops = _with_schedule(
+        [_stop(1, 0.0, kind="unknown", settled=False), _stop(2, 0.01, kind="unknown", settled=False)]
+    )
+    result = align_stop_crossings(_execution(), stops, [_ping(0, 0.0), _ping(60, 0.005), _ping(120, 0.01)])
+
+    assert [row["stop_sequence"] for row in result.operational_crossings] == [1, 2]
+    assert result.passenger_arrivals == []
+
+
 def test_missing_middle_never_uses_interpolation_across_an_invalid_gap() -> None:
     execution = _execution(
         service_date=date(2026, 1, 14),
