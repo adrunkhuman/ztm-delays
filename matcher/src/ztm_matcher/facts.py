@@ -1,4 +1,4 @@
-"""Bounded local reconstruction facts with dbt trip-summary parity."""
+"""Bounded local reconstruction facts with dbt quality-policy parity."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ FACT_ROW_GROUP_ROWS = 25_000
 
 
 def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
-    """Port dbt ``int_trip_summary`` quality and service-observation policy exactly."""
+    """Port dbt ``int_trip_summary`` quality and service-observation policy."""
     expected = int(metrics["passenger_stops_expected"])
     detected = int(metrics["passenger_stops_detected"])
     ratio = detected / expected if expected else None
@@ -132,12 +132,19 @@ def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def expected_status(*, direct_confidence: str | None, stop_service_class: str) -> tuple[str, list[str]]:
+def expected_status(
+    *,
+    direct_confidence: str | None,
+    stop_service_class: str,
+    trip_service_observation_class: str,
+) -> tuple[str, list[str]]:
     """Classify an accepted settled passenger occurrence without interpolating it."""
     if direct_confidence == "high":
         return "observed", []
     if direct_confidence is not None:
         return "uncertain", ["alignment_ambiguous_or_medium"]
+    if trip_service_observation_class == "matching_failure":
+        return "uncertain", ["unreliable_trip_assignment"]
     if stop_service_class == "request":
         return "skipped_optional", []
     return "missed", []
@@ -153,7 +160,7 @@ def _assert_unique(connection: duckdb.DuckDBPyConnection, query: str, label: str
 
 
 def _install_warsaw_scheduled_time_macro(connection: duckdb.DuckDBPyConnection) -> None:
-    """Install a wall-clock GTFS time conversion matching stop alignment's DST policy."""
+    """Install Python-authoritative Warsaw wall-clock conversion, not legacy dbt elapsed UTC."""
     connection.execute(
         """
         create or replace temp macro warsaw_scheduled_time(service_date, seconds) as (
@@ -393,7 +400,7 @@ def build_facts(
         f"""
         copy (
             select trips.gtfs_snapshot_id, trips.processing_date, trips.gps_date,
-                coalesce(segment.gps_date, trips.gps_date) source_gps_date,
+                case when arrivals.alignment_confidence is not null then segment.gps_date end source_gps_date,
                 trips.service_date, trips.trip_id, trips.vehicle_number, trips.line, trips.brigade, trips.mode,
                 semantics.stop_id, semantics.stop_group_id, semantics.stop_sequence::bigint stop_sequence,
                 semantics.pickup_type::bigint pickup_type, semantics.drop_off_type::bigint drop_off_type,
@@ -404,14 +411,21 @@ def build_facts(
                     as scheduled_departure_time,
                 case when arrivals.alignment_confidence = 'high' then 'observed'
                     when arrivals.alignment_confidence is not null then 'uncertain'
+                    when trips.service_observation_class = 'matching_failure' then 'uncertain'
                     when semantics.stop_service_class = 'request' then 'skipped_optional'
                     else 'missed' end observation_status,
                 case when arrivals.alignment_confidence = 'high'
                     then arrivals.actual_arrival_time end actual_arrival_time,
                 case when arrivals.alignment_confidence = 'high'
                     then arrivals.arrival_delay_seconds end delay_seconds,
-                case when arrivals.alignment_confidence is not null and arrivals.alignment_confidence != 'high'
-                    then ['alignment_ambiguous_or_medium'] else []::varchar[] end uncertainty_evidence,
+                case
+                    when arrivals.alignment_confidence is not null and arrivals.alignment_confidence != 'high'
+                        then ['alignment_ambiguous_or_medium']
+                    when arrivals.alignment_confidence is null
+                        and trips.service_observation_class = 'matching_failure'
+                        then ['unreliable_trip_assignment']
+                    else []::varchar[]
+                end uncertainty_evidence,
                 trips.trip_quality, trips.quality_flags, trips.service_observation_class,
                 trips.service_observation_flags
             from read_parquet('{trip_sql}') trips

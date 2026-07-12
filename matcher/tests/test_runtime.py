@@ -449,6 +449,7 @@ def test_fact_construction_publishes_high_confidence_direct_adapters(tmp_path: P
     assert trips.to_pylist()[0]["trip_quality"] == "complete"
     assert all(row["source_gps_date"] == date(2026, 1, 15) for row in arrivals.to_pylist())
     assert [row["observation_status"] for row in expected.to_pylist()] == ["observed"]
+    assert all(row["source_gps_date"] == date(2026, 1, 15) for row in expected.to_pylist())
 
 
 @pytest.mark.parametrize(
@@ -621,6 +622,55 @@ def test_medium_direct_arrivals_are_uncertain_not_fact_evidence(tmp_path: Path) 
     assert all(row["actual_arrival_time"] is None and row["delay_seconds"] is None for row in expected)
     assert all(row["uncertainty_evidence"] == ["alignment_ambiguous_or_medium"] for row in expected)
     assert all(row["source_gps_date"] == date(2026, 1, 14) for row in expected)
+
+
+def test_matching_failure_absent_events_are_uncertain_without_lineage(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("1",))
+        run.align_stops()
+        work = run._work()
+        semantics_path = work / "stop_semantics.parquet"
+        semantic_table = pq.read_table(semantics_path)
+        semantics = semantic_table.to_pylist()
+        trip_semantics = [row for row in semantics if row["trip_id"] == "today"]
+        for index, row in enumerate(trip_semantics):
+            row.update(
+                {
+                    "stop_execution_class": "passenger",
+                    "stop_service_class": "regular" if index == 0 else "request",
+                    "is_passenger_stop": True,
+                    "are_passenger_boundaries_settled": True,
+                    "first_passenger_stop_sequence": trip_semantics[0]["stop_sequence"],
+                    "last_passenger_stop_sequence": trip_semantics[-1]["stop_sequence"],
+                }
+            )
+        pq.write_table(pa.Table.from_pylist(semantics, schema=semantic_table.schema), semantics_path)
+
+        arrivals_path = work / "passenger_stop_arrivals.parquet"
+        arrival_schema = pq.read_schema(arrivals_path)
+        pq.write_table(pa.Table.from_pylist([], schema=arrival_schema), arrivals_path)
+
+        run.build_facts()
+        trips = pq.read_table(work / "reconstruction_trip_facts.parquet").to_pylist()
+        expected = pq.read_table(work / "reconstruction_expected_stop_events.parquet").to_pylist()
+
+    assert trips[0]["service_observation_class"] == "matching_failure"
+    assert [row["stop_service_class"] for row in expected] == ["regular", "request"]
+    assert [row["observation_status"] for row in expected] == ["uncertain", "uncertain"]
+    assert all(row["actual_arrival_time"] is None and row["delay_seconds"] is None for row in expected)
+    assert all(row["uncertainty_evidence"] == ["unreliable_trip_assignment"] for row in expected)
+    assert all(row["source_gps_date"] is None for row in expected)
 
 
 @pytest.mark.parametrize(

@@ -79,8 +79,9 @@ def _segment_distance_m(start: dict[str, Any], end: dict[str, Any], stop: dict[s
 def _scheduled_time(service_date: date, seconds: int | None) -> datetime | None:
     if seconds is None:
         return None
-    # GTFS times advance in Warsaw wall-clock space. The UTC round-trip normalizes
-    # spring-forward gaps; fold=0 chooses the first fall-back occurrence.
+    # Python's Warsaw wall-clock policy is authoritative. It intentionally differs
+    # from legacy dbt elapsed-UTC behavior on DST transition dates: the UTC round-trip
+    # normalizes spring-forward gaps; fold=0 chooses the first fall-back occurrence.
     local = (datetime.combine(service_date, time()) + timedelta(seconds=int(seconds))).replace(tzinfo=WARSAW, fold=0)
     return local.astimezone(UTC).astimezone(WARSAW).astimezone(UTC)
 

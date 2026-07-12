@@ -97,8 +97,9 @@ calculate each accepted ownership interval's max ping gap and speed; it never
 loads a GPS day into Python. Trip quality is then streamed one trip record at a
 time. Duplicate accepted trip or direct-arrival grains reject the run.
 
-The parity source is `dbt/models/intermediate/int_trip_summary.sql`. The Python
-port retains its thresholds: complete coverage `.80`, broken coverage `.30`,
+The parity source for quality and service-observation policy is
+`dbt/models/intermediate/int_trip_summary.sql`. The Python port retains its
+thresholds: complete coverage `.80`, broken coverage `.30`,
 ping gap `900` seconds, zero-based-safe terminal tolerance `2`, stale lag
 `120` seconds, sequence gap `4`, speed `50 m/s`, and extreme delay `3600`
 seconds. It emits the same trip-quality, quality-flag, service-observation
@@ -106,10 +107,16 @@ flag, and service-observation-class policy. Regular settled passenger stops
 alone determine coverage; request stops remain explicit optional expected
 events and their detections do not change regular coverage.
 
+Scheduled timestamps intentionally use Python's Warsaw wall-clock policy as
+the authoritative internal semantics. This differs from legacy dbt elapsed-UTC
+behavior on DST transition dates: spring-forward gaps normalize and fall-back
+times use the first occurrence.
+
 Expected events contain one row for every settled passenger stop occurrence of
 an accepted trip. A high-confidence direct crossing is `observed`; a medium or
-ambiguous direct crossing is `uncertain`; absent request stops are
-`skipped_optional`; other absent passenger stops are `missed`. Technical stops
-are excluded. `interpolated` is deliberately not emitted before #102. Prior
-service dates remain intact through `processing_date`, `gps_date`, and, for
-direct arrival facts, `source_gps_date`.
+ambiguous direct crossing is `uncertain`; if trip assignment failed, absent
+regular and request stops are also `uncertain`; otherwise absent request stops
+are `skipped_optional` and regular stops are `missed`. Technical stops are
+excluded. `interpolated` is deliberately not emitted before #102. Prior service
+dates remain intact through `processing_date`, `gps_date`, and, for direct
+arrival facts, `source_gps_date`.

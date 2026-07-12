@@ -124,18 +124,28 @@ def test_trip_quality_fixtures_port_int_trip_summary(
 
 
 @pytest.mark.parametrize(
-    ("direct_confidence", "service_class", "expected", "evidence"),
+    ("direct_confidence", "stop_service_class", "trip_service_class", "expected", "evidence"),
     [
-        ("high", "regular", "observed", []),
-        ("medium", "regular", "uncertain", ["alignment_ambiguous_or_medium"]),
-        (None, "request", "skipped_optional", []),
-        (None, "regular", "missed", []),
+        ("high", "regular", "matching_failure", "observed", []),
+        ("medium", "regular", "matching_failure", "uncertain", ["alignment_ambiguous_or_medium"]),
+        (None, "regular", "matching_failure", "uncertain", ["unreliable_trip_assignment"]),
+        (None, "request", "matching_failure", "uncertain", ["unreliable_trip_assignment"]),
+        (None, "request", "regular", "skipped_optional", []),
+        (None, "regular", "regular", "missed", []),
     ],
 )
 def test_expected_event_states_are_explicit(
-    direct_confidence: str | None, service_class: str, expected: str, evidence: list[str]
+    direct_confidence: str | None,
+    stop_service_class: str,
+    trip_service_class: str,
+    expected: str,
+    evidence: list[str],
 ) -> None:
-    assert expected_status(direct_confidence=direct_confidence, stop_service_class=service_class) == (
+    assert expected_status(
+        direct_confidence=direct_confidence,
+        stop_service_class=stop_service_class,
+        trip_service_observation_class=trip_service_class,
+    ) == (
         expected,
         evidence,
     )
