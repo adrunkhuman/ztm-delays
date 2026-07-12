@@ -19,9 +19,9 @@ pings. GTFS requires six UTF-8 (BOM accepted) files: `trips`, `stop_times`,
 active. Prior and current service dates are both required, and GTFS times may
 exceed 24:00.
 
-All 24 hourly partitions for both bus and tram are required by default. A known
-partial-day diagnostic run must opt in with `--allow-missing-hours`; the missing
-inventory remains recorded in its manifest.
+Missing hourly partitions are recorded in the manifest but do not block
+reconstruction. No-service hours are normal; completeness and coverage outputs
+distinguish expected absence from ingestion gaps downstream.
 
 Success atomically publishes normalized GPS, duty schedule, stop semantics,
 `duty_execution.parquet`, `operational_stop_crossings.parquet`,

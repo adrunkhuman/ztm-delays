@@ -1253,7 +1253,7 @@ def test_cli_uses_stable_missing_input_exit(tmp_path: Path) -> None:
     )
 
 
-def test_missing_hours_fail_without_explicit_partial_day_opt_in(tmp_path: Path) -> None:
+def test_missing_hours_are_recorded_without_blocking_reconstruction(tmp_path: Path) -> None:
     root, zip_path = tmp_path / "gps", tmp_path / "snapshot.zip"
     _gps(root, [_row()])
     _gtfs(zip_path)
@@ -1265,9 +1265,9 @@ def test_missing_hours_fail_without_explicit_partial_day_opt_in(tmp_path: Path) 
         tmp_path / "output",
         tmp_path / "metrics.json",
     )
-    with pytest.raises(MatcherError, match="missing hourly partitions"):
-        with ReconstructionRun(config) as run:
-            run.prepare()
+    with ReconstructionRun(config) as run:
+        result = run.prepare()
+    assert result["manifest"]["missing_hours"]["tram"] == list(range(24))
 
 
 def test_rejects_nonpositive_stop_alignment_workers(tmp_path: Path) -> None:

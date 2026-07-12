@@ -29,11 +29,6 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="Concurrent vehicle chunks for stop alignment; each worker uses one DuckDB thread.",
     )
-    prepare.add_argument(
-        "--allow-missing-hours",
-        action="store_true",
-        help="Prepare a known partial day while retaining missing hours in the manifest.",
-    )
     overnight_proof = commands.add_parser("overnight-proof")
     overnight_proof.add_argument("--input-dir", required=True)
     overnight_proof.add_argument("--report-json", required=True)
@@ -57,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             args.memory_limit,
             args.temp_limit,
             args.max_vehicle_rows,
-            args.allow_missing_hours,
+            False,
             args.alignment_workers,
         )
         with ReconstructionRun(config) as run:

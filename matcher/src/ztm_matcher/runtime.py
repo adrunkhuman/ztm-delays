@@ -706,12 +706,6 @@ class ReconstructionRun:
         cpu_started = time.process_time()
         work, connection = self._work(), self._connection()
         files, missing = discover(self.config.gps_root, self.config.processing_date)
-        missing_modes = {mode: hours for mode, hours in missing.items() if hours}
-        if missing_modes and not self.config.allow_missing_hours:
-            detail = "; ".join(
-                f"{mode}: {','.join(f'{hour:02d}' for hour in hours)}" for mode, hours in missing_modes.items()
-            )
-            raise fail("missing_input", f"GPS input has missing hourly partitions ({detail})", 10)
         schedule_rows = self.prepare_schedule()
         self.normalized_path = work / "normalized_gps.parquet"
         normalized_rows = normalize(connection, files, self.config.processing_date, self.normalized_path)
