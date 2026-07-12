@@ -11,6 +11,21 @@ uv run --project matcher ztm-matcher prepare --processing-date 2026-07-09 \
   --alignment-workers 8
 ```
 
+For development diagnostics, retain full duty context while reducing schedule
+and GPS work with `--line`, `--trip-id`, and optionally `--vehicle-number`:
+
+```shell
+uv run --project matcher ztm-matcher prepare --processing-date 2026-07-09 \
+  --snapshot-id 2026-07-08T00:00:00Z_37117bdef8d6 --gps-root cache/raw/gps \
+  --gtfs-zip cache/gtfs/snapshot.zip --output-dir work/z26 \
+  --line Z26 --vehicle-number 9812
+```
+
+Line and trip selectors retain every course in each matching duty and every GPS
+line used by those duties. Vehicle selection then narrows GPS observations.
+Diagnostic outputs are investigation artifacts, not complete daily publication
+partitions. Omitting all selectors preserves the production full-day behavior.
+
 GPS partitions are `vehicle_type={bus,tram}/date=YYYY-MM-DD/hour=HH/*.parquet`.
 The runtime validates `raw-gps-v1`, reports missing hours, applies the dbt
 Warsaw-day/numeric-coordinate/dedup contract, and retains same-coordinate

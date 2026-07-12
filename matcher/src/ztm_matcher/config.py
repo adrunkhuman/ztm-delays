@@ -23,10 +23,17 @@ class RunConfig:
     max_vehicle_rows: int = 1_000_000
     allow_missing_hours: bool = False
     alignment_workers: int = 1
+    diagnostic_line: str | None = None
+    diagnostic_vehicle_number: str | None = None
+    diagnostic_trip_id: str | None = None
 
     def as_manifest(self) -> dict[str, object]:
         """Return JSON-safe config values."""
-        return {key: str(value) if isinstance(value, (date, Path)) else value for key, value in asdict(self).items()}
+        return {
+            key: str(value) if isinstance(value, (date, Path)) else value
+            for key, value in asdict(self).items()
+            if value is not None
+        }
 
 
 def parse_date(value: str) -> date:

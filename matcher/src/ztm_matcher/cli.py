@@ -29,6 +29,11 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="Concurrent vehicle chunks for stop alignment; each worker uses one DuckDB thread.",
     )
+    prepare.add_argument("--line", dest="diagnostic_line", help="Retain duties containing this line.")
+    prepare.add_argument(
+        "--vehicle-number", dest="diagnostic_vehicle_number", help="Retain GPS from this vehicle only."
+    )
+    prepare.add_argument("--trip-id", dest="diagnostic_trip_id", help="Retain the full duty containing this trip.")
     overnight_proof = commands.add_parser("overnight-proof")
     overnight_proof.add_argument("--input-dir", required=True)
     overnight_proof.add_argument("--report-json", required=True)
@@ -54,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
             args.max_vehicle_rows,
             False,
             args.alignment_workers,
+            args.diagnostic_line,
+            args.diagnostic_vehicle_number,
+            args.diagnostic_trip_id,
         )
         with ReconstructionRun(config) as run:
             result = run.prepare()

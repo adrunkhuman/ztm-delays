@@ -525,6 +525,7 @@ class ReconstructionRun:
     def __init__(self, config: RunConfig) -> None:
         self.config, self.connection, self.work_dir, self.normalized_path = config, None, None, None
         self.semantics_rows = 0
+        self.diagnostic_lines: set[str] | None = None
 
     def __enter__(self) -> "ReconstructionRun":
         if self.config.alignment_workers < 1:
@@ -558,6 +559,24 @@ class ReconstructionRun:
         if not selected:
             raise fail("invalid_output", "pinned snapshot has no trips overlapping the processing date", 15)
         rows = duties(selected, snapshot)
+        if self.config.diagnostic_line or self.config.diagnostic_trip_id:
+            targets = [
+                row
+                for row in rows
+                if (
+                    self.config.diagnostic_line is None
+                    or row["line"] == self.config.diagnostic_line
+                    or row["route_short_name"] == self.config.diagnostic_line
+                )
+                and (self.config.diagnostic_trip_id is None or row["trip_id"] == self.config.diagnostic_trip_id)
+            ]
+            if not targets:
+                raise fail("missing_input", "diagnostic selectors matched no scheduled trip", 10)
+            duty_keys = {(row["service_date"], row["gtfs_snapshot_id"], row["duty_chain_id"]) for row in targets}
+            rows = [
+                row for row in rows if (row["service_date"], row["gtfs_snapshot_id"], row["duty_chain_id"]) in duty_keys
+            ]
+            self.diagnostic_lines = {str(row["line"]) for row in rows}
         schedule_table = pa.Table.from_pylist(rows)
         required_schedule = {
             "service_date",
@@ -710,7 +729,18 @@ class ReconstructionRun:
         files, missing = discover(self.config.gps_root, self.config.processing_date)
         schedule_rows = self.prepare_schedule()
         self.normalized_path = work / "normalized_gps.parquet"
-        normalized_rows = normalize(connection, files, self.config.processing_date, self.normalized_path)
+        normalized_rows = normalize(
+            connection,
+            files,
+            self.config.processing_date,
+            self.normalized_path,
+            lines=self.diagnostic_lines,
+            vehicle_number=self.config.diagnostic_vehicle_number,
+        )
+        if normalized_rows == 0 and any(
+            (self.config.diagnostic_line, self.config.diagnostic_vehicle_number, self.config.diagnostic_trip_id)
+        ):
+            raise fail("missing_input", "diagnostic selectors matched no GPS observations", 10)
         execution_counts = self.align_execution()
         crossing_counts = self.align_stops()
         fact_counts = self.build_facts()

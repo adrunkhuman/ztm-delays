@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -16,6 +17,7 @@ import ztm_matcher.runtime as runtime
 from ztm_matcher import ReconstructionRun, RunConfig
 from ztm_matcher.cli import main
 from ztm_matcher.errors import MatcherError
+from ztm_matcher.gps import normalize
 from ztm_matcher.gtfs import Snapshot, load, select
 from ztm_matcher.overnight_proof import build_overnight_proof_report
 from ztm_matcher.runtime import STOP_ALIGNMENT_ROW_GROUP_ROWS, _flush_stop_alignment_rows
@@ -197,6 +199,34 @@ def _row(**changes: object) -> dict[str, object]:
     return row
 
 
+def test_normalize_applies_diagnostic_line_and_vehicle_filters(tmp_path: Path) -> None:
+    gps = tmp_path / "gps"
+    _gps(
+        gps,
+        [
+            _row(Lines="187", VehicleNumber="2"),
+            _row(Lines="Z26", VehicleNumber="3", Time=datetime(2026, 1, 15, 0, 30, tzinfo=UTC)),
+            _row(Lines="Z26", VehicleNumber="4", Time=datetime(2026, 1, 15, 0, 31, tzinfo=UTC)),
+        ],
+    )
+    source = next(gps.rglob("*.parquet"))
+    output = tmp_path / "normalized.parquet"
+
+    with duckdb.connect() as connection:
+        rows = normalize(
+            connection,
+            [source],
+            date(2026, 1, 15),
+            output,
+            lines={"Z26"},
+            vehicle_number="3",
+        )
+
+    assert rows == 1
+    assert pq.read_table(output).to_pylist()[0]["line"] == "Z26"
+    assert pq.read_table(output).to_pylist()[0]["vehicle_number"] == "3"
+
+
 def _write_stop_alignment_fixture(run: ReconstructionRun, vehicle_numbers: tuple[str, ...]) -> None:
     run.prepare_schedule()
     work = run._work()
@@ -331,6 +361,37 @@ def test_prepares_normalized_gps_schedule_semantics_manifest_and_groups(tmp_path
     )
     semantics = pq.read_table(output / "stop_semantics.parquet").to_pylist()
     assert any(row["stop_execution_class"] == "technical_suffix" for row in semantics)
+
+
+def test_prepare_diagnostic_trip_filters_schedule_and_gps(tmp_path: Path) -> None:
+    root, zip_path, output = tmp_path / "gps", tmp_path / "snapshot.zip", tmp_path / "output"
+    _gps(
+        root,
+        [
+            _row(VehicleNumber="2"),
+            _row(Lines="r1", VehicleNumber="3", Time=datetime(2026, 1, 15, 0, 30, tzinfo=UTC)),
+        ],
+    )
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        root,
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+        diagnostic_vehicle_number="3",
+        diagnostic_trip_id="today",
+    )
+
+    with ReconstructionRun(config) as run:
+        result = run.prepare()
+
+    assert result["metrics"]["schedule_rows"] == 1
+    assert result["metrics"]["normalized_rows"] == 1
+    assert result["manifest"]["config"]["diagnostic_trip_id"] == "today"
+    assert {row["trip_id"] for row in pq.read_table(output / "duty_schedule.parquet").to_pylist()} == {"today"}
 
 
 def test_stop_alignment_inputs_are_removed_after_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -35,7 +35,15 @@ def discover(root: Path, processing_date: date) -> tuple[list[Path], dict[str, l
     return files, missing
 
 
-def normalize(connection: duckdb.DuckDBPyConnection, files: list[Path], day: date, output: Path) -> int:
+def normalize(
+    connection: duckdb.DuckDBPyConnection,
+    files: list[Path],
+    day: date,
+    output: Path,
+    *,
+    lines: set[str] | None = None,
+    vehicle_number: str | None = None,
+) -> int:
     """Port stg_gps__pings with Warsaw bounds, newest ingestion dedup, and ordering."""
     for path in files:
         try:
@@ -47,6 +55,14 @@ def normalize(connection: duckdb.DuckDBPyConnection, files: list[Path], day: dat
             raise fail("invalid_data", f"cannot read GPS Parquet schema: {path}", 12) from exc
     try:
         connection.register("raw_gps", ds.dataset([str(path) for path in files], format="parquet"))
+        diagnostic_filters = []
+        if lines:
+            quoted_lines = ", ".join(f"'{line.replace("'", "''")}'" for line in sorted(lines))
+            diagnostic_filters.append(f'cast("Lines" as varchar) in ({quoted_lines})')
+        if vehicle_number:
+            quoted_vehicle = vehicle_number.replace("'", "''")
+            diagnostic_filters.append(f"cast(\"VehicleNumber\" as varchar) = '{quoted_vehicle}'")
+        diagnostic_sql = "".join(f"\n                and {condition}" for condition in diagnostic_filters)
         connection.execute(
             f"""
             create or replace temp view normalized_gps as
@@ -62,6 +78,7 @@ def normalize(connection: duckdb.DuckDBPyConnection, files: list[Path], day: dat
                 and regexp_full_match(cast("Brigade" as varchar), '^[0-9]+$')
                 and regexp_full_match(cast("VehicleNumber" as varchar), '^[0-9]+$')
                 and cast("Lat" as double) between 51.0 and 53.5 and cast("Lon" as double) between 19.5 and 22.5
+                {diagnostic_sql}
             ), dedup as (
               select *, row_number() over (
                 partition by vehicle_number, gps_time order by ingested_at desc, line, brigade, lat, lon, vehicle_type
