@@ -12,6 +12,14 @@ def _depot(name: str | None) -> bool:
     return bool(name and re.search(r"(^R-[0-9]+\s+Zajezdnia|^Zajezdnia|\sZajezdnia)", name, re.IGNORECASE))
 
 
+def _is_depot_segment(
+    line: str, route_short_name: str, origin_name: str | None, destination_name: str | None, passenger_stop_count: int
+) -> bool:
+    depot_endpoint = _depot(origin_name) or _depot(destination_name)
+    replacement_line = line.upper().startswith("Z") or route_short_name.upper().startswith("Z")
+    return depot_endpoint and not (replacement_line and passenger_stop_count >= 2)
+
+
 def _distance(left: StopInfo | None, right: StopInfo | None) -> float | None:
     if not left or not right:
         return None
@@ -48,7 +56,10 @@ def duties(schedule: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str,
             missing = len(endpoints) < 2 or not origin or not destination
             overlap = bool(previous and trip["trip_start_seconds"] < previous["trip_end_seconds"])
             negative = trip["trip_end_seconds"] < trip["trip_start_seconds"]
-            depot = _depot(origin_name) or _depot(destination_name)
+            passenger_stop_count = sum(row.stop_service_class != "not_in_passenger_service" for row in endpoints)
+            depot = _is_depot_segment(
+                str(trip["line"]), str(trip["route_short_name"]), origin_name, destination_name, passenger_stop_count
+            )
             result.append(
                 {
                     **trip,

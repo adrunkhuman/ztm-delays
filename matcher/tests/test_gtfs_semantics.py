@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from ztm_matcher.gtfs import StopTime, load, select
-from ztm_matcher.semantics import _depot, duties, stop_semantics
+from ztm_matcher.semantics import _depot, _is_depot_segment, duties, stop_semantics
 
 
 def _zip(path: Path, block: str = "block-a", *, include_zone_id: bool = True) -> None:
@@ -120,3 +120,9 @@ def test_depot_name_parity_is_case_insensitive() -> None:
     assert _depot("r-4 zajezdnia Żoliborz")
     assert _depot("Metro Zajezdnia")
     assert not _depot("Zajezdniowa")
+
+
+def test_replacement_line_can_serve_a_depot_named_passenger_terminal() -> None:
+    assert not _is_depot_segment("Z26", "Z26", "Zajezdnia Wola", "Metro Ratusz Arsenał", 6)
+    assert _is_depot_segment("Z26", "Z26", "Zajezdnia Wola", "Metro Ratusz Arsenał", 1)
+    assert _is_depot_segment("26", "26", "Zajezdnia Wola", "Metro Ratusz Arsenał", 6)
