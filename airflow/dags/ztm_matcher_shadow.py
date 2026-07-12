@@ -825,6 +825,7 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
                     array_agg(distinct cast({source_date} as string) ignore nulls order by cast({source_date} as string)) as source_dates
                 from `{table}`
                 where service_date in unnest(@service_dates)
+                  and {source_date} = @processing_date
                 group by artifact, source, service_date, mode, trip_quality, observation_status
                 """
             )
@@ -835,7 +836,12 @@ def _comparison_report(
     client: Any, processing_date: str, shadow_tables: dict[str, dict[str, str]]
 ) -> dict[str, object]:
     dates = [date.fromisoformat(processing_date) - timedelta(days=1), date.fromisoformat(processing_date)]
-    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("service_dates", "DATE", dates)])
+    config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("service_dates", "DATE", dates),
+            bigquery.ScalarQueryParameter("processing_date", "DATE", date.fromisoformat(processing_date)),
+        ]
+    )
     rows = [
         {key: _json_value(value) for key, value in (dict(row.items()) if hasattr(row, "items") else dict(row)).items()}
         for row in client.query(_comparison_query(shadow_tables), job_config=config).result()
