@@ -13,6 +13,7 @@ Runtime env defaults match the current VPS:
 | `BIGQUERY_STG_DATASET` | `ztm_stg` |
 | `BIGQUERY_INT_DATASET` | `ztm_int` |
 | `BIGQUERY_MARTS_DATASET` | `ztm_marts` |
+| `BIGQUERY_MATCHER_INPUT_DATASET` | `ztm_matcher_input` |
 | `BIGQUERY_LOCATION` | `europe-north1` |
 | `GCS_BUCKET` | `ztm-analytics-bucket` |
 | `DBT_PROJECT_DIR` | `/opt/airflow/dbt` |
@@ -40,6 +41,8 @@ Runtime env defaults match the current VPS:
 | `MATCHER_SHADOW_GATE_DELAY_TAIL_DELTA_MAX` | `0.15` |
 | `MATCHER_SHADOW_GATE_MATERIAL_LINE_ROWS_MIN` | `20` |
 | `MATCHER_SHADOW_GATE_PEAK_RSS_BYTES_MAX` | `2147483648` (2 GiB) |
+| `MATCHER_CUTOVER_ENABLED` | `false` |
+| `MATCHER_CUTOVER_MAX_BYTES` | `5368709120` (5 GiB) |
 
 - Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
 - `dbt/` is mounted at `DBT_PROJECT_DIR`.
@@ -81,7 +84,15 @@ Runtime env defaults match the current VPS:
 
 `matcher_historical_correction.py` is a manual, read-only planner, not a DAG. It requires explicit start/end dates, rejects dates before the warehouse history start, limits the range to 31 days by default, rejects 2026-07-05 through 2026-07-07, inventories immutable GCS inputs, and emits no cloud mutation unless an optional report destination is requested.
 
-Smoke-check an enabled non-production run by confirming a marker under `gs://$GCS_BUCKET/shadow/matcher/processing_date=YYYY-MM-DD/run_id=.../commit.json`, its three run-scoped tables, and current/prior rows in the marker comparison. Do not treat a marker as a cutover signal.
+Smoke-check an enabled non-production run by confirming a marker under `gs://$GCS_BUCKET/shadow/matcher/processing_date=YYYY-MM-DD/run_id=.../commit.json`, its four run-scoped artifacts (including complete `stop_semantics`), and current/prior rows in the three-fact marker comparison. Do not treat a marker as a cutover signal.
+
+## Matcher Cutover
+
+Cutover remains disabled and is not wired into any DAG. The manual helper only promotes a passing, content-addressed shadow marker when `MATCHER_CUTOVER_ENABLED=true`, `MATCHER_SHADOW_ENABLED=true`, and the input dataset is a strict BigQuery dataset ID distinct from shadow, raw, intermediate, and marts datasets. The three fact artifacts and their stages contain exactly one `gps_date`, equal to `processing_date`; complete `stop_semantics` instead contains exactly one `processing_date` partition. `service_date` may be the prior or current service day. Stable matcher input retains one partition per processing date. Prior-service publication therefore reads the retained previous `gps_date` fact partition plus the current overnight delta, while snapshot-specific semantics join by their `processing_date`.
+
+Both source artifacts and immutable content-addressed stages are fully checked before stable mutation, including ordered schema, labels, partition field, row count, and partition/processing lineage. A stage is created only by its deterministic content- and run-bound query job: a retry recovers that exact successful job and verifies its SQL, destination when exposed by BigQuery, location, byte cap, and parameters. Existing tables are never accepted independently of that job. One byte-capped BigQuery transaction then replaces all four stable partitions with explicit column lists: the three fact `gps_date` partitions and the `stop_semantics.processing_date` partition. Post-commit checks scan only the replaced partition, so retained history is not treated as an error. The promotion marker is create-only and is written only after post-commit validation. If that validation fails, the transaction is already committed and no marker is written; the captured pre-counts identify the exact partition rollback boundary. `matcher_cutover_publication_dbt_args()` returns the current/prior history/schedule dependencies plus `fct_trip fct_stop_arrival fct_expected_stop_event` selectors and `use_python_reconstruction=true` vars; it does not select the current-only semantics model.
+
+The true trip adapter first selects one logical trip by `(service_date, trip_id, vehicle_number)`, ranking quality before newest `gps_date`, then enriches only that winner. It joins schedule history by snapshot, processing/GPS date, service date, and trip ID; settled passenger endpoints come from the retained expected-event adapter and snapshot-specific stop names. Stop arrivals and expected events join retained matcher stop semantics by snapshot, processing/GPS date, service date, trip ID, and stop sequence where applicable; no true-path fact reads the current-only semantics model. Stop arrivals retain `source_gps_date` and do not require it to equal the selected trip fact's publication `gps_date`.
 
 ## Serving Export
 

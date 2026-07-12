@@ -27,6 +27,7 @@ from ztm_airflow_common import (
     BIGQUERY_INT_DATASET,
     BIGQUERY_LOCATION,
     BIGQUERY_MARTS_DATASET,
+    BIGQUERY_MATCHER_INPUT_DATASET,
     BIGQUERY_RAW_DATASET,
     GCP_PROJECT,
     GCS_BUCKET,
@@ -47,10 +48,12 @@ ARTIFACT_SCHEMA_VERSIONS = {
     "reconstruction_trip_facts": "reconstruction-trip-facts-v2",
     "reconstruction_stop_arrivals": "reconstruction-stop-arrivals-v2",
     "reconstruction_expected_stop_events": "reconstruction-expected-stop-events-v2",
+    "stop_semantics": "stop-semantics-v3",
     "trip_universe": "trip-universe-v1",
 }
 IDENTIFIER_PATTERN = re.compile(r"[^a-z0-9_]+")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+DATASET_ID_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,1023}\Z")
 VALIDATION_MEMORY_LIMIT = "320MB"
 VALIDATION_TEMP_LIMIT = "20GB"
 VALIDATION_BATCH_SIZE = 8_192
@@ -68,7 +71,14 @@ DEFAULT_GATE_DELAY_PERCENTILE_RATIO_MAX = 2.0
 DEFAULT_GATE_DELAY_TAIL_DELTA_MAX = 0.15
 DEFAULT_GATE_MATERIAL_LINE_ROWS = 20
 DEFAULT_GATE_PEAK_RSS_BYTES = 2 * 1024**3
+DEFAULT_MAX_PROMOTION_BYTES = 5 * 1024**3
 COMPARISON_DATE_COUNT = 2
+STABLE_INPUT_TABLES = {
+    "trip": "reconstruction_trip_facts",
+    "stop_arrival": "reconstruction_stop_arrivals",
+    "expected_stop_event": "reconstruction_expected_stop_events",
+    "stop_semantics": "reconstruction_stop_semantics",
+}
 
 
 @dataclass(frozen=True)
@@ -90,6 +100,7 @@ class ArtifactSpec:
     fields: tuple[FieldSpec, ...]
     grain: tuple[str, ...]
     source_date_field: str
+    partition_field: str = "gps_date"
     quality_field: str | None = "trip_quality"
     status_field: str | None = None
     delay_field: str | None = None
@@ -228,7 +239,49 @@ ARTIFACTS = (
         status_field="observation_status",
         delay_field="delay_seconds",
     ),
+    ArtifactSpec(
+        "stop_semantics",
+        "stop_semantics.parquet",
+        "stop_semantics",
+        _fields(
+            ("gtfs_snapshot_id", "STRING"),
+            ("service_date", "DATE"),
+            ("processing_date", "DATE"),
+            ("trip_id", "STRING"),
+            ("stop_id", "STRING"),
+            ("stop_group_id", "STRING"),
+            ("stop_lat", "FLOAT"),
+            ("stop_lon", "FLOAT"),
+            ("zone_id", "STRING"),
+            ("effective_zone_id", "STRING"),
+            ("stop_sequence", "INTEGER"),
+            ("arrival_time_seconds", "INTEGER"),
+            ("departure_time_seconds", "INTEGER"),
+            ("pickup_type", "INTEGER"),
+            ("drop_off_type", "INTEGER"),
+            ("stop_service_class", "STRING"),
+            ("duty_chain_id", "STRING"),
+            ("duty_chain_source", "STRING"),
+            ("duty_chain_source_id", "STRING"),
+            ("trip_order", "INTEGER"),
+            ("previous_trip_id", "STRING"),
+            ("next_trip_id", "STRING"),
+            ("stop_execution_class", "STRING"),
+            ("classification_confidence", "STRING"),
+            ("classification_reason", "STRING"),
+            ("classification_evidence", "STRING", True),
+            ("is_passenger_stop", "BOOLEAN"),
+            ("are_passenger_boundaries_settled", "BOOLEAN"),
+            ("first_passenger_stop_sequence", "INTEGER"),
+            ("last_passenger_stop_sequence", "INTEGER"),
+        ),
+        ("gtfs_snapshot_id", "service_date", "trip_id", "stop_sequence"),
+        "processing_date",
+        partition_field="processing_date",
+        quality_field=None,
+    ),
 )
+COMPARISON_ARTIFACTS = tuple(spec for spec in ARTIFACTS if spec.key in CANONICAL_FACT_TABLES)
 TRIP_UNIVERSE_FIELDS = _fields(
     ("gtfs_snapshot_id", "STRING"),
     ("processing_date", "DATE"),
@@ -314,8 +367,9 @@ class ShadowConfig:
             return
         if not self.dataset:
             raise ValueError("BIGQUERY_MATCHER_SHADOW_DATASET is required when MATCHER_SHADOW_ENABLED=true")
-        forbidden = {BIGQUERY_RAW_DATASET, BIGQUERY_INT_DATASET, BIGQUERY_MARTS_DATASET}
-        if self.dataset in forbidden:
+        _validate_dataset_id("BIGQUERY_MATCHER_SHADOW_DATASET", self.dataset)
+        forbidden = {value.casefold() for value in (BIGQUERY_RAW_DATASET, BIGQUERY_INT_DATASET, BIGQUERY_MARTS_DATASET)}
+        if self.dataset.casefold() in forbidden:
             raise ValueError("BIGQUERY_MATCHER_SHADOW_DATASET must not name a canonical raw, int, or marts dataset")
         if not self.marker_prefix:
             raise ValueError("MATCHER_SHADOW_GCS_PREFIX must not be empty")
@@ -355,9 +409,46 @@ class ArtifactValidation:
     service_dates: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CutoverConfig:
+    """Manual-only configuration for promoting a validated shadow run."""
+
+    enabled: bool
+    input_dataset: str
+    max_promotion_bytes: int
+
+    @classmethod
+    def from_env(cls) -> CutoverConfig:
+        """Read the manual cutover settings without enabling a promotion."""
+        return cls(
+            enabled=_env_bool("MATCHER_CUTOVER_ENABLED", False),
+            input_dataset=os.getenv("BIGQUERY_MATCHER_INPUT_DATASET", BIGQUERY_MATCHER_INPUT_DATASET).strip()
+            or BIGQUERY_MATCHER_INPUT_DATASET,
+            max_promotion_bytes=_env_positive_int("MATCHER_CUTOVER_MAX_BYTES", DEFAULT_MAX_PROMOTION_BYTES),
+        )
+
+    def validate(self, shadow: ShadowConfig) -> None:
+        """Reject an enabled cutover unless its isolated shadow prerequisites hold."""
+        _validate_dataset_id("BIGQUERY_MATCHER_INPUT_DATASET", self.input_dataset)
+        datasets = (BIGQUERY_RAW_DATASET, BIGQUERY_INT_DATASET, BIGQUERY_MARTS_DATASET, shadow.dataset)
+        forbidden = {value.casefold() for value in datasets if value}
+        if self.input_dataset.casefold() in forbidden:
+            raise ValueError("BIGQUERY_MATCHER_INPUT_DATASET must not name a shadow, raw, int, or marts dataset")
+        if not self.enabled:
+            return
+        if not shadow.enabled:
+            raise ValueError("MATCHER_CUTOVER_ENABLED requires MATCHER_SHADOW_ENABLED=true")
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     return default if value is None else value.strip().lower() == "true"
+
+
+def _validate_dataset_id(name: str, value: str) -> None:
+    """BigQuery dataset IDs are identifiers, not table expressions or project paths."""
+    if not DATASET_ID_PATTERN.fullmatch(value):
+        raise ValueError(f"{name} must be a BigQuery dataset ID without project qualification or backticks")
 
 
 def _command_projects(command: tuple[str, ...]) -> tuple[str, ...]:
@@ -668,14 +759,17 @@ def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snap
     connection = _validation_connection(duckdb, temp_directory)
     try:
         rows = _query_count(connection, "select count(*) from read_parquet(?)", [str(path)])
+        lineage_fields = tuple(dict.fromkeys(("processing_date", spec.partition_field)))
+        lineage_predicate = " or ".join(f"cast({field} as varchar) != ?" for field in lineage_fields)
         bad_lineage = _query_count(
             connection,
-            """
+            f"""
             select count(*)
             from read_parquet(?)
-            where cast(processing_date as varchar) != ? or gtfs_snapshot_id != ?
+            where {lineage_predicate}
+               or gtfs_snapshot_id != ?
             """,
-            [str(path), processing_date, snapshot_id],
+            [str(path), *(processing_date for _ in lineage_fields), snapshot_id],
         )
         duplicate_grains = _query_count(
             connection,
@@ -709,7 +803,8 @@ def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snap
     if batch_rows != rows:
         raise RuntimeError(f"Parquet batch row count mismatch in {path.name}")
     if bad_lineage:
-        raise RuntimeError(f"Lineage mismatch in {path.name}")
+        fields = " and ".join(lineage_fields)
+        raise RuntimeError(f"Lineage mismatch in {path.name}: {fields} must equal the request")
     if duplicate_grains:
         raise RuntimeError(f"Duplicate {spec.key} grain in {path.name}")
     return ArtifactValidation(path, rows, _sha256(path), path.stat().st_size, tuple(sorted(service_dates)))
@@ -799,7 +894,7 @@ def _load_artifact(
             )
         except Conflict:
             job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
-    _verify_load_job(job, job_id, table_id)
+    _verify_load_job(job, job_id, table_id, spec)
     return table
 
 
@@ -822,7 +917,7 @@ def _table_reference_id(table: object) -> str:
     return str(table)
 
 
-def _verify_load_job(job: Any, job_id: str, table_id: str) -> None:
+def _verify_load_job(job: Any, job_id: str, table_id: str, spec: ArtifactSpec) -> None:
     """Accept a retried load only when its immutable job/table identity matches."""
     job.result()
     if getattr(job, "job_id", None) != job_id:
@@ -831,11 +926,21 @@ def _verify_load_job(job: Any, job_id: str, table_id: str) -> None:
         raise RuntimeError(f"Shadow load job did not complete successfully: {job_id}")
     if _table_reference_id(getattr(job, "destination", None)) != table_id:
         raise RuntimeError(f"Shadow load job destination does not match expected table: {job_id}")
+    if (source_format := getattr(job, "source_format", None)) is not None and str(source_format).upper() != "PARQUET":
+        raise RuntimeError(f"Shadow load job source format does not match expected artifact: {job_id}")
+    if (write_disposition := getattr(job, "write_disposition", None)) is not None and str(
+        write_disposition
+    ).upper() != "WRITE_TRUNCATE":
+        raise RuntimeError(f"Shadow load job write disposition does not match expected artifact: {job_id}")
+    if (schema := getattr(job, "schema", None)) is not None and _schema_signature(list(schema)) != _expected_schema(
+        spec
+    ):
+        raise RuntimeError(f"Shadow load job schema does not match expected artifact: {job_id}")
 
 
 def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
     sections = []
-    for spec in ARTIFACTS:
+    for spec in COMPARISON_ARTIFACTS:
         shadow = shadow_tables[spec.key]["table_id"]
         canonical = CANONICAL_FACT_TABLES[spec.key]
         source_date = "gps_date" if spec.key == "trip" else "source_gps_date"
@@ -1498,6 +1603,487 @@ def _json_value(value: object) -> object:
     if isinstance(value, dict):
         return {str(key): _json_value(item) for key, item in value.items()}
     return value
+
+
+def matcher_cutover_publication_dbt_args(processing_date: str, gtfs_snapshot_id: str) -> dict[str, dict[str, object]]:
+    """Return publication args without forcing retained rows to one GTFS snapshot."""
+    current = date.fromisoformat(processing_date)
+    selector = (
+        "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version "
+        "dim_schedule_version fct_trip fct_stop_arrival fct_expected_stop_event"
+    )
+    base_vars = {
+        "processing_date": current.isoformat(),
+        "gtfs_snapshot_id": gtfs_snapshot_id,
+        "use_python_reconstruction": True,
+    }
+    return {
+        "current": {
+            "selector": selector,
+            "vars": base_vars | {"publish_service_date": current.isoformat()},
+        },
+        "prior": {
+            "selector": selector,
+            "vars": base_vars | {"publish_service_date": (current - timedelta(days=1)).isoformat()},
+        },
+    }
+
+
+def _promotion_table_id(
+    dataset: str, processing_date: str, run_id: str, spec: ArtifactSpec, artifact_sha256: str
+) -> str:
+    digest = _validated_sha256(artifact_sha256)
+    return f"{GCP_PROJECT}.{dataset}.matcher_input_stage_{spec.table_suffix}_{processing_date.replace('-', '')}_{_run_id(run_id)}_{digest[:16]}"
+
+
+def _promotion_job_id(action: str, processing_date: str, run_id: str, spec: ArtifactSpec, artifact_sha256: str) -> str:
+    """Return a retry-safe job ID that cannot collide across normalized run IDs."""
+    digest = _validated_sha256(artifact_sha256)[:24]
+    run_digest = hashlib.sha256(_run_id(run_id).encode("utf-8")).hexdigest()[:16]
+    return f"matcher_cutover_{action}_{spec.table_suffix}_{processing_date.replace('-', '')}_{run_digest}_{digest}"
+
+
+def _promotion_transaction_job_id(processing_date: str, run_id: str, artifacts: dict[str, dict[str, object]]) -> str:
+    digests = ":".join(_validated_sha256(str(artifacts[key]["sha256"])) for key in sorted(STABLE_INPUT_TABLES))
+    content_digest = hashlib.sha256(digests.encode("ascii")).hexdigest()[:24]
+    run_digest = hashlib.sha256(_run_id(run_id).encode("utf-8")).hexdigest()[:16]
+    return f"matcher_cutover_replace_all_{processing_date.replace('-', '')}_{run_digest}_{content_digest}"
+
+
+def _query_job(
+    client: Any,
+    query: str,
+    job_id: str,
+    max_bytes: int,
+    parameters: list[Any] | None = None,
+    destination: str | None = None,
+) -> Any:
+    """Run a bounded query and only reuse an API-visible identical job on conflict."""
+    config = bigquery.QueryJobConfig(
+        query_parameters=parameters or [],
+        maximum_bytes_billed=max_bytes,
+    )
+    try:
+        job = client.query(query, job_config=config, job_id=job_id, location=BIGQUERY_LOCATION)
+    except Conflict:
+        job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
+    job.result()
+    _verify_query_job_identity(job, query, job_id, max_bytes, parameters or [], destination)
+    return job
+
+
+def _query_parameters_match(actual: object, expected: list[Any]) -> bool:
+    """Compare public query parameter fields without depending on client internals."""
+    if actual is None or not isinstance(actual, (list, tuple)):
+        return True
+    actual_values = list(actual)
+    if len(actual_values) != len(expected):
+        return False
+    return all(
+        getattr(item, "name", None) == getattr(want, "name", None)
+        and getattr(item, "type_", getattr(item, "type", None)) == getattr(want, "type_", getattr(want, "type", None))
+        and getattr(item, "value", None) == getattr(want, "value", None)
+        for item, want in zip(actual_values, expected, strict=True)
+    )
+
+
+def _verify_query_job_identity(
+    job: Any, query: str, job_id: str, max_bytes: int, parameters: list[Any], destination: str | None = None
+) -> None:
+    """Reject recovery unless the server-visible job is this exact bounded query."""
+    if getattr(job, "job_id", job_id) != job_id or getattr(job, "error_result", None) is not None:
+        raise RuntimeError(f"Matcher cutover query did not complete successfully: {job_id}")
+    if getattr(job, "state", "DONE") != "DONE":
+        raise RuntimeError(f"Matcher cutover query is not complete: {job_id}")
+    if (actual_query := getattr(job, "query", None)) is not None and actual_query != query:
+        raise RuntimeError(f"Matcher cutover query text does not match reused job: {job_id}")
+    actual_destination = getattr(job, "destination", None)
+    if destination is not None and actual_destination is not None and str(actual_destination) != destination:
+        raise RuntimeError(f"Matcher cutover query destination does not match reused job: {job_id}")
+    if (location := getattr(job, "location", None)) is not None and location != BIGQUERY_LOCATION:
+        raise RuntimeError(f"Matcher cutover query location does not match reused job: {job_id}")
+    if (actual_max_bytes := getattr(job, "maximum_bytes_billed", None)) is not None and actual_max_bytes != max_bytes:
+        raise RuntimeError(f"Matcher cutover query byte cap does not match reused job: {job_id}")
+    configuration = getattr(job, "configuration", None)
+    if configuration is not None and getattr(configuration, "maximum_bytes_billed", max_bytes) != max_bytes:
+        raise RuntimeError(f"Matcher cutover query byte cap does not match reused job: {job_id}")
+    if configuration is not None and not _query_parameters_match(
+        getattr(configuration, "query_parameters", None), parameters
+    ):
+        raise RuntimeError(f"Matcher cutover query parameters do not match reused job: {job_id}")
+
+
+def _promotion_table_counts(
+    client: Any, table_id: str, processing_date: str, spec: ArtifactSpec, job_id: str, max_bytes: int
+) -> dict[str, int]:
+    job = _query_job(
+        client,
+        f"""
+        select
+            count(*) as total_rows,
+            countif({spec.partition_field} = @processing_date) as partition_rows,
+            countif({spec.partition_field} is null or {spec.partition_field} != @processing_date) as wrong_partition_rows,
+            countif(processing_date is null or processing_date != @processing_date) as wrong_processing_date_rows
+        from `{table_id}`
+        """,
+        job_id,
+        max_bytes,
+        [bigquery.ScalarQueryParameter("processing_date", "DATE", date.fromisoformat(processing_date))],
+    )
+    rows = list(job.result())
+    if len(rows) != 1:
+        raise RuntimeError("Matcher cutover validation did not return one count row")
+    row = rows[0]
+    values = {
+        key: row.get(key) if isinstance(row, dict) else getattr(row, key, None)
+        for key in ("total_rows", "partition_rows", "wrong_partition_rows", "wrong_processing_date_rows")
+    }
+    if not all(isinstance(value, int) for value in values.values()):
+        raise TypeError("Matcher cutover validation returned invalid row counts")
+    return cast("dict[str, int]", values)
+
+
+def _stable_partition_counts(
+    client: Any, table_id: str, processing_date: str, spec: ArtifactSpec, job_id: str, max_bytes: int
+) -> dict[str, int]:
+    """Validate only the stable partition being replaced, never retained history."""
+    job = _query_job(
+        client,
+        f"""
+        select
+            count(*) as total_rows,
+            countif(processing_date is null or processing_date != @processing_date) as wrong_processing_date_rows
+        from `{table_id}`
+        where {spec.partition_field} = @processing_date
+        """,
+        job_id,
+        max_bytes,
+        [bigquery.ScalarQueryParameter("processing_date", "DATE", date.fromisoformat(processing_date))],
+    )
+    rows = list(job.result())
+    if len(rows) != 1:
+        raise RuntimeError("Matcher cutover stable validation did not return one count row")
+    row = rows[0]
+    values = {
+        key: row.get(key) if isinstance(row, dict) else getattr(row, key, None)
+        for key in ("total_rows", "wrong_processing_date_rows")
+    }
+    if not all(isinstance(value, int) for value in values.values()):
+        raise TypeError("Matcher cutover stable validation returned invalid row counts")
+    return cast("dict[str, int]", values)
+
+
+def _require_exact_processing_partition(
+    client: Any,
+    table_id: str,
+    processing_date: str,
+    spec: ArtifactSpec,
+    expected_rows: int,
+    job_id: str,
+    max_bytes: int,
+) -> int:
+    """Artifacts and stages must contain only the one requested processing partition."""
+    counts = _promotion_table_counts(client, table_id, processing_date, spec, job_id, max_bytes)
+    if counts["total_rows"] != expected_rows or counts["partition_rows"] != expected_rows:
+        raise RuntimeError(
+            f"Matcher cutover {table_id} row count does not equal its processing {spec.partition_field} partition"
+        )
+    if counts["wrong_partition_rows"] or counts["wrong_processing_date_rows"]:
+        raise RuntimeError(f"Matcher cutover {table_id} has rows outside processing_date={processing_date}")
+    return counts["total_rows"]
+
+
+def _require_stable_processing_partition(
+    client: Any,
+    table_id: str,
+    processing_date: str,
+    spec: ArtifactSpec,
+    expected_rows: int,
+    job_id: str,
+    max_bytes: int,
+) -> int:
+    counts = _stable_partition_counts(client, table_id, processing_date, spec, job_id, max_bytes)
+    if counts["total_rows"] != expected_rows or counts["wrong_processing_date_rows"]:
+        raise RuntimeError(
+            f"Matcher cutover {table_id} stable {spec.partition_field} partition failed lineage validation"
+        )
+    return counts["total_rows"]
+
+
+def _schema_signature(fields: list[Any]) -> tuple[tuple[str, str, str], ...]:
+    return tuple((str(field.name), str(field.field_type).upper(), str(field.mode).upper()) for field in fields)
+
+
+def _expected_schema(spec: ArtifactSpec) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        (field.name, field.bigquery_type, "REPEATED" if field.repeated else "NULLABLE") for field in spec.fields
+    )
+
+
+def _stage_labels(spec: ArtifactSpec, artifact_sha256: str) -> dict[str, str]:
+    return {
+        "matcher_schema_version": ARTIFACT_SCHEMA_VERSIONS[Path(spec.filename).stem],
+        "matcher_artifact_sha256": _validated_sha256(artifact_sha256),
+    }
+
+
+def _verify_table_contract(
+    client: Any, table_id: str, spec: ArtifactSpec, labels: dict[str, str] | None = None
+) -> None:
+    table = client.get_table(table_id)
+    if _schema_signature(list(getattr(table, "schema", []))) != _expected_schema(spec):
+        raise RuntimeError(f"Matcher cutover table schema does not exactly match {spec.key}: {table_id}")
+    partitioning = getattr(table, "time_partitioning", None)
+    if getattr(partitioning, "field", None) != spec.partition_field:
+        raise RuntimeError(f"Matcher cutover table must be partitioned by {spec.partition_field}: {table_id}")
+    if labels is not None:
+        actual_labels = getattr(table, "labels", None) or {}
+        if {key: actual_labels.get(key) for key in labels} != labels:
+            raise RuntimeError(
+                f"Matcher cutover stage table labels do not match immutable artifact identity: {table_id}"
+            )
+
+
+def _column_list(spec: ArtifactSpec) -> str:
+    return ", ".join(f"`{field.name}`" for field in spec.fields)
+
+
+def _promotion_transaction_query(promoted: dict[str, dict[str, object]]) -> str:
+    """Replace all stable partitions together; callers must preflight every stage first."""
+    statements = ["begin transaction;"]
+    for spec in ARTIFACTS:
+        stable_table = str(promoted[spec.key]["stable_table"])
+        staged_table = str(promoted[spec.key]["staged_table"])
+        columns = _column_list(spec)
+        statements.extend(
+            [
+                f"delete from `{stable_table}` where {spec.partition_field} = @processing_date;",
+                f"insert into `{stable_table}` ({columns}) select {columns} from `{staged_table}` "
+                f"where {spec.partition_field} = @processing_date;",
+            ]
+        )
+    statements.append("commit transaction;")
+    return "\n".join(statements)
+
+
+def _stage_artifact(
+    client: Any,
+    source_table: str,
+    staged_table: str,
+    processing_date: str,
+    run_id: str,
+    spec: ArtifactSpec,
+    artifact_sha256: str,
+    max_bytes: int,
+) -> None:
+    """Create a stage only through its deterministic query job, then validate it."""
+    columns = _column_list(spec)
+    labels = _stage_labels(spec, artifact_sha256)
+    label_sql = ", ".join(f"{key}='{value}'" for key, value in labels.items())
+    _query_job(
+        client,
+        f"""
+        create table `{staged_table}`
+        partition by {spec.partition_field}
+        options (labels=[{label_sql}]) as
+        select {columns}
+        from `{source_table}`
+        where {spec.partition_field} = @processing_date
+        """,
+        _promotion_job_id("stage", processing_date, run_id, spec, artifact_sha256),
+        max_bytes,
+        [bigquery.ScalarQueryParameter("processing_date", "DATE", date.fromisoformat(processing_date))],
+        staged_table,
+    )
+    _verify_table_contract(client, staged_table, spec, labels)
+
+
+def _promotion_marker_name(config: ShadowConfig, processing_date: str, run_id: str) -> str:
+    return f"{config.marker_prefix}/processing_date={processing_date}/run_id={_run_id(run_id)}/promotion.json"
+
+
+def _require_partition_field(client: Any, table_id: str, spec: ArtifactSpec) -> None:
+    table = client.get_table(table_id)
+    if getattr(getattr(table, "time_partitioning", None), "field", None) != spec.partition_field:
+        raise RuntimeError(
+            f"Matcher cutover stable input table must be partitioned by {spec.partition_field}: {table_id}"
+        )
+
+
+def _write_promotion_marker(
+    client: Any, config: ShadowConfig, processing_date: str, run_id: str, marker: dict[str, object]
+) -> str:
+    name = _promotion_marker_name(config, processing_date, run_id)
+    blob = client.bucket(GCS_BUCKET).blob(name)
+    payload = _json_bytes(marker)
+    if len(payload) > config.max_marker_bytes:
+        raise RuntimeError(
+            f"Matcher cutover marker exceeds configured size: {len(payload)} > {config.max_marker_bytes}"
+        )
+    try:
+        blob.upload_from_string(payload, content_type="application/json", if_generation_match=0)
+    except PreconditionFailed as exc:
+        existing = _read_bounded_blob(blob, config, "existing promotion marker", missing_ok=True)
+        if existing is None or not _marker_is_identical(existing, payload):
+            raise RuntimeError(
+                f"Matcher cutover marker already exists with different content: gs://{GCS_BUCKET}/{name}"
+            ) from exc
+    return f"gs://{GCS_BUCKET}/{name}"
+
+
+def promote_validated_shadow_artifacts(processing_date: str, run_id: str) -> dict[str, object]:
+    """Promote one validated shadow run; no DAG task calls this manual-only function.
+
+    The rollback boundary is a table copy of each previous stable input partition,
+    taken before this function is invoked. This function replaces no other partition.
+    """
+    shadow = ShadowConfig.from_env()
+    shadow.validate()
+    cutover = CutoverConfig.from_env()
+    cutover.validate(shadow)
+    if not cutover.enabled:
+        return {"enabled": False, "reason": "MATCHER_CUTOVER_ENABLED is false"}
+    date.fromisoformat(processing_date)
+
+    storage_client = storage.Client(project=GCP_PROJECT)
+    marker = _read_marker(storage_client, shadow, processing_date, run_id)
+    if marker is None:
+        raise RuntimeError("Matcher cutover requires a committed shadow marker")
+    if marker.get("processing_date") != processing_date or marker.get("run_id") != run_id:
+        raise RuntimeError("Matcher cutover marker does not match this processing date and run")
+    gate = marker.get("quality_gate")
+    if not isinstance(gate, dict) or gate.get("status") != "pass":
+        raise RuntimeError("Matcher cutover requires a passing shadow quality gate")
+    shadow_tables = _pending_tables(shadow, run_id, marker)
+    artifacts = marker.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise TypeError("Matcher cutover marker has no artifact inventory")
+
+    # Complete every source/stage check before inspecting or changing stable inputs.
+    # A stage failure therefore cannot delete either retained stable partition.
+    bq_client = bigquery.Client(project=GCP_PROJECT)
+    promoted: dict[str, dict[str, object]] = {}
+    for spec in ARTIFACTS:
+        artifact = artifacts.get(spec.key)
+        if (
+            not isinstance(artifact, dict)
+            or not isinstance(artifact.get("sha256"), str)
+            or not isinstance(artifact.get("rows"), int)
+        ):
+            raise TypeError(f"Matcher cutover marker has invalid {spec.key} artifact metadata")
+        sha256, expected_rows = str(artifact.get("sha256")), int(cast("int", artifact.get("rows")))
+        source_table = shadow_tables[spec.key]["table_id"]
+        staged_table = _promotion_table_id(cutover.input_dataset, processing_date, run_id, spec, sha256)
+        stable_table = f"{GCP_PROJECT}.{cutover.input_dataset}.{STABLE_INPUT_TABLES[spec.key]}"
+        source_rows = _require_exact_processing_partition(
+            bq_client,
+            source_table,
+            processing_date,
+            spec,
+            expected_rows,
+            _promotion_job_id("source_validate", processing_date, run_id, spec, sha256),
+            cutover.max_promotion_bytes,
+        )
+        _stage_artifact(
+            bq_client,
+            source_table,
+            staged_table,
+            processing_date,
+            run_id,
+            spec,
+            sha256,
+            cutover.max_promotion_bytes,
+        )
+        staged_rows = _require_exact_processing_partition(
+            bq_client,
+            staged_table,
+            processing_date,
+            spec,
+            expected_rows,
+            _promotion_job_id("stage_validate", processing_date, run_id, spec, sha256),
+            cutover.max_promotion_bytes,
+        )
+        promoted[spec.key] = {
+            "source_table": source_table,
+            "staged_table": staged_table,
+            "stable_table": stable_table,
+            "rows": staged_rows,
+            "source_rows": source_rows,
+            "sha256": sha256,
+            "job_ids": {
+                action: _promotion_job_id(action, processing_date, run_id, spec, sha256)
+                for action in ("source_validate", "stage", "stage_validate")
+            },
+        }
+
+    for spec in ARTIFACTS:
+        _verify_table_contract(bq_client, str(promoted[spec.key]["stable_table"]), spec)
+
+    pre_counts = {
+        spec.key: _stable_partition_counts(
+            bq_client,
+            str(promoted[spec.key]["stable_table"]),
+            processing_date,
+            spec,
+            _promotion_job_id("precount", processing_date, run_id, spec, str(promoted[spec.key]["sha256"])),
+            cutover.max_promotion_bytes,
+        )
+        for spec in ARTIFACTS
+    }
+    transaction_job_id = _promotion_transaction_job_id(processing_date, run_id, promoted)
+    _query_job(
+        bq_client,
+        _promotion_transaction_query(promoted),
+        transaction_job_id,
+        cutover.max_promotion_bytes,
+        [bigquery.ScalarQueryParameter("processing_date", "DATE", date.fromisoformat(processing_date))],
+    )
+    try:
+        for spec in ARTIFACTS:
+            stable_rows = _require_stable_processing_partition(
+                bq_client,
+                str(promoted[spec.key]["stable_table"]),
+                processing_date,
+                spec,
+                cast("int", promoted[spec.key]["rows"]),
+                _promotion_job_id("postvalidate", processing_date, run_id, spec, str(promoted[spec.key]["sha256"])),
+                cutover.max_promotion_bytes,
+            )
+            promoted[spec.key]["rows"] = stable_rows
+            promoted[spec.key]["job_ids"] = cast("dict[str, str]", promoted[spec.key]["job_ids"]) | {
+                "precount": _promotion_job_id(
+                    "precount", processing_date, run_id, spec, str(promoted[spec.key]["sha256"])
+                ),
+                "postvalidate": _promotion_job_id(
+                    "postvalidate", processing_date, run_id, spec, str(promoted[spec.key]["sha256"])
+                ),
+            }
+    except Exception:
+        LOGGER.exception(
+            "Matcher cutover transaction committed but post-commit validation failed; marker remains absent. "
+            "Restore only the captured pre-promotion partitions if rollback is required: %s",
+            pre_counts,
+        )
+        raise
+    marker_uri = _write_promotion_marker(
+        storage_client,
+        shadow,
+        processing_date,
+        run_id,
+        {
+            "processing_date": processing_date,
+            "run_id": run_id,
+            "stable_inputs": promoted,
+            "transaction_job_id": transaction_job_id,
+            "pre_promotion_partition_counts": pre_counts,
+            "rollback_boundary": (
+                "The four-table transaction is committed before post-validation. If post-validation fails, "
+                "the marker is absent but the transaction is not rolled back; restore only the captured "
+                "pre-promotion partitions."
+            ),
+        },
+    )
+    return {"enabled": True, "status": "promoted", "marker_uri": marker_uri, "stable_inputs": promoted}
 
 
 def run_matcher_shadow_load_task(

@@ -1715,6 +1715,7 @@ unit_tests:
         processing_date: '2026-01-16'
         publish_service_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
+        use_python_reconstruction: true
     given:
       - input: ref('fct_trip')
         format: sql
@@ -1795,18 +1796,31 @@ unit_tests:
           select
             'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 'settled_duty_chain',
             'chain-prior', 'block_id', 'block-prior', 1, 1, 1, array<string>[]
-      - input: ref('int_gtfs_trip_stop_semantics')
+      - input: source('matcher_input', 'reconstruction_stop_semantics')
         format: sql
         rows: |
           select
             base.*,
             date '2026-01-15' as service_date,
-            if(stop_service_class = 'not_in_passenger_service', 'technical_suffix', 'passenger') as stop_execution_class,
-            'high' as classification_confidence,
-            if(stop_service_class = 'not_in_passenger_service', 'explicit_non_passenger_suffix', 'gtfs_passenger_stop') as classification_reason,
-            if(stop_service_class = 'not_in_passenger_service', ['explicit_non_passenger_service'], ['gtfs_passenger_eligible']) as classification_evidence,
+            date '2026-01-15' as processing_date,
+            case
+              when trip_id = 'trip-3' then 'unknown'
+              when stop_service_class = 'not_in_passenger_service' then 'technical_suffix'
+              else 'passenger'
+            end as stop_execution_class,
+            if(trip_id = 'trip-3', 'unknown', 'high') as classification_confidence,
+            case
+              when trip_id = 'trip-3' then 'unresolved_passenger_boundary'
+              when stop_service_class = 'not_in_passenger_service' then 'explicit_non_passenger_suffix'
+              else 'gtfs_passenger_stop'
+            end as classification_reason,
+            case
+              when trip_id = 'trip-3' then ['missing_boundary_evidence']
+              when stop_service_class = 'not_in_passenger_service' then ['explicit_non_passenger_service']
+              else ['gtfs_passenger_eligible']
+            end as classification_evidence,
             stop_service_class != 'not_in_passenger_service' as is_passenger_stop,
-            true as are_passenger_boundaries_settled,
+            trip_id != 'trip-3' as are_passenger_boundaries_settled,
             min(if(stop_service_class != 'not_in_passenger_service', stop_sequence, null)) over (partition by gtfs_snapshot_id, trip_id) as first_passenger_stop_sequence,
             max(if(stop_service_class != 'not_in_passenger_service', stop_sequence, null)) over (partition by gtfs_snapshot_id, trip_id) as last_passenger_stop_sequence
           from (
@@ -2008,11 +2022,11 @@ unit_tests:
           '187', '187', 'bus', '3', 1, 0, 'svc', 'Central', 'shape-3', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', ['stale_stop_progression'], 'modified', ['stale_progress'], 'settled_duty_chain', 'chain-3', 'block_id', 'block-3',
           1, 1, 1, array<string>[], '100104', '1001', '04', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
-          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
+          'unknown', 'unknown', 'unresolved_passenger_boundary', ['missing_boundary_evidence'], true, false, 0, 0,
           timestamp('2026-01-15 08:35:00+01'), timestamp('2026-01-15 08:35:00+01'),
           timestamp('2026-01-15 08:35:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:35:00+01'),
-          timestamp('2026-01-15 08:35:30+01'), 30, true, false, 'observed'
+          timestamp('2026-01-15 08:35:30+01'), 30, true, false, 'uncertain'
         union all
         select
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-4', 1004,

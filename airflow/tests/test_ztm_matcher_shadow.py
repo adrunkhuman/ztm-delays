@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from datetime import date
@@ -22,6 +23,202 @@ def test_shadow_load_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> 
     }
 
 
+def test_cutover_is_disabled_by_default_and_cannot_mutate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MATCHER_CUTOVER_ENABLED", raising=False)
+    shadow = _load_shadow_module()
+
+    assert shadow.promote_validated_shadow_artifacts("2026-07-09", "run") == {
+        "enabled": False,
+        "reason": "MATCHER_CUTOVER_ENABLED is false",
+    }
+
+
+@pytest.mark.parametrize("dataset", ["ztm_raw", "ztm_int", "ztm_marts", "matcher_shadow"])
+def test_enabled_cutover_requires_an_isolated_shadow_and_input_dataset(
+    monkeypatch: pytest.MonkeyPatch, dataset: str
+) -> None:
+    monkeypatch.setenv("MATCHER_CUTOVER_ENABLED", "true")
+    monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
+    monkeypatch.setenv("BIGQUERY_MATCHER_INPUT_DATASET", dataset)
+    shadow = _load_shadow_module()
+
+    with pytest.raises(ValueError, match="must not name"):
+        shadow.CutoverConfig.from_env().validate(shadow.ShadowConfig.from_env())
+
+
+def test_cutover_publication_args_are_exact_current_and_prior_without_execution() -> None:
+    shadow = _load_shadow_module()
+
+    publication = shadow.matcher_cutover_publication_dbt_args("2026-07-09", "snapshot")
+
+    assert publication == {
+        "current": {
+            "selector": (
+                "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version "
+                "dim_schedule_version fct_trip fct_stop_arrival fct_expected_stop_event"
+            ),
+            "vars": {
+                "processing_date": "2026-07-09",
+                "gtfs_snapshot_id": "snapshot",
+                "use_python_reconstruction": True,
+                "publish_service_date": "2026-07-09",
+            },
+        },
+        "prior": {
+            "selector": (
+                "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version "
+                "dim_schedule_version fct_trip fct_stop_arrival fct_expected_stop_event"
+            ),
+            "vars": {
+                "processing_date": "2026-07-09",
+                "gtfs_snapshot_id": "snapshot",
+                "use_python_reconstruction": True,
+                "publish_service_date": "2026-07-08",
+            },
+        },
+    }
+
+
+def test_cutover_refuses_non_passing_marker_before_bigquery_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MATCHER_CUTOVER_ENABLED", "true")
+    monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
+    monkeypatch.setenv("BIGQUERY_MATCHER_INPUT_DATASET", "matcher_input")
+    monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
+    shadow = _load_shadow_module()
+    monkeypatch.setattr(shadow.storage, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        shadow,
+        "_read_marker",
+        lambda *_args: {"processing_date": "2026-07-09", "run_id": "run", "quality_gate": {"status": "warn"}},
+    )
+    monkeypatch.setattr(shadow.bigquery, "Client", lambda **_kwargs: pytest.fail("unsafe cutover reached BigQuery"))
+
+    with pytest.raises(RuntimeError, match="passing shadow quality gate"):
+        shadow.promote_validated_shadow_artifacts("2026-07-09", "run")
+
+
+def test_promotion_identities_are_deterministic_and_bound_to_content_hash() -> None:
+    shadow = _load_shadow_module()
+    spec = shadow.ARTIFACTS[0]
+
+    assert shadow._promotion_table_id(
+        "matcher_input", "2026-07-09", "run", spec, "a" * 64
+    ) == shadow._promotion_table_id("matcher_input", "2026-07-09", "run", spec, "a" * 64)
+    assert shadow._promotion_job_id("replace", "2026-07-09", "run-a", spec, "a" * 64) != shadow._promotion_job_id(
+        "replace", "2026-07-09", "run-a", spec, "b" * 64
+    )
+    assert shadow._promotion_job_id("replace", "2026-07-09", "run-a", spec, "a" * 64) != shadow._promotion_job_id(
+        "replace", "2026-07-09", "run-b", spec, "a" * 64
+    )
+
+
+def test_promotion_transaction_replaces_all_partitions_with_explicit_columns() -> None:
+    shadow = _load_shadow_module()
+    promoted = {
+        spec.key: {
+            "stable_table": f"project.input.{shadow.STABLE_INPUT_TABLES[spec.key]}",
+            "staged_table": f"project.input.stage_{spec.key}",
+        }
+        for spec in shadow.ARTIFACTS
+    }
+
+    query = shadow._promotion_transaction_query(promoted)
+
+    assert query.count("delete from") == 4
+    assert query.count("insert into") == 4
+    assert query.count("@processing_date") == 8
+    assert "reconstruction_stop_semantics` where processing_date = @processing_date" in query
+    assert "begin transaction;" in query
+    assert "commit transaction;" in query
+    assert "select *" not in query
+
+
+def test_partition_validation_rejects_wrong_gps_date_before_stable_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    shadow = _load_shadow_module()
+    monkeypatch.setattr(
+        shadow,
+        "_promotion_table_counts",
+        lambda *_args: {
+            "total_rows": 3,
+            "partition_rows": 2,
+            "wrong_partition_rows": 1,
+            "wrong_processing_date_rows": 1,
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="row count does not equal"):
+        shadow._require_exact_processing_partition(
+            object(), "project.shadow.trip", "2026-07-09", shadow.ARTIFACTS[0], 3, "job", 1
+        )
+
+
+def test_stage_failure_prevents_any_stable_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MATCHER_CUTOVER_ENABLED", "true")
+    monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
+    monkeypatch.setenv("BIGQUERY_MATCHER_INPUT_DATASET", "matcher_input")
+    monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
+    shadow = _load_shadow_module()
+    marker = {
+        "processing_date": "2026-07-09",
+        "run_id": "run",
+        "quality_gate": {"status": "pass"},
+        "artifacts": {spec.key: {"sha256": "a" * 64, "rows": 1} for spec in shadow.ARTIFACTS},
+    }
+    tables = {spec.key: shadow._table_identity("matcher_shadow", "run", spec, "a" * 64) for spec in shadow.ARTIFACTS}
+    mutations: list[str] = []
+    monkeypatch.setattr(shadow.storage, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow.bigquery, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow, "_read_marker", lambda *_args: marker)
+    monkeypatch.setattr(shadow, "_pending_tables", lambda *_args: tables)
+    monkeypatch.setattr(shadow, "_require_exact_processing_partition", lambda *_args: 1)
+    monkeypatch.setattr(shadow, "_stage_artifact", lambda *_args: (_ for _ in ()).throw(RuntimeError("stage failed")))
+    monkeypatch.setattr(shadow, "_query_job", lambda *_args: mutations.append("query"))
+
+    with pytest.raises(RuntimeError, match="stage failed"):
+        shadow.promote_validated_shadow_artifacts("2026-07-09", "run")
+
+    assert mutations == []
+
+
+def test_promotion_marker_is_create_only_and_idempotent(tmp_path: Path) -> None:
+    shadow = _load_shadow_module()
+    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher")
+    marker = {"run_id": "run", "stable_inputs": {"trip": {"sha256": "a" * 64}}}
+    bucket = FakeMarkerBucket(existing=None)
+
+    uri = shadow._write_promotion_marker(FakeStorageClient(bucket), config, "2026-07-09", "run", marker)
+
+    assert uri.endswith("promotion.json")
+    assert bucket.blob_instance.if_generation_match == 0
+    same = FakeMarkerBucket(existing=bucket.blob_instance.payload)
+    assert shadow._write_promotion_marker(FakeStorageClient(same), config, "2026-07-09", "run", marker) == uri
+
+
+def test_stable_inputs_must_keep_the_configured_partition_field() -> None:
+    shadow = _load_shadow_module()
+    client = types.SimpleNamespace(
+        get_table=lambda _table_id: types.SimpleNamespace(time_partitioning=types.SimpleNamespace(field="gps_date"))
+    )
+
+    shadow._require_partition_field(client, "project.matcher_input.reconstruction_trip_facts", shadow.ARTIFACTS[0])
+    semantics = next(spec for spec in shadow.ARTIFACTS if spec.key == "stop_semantics")
+    client.get_table = lambda _table_id: types.SimpleNamespace(
+        time_partitioning=types.SimpleNamespace(field="processing_date")
+    )
+    shadow._require_partition_field(client, "project.matcher_input.reconstruction_stop_semantics", semantics)
+
+    client.get_table = lambda _table_id: types.SimpleNamespace(
+        time_partitioning=types.SimpleNamespace(field="service_date")
+    )
+    with pytest.raises(RuntimeError, match="partitioned by gps_date"):
+        shadow._require_partition_field(client, "project.matcher_input.reconstruction_trip_facts", shadow.ARTIFACTS[0])
+
+
 @pytest.mark.parametrize("dataset", ["", "ztm_raw", "ztm_int", "ztm_marts"])
 def test_enabled_shadow_rejects_missing_or_canonical_dataset(monkeypatch: pytest.MonkeyPatch, dataset: str) -> None:
     monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
@@ -30,6 +227,186 @@ def test_enabled_shadow_rejects_missing_or_canonical_dataset(monkeypatch: pytest
 
     with pytest.raises(ValueError, match=r"DATASET|dataset"):
         shadow.ShadowConfig.from_env().validate()
+
+
+@pytest.mark.parametrize("dataset", ["project.matcher_input", "matcher`input", "matcher-input", "matcher input"])
+def test_cutover_rejects_dataset_expression_injection(monkeypatch: pytest.MonkeyPatch, dataset: str) -> None:
+    monkeypatch.setenv("MATCHER_CUTOVER_ENABLED", "true")
+    monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
+    monkeypatch.setenv("BIGQUERY_MATCHER_INPUT_DATASET", dataset)
+    shadow = _load_shadow_module()
+
+    with pytest.raises(ValueError, match="dataset ID"):
+        shadow.CutoverConfig.from_env().validate(shadow.ShadowConfig.from_env())
+
+
+def test_stage_contract_requires_exact_schema_and_content_labels() -> None:
+    shadow = _load_shadow_module()
+    spec = shadow.ARTIFACTS[0]
+    expected = shadow._expected_schema(spec)
+    fields = [types.SimpleNamespace(name=name, field_type=field_type, mode=mode) for name, field_type, mode in expected]
+    labels = shadow._stage_labels(spec, "a" * 64)
+    table = types.SimpleNamespace(
+        schema=fields,
+        labels=labels,
+        time_partitioning=types.SimpleNamespace(field="gps_date"),
+    )
+    client = types.SimpleNamespace(get_table=lambda _table: table)
+
+    shadow._verify_table_contract(client, "project.input.stage", spec, labels)
+    table.labels = {"matcher_schema_version": labels["matcher_schema_version"]}
+    with pytest.raises(RuntimeError, match="labels"):
+        shadow._verify_table_contract(client, "project.input.stage", spec, labels)
+
+
+def test_stable_postcommit_validation_scans_only_the_replaced_partition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shadow = _load_shadow_module()
+
+    def query_job_config(**kwargs: Any) -> types.SimpleNamespace:
+        return types.SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(shadow.bigquery, "QueryJobConfig", query_job_config)
+
+    class Client:
+        query_text = ""
+        job_config: Any = None
+
+        def query(self, query: str, **kwargs: Any) -> Any:
+            self.query_text = query
+            self.job_config = kwargs["job_config"]
+            return types.SimpleNamespace(
+                job_id="partition-check",
+                query=query,
+                state="DONE",
+                error_result=None,
+                result=lambda: [{"total_rows": 2, "wrong_processing_date_rows": 0}],
+            )
+
+    client = Client()
+    assert (
+        shadow._require_stable_processing_partition(
+            client,
+            "project.input.reconstruction_trip_facts",
+            "2026-07-09",
+            shadow.ARTIFACTS[0],
+            2,
+            "partition-check",
+            100,
+        )
+        == 2
+    )
+    assert "where gps_date = @processing_date" in client.query_text.lower()
+    assert "wrong_gps_date_rows" not in client.query_text
+    assert client.job_config.maximum_bytes_billed == 100
+
+
+def test_semantics_stage_and_postcommit_validation_use_processing_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    shadow = _load_shadow_module()
+    semantics = next(spec for spec in shadow.ARTIFACTS if spec.key == "stop_semantics")
+
+    def query_job_config(**kwargs: Any) -> types.SimpleNamespace:
+        return types.SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(shadow.bigquery, "QueryJobConfig", query_job_config)
+
+    class Client:
+        query_text = ""
+
+        def query(self, query: str, **_kwargs: Any) -> Any:
+            self.query_text = query
+            return types.SimpleNamespace(
+                job_id="partition-check",
+                query=query,
+                state="DONE",
+                error_result=None,
+                result=lambda: [{"total_rows": 2, "wrong_processing_date_rows": 0}],
+            )
+
+    client = Client()
+    assert (
+        shadow._require_stable_processing_partition(
+            client, "project.input.reconstruction_stop_semantics", "2026-07-09", semantics, 2, "partition-check", 100
+        )
+        == 2
+    )
+    assert "where processing_date = @processing_date" in client.query_text.lower()
+
+
+def test_stage_preexisting_tampered_table_is_rejected_after_verified_job_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shadow = _load_shadow_module()
+
+    def query_job_config(**kwargs: Any) -> types.SimpleNamespace:
+        return types.SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(shadow.bigquery, "QueryJobConfig", query_job_config)
+    spec = shadow.ARTIFACTS[0]
+    labels = shadow._stage_labels(spec, "a" * 64)
+    fields = [
+        types.SimpleNamespace(name=name, field_type=field_type, mode=mode)
+        for name, field_type, mode in shadow._expected_schema(spec)
+    ]
+
+    class Client:
+        query_text = ""
+        recovered = False
+
+        def query(self, query: str, **_kwargs: Any) -> Any:
+            self.query_text = query
+            raise Conflict("retry")
+
+        def get_job(self, job_id: str, **_kwargs: Any) -> Any:
+            self.recovered = True
+            return types.SimpleNamespace(
+                job_id=job_id,
+                query=self.query_text,
+                state="DONE",
+                error_result=None,
+                destination="project.input.stage",
+                result=list,
+            )
+
+        def get_table(self, _table_id: str) -> Any:
+            return types.SimpleNamespace(
+                schema=fields,
+                labels=labels | {"matcher_artifact_sha256": "b" * 64},
+                time_partitioning=types.SimpleNamespace(field="gps_date"),
+            )
+
+    client = Client()
+    with pytest.raises(RuntimeError, match="labels"):
+        shadow._stage_artifact(
+            client,
+            "project.shadow.trip",
+            "project.input.stage",
+            "2026-07-09",
+            "run",
+            spec,
+            "a" * 64,
+            100,
+        )
+    assert client.recovered is True
+    assert "create table if not exists" not in client.query_text.lower()
+
+
+def test_query_recovery_rejects_different_sql_or_destination() -> None:
+    shadow = _load_shadow_module()
+    job = types.SimpleNamespace(
+        job_id="stage-job",
+        query="select 1",
+        state="DONE",
+        error_result=None,
+        destination="project.input.other_stage",
+    )
+
+    with pytest.raises(RuntimeError, match="destination"):
+        shadow._verify_query_job_identity(job, "select 1", "stage-job", 100, [], "project.input.expected_stage")
+    with pytest.raises(RuntimeError, match="text"):
+        shadow._verify_query_job_identity(job, "select 2", "stage-job", 100, [])
 
 
 def test_matcher_command_is_parsed_and_prepended_to_prepare_args(
@@ -116,6 +493,7 @@ def test_inspect_artifact_uses_bounded_duckdb_validation(tmp_path: Path) -> None
         "test",
         (
             shadow.FieldSpec("processing_date", "DATE"),
+            shadow.FieldSpec("gps_date", "DATE"),
             shadow.FieldSpec("service_date", "DATE"),
             shadow.FieldSpec("gtfs_snapshot_id", "STRING"),
             shadow.FieldSpec("trip_id", "STRING"),
@@ -128,6 +506,7 @@ def test_inspect_artifact_uses_bounded_duckdb_validation(tmp_path: Path) -> None
         pa.table(
             {
                 "processing_date": [date(2026, 7, 9), date(2026, 7, 9)],
+                "gps_date": [date(2026, 7, 9), date(2026, 7, 9)],
                 "service_date": [date(2026, 7, 8), date(2026, 7, 9)],
                 "gtfs_snapshot_id": ["snapshot", "snapshot"],
                 "trip_id": ["prior", "current"],
@@ -148,6 +527,83 @@ def test_inspect_artifact_uses_bounded_duckdb_validation(tmp_path: Path) -> None
     assert shadow.VALIDATION_MEMORY_LIMIT == "320MB"
     assert shadow.VALIDATION_TEMP_LIMIT == "20GB"
     assert duckdb is not None
+
+
+def test_inspect_artifact_rejects_a_second_gps_date(tmp_path: Path) -> None:
+    pytest.importorskip("duckdb")
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    shadow = _load_shadow_module()
+    path = tmp_path / "artifact.parquet"
+    spec = shadow.ArtifactSpec(
+        "test",
+        path.name,
+        "test",
+        (
+            shadow.FieldSpec("processing_date", "DATE"),
+            shadow.FieldSpec("gps_date", "DATE"),
+            shadow.FieldSpec("service_date", "DATE"),
+            shadow.FieldSpec("gtfs_snapshot_id", "STRING"),
+            shadow.FieldSpec("trip_id", "STRING"),
+        ),
+        ("gtfs_snapshot_id", "service_date", "trip_id"),
+        "gps_date",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "processing_date": [date(2026, 7, 9), date(2026, 7, 9)],
+                "gps_date": [date(2026, 7, 9), date(2026, 7, 8)],
+                "service_date": [date(2026, 7, 8), date(2026, 7, 9)],
+                "gtfs_snapshot_id": ["snapshot", "snapshot"],
+                "trip_id": ["prior", "current"],
+            }
+        ),
+        path,
+    )
+
+    with pytest.raises(RuntimeError, match="gps_date"):
+        shadow._inspect_artifact(path, spec, "2026-07-09", "snapshot")
+
+
+def test_manifest_requires_and_marker_binds_complete_stop_semantics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    shadow = _load_shadow_module()
+    artifact = shadow.ArtifactValidation(tmp_path / "artifact.parquet", 2, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
+    semantics = next(spec for spec in shadow.ARTIFACTS if spec.key == "stop_semantics")
+    manifest = {
+        "processing_date": "2026-07-09",
+        "snapshot_id": "snapshot",
+        "schema_versions": {
+            **{
+                Path(spec.filename).stem: shadow.ARTIFACT_SCHEMA_VERSIONS[Path(spec.filename).stem]
+                for spec in shadow.ARTIFACTS
+            },
+            "trip_universe": shadow.ARTIFACT_SCHEMA_VERSIONS["trip_universe"],
+        },
+        "outputs": {
+            **{
+                Path(spec.filename).stem: {"sha256": artifact.sha256, "bytes": artifact.bytes}
+                for spec in shadow.ARTIFACTS
+            },
+            "trip_universe": {"sha256": artifact.sha256, "bytes": artifact.bytes},
+        },
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(shadow, "_inspect_artifact", lambda *_args: artifact)
+    monkeypatch.setattr(
+        shadow, "_read_metrics", lambda *_args: {Path(spec.filename).stem: artifact.rows for spec in shadow.ARTIFACTS}
+    )
+
+    validated, _ = shadow._validate_outputs(tmp_path, "2026-07-09", "snapshot")
+
+    assert validated[semantics.key] == artifact
+    assert semantics.key in {spec.key for spec in shadow.ARTIFACTS}
+    del manifest["outputs"][Path(semantics.filename).stem]
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="missing required reconstruction artifacts"):
+        shadow._validate_outputs(tmp_path, "2026-07-09", "snapshot")
 
 
 def test_load_job_id_binds_artifact_hash_and_conflict_checks_existing_job(
@@ -385,7 +841,7 @@ def test_load_writes_pending_not_marker_and_compare_commits_afterwards(
         "run_id": "run",
         "pending_uri": "gs://pending",
     }
-    assert events == ["matcher", "load", "load", "load", "pending"]
+    assert events == ["matcher", "load", "load", "load", "load", "pending"]
     pending = {
         "run_id": "run",
         "processing_date": "2026-07-09",
