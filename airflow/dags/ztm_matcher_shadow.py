@@ -855,6 +855,7 @@ def _validate_outputs(
         TRIP_UNIVERSE_FIELDS,
         ("gtfs_snapshot_id", "service_date", "duty_chain_id", "trip_id"),
         "processing_date",
+        partition_field="processing_date",
         quality_field=None,
     )
     universe_validation = _inspect_artifact(universe, universe_spec, processing_date, snapshot_id)
