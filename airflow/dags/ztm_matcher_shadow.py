@@ -62,7 +62,7 @@ DEFAULT_MAX_GPS_BYTES = 20 * 1024**3
 DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024**3
 DEFAULT_MAX_COMPARISON_BYTES = 5 * 1024**3
 DEFAULT_MAX_MARKER_BYTES = 20 * 1024**2
-COMPARISON_CONTRACT_VERSION = "matcher-shadow-comparison-v2"
+COMPARISON_CONTRACT_VERSION = "matcher-shadow-comparison-v3"
 DEFAULT_GATE_CURRENT_RETENTION_MIN = 0.75
 DEFAULT_GATE_PRIOR_RETENTION_MIN = 0.40
 DEFAULT_GATE_COMPLETE_RATE_DROP_MAX = 0.15
@@ -945,30 +945,91 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
         shadow = shadow_tables[spec.key]["table_id"]
         canonical = CANONICAL_FACT_TABLES[spec.key]
         source_date = "gps_date" if spec.key == "trip" else "source_gps_date"
-        processing_field = "gps_date"
         delay = "end_delay_seconds" if spec.key == "trip" else "delay_seconds"
-        status = "cast(null as string)" if spec.key != "expected_stop_event" else "observation_status"
-        grain = ", ".join(spec.grain)
+        status = "cast(null as string)" if spec.key != "expected_stop_event" else "fact.observation_status"
+        grain = ", ".join(f"fact.{field}" for field in spec.grain)
         for source, table in (("shadow", shadow), ("canonical", canonical)):
+            trip_table = shadow_tables["trip"]["table_id"] if source == "shadow" else CANONICAL_FACT_TABLES["trip"]
+            cohort = f"""
+                select
+                    trip.gtfs_snapshot_id,
+                    trip.gps_date,
+                    trip.service_date,
+                    trip.trip_id,
+                    trip.vehicle_number,
+                    trip.line,
+                    trip.mode,
+                    trip.trip_quality,
+                    trip.scheduled_end_time,
+                    trip.end_delay_seconds
+                from `{trip_table}` as trip
+                where trip.gps_date = @processing_date
+                  and trip.service_date in unnest(@service_dates)
+                  and (
+                      trip.service_date = @processing_date
+                      or (
+                          trip.service_date = date_sub(@processing_date, interval 1 day)
+                          and trip.scheduled_end_time >= timestamp(@processing_date, 'Europe/Warsaw')
+                      )
+                  )
+            """
+            if spec.key == "trip":
+                fact_source = "from cohort as fact"
+                fact_filter = ""
+            else:
+                fact_source = f"""
+                    from `{table}` as fact
+                    inner join cohort
+                        on fact.gtfs_snapshot_id = cohort.gtfs_snapshot_id
+                        and fact.gps_date = cohort.gps_date
+                        and fact.service_date = cohort.service_date
+                        and fact.trip_id = cohort.trip_id
+                        and fact.vehicle_number = cohort.vehicle_number
+                """
+                # Canonical stop facts require this partition predicate. Keep the
+                # processing lineage separate from source_gps_date diagnostics.
+                fact_filter = """
+                    where fact.service_date in unnest(@service_dates)
+                      and fact.gps_date = @processing_date
+                """
             sections.append(
                 f"""
-                select '{spec.key}' as artifact, '{source}' as source, service_date, mode, line, gtfs_snapshot_id,
-                    trip_quality, {status} as observation_status, count(*) as row_count,
+                with cohort as ({cohort})
+                select
+                    '{spec.key}' as artifact,
+                    '{source}' as source,
+                    fact.service_date,
+                    fact.mode,
+                    fact.line,
+                    fact.gtfs_snapshot_id,
+                    fact.trip_quality,
+                    {status} as observation_status,
+                    count(*) as row_count,
                     count(distinct to_json_string(struct({grain}))) as distinct_grains,
-                    avg({delay}) as avg_delay_seconds,
-                    approx_quantiles({delay}, 100)[offset(50)] as delay_p50_seconds,
-                    approx_quantiles({delay}, 100)[offset(90)] as delay_p90_seconds,
-                    approx_quantiles({delay}, 100)[offset(95)] as delay_p95_seconds,
-                    countif(abs({delay}) > 3600) as abs_delay_over_3600_count,
+                    avg(fact.{delay}) as avg_delay_seconds,
+                    approx_quantiles(fact.{delay}, 100)[offset(50)] as delay_p50_seconds,
+                    approx_quantiles(fact.{delay}, 100)[offset(90)] as delay_p90_seconds,
+                    approx_quantiles(fact.{delay}, 100)[offset(95)] as delay_p95_seconds,
+                    countif(abs(fact.{delay}) > 3600) as abs_delay_over_3600_count,
                     countif({status} = 'uncertain') as uncertain_count,
                     countif({status} = 'missed') as missed_count,
-                    countif({source_date} != service_date) as overnight_rows,
-                    count(distinct {source_date}) as source_date_count,
-                    array_agg(distinct cast({source_date} as string) ignore nulls order by cast({source_date} as string)) as source_dates
-                from `{table}`
-                where service_date in unnest(@service_dates)
-                  and {processing_field} = @processing_date
-                group by artifact, source, service_date, mode, line, gtfs_snapshot_id, trip_quality, observation_status
+                    countif(fact.{source_date} != fact.service_date) as overnight_rows,
+                    count(distinct fact.{source_date}) as source_date_count,
+                    array_agg(
+                        distinct cast(fact.{source_date} as string) ignore nulls
+                        order by cast(fact.{source_date} as string)
+                    ) as source_dates
+                {fact_source}
+                {fact_filter}
+                group by
+                    artifact,
+                    source,
+                    fact.service_date,
+                    fact.mode,
+                    fact.line,
+                    fact.gtfs_snapshot_id,
+                    fact.trip_quality,
+                    observation_status
                 """
             )
     return " union all ".join(sections)

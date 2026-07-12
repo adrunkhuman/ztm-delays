@@ -1039,6 +1039,13 @@ def test_comparison_query_and_marker_bounds_are_configured(monkeypatch: pytest.M
     assert "abs_delay_over_3600_count" in query
     assert "gtfs_snapshot_id" in query
     assert "line" in query
+    assert "trip.scheduled_end_time >= timestamp(@processing_date, 'Europe/Warsaw')" in query
+    assert query.count("from cohort as fact") == 2
+    assert query.count("inner join cohort") == 4
+    assert "fact.gps_date = cohort.gps_date" in query
+    assert "fact.source_gps_date = cohort" not in query
+    assert "fact.scheduled_arrival_time" not in query
+    assert "struct(fact.gtfs_snapshot_id" in query
     config = shadow.ShadowConfig(
         True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher", max_marker_bytes=1
     )
