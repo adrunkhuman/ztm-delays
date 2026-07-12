@@ -34,6 +34,7 @@ from ztm_airflow_common import (
     dbt_command,
     dbt_vars,
 )
+from ztm_matcher_shadow import run_matcher_shadow_task
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -328,6 +329,22 @@ with DAG(
         )
 
     with TaskGroup(
+        "matcher_shadow", group_display_name="Matcher shadow", prefix_group_id=False
+    ) as matcher_shadow_group:
+
+        @task
+        def run_matcher_shadow_branch(processing_date: str, snapshot_id: str) -> dict[str, object]:
+            """Run the opt-in local matcher without publishing canonical facts or assets."""
+            context = get_current_context()
+            dag_run = context.get("dag_run")
+            task_instance = context.get("ti")
+            run_id = str(getattr(dag_run, "run_id", "manual-shadow"))
+            try_number = int(getattr(task_instance, "try_number", 1) or 1)
+            return run_matcher_shadow_task(processing_date, snapshot_id, run_id, try_number=try_number)
+
+        matcher_shadow = run_matcher_shadow_branch(PROCESSING_DATE, selected_gtfs_snapshot)
+
+    with TaskGroup(
         "trip_reconstruction", group_display_name="Trip reconstruction", prefix_group_id=False
     ) as trip_group:
         dbt_run_int_ping_trip, dbt_test_int_ping_trip = _dbt_run_test_pair(
@@ -522,8 +539,10 @@ with DAG(
             raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
 
     selected_gtfs_snapshot >> dbt_run_int_ping_trip
+    selected_gtfs_snapshot >> matcher_shadow
     selected_prior_gtfs_snapshot >> dbt_run_prior_coverage_schedule
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
+    dbt_test_stg_gps_pings >> matcher_shadow
     dbt_test_stg_gps_pings >> dbt_run_int_ping_trip >> dbt_test_int_ping_trip >> dbt_run_int_stop_arrivals
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
     dbt_run_int_stop_arrivals >> dbt_test_int_stop_arrivals >> dbt_run_int_trip_summary

@@ -241,6 +241,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     expected_groups = {
         "snapshot_group": ("snapshot_lookup", "Snapshot lookup"),
         "staging_group": ("staging", "Staging"),
+        "matcher_shadow_group": ("matcher_shadow", "Matcher shadow"),
         "trip_group": ("trip_reconstruction", "Trip reconstruction"),
         "current_facts_group": ("current_facts", "Current facts"),
         "prior_facts_group": ("prior_facts", "Prior facts"),
@@ -305,6 +306,8 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         (dag.dbt_run_stg_gps_pings, dag.dbt_test_stg_gps_pings),
         (dag.selected_gtfs_snapshot, dag.dbt_run_int_ping_trip),
         (dag.dbt_test_stg_gps_pings, dag.dbt_run_int_ping_trip),
+        (dag.selected_gtfs_snapshot, dag.matcher_shadow),
+        (dag.dbt_test_stg_gps_pings, dag.matcher_shadow),
         (dag.dbt_test_stg_gps_pings, dag.dbt_run_int_gps_hourly_completeness),
         (dag.dbt_run_int_ping_trip, dag.dbt_test_int_ping_trip),
         (dag.dbt_test_int_ping_trip, dag.dbt_run_int_stop_arrivals),
@@ -345,6 +348,8 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert dag.LOG_BIGQUERY_DBT_JOB_COSTS is False
     assert dag.log_bigquery_dbt_job_costs not in dag.dbt_test_serving_marts.downstream
     assert dag.emit_gps_models_date_asset in dag.dbt_test_serving_marts.downstream
+    assert dag.matcher_shadow.kwargs == {}
+    assert dag.matcher_shadow.downstream == []
     assert dag.log_bigquery_dbt_job_costs.kwargs == {"do_xcom_push": False}
     assert dag.watcher in dag.dbt_test_serving_marts.downstream
     assert dag.fail_on_any_task_failure.kwargs["retries"] == 0

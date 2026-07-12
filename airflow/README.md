@@ -18,6 +18,15 @@ Runtime env defaults match the current VPS:
 | `DBT_PROJECT_DIR` | `/opt/airflow/dbt` |
 | `RAW_GPS_PREFIX` | `raw/gps` |
 | `RAW_GTFS_PREFIX` | `raw/gtfs` |
+| `MATCHER_SHADOW_ENABLED` | `false` |
+| `MATCHER_SHADOW_STRICT` | `false` |
+| `MATCHER_SHADOW_KEEP_WORKSPACE` | `false` |
+| `BIGQUERY_MATCHER_SHADOW_DATASET` | Required when enabled; no default |
+| `MATCHER_SHADOW_WORKSPACE_ROOT` | `/opt/airflow/matcher-shadow` |
+| `MATCHER_SHADOW_COMMAND` | `ztm-matcher` |
+| `MATCHER_SHADOW_PROJECT_DIR` | `/opt/airflow/matcher` |
+| `MATCHER_SHADOW_TIMEOUT_SECONDS` | `2700` |
+| `MATCHER_SHADOW_GCS_PREFIX` | `shadow/matcher` |
 
 - Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
 - `dbt/` is mounted at `DBT_PROJECT_DIR`.
@@ -26,6 +35,7 @@ Runtime env defaults match the current VPS:
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
 - The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, and `duckdb`.
 - The service account can read/write the configured GCS bucket and load/query the configured BigQuery datasets.
+- Enabling matcher shadow requires an image with the installed `ztm-matcher` command and `pyarrow`, plus a read-only matcher project mount at `MATCHER_SHADOW_PROJECT_DIR`. This repository change does not alter the deployed image, mounts, IAM, or environment.
 
 ## DAG Boundaries
 
@@ -44,6 +54,17 @@ Runtime env defaults match the current VPS:
 - `dag_daily_gps` runs once per night, uses the latest dimension-built GTFS snapshot available at rebuild time, republishes the current and prior service dates, and accepts a manual `processing_date` for targeted recovery.
 - `dag_serving_export` is manual; use a fresh `export_id` for every run.
 - Default dbt tests stay bounded. Full-history schedule/version and broad aggregate audits are manual jobs.
+
+## Matcher Shadow
+
+`dag_daily_gps` has an optional `matcher_shadow` TaskGroup. It starts only after the selected current GTFS snapshot and `stg_gps__pings` test, reads the exact snapshot ZIP recorded in `raw_gtfs_snapshots`, and has no edge into canonical facts, marts, serving, or `gps_models_date`.
+
+- Leave `MATCHER_SHADOW_ENABLED=false` until the dedicated BigQuery dataset, image, mount, and IAM have been provisioned outside this repository. The task fails closed if an enabled run has no dataset or if it names `ztm_raw`, `ztm_int`, or `ztm_marts`.
+- The task inventories/downloads only bus/tram `part-*.parquet` objects for one processing date into a run/attempt-scoped workspace, invokes the installed matcher with `threads=2`, `alignment-workers=1`, `320MB`, `20GB`, and a bounded timeout, then validates manifest lineage, artifact schemas/hashes, current/prior service-date evidence, and grains. It removes the run workspace after a successful marker or failure unless `MATCHER_SHADOW_KEEP_WORKSPACE=true`.
+- It loads only run-scoped `matcher_shadow_*` tables with explicit schemas and `WRITE_TRUNCATE`. A GCS `commit.json` marker is written only after validation, all loads, and bounded canonical comparison aggregates succeed.
+- `MATCHER_SHADOW_STRICT=false` reports a shadow error without stopping canonical publication. Set it to `true` only when a shadow failure should fail the DAG run. Structural lineage/grain violations always prevent a marker; aggregate differences are recorded in the marker and do not fail the shadow run.
+
+Smoke-check an enabled non-production run by confirming a marker under `gs://$GCS_BUCKET/shadow/matcher/processing_date=YYYY-MM-DD/run_id=.../commit.json`, its three run-scoped tables, and current/prior rows in the marker comparison. Do not treat a marker as a cutover signal.
 
 ## Serving Export
 

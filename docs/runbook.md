@@ -78,6 +78,22 @@ Set `AIRFLOW_FAILURE_WEBHOOK_URL` to an HTTPS endpoint to receive structured tas
 
 The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS_PATH` or `health/poller/latest.json`, sanitizes it, and writes `poller_status` plus `last_export_at` into `ztm.duckdb.meta.json`. Heartbeats older than 180 seconds are exported as `stale`. Missing or malformed heartbeat data is exported as `unknown`, not as a serving-export failure.
 
+## Matcher Shadow Runs
+
+The matcher shadow branch is disabled by default and is not a production cutover. Before enabling it in a non-production environment, provision a separate `BIGQUERY_MATCHER_SHADOW_DATASET` that is not `ztm_raw`, `ztm_int`, or `ztm_marts`; grant only the required read/load/query permissions; mount the matcher project at `/opt/airflow/matcher` (or set `MATCHER_SHADOW_PROJECT_DIR`); and use an Airflow image containing the installed `ztm-matcher` command and `pyarrow`. Do not make those infrastructure changes as part of a normal DAG deploy.
+
+Enable only the shadow path with `MATCHER_SHADOW_ENABLED=true`. It starts after snapshot selection and GPS staging validation, uses the exact `raw_gtfs_snapshots.gcs_path` for the mapped snapshot, and does not emit a GPS asset or feed canonical publication. Each retry removes the prior run-scoped workspace before creating its attempt workspace while BigQuery table/job IDs remain deterministic for the DAG run. The helper validates input inventory, local artifacts, lineage, current/prior service dates, and duplicate grains before any load.
+
+Smoke checks for a successful run:
+
+1. Find exactly one new `commit.json` below `shadow/matcher/processing_date=YYYY-MM-DD/run_id=.../`.
+2. Check the marker's three shadow table IDs, job IDs, artifact hashes/rows, matcher metrics, and current/prior comparison aggregates.
+3. Confirm all referenced tables are in the dedicated shadow dataset and no canonical table has a new job from this task.
+
+No marker is expected for failed runs. Workspaces are removed after marker success and failures by default; set `MATCHER_SHADOW_KEEP_WORKSPACE=true` only for an explicitly supervised investigation. Prior shadow tables and markers remain intact. With `MATCHER_SHADOW_STRICT=false` the failure is logged and canonical work can still complete; set strict mode only for an explicitly supervised validation window. Differences in comparison aggregates are evidence, not failures. Lineage or duplicate-grain failures prevent the marker in either mode.
+
+There is no shadow-to-canonical promotion command. A future cutover must be a separately approved migration with explicit canonical schema adaptation, bounded partition publication, serving validation, and rollback. Until that exists, rollback means set `MATCHER_SHADOW_ENABLED=false`; never delete or overwrite canonical partitions to roll back a shadow run.
+
 ## Deployment Sync
 
 Deploy steps:

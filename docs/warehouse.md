@@ -82,6 +82,14 @@ The local matcher can additionally emit `operational_stop_crossings-v1` and
 lineage, including technical posts; the second is a settled-passenger-only adapter
 toward `fct_stop_arrival`. They are not yet a warehouse replacement.
 
+## Matcher Shadow Boundary
+
+The optional Airflow matcher shadow path is a comparison harness, not an alternate warehouse path. When enabled, it reads the mapped snapshot ZIP and immutable processing-date GPS objects, writes three local adapter facts only to a dedicated `BIGQUERY_MATCHER_SHADOW_DATASET`, and writes a GCS commit marker after validation and bounded comparisons to canonical facts. It never writes `ztm_raw`, `ztm_int`, `ztm_marts`, canonical dbt models, assets, or serving exports.
+
+Shadow tables are run-scoped and use explicit adapter schemas. They must not be queried as canonical facts: the local adapter does not include the canonical dimension enrichments. The marker records object generations/sizes/hashes, artifact rows/hashes, table/job IDs, matcher metrics, and partition-filtered current/prior comparison aggregates. A missing marker means the candidate run is incomplete or failed; prior markers and shadow tables are retained for inspection.
+
+Cutover requires a separate, reviewed change that defines canonical schema adaptation, partition replacement, service/rollback ownership, and comparison thresholds. Until then rollback is simply disabling `MATCHER_SHADOW_ENABLED`; it does not delete, replace, or restore canonical data.
+
 ## Dimensions
 
 Archive-safe dimensions are date-ranged where history matters:
