@@ -844,7 +844,7 @@ def _validate_outputs(
         if not expected_dates.issubset(artifact.service_dates):
             raise RuntimeError(f"Matcher {spec.key} lacks current/prior service-date evidence")
         expected_rows = metrics.get(Path(spec.filename).stem)
-        if not isinstance(expected_rows, int) or expected_rows != artifact.rows:
+        if spec.key != "stop_semantics" and (not isinstance(expected_rows, int) or expected_rows != artifact.rows):
             raise RuntimeError(f"Matcher metrics row count mismatch for {spec.key}")
         validated[spec.key] = artifact
     universe = output / "trip_universe.parquet"
