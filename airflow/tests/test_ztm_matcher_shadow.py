@@ -100,7 +100,7 @@ def test_load_job_id_binds_artifact_hash_and_conflict_checks_existing_job(
     artifact = shadow.ArtifactValidation(tmp_path / "trip.parquet", 1, "a" * 64, 7, ("2026-07-09",))
     artifact.path.write_bytes(b"parquet")
     spec = shadow.ARTIFACTS[0]
-    expected_table = shadow._table_id("shadow", "run-id", spec)
+    expected_table = shadow._table_id("shadow", "run-id", spec, artifact.sha256)
     expected_job = shadow._load_job_id("run-id", spec, artifact.sha256)
     assert expected_job != shadow._load_job_id("run-id", spec, "b" * 64)
     client = FakeLoadClient(FakeLoadJob(expected_job, expected_table), conflict=True)
@@ -116,6 +116,50 @@ def test_load_job_id_binds_artifact_hash_and_conflict_checks_existing_job(
     failed_job.error_result = {"reason": "invalid"}
     with pytest.raises(RuntimeError, match="complete successfully"):
         shadow._load_artifact(FakeLoadClient(failed_job, conflict=True), "shadow", "run-id", spec, artifact)
+
+
+def test_content_addressed_table_identity_preserves_committed_tables() -> None:
+    shadow = _load_shadow_module()
+    spec = shadow.ARTIFACTS[0]
+    original = shadow._table_identity("shadow", "run", spec, "a" * 64)
+    changed = shadow._table_identity("shadow", "run", spec, "b" * 64)
+
+    assert original["table_id"] != changed["table_id"]
+    assert original["table_id"].endswith("a" * 64)
+    assert changed["table_id"].endswith("b" * 64)
+    assert original["job_id"] != changed["job_id"]
+
+
+def test_run_id_hash_prevents_sanitized_and_truncated_collisions(tmp_path: Path) -> None:
+    shadow = _load_shadow_module()
+    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, "matcher", None, 1, "shadow/matcher")
+    slash = "manual/run"
+    underscore = "manual_run"
+    long_a = "x" * 100 + "a"
+    long_b = "x" * 100 + "b"
+
+    assert shadow._run_id(slash) != shadow._run_id(underscore)
+    assert shadow._run_id(long_a) != shadow._run_id(long_b)
+    assert shadow._run_id(slash).endswith(shadow.hashlib.sha256(slash.encode()).hexdigest()[:16])
+    assert shadow._marker_name(config, "2026-07-09", slash) != shadow._marker_name(config, "2026-07-09", underscore)
+    assert shadow._pending_name(config, "2026-07-09", slash) != shadow._pending_name(config, "2026-07-09", underscore)
+    assert (tmp_path / shadow._run_id(slash)) != (tmp_path / shadow._run_id(underscore))
+
+
+def test_identical_run_and_artifact_resolve_identical_identities(tmp_path: Path) -> None:
+    shadow = _load_shadow_module()
+    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, "matcher", None, 1, "shadow/matcher")
+    spec = shadow.ARTIFACTS[0]
+    first = shadow._table_identity("shadow", "manual/run", spec, "a" * 64)
+    second = shadow._table_identity("shadow", "manual/run", spec, "a" * 64)
+
+    assert first == second
+    assert shadow._marker_name(config, "2026-07-09", "manual/run") == shadow._marker_name(
+        config, "2026-07-09", "manual/run"
+    )
+    assert shadow._pending_name(config, "2026-07-09", "manual/run") == shadow._pending_name(
+        config, "2026-07-09", "manual/run"
+    )
 
 
 def test_marker_uses_create_only_precondition_and_rejects_conflicts(tmp_path: Path) -> None:
@@ -135,6 +179,18 @@ def test_marker_uses_create_only_precondition_and_rejects_conflicts(tmp_path: Pa
     conflict = FakeMarkerBucket(existing=b'{"state":"other"}')
     with pytest.raises(RuntimeError, match="different content"):
         shadow._write_marker(FakeStorageClient(conflict), config, "2026-07-09", "run", marker)
+
+
+def test_pending_verification_rejects_table_for_different_artifact() -> None:
+    shadow = _load_shadow_module()
+    config = shadow.ShadowConfig(True, False, "shadow", Path("workspace"), "matcher", None, 1, "shadow/matcher")
+    pending = {
+        "artifacts": {spec.key: {"sha256": "a" * 64} for spec in shadow.ARTIFACTS},
+        "tables": {spec.key: shadow._table_identity("shadow", "run", spec, "b" * 64) for spec in shadow.ARTIFACTS},
+    }
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        shadow._pending_tables(config, "run", pending)
 
 
 @pytest.mark.parametrize("name", ["/absolute/part.parquet", "raw\\gps\\part.parquet", "raw/gps/../part.parquet"])
@@ -248,10 +304,7 @@ def test_load_writes_pending_not_marker_and_compare_commits_afterwards(
         "processing_date": "2026-07-09",
         "artifacts": {spec.key: {"sha256": artifact.sha256} for spec in shadow.ARTIFACTS},
         "tables": {
-            spec.key: {
-                "table_id": shadow._table_id("matcher_shadow", shadow._run_id("run"), spec),
-                "job_id": shadow._load_job_id(shadow._run_id("run"), spec, artifact.sha256),
-            }
+            spec.key: shadow._table_identity("matcher_shadow", "run", spec, artifact.sha256)
             for spec in shadow.ARTIFACTS
         },
     }
@@ -261,6 +314,23 @@ def test_load_writes_pending_not_marker_and_compare_commits_afterwards(
 
     assert shadow.run_matcher_shadow_compare_commit("2026-07-09", "run", context)["marker_uri"] == "gs://marker"
     assert events[-2:] == ["compare", "marker"]
+
+
+def test_load_rejects_conflicting_marker_before_loading_tables(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
+    monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("MATCHER_SHADOW_PROJECT_DIR", "")
+    shadow = _load_shadow_module()
+    artifact = shadow.ArtifactValidation(tmp_path / "artifact.parquet", 1, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
+    events: list[str] = []
+    _stub_load(monkeypatch, shadow, artifact, events)
+    monkeypatch.setattr(shadow, "_read_marker", lambda *_args: {"run_id": "other"})
+
+    with pytest.raises(RuntimeError, match="different immutable run content"):
+        shadow.run_matcher_shadow_load("2026-07-09", "snapshot", "run")
+
+    assert events == ["matcher"]
 
 
 def test_non_strict_load_and_compare_failures_return_success_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -358,9 +428,14 @@ def _stub_load(monkeypatch: pytest.MonkeyPatch, shadow: types.ModuleType, artifa
         ),
     )
     monkeypatch.setattr(
-        shadow, "_load_artifact", lambda *_args: events.append("load") or {"table_id": "table", "job_id": "job"}
+        shadow,
+        "_load_artifact",
+        lambda _client, dataset, run_id, spec, loaded: (
+            events.append("load") or shadow._table_identity(dataset, run_id, spec, loaded.sha256)
+        ),
     )
     monkeypatch.setattr(shadow, "_write_pending", lambda *_args: events.append("pending") or "gs://pending")
+    monkeypatch.setattr(shadow, "_read_marker", lambda *_args: None)
     monkeypatch.setattr(shadow.bigquery, "Client", lambda **_kwargs: object())
     monkeypatch.setattr(shadow.storage, "Client", lambda **_kwargs: object())
 

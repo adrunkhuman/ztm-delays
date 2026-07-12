@@ -587,6 +587,7 @@ def _install_google_stubs() -> None:
     storage_module = types.ModuleType("google.cloud.storage")
 
     google_api_core_exceptions_module.Conflict = Conflict
+    google_api_core_exceptions_module.NotFound = NotFound
     google_api_core_exceptions_module.PreconditionFailed = PreconditionFailed
     bigquery_module.Client = lambda project: FakeBigQueryClient()
     bigquery_module.SourceFormat = types.SimpleNamespace(PARQUET="PARQUET")
@@ -610,6 +611,10 @@ def _install_google_stubs() -> None:
 
 
 class Conflict(Exception):
+    pass
+
+
+class NotFound(Exception):
     pass
 
 

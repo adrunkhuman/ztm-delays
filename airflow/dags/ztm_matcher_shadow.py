@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-from google.api_core.exceptions import Conflict, PreconditionFailed
+from google.api_core.exceptions import Conflict, NotFound, PreconditionFailed
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
     BIGQUERY_INT_DATASET,
@@ -49,6 +49,7 @@ ARTIFACT_SCHEMA_VERSIONS = {
     "trip_universe": "trip-universe-v1",
 }
 IDENTIFIER_PATTERN = re.compile(r"[^a-z0-9_]+")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 VALIDATION_MEMORY_LIMIT = "320MB"
 VALIDATION_TEMP_LIMIT = "20GB"
 VALIDATION_BATCH_SIZE = 8_192
@@ -338,23 +339,26 @@ def _env_positive_int(name: str, default: int) -> int:
     return parsed
 
 
-def _safe_id(value: str, *, prefix: str) -> str:
-    normalized = IDENTIFIER_PATTERN.sub("_", value.lower()).strip("_")
-    normalized = normalized[:80] or "run"
-    return f"{prefix}_{normalized}"[:1024]
-
-
 def _run_id(value: str) -> str:
-    return _safe_id(value, prefix="run")
+    normalized = IDENTIFIER_PATTERN.sub("_", value.lower()).strip("_") or "run"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"run_{normalized[:59]}_{digest}"
 
 
-def _table_id(dataset: str, run_id: str, spec: ArtifactSpec) -> str:
-    return f"{GCP_PROJECT}.{dataset}.{_safe_id(run_id, prefix=f'matcher_shadow_{spec.table_suffix}')}"
+def _validated_sha256(value: str) -> str:
+    if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value):
+        raise ValueError("Artifact SHA-256 must be a lowercase 64-character hexadecimal digest")
+    return value
+
+
+def _table_id(dataset: str, run_id: str, spec: ArtifactSpec, artifact_sha256: str) -> str:
+    digest = _validated_sha256(artifact_sha256)
+    return f"{GCP_PROJECT}.{dataset}.matcher_shadow_{spec.table_suffix}_{_run_id(run_id)}_{digest}"
 
 
 def _load_job_id(run_id: str, spec: ArtifactSpec, artifact_sha256: str) -> str:
-    run_digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
-    artifact_digest = hashlib.sha256(artifact_sha256.encode("ascii")).hexdigest()[:16]
+    run_digest = hashlib.sha256(_run_id(run_id).encode("utf-8")).hexdigest()[:16]
+    artifact_digest = hashlib.sha256(_validated_sha256(artifact_sha256).encode("ascii")).hexdigest()[:16]
     return f"matcher_shadow_load_{spec.table_suffix}_{run_digest}_{artifact_digest}"
 
 
@@ -730,8 +734,9 @@ def _load_config(spec: ArtifactSpec) -> Any:
 def _load_artifact(
     client: Any, dataset: str, run_id: str, spec: ArtifactSpec, artifact: ArtifactValidation
 ) -> dict[str, str]:
-    table_id = _table_id(dataset, run_id, spec)
-    job_id = _load_job_id(run_id, spec, artifact.sha256)
+    table = _table_identity(dataset, run_id, spec, artifact.sha256)
+    table_id = table["table_id"]
+    job_id = table["job_id"]
     with artifact.path.open("rb") as source:
         try:
             job = client.load_table_from_file(
@@ -740,7 +745,15 @@ def _load_artifact(
         except Conflict:
             job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
     _verify_load_job(job, job_id, table_id)
-    return {"table_id": table_id, "job_id": job_id}
+    return table
+
+
+def _table_identity(dataset: str, run_id: str, spec: ArtifactSpec, artifact_sha256: str) -> dict[str, str]:
+    """Return deterministic, content-addressed table and load-job identities."""
+    return {
+        "table_id": _table_id(dataset, run_id, spec, artifact_sha256),
+        "job_id": _load_job_id(run_id, spec, artifact_sha256),
+    }
 
 
 def _table_reference_id(table: object) -> str:
@@ -801,6 +814,8 @@ def _comparison_report(
         {key: _json_value(value) for key, value in (dict(row.items()) if hasattr(row, "items") else dict(row)).items()}
         for row in client.query(_comparison_query(shadow_tables), job_config=config).result()
     ]
+    # BigQuery does not preserve result order without ORDER BY; markers must be rerun-stable.
+    rows.sort(key=lambda row: _json_bytes(row).decode("utf-8"))
     grouped: dict[tuple[object, ...], dict[str, dict[str, object]]] = {}
     for row in rows:
         key = tuple(row[field] for field in ("artifact", "service_date", "mode", "trip_quality", "observation_status"))
@@ -810,6 +825,7 @@ def _comparison_report(
         for key, values in grouped.items()
         if _comparison_payload(values.get("shadow")) != _comparison_payload(values.get("canonical"))
     ]
+    differences.sort(key=lambda difference: _json_bytes(difference).decode("utf-8"))
     return {"service_dates": [item.isoformat() for item in dates], "aggregates": rows, "differences": differences}
 
 
@@ -846,6 +862,17 @@ def _read_pending(client: Any, config: ShadowConfig, processing_date: str, run_i
     return pending
 
 
+def _read_marker(client: Any, config: ShadowConfig, processing_date: str, run_id: str) -> dict[str, object] | None:
+    blob = client.bucket(GCS_BUCKET).blob(_marker_name(config, processing_date, run_id))
+    try:
+        marker = json.loads(blob.download_as_bytes())
+    except NotFound:
+        return None
+    if not isinstance(marker, dict):
+        raise TypeError("Matcher shadow commit marker is not an object")
+    return marker
+
+
 def _marker_is_identical(existing: bytes, payload: bytes) -> bool:
     if existing == payload:
         return True
@@ -871,6 +898,21 @@ def _write_marker(
     return f"gs://{GCS_BUCKET}/{name}"
 
 
+def _reject_conflicting_marker(
+    client: Any, config: ShadowConfig, processing_date: str, run_id: str, pending: dict[str, object]
+) -> None:
+    """Fail before loading when an immutable marker belongs to different content."""
+    marker = _read_marker(client, config, processing_date, run_id)
+    if marker is None:
+        return
+    expected = json.loads(_json_bytes(pending))
+    if any(marker.get(key) != value for key, value in expected.items()):
+        name = _marker_name(config, processing_date, run_id)
+        raise RuntimeError(
+            f"Matcher shadow commit marker already exists with different immutable run content: gs://{GCS_BUCKET}/{name}"
+        )
+
+
 def _pending_tables(config: ShadowConfig, run_id: str, pending: dict[str, object]) -> dict[str, dict[str, str]]:
     artifacts = pending.get("artifacts")
     tables = pending.get("tables")
@@ -885,7 +927,7 @@ def _pending_tables(config: ShadowConfig, run_id: str, pending: dict[str, object
         sha256 = artifact.get("sha256")
         if not isinstance(sha256, str):
             raise TypeError(f"Matcher shadow pending metadata has no hash for {spec.key}")
-        expected_table = _table_id(config.dataset or "", run_id, spec)
+        expected_table = _table_id(config.dataset or "", run_id, spec, sha256)
         expected_job = _load_job_id(run_id, spec, sha256)
         if table.get("table_id") != expected_table or table.get("job_id") != expected_job:
             raise RuntimeError(f"Matcher shadow pending table/job identity mismatch for {spec.key}")
@@ -902,8 +944,7 @@ def run_matcher_shadow_load(
     if not config.enabled:
         return {"enabled": False, "reason": "MATCHER_SHADOW_ENABLED is false"}
 
-    scoped_run_id = _run_id(run_id)
-    run_workspace = config.workspace_root / scoped_run_id
+    run_workspace = config.workspace_root / _run_id(run_id)
     workspace = run_workspace / f"attempt-{try_number}"
     output = workspace / "output"
     _validate_run_workspace(config, workspace)
@@ -919,10 +960,6 @@ def run_matcher_shadow_load(
         )
         _invoke_matcher(_matcher_argv(config, processing_date, snapshot_id, gps_root, gtfs_zip, output), config)
         artifacts, manifest = _validate_outputs(output, processing_date, snapshot_id)
-        tables = {
-            spec.key: _load_artifact(bq_client, config.dataset or "", scoped_run_id, spec, artifacts[spec.key])
-            for spec in ARTIFACTS
-        }
         pending = {
             "run_id": run_id,
             "processing_date": processing_date,
@@ -939,9 +976,15 @@ def run_matcher_shadow_load(
                 }
                 for key, item in artifacts.items()
             },
-            "tables": tables,
+            "tables": {
+                spec.key: _table_identity(config.dataset or "", run_id, spec, artifacts[spec.key].sha256)
+                for spec in ARTIFACTS
+            },
             "metrics": manifest.get("metrics", _read_metrics(output)),
         }
+        _reject_conflicting_marker(storage_client, config, processing_date, run_id, pending)
+        for spec in ARTIFACTS:
+            _load_artifact(bq_client, config.dataset or "", run_id, spec, artifacts[spec.key])
         pending_uri = _write_pending(storage_client, config, processing_date, run_id, pending)
     except Exception:
         if not config.keep_workspace:
@@ -974,7 +1017,7 @@ def run_matcher_shadow_compare_commit(
     pending = _read_pending(storage_client, config, processing_date, run_id)
     if pending.get("processing_date") != processing_date or pending.get("run_id") != run_id:
         raise RuntimeError("Matcher shadow pending metadata does not match this DAG run")
-    tables = _pending_tables(config, _run_id(run_id), pending)
+    tables = _pending_tables(config, run_id, pending)
     comparison = _comparison_report(bigquery.Client(project=GCP_PROJECT), processing_date, tables)
     marker_uri = _write_marker(storage_client, config, processing_date, run_id, pending | {"comparison": comparison})
     return {"enabled": True, "status": "committed", "marker_uri": marker_uri}
