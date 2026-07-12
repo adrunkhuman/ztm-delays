@@ -37,7 +37,7 @@ Failed `.incomplete-*` work directories are preserved.
 Errors use stable codes: `missing_input`, `schema_drift`, `invalid_data`,
 `snapshot_mismatch`, `resource_limit`, and `invalid_output`.
 
-DuckDB defaults to two threads, 320 MB of managed memory, and 20 GB of
+DuckDB defaults to two threads, 384 MB of managed memory, and 20 GB of
 temporary disk. The loader additionally rejects GTFS archives above 640 MB
 uncompressed or 1,800,000 selected stop rows. It streams the rolling feed and
 retains only services active on the required current/prior dates so Python

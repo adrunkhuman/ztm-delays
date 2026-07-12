@@ -442,7 +442,7 @@ def test_matcher_command_is_parsed_and_prepended_to_prepare_args(
         "--alignment-workers",
         "1",
         "--memory-limit",
-        "320MB",
+        "384MB",
         "--temp-limit",
         "20GB",
     ]

@@ -673,7 +673,7 @@ def _matcher_argv(
         "--alignment-workers",
         "1",
         "--memory-limit",
-        "320MB",
+        "384MB",
         "--temp-limit",
         "20GB",
     ]
