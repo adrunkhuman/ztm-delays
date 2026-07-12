@@ -810,6 +810,7 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
         shadow = shadow_tables[spec.key]["table_id"]
         canonical = CANONICAL_FACT_TABLES[spec.key]
         source_date = "gps_date" if spec.key == "trip" else "source_gps_date"
+        processing_field = "gps_date"
         delay = "end_delay_seconds" if spec.key == "trip" else "delay_seconds"
         status = "cast(null as string)" if spec.key != "expected_stop_event" else "observation_status"
         grain = ", ".join(spec.grain)
@@ -825,7 +826,7 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
                     array_agg(distinct cast({source_date} as string) ignore nulls order by cast({source_date} as string)) as source_dates
                 from `{table}`
                 where service_date in unnest(@service_dates)
-                  and {source_date} = @processing_date
+                  and {processing_field} = @processing_date
                 group by artifact, source, service_date, mode, trip_quality, observation_status
                 """
             )
