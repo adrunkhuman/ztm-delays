@@ -271,9 +271,10 @@ def test_gcs_paths_require_expected_prefix_and_contained_destination(tmp_path: P
     shadow = _load_shadow_module()
     relative = shadow._gcs_relative_name(
         "raw/gps/vehicle_type=bus/date=2026-07-09/hour=01/part-a.parquet",
-        "raw/gps/vehicle_type=bus/date=2026-07-09/",
+        "raw/gps",
     )
 
+    assert relative.as_posix() == "vehicle_type=bus/date=2026-07-09/hour=01/part-a.parquet"
     assert shadow._contained_destination(tmp_path, relative).is_relative_to(tmp_path)
     with pytest.raises(ValueError, match="outside expected"):
         shadow._gcs_relative_name("raw/other/part-a.parquet", "raw/gps")

@@ -521,8 +521,7 @@ def _download_inputs(
     _enforce_input_bounds(config, objects, int(gtfs_inventory["size"]), workspace)
     inventory = []
     for item in objects:
-        prefix = next(prefix for prefix in _gps_prefixes(processing_date) if item.name.startswith(prefix))
-        destination = _contained_destination(gps_root, _gcs_relative_name(item.name, prefix))
+        destination = _contained_destination(gps_root, _gcs_relative_name(item.name, RAW_GPS_PREFIX))
         destination.parent.mkdir(parents=True, exist_ok=True)
         gps_bucket.blob(item.name, generation=item.generation).download_to_filename(destination)
         inventory.append(asdict(item))
