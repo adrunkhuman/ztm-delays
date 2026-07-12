@@ -5,11 +5,14 @@ import logging
 import os
 import shlex
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from airflow.sdk import Asset
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,7 +45,7 @@ RAW_GPS_DATE_ASSET = Asset("x-ztm://gps/raw-date")
 GPS_MODELS_DATE_ASSET = Asset("x-ztm://gps/models-date")
 
 
-def airflow_failure_alert(context: dict[str, Any]) -> None:
+def airflow_failure_alert(context: Mapping[str, Any]) -> None:
     """Emit a bounded failure alert without depending on Airflow metadata DB access."""
     payload = _airflow_failure_payload(context)
     LOGGER.error("Airflow task failed: %s", json.dumps(payload, sort_keys=True))
@@ -67,7 +70,7 @@ def airflow_failure_alert(context: dict[str, Any]) -> None:
         LOGGER.exception("Failed to send Airflow failure webhook")
 
 
-def _airflow_failure_payload(context: dict[str, Any]) -> dict[str, object]:
+def _airflow_failure_payload(context: Mapping[str, Any]) -> dict[str, object]:
     task_instance = context.get("task_instance") or context.get("ti")
     dag_run = context.get("dag_run")
     return {

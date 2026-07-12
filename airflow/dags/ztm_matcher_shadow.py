@@ -15,11 +15,12 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
-from pathlib import Path
+from importlib import import_module
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-from google.api_core.exceptions import Conflict
+from google.api_core.exceptions import Conflict, PreconditionFailed
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
     BIGQUERY_INT_DATASET,
@@ -29,6 +30,7 @@ from ztm_airflow_common import (
     GCP_PROJECT,
     GCS_BUCKET,
     RAW_GPS_PREFIX,
+    RAW_GTFS_PREFIX,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -47,6 +49,12 @@ ARTIFACT_SCHEMA_VERSIONS = {
     "trip_universe": "trip-universe-v1",
 }
 IDENTIFIER_PATTERN = re.compile(r"[^a-z0-9_]+")
+VALIDATION_MEMORY_LIMIT = "320MB"
+VALIDATION_TEMP_LIMIT = "20GB"
+VALIDATION_BATCH_SIZE = 8_192
+DEFAULT_MAX_GPS_OBJECTS = 5_000
+DEFAULT_MAX_GPS_BYTES = 20 * 1024**3
+DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024**3
 
 
 @dataclass(frozen=True)
@@ -244,6 +252,9 @@ class ShadowConfig:
     timeout_seconds: int
     marker_prefix: str
     keep_workspace: bool = False
+    max_gps_objects: int = DEFAULT_MAX_GPS_OBJECTS
+    max_gps_bytes: int = DEFAULT_MAX_GPS_BYTES
+    min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
 
     @classmethod
     def from_env(cls) -> ShadowConfig:
@@ -257,8 +268,11 @@ class ShadowConfig:
             command=os.getenv("MATCHER_SHADOW_COMMAND", "ztm-matcher").strip() or "ztm-matcher",
             project_dir=Path(project_dir) if project_dir else None,
             timeout_seconds=_env_positive_int("MATCHER_SHADOW_TIMEOUT_SECONDS", 45 * 60),
-            marker_prefix=os.getenv("MATCHER_SHADOW_GCS_PREFIX", "shadow/matcher").strip("/"),
+            marker_prefix=os.getenv("MATCHER_SHADOW_GCS_PREFIX", "shadow/matcher").strip(),
             keep_workspace=_env_bool("MATCHER_SHADOW_KEEP_WORKSPACE", False),
+            max_gps_objects=_env_positive_int("MATCHER_SHADOW_MAX_GPS_OBJECTS", DEFAULT_MAX_GPS_OBJECTS),
+            max_gps_bytes=_env_positive_int("MATCHER_SHADOW_MAX_GPS_BYTES", DEFAULT_MAX_GPS_BYTES),
+            min_free_disk_bytes=_env_positive_int("MATCHER_SHADOW_MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES),
         )
 
     def validate(self) -> None:
@@ -272,10 +286,18 @@ class ShadowConfig:
             raise ValueError("BIGQUERY_MATCHER_SHADOW_DATASET must not name a canonical raw, int, or marts dataset")
         if not self.marker_prefix:
             raise ValueError("MATCHER_SHADOW_GCS_PREFIX must not be empty")
+        _strict_posix_name(self.marker_prefix)
         if not self.workspace_root.is_absolute():
             raise ValueError("MATCHER_SHADOW_WORKSPACE_ROOT must be absolute")
         if ".." in Path(self.command).parts:
             raise ValueError("MATCHER_SHADOW_COMMAND must not contain path traversal")
+        for name, value in (
+            ("MATCHER_SHADOW_MAX_GPS_OBJECTS", self.max_gps_objects),
+            ("MATCHER_SHADOW_MAX_GPS_BYTES", self.max_gps_bytes),
+            ("MATCHER_SHADOW_MIN_FREE_DISK_BYTES", self.min_free_disk_bytes),
+        ):
+            if value < 1:
+                raise ValueError(f"{name} must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -330,29 +352,73 @@ def _table_id(dataset: str, run_id: str, spec: ArtifactSpec) -> str:
     return f"{GCP_PROJECT}.{dataset}.{_safe_id(run_id, prefix=f'matcher_shadow_{spec.table_suffix}')}"
 
 
-def _load_job_id(run_id: str, spec: ArtifactSpec) -> str:
-    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
-    return f"matcher_shadow_load_{spec.table_suffix}_{digest}"
+def _load_job_id(run_id: str, spec: ArtifactSpec, artifact_sha256: str) -> str:
+    run_digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
+    artifact_digest = hashlib.sha256(artifact_sha256.encode("ascii")).hexdigest()[:16]
+    return f"matcher_shadow_load_{spec.table_suffix}_{run_digest}_{artifact_digest}"
 
 
 def _gps_prefixes(processing_date: str) -> list[str]:
     return [f"{RAW_GPS_PREFIX}/vehicle_type={mode}/date={processing_date}/" for mode in VEHICLE_TYPES]
 
 
+def _strict_posix_name(name: str) -> PurePosixPath:
+    """Accept only normalized relative GCS object names."""
+    path = PurePosixPath(name)
+    if (
+        not name
+        or path == PurePosixPath(".")
+        or "\\" in name
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.as_posix() != name
+    ):
+        raise ValueError(f"Unsafe GCS object name: {name}")
+    return path
+
+
+def _strict_posix_prefix(prefix: str) -> str:
+    normalized = prefix.removesuffix("/")
+    _strict_posix_name(normalized)
+    return normalized
+
+
+def _gcs_relative_name(name: str, prefix: str) -> PurePosixPath:
+    normalized_prefix = _strict_posix_prefix(prefix)
+    _strict_posix_name(name)
+    expected_prefix = f"{normalized_prefix}/"
+    if not name.startswith(expected_prefix):
+        raise ValueError(f"GCS object is outside expected prefix {normalized_prefix}: {name}")
+    relative = PurePosixPath(name.removeprefix(expected_prefix))
+    if relative == PurePosixPath("."):
+        raise ValueError(f"GCS object is not below expected prefix {normalized_prefix}: {name}")
+    return relative
+
+
+def _contained_destination(root: Path, relative: PurePosixPath) -> Path:
+    destination = root.joinpath(*relative.parts)
+    if not destination.resolve().is_relative_to(root.resolve()):
+        raise ValueError(f"GCS object destination escapes workspace: {relative}")
+    return destination
+
+
 def _list_gps_objects(bucket: Any, processing_date: str) -> list[GcsObject]:
     objects = []
     for prefix in _gps_prefixes(processing_date):
-        objects.extend(
-            GcsObject(
-                blob.name,
-                str(getattr(blob, "generation", "")) or None,
-                int(blob.size) if getattr(blob, "size", None) is not None else None,
-                getattr(blob, "md5_hash", None),
-                getattr(blob, "crc32c", None),
+        for blob in bucket.list_blobs(prefix=prefix):
+            name = str(blob.name)
+            if not (name.endswith(".parquet") and "/part-" in name):
+                continue
+            _gcs_relative_name(name, prefix)
+            objects.append(
+                GcsObject(
+                    name,
+                    str(getattr(blob, "generation", "")) or None,
+                    int(blob.size) if getattr(blob, "size", None) is not None else None,
+                    getattr(blob, "md5_hash", None),
+                    getattr(blob, "crc32c", None),
+                )
             )
-            for blob in bucket.list_blobs(prefix=prefix)
-            if blob.name.endswith(".parquet") and "/part-" in blob.name
-        )
     if not objects:
         raise RuntimeError(f"No bus/tram GPS part objects found for {processing_date}")
     if any(item.generation is None or item.size is None or not (item.md5_hash or item.crc32c) for item in objects):
@@ -378,33 +444,36 @@ def _snapshot_gcs_path(client: Any, snapshot_id: str) -> str:
 
 def _gcs_uri_parts(uri: str) -> tuple[str, str]:
     parsed = urlparse(uri)
-    if parsed.scheme != "gs" or not parsed.netloc or not parsed.path.strip("/"):
+    if parsed.scheme != "gs" or not parsed.netloc or not parsed.path:
         raise ValueError(f"GTFS snapshot path is not a GCS URI: {uri}")
-    return parsed.netloc, parsed.path.lstrip("/")
+    name = parsed.path.removeprefix("/")
+    _gcs_relative_name(name, RAW_GTFS_PREFIX)
+    return parsed.netloc, name
+
+
+def _enforce_input_bounds(config: ShadowConfig, objects: list[GcsObject], gtfs_size: int, workspace: Path) -> None:
+    if len(objects) > config.max_gps_objects:
+        raise RuntimeError(f"Shadow GPS object count exceeds limit: {len(objects)} > {config.max_gps_objects}")
+    gps_bytes = sum(item.size or 0 for item in objects)
+    if gps_bytes > config.max_gps_bytes:
+        raise RuntimeError(f"Shadow GPS input bytes exceed limit: {gps_bytes} > {config.max_gps_bytes}")
+    free_bytes = shutil.disk_usage(workspace).free
+    required_bytes = gps_bytes + gtfs_size + config.min_free_disk_bytes
+    if free_bytes < required_bytes:
+        raise RuntimeError(f"Shadow workspace free disk is below input plus reserve: {free_bytes} < {required_bytes}")
 
 
 def _download_inputs(
-    client: Any, processing_date: str, snapshot_uri: str, workspace: Path
+    client: Any, config: ShadowConfig, processing_date: str, snapshot_uri: str, workspace: Path
 ) -> tuple[list[dict[str, object]], dict[str, object], Path, Path]:
     gps_root = workspace / "gps"
     gps_bucket = client.bucket(GCS_BUCKET)
     objects = _list_gps_objects(gps_bucket, processing_date)
-    inventory = []
-    for item in objects:
-        relative = Path(item.name).relative_to(RAW_GPS_PREFIX)
-        destination = gps_root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        gps_bucket.blob(item.name, generation=item.generation).download_to_filename(destination)
-        inventory.append(asdict(item))
-
     gtfs_bucket_name, gtfs_name = _gcs_uri_parts(snapshot_uri)
     gtfs_bucket = client.bucket(gtfs_bucket_name)
     gtfs_blob = gtfs_bucket.get_blob(gtfs_name)
     if gtfs_blob is None:
         raise RuntimeError(f"Pinned GTFS ZIP no longer exists: {snapshot_uri}")
-    gtfs_path = workspace / "gtfs" / "snapshot.zip"
-    gtfs_path.parent.mkdir(parents=True, exist_ok=True)
-    gtfs_blob.download_to_filename(gtfs_path)
     gtfs_inventory = asdict(
         GcsObject(
             gtfs_name,
@@ -420,6 +489,18 @@ def _download_inputs(
         or not (gtfs_inventory["md5_hash"] or gtfs_inventory["crc32c"])
     ):
         raise RuntimeError("Pinned GTFS ZIP inventory requires object generation, size, and hash metadata")
+    _enforce_input_bounds(config, objects, int(gtfs_inventory["size"]), workspace)
+    inventory = []
+    for item in objects:
+        prefix = next(prefix for prefix in _gps_prefixes(processing_date) if item.name.startswith(prefix))
+        destination = _contained_destination(gps_root, _gcs_relative_name(item.name, prefix))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        gps_bucket.blob(item.name, generation=item.generation).download_to_filename(destination)
+        inventory.append(asdict(item))
+
+    gtfs_path = workspace / "gtfs" / "snapshot.zip"
+    gtfs_path.parent.mkdir(parents=True, exist_ok=True)
+    gtfs_blob.download_to_filename(gtfs_path)
     return inventory, gtfs_inventory, gps_root, gtfs_path
 
 
@@ -469,23 +550,51 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _expected_arrow_type(field: FieldSpec) -> str:
+def _expected_arrow_type(field: FieldSpec, pa: Any) -> Any:
     base = {
-        "STRING": "string",
-        "DATE": "date32[day]",
-        "TIMESTAMP": "timestamp[us, tz=UTC]",
-        "INTEGER": "int64",
-        "FLOAT": "double",
-        "BOOLEAN": "bool",
+        "STRING": pa.string(),
+        "DATE": pa.date32(),
+        "TIMESTAMP": pa.timestamp("us", tz="UTC"),
+        "INTEGER": pa.int64(),
+        "FLOAT": pa.float64(),
+        "BOOLEAN": pa.bool_(),
     }[field.bigquery_type]
-    return f"list<element: {base}>" if field.repeated else base
+    return pa.list_(base) if field.repeated else base
+
+
+def _validation_connection(duckdb: Any, temp_directory: Path) -> Any:
+    temp_directory.mkdir(parents=True, exist_ok=False)
+    connection = duckdb.connect()
+    temp_directory_sql = temp_directory.as_posix().replace("'", "''")
+    connection.execute(f"set memory_limit = '{VALIDATION_MEMORY_LIMIT}'")
+    connection.execute(f"set temp_directory = '{temp_directory_sql}'")
+    connection.execute(f"set max_temp_directory_size = '{VALIDATION_TEMP_LIMIT}'")
+    connection.execute("set threads = 2")
+    connection.execute("set preserve_insertion_order = false")
+    return connection
+
+
+def _query_scalar(connection: Any, query: str, parameters: list[object]) -> object:
+    row = connection.execute(query, parameters).fetchone()
+    if row is None:
+        raise RuntimeError("DuckDB validation query returned no row")
+    return row[0]
+
+
+def _query_count(connection: Any, query: str, parameters: list[object]) -> int:
+    value = _query_scalar(connection, query, parameters)
+    if not isinstance(value, int):
+        raise TypeError("DuckDB validation count is not an integer")
+    return value
 
 
 def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snapshot_id: str) -> ArtifactValidation:
     try:
-        import pyarrow.parquet as pq
+        duckdb = import_module("duckdb")
+        pa = import_module("pyarrow")
+        pq = import_module("pyarrow.parquet")
     except ImportError as exc:
-        raise RuntimeError("pyarrow is required in the Airflow image for matcher shadow validation") from exc
+        raise RuntimeError("duckdb and pyarrow are required for matcher shadow validation") from exc
 
     parquet = pq.ParquetFile(path)
     schema = parquet.schema_arrow
@@ -493,22 +602,58 @@ def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snap
     if schema.names != expected_names:
         raise RuntimeError(f"Unexpected schema columns in {path.name}")
     for field, expected in zip(schema, spec.fields, strict=True):
-        if str(field.type) != _expected_arrow_type(expected):
+        if field.type != _expected_arrow_type(expected, pa):
             raise RuntimeError(f"Unexpected schema type for {path.name}.{field.name}: {field.type}")
 
-    grains: set[tuple[object, ...]] = set()
-    service_dates: set[str] = set()
-    rows = 0
-    for batch in parquet.iter_batches(columns=[*spec.grain, "processing_date", "service_date", "gtfs_snapshot_id"]):
-        for row in batch.to_pylist():
-            if str(row["processing_date"]) != processing_date or row["gtfs_snapshot_id"] != snapshot_id:
-                raise RuntimeError(f"Lineage mismatch in {path.name}")
-            service_dates.add(str(row["service_date"]))
-            grain = tuple(row[column] for column in spec.grain)
-            if grain in grains:
-                raise RuntimeError(f"Duplicate {spec.key} grain in {path.name}: {grain}")
-            grains.add(grain)
-            rows += 1
+    batch_rows = sum(batch.num_rows for batch in parquet.iter_batches(batch_size=VALIDATION_BATCH_SIZE))
+    temp_directory = path.parent / f".validation-{spec.key}"
+    connection = _validation_connection(duckdb, temp_directory)
+    try:
+        rows = _query_count(connection, "select count(*) from read_parquet(?)", [str(path)])
+        bad_lineage = _query_count(
+            connection,
+            """
+            select count(*)
+            from read_parquet(?)
+            where cast(processing_date as varchar) != ? or gtfs_snapshot_id != ?
+            """,
+            [str(path), processing_date, snapshot_id],
+        )
+        duplicate_grains = _query_count(
+            connection,
+            f"""
+            select count(*)
+            from (
+                select {", ".join(spec.grain)}
+                from read_parquet(?)
+                group by {", ".join(spec.grain)}
+                having count(*) > 1
+            )
+            """,
+            [str(path)],
+        )
+        service_dates = tuple(
+            str(row[0])
+            for row in connection.execute(
+                """
+                select cast(service_date as varchar)
+                from read_parquet(?)
+                group by 1
+                order by 1
+                limit 3
+                """,
+                [str(path)],
+            ).fetchall()
+        )
+    finally:
+        connection.close()
+        shutil.rmtree(temp_directory, ignore_errors=True)
+    if batch_rows != rows:
+        raise RuntimeError(f"Parquet batch row count mismatch in {path.name}")
+    if bad_lineage:
+        raise RuntimeError(f"Lineage mismatch in {path.name}")
+    if duplicate_grains:
+        raise RuntimeError(f"Duplicate {spec.key} grain in {path.name}")
     return ArtifactValidation(path, rows, _sha256(path), path.stat().st_size, tuple(sorted(service_dates)))
 
 
@@ -586,7 +731,7 @@ def _load_artifact(
     client: Any, dataset: str, run_id: str, spec: ArtifactSpec, artifact: ArtifactValidation
 ) -> dict[str, str]:
     table_id = _table_id(dataset, run_id, spec)
-    job_id = _load_job_id(run_id, spec)
+    job_id = _load_job_id(run_id, spec, artifact.sha256)
     with artifact.path.open("rb") as source:
         try:
             job = client.load_table_from_file(
@@ -594,8 +739,30 @@ def _load_artifact(
             )
         except Conflict:
             job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
-    job.result()
+    _verify_load_job(job, job_id, table_id)
     return {"table_id": table_id, "job_id": job_id}
+
+
+def _table_reference_id(table: object) -> str:
+    if isinstance(table, str):
+        return table
+    project = getattr(table, "project", None)
+    dataset = getattr(table, "dataset_id", None)
+    table_name = getattr(table, "table_id", None)
+    if all(isinstance(value, str) and value for value in (project, dataset, table_name)):
+        return f"{project}.{dataset}.{table_name}"
+    return str(table)
+
+
+def _verify_load_job(job: Any, job_id: str, table_id: str) -> None:
+    """Accept a retried load only when its immutable job/table identity matches."""
+    job.result()
+    if getattr(job, "job_id", None) != job_id:
+        raise RuntimeError(f"Shadow load job ID does not match artifact-bound ID: {job_id}")
+    if getattr(job, "state", None) != "DONE" or getattr(job, "error_result", None) is not None:
+        raise RuntimeError(f"Shadow load job did not complete successfully: {job_id}")
+    if _table_reference_id(getattr(job, "destination", None)) != table_id:
+        raise RuntimeError(f"Shadow load job destination does not match expected table: {job_id}")
 
 
 def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
@@ -655,20 +822,81 @@ def _marker_name(config: ShadowConfig, processing_date: str, run_id: str) -> str
     return f"{config.marker_prefix}/processing_date={processing_date}/run_id={_run_id(run_id)}/commit.json"
 
 
+def _pending_name(config: ShadowConfig, processing_date: str, run_id: str) -> str:
+    return f"{config.marker_prefix}/processing_date={processing_date}/run_id={_run_id(run_id)}/pending.json"
+
+
+def _json_bytes(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload, sort_keys=True, default=_json_value, separators=(",", ":")).encode("utf-8")
+
+
+def _write_pending(
+    client: Any, config: ShadowConfig, processing_date: str, run_id: str, pending: dict[str, object]
+) -> str:
+    name = _pending_name(config, processing_date, run_id)
+    client.bucket(GCS_BUCKET).blob(name).upload_from_string(_json_bytes(pending), content_type="application/json")
+    return f"gs://{GCS_BUCKET}/{name}"
+
+
+def _read_pending(client: Any, config: ShadowConfig, processing_date: str, run_id: str) -> dict[str, object]:
+    blob = client.bucket(GCS_BUCKET).blob(_pending_name(config, processing_date, run_id))
+    pending = json.loads(blob.download_as_bytes())
+    if not isinstance(pending, dict):
+        raise TypeError("Matcher shadow pending metadata is not an object")
+    return pending
+
+
+def _marker_is_identical(existing: bytes, payload: bytes) -> bool:
+    if existing == payload:
+        return True
+    try:
+        return json.loads(existing) == json.loads(payload)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return False
+
+
 def _write_marker(
     client: Any, config: ShadowConfig, processing_date: str, run_id: str, marker: dict[str, object]
 ) -> str:
     name = _marker_name(config, processing_date, run_id)
-    client.bucket(GCS_BUCKET).blob(name).upload_from_string(
-        json.dumps(marker, sort_keys=True, default=_json_value), content_type="application/json"
-    )
+    blob = client.bucket(GCS_BUCKET).blob(name)
+    payload = _json_bytes(marker)
+    try:
+        blob.upload_from_string(payload, content_type="application/json", if_generation_match=0)
+    except PreconditionFailed as exc:
+        if not _marker_is_identical(blob.download_as_bytes(), payload):
+            raise RuntimeError(
+                f"Matcher shadow commit marker already exists with different content: gs://{GCS_BUCKET}/{name}"
+            ) from exc
     return f"gs://{GCS_BUCKET}/{name}"
 
 
-def run_matcher_shadow(
+def _pending_tables(config: ShadowConfig, run_id: str, pending: dict[str, object]) -> dict[str, dict[str, str]]:
+    artifacts = pending.get("artifacts")
+    tables = pending.get("tables")
+    if not isinstance(artifacts, dict) or not isinstance(tables, dict):
+        raise TypeError("Matcher shadow pending metadata has no artifact/table inventory")
+    validated = {}
+    for spec in ARTIFACTS:
+        artifact = artifacts.get(spec.key)
+        table = tables.get(spec.key)
+        if not isinstance(artifact, dict) or not isinstance(table, dict):
+            raise TypeError(f"Matcher shadow pending metadata is missing {spec.key}")
+        sha256 = artifact.get("sha256")
+        if not isinstance(sha256, str):
+            raise TypeError(f"Matcher shadow pending metadata has no hash for {spec.key}")
+        expected_table = _table_id(config.dataset or "", run_id, spec)
+        expected_job = _load_job_id(run_id, spec, sha256)
+        if table.get("table_id") != expected_table or table.get("job_id") != expected_job:
+            raise RuntimeError(f"Matcher shadow pending table/job identity mismatch for {spec.key}")
+        validated[spec.key] = {"table_id": expected_table, "job_id": expected_job}
+    return validated
+
+
+def run_matcher_shadow_load(
     processing_date: str, snapshot_id: str, run_id: str, *, try_number: int = 1
 ) -> dict[str, object]:
-    """Run one complete shadow reconstruction and write its marker last."""
+    """Write validated, loaded shadow metadata without creating a commit marker."""
     config = ShadowConfig.from_env()
     config.validate()
     if not config.enabled:
@@ -687,7 +915,7 @@ def run_matcher_shadow(
         storage_client = storage.Client(project=GCP_PROJECT)
         snapshot_uri = _snapshot_gcs_path(bq_client, snapshot_id)
         gps_inventory, gtfs_inventory, gps_root, gtfs_zip = _download_inputs(
-            storage_client, processing_date, snapshot_uri, workspace
+            storage_client, config, processing_date, snapshot_uri, workspace
         )
         _invoke_matcher(_matcher_argv(config, processing_date, snapshot_id, gps_root, gtfs_zip, output), config)
         artifacts, manifest = _validate_outputs(output, processing_date, snapshot_id)
@@ -695,8 +923,7 @@ def run_matcher_shadow(
             spec.key: _load_artifact(bq_client, config.dataset or "", scoped_run_id, spec, artifacts[spec.key])
             for spec in ARTIFACTS
         }
-        comparison = _comparison_report(bq_client, processing_date, tables)
-        marker = {
+        pending = {
             "run_id": run_id,
             "processing_date": processing_date,
             "snapshot_id": snapshot_id,
@@ -714,16 +941,43 @@ def run_matcher_shadow(
             },
             "tables": tables,
             "metrics": manifest.get("metrics", _read_metrics(output)),
-            "comparison": comparison,
         }
-        marker_uri = _write_marker(storage_client, config, processing_date, run_id, marker)
+        pending_uri = _write_pending(storage_client, config, processing_date, run_id, pending)
     except Exception:
         if not config.keep_workspace:
             shutil.rmtree(run_workspace, ignore_errors=True)
         raise
     if not config.keep_workspace:
         shutil.rmtree(run_workspace, ignore_errors=True)
-    return {"enabled": True, "marker_uri": marker_uri, "tables": tables}
+    return {
+        "enabled": True,
+        "status": "loaded_pending",
+        "processing_date": processing_date,
+        "run_id": run_id,
+        "pending_uri": pending_uri,
+    }
+
+
+def run_matcher_shadow_compare_commit(
+    processing_date: str, run_id: str, pending_context: dict[str, object]
+) -> dict[str, object]:
+    """Compare same-run shadow tables after canonical fact tests, then commit once."""
+    if not pending_context.get("enabled"):
+        return {"enabled": False, "reason": "MATCHER_SHADOW_ENABLED is false"}
+    if pending_context.get("status") != "loaded_pending":
+        return {"enabled": True, "status": "skipped_shadow_load_failed"}
+    if pending_context.get("processing_date") != processing_date or pending_context.get("run_id") != run_id:
+        raise RuntimeError("Matcher shadow pending context does not match this DAG run")
+    config = ShadowConfig.from_env()
+    config.validate()
+    storage_client = storage.Client(project=GCP_PROJECT)
+    pending = _read_pending(storage_client, config, processing_date, run_id)
+    if pending.get("processing_date") != processing_date or pending.get("run_id") != run_id:
+        raise RuntimeError("Matcher shadow pending metadata does not match this DAG run")
+    tables = _pending_tables(config, _run_id(run_id), pending)
+    comparison = _comparison_report(bigquery.Client(project=GCP_PROJECT), processing_date, tables)
+    marker_uri = _write_marker(storage_client, config, processing_date, run_id, pending | {"comparison": comparison})
+    return {"enabled": True, "status": "committed", "marker_uri": marker_uri}
 
 
 def _validate_run_workspace(config: ShadowConfig, workspace: Path) -> None:
@@ -748,14 +1002,27 @@ def _json_value(value: object) -> object:
     return value
 
 
-def run_matcher_shadow_task(
+def run_matcher_shadow_load_task(
     processing_date: str, snapshot_id: str, run_id: str, *, try_number: int = 1
 ) -> dict[str, object]:
     """Keep canonical DAG publication runnable unless strict mode is explicitly requested."""
     try:
-        return run_matcher_shadow(processing_date, snapshot_id, run_id, try_number=try_number)
+        return run_matcher_shadow_load(processing_date, snapshot_id, run_id, try_number=try_number)
     except Exception as exc:
         if _env_bool("MATCHER_SHADOW_STRICT", False):
             raise
-        LOGGER.exception("Matcher shadow failed without affecting canonical publication")
+        LOGGER.exception("Matcher shadow load failed without affecting canonical publication")
+        return {"enabled": True, "status": "failed_non_strict", "error": str(exc)}
+
+
+def run_matcher_shadow_compare_commit_task(
+    processing_date: str, run_id: str, pending_context: dict[str, object]
+) -> dict[str, object]:
+    """Keep canonical publication independent from non-strict comparison failures."""
+    try:
+        return run_matcher_shadow_compare_commit(processing_date, run_id, pending_context)
+    except Exception as exc:
+        if _env_bool("MATCHER_SHADOW_STRICT", False):
+            raise
+        LOGGER.exception("Matcher shadow comparison failed without affecting canonical publication")
         return {"enabled": True, "status": "failed_non_strict", "error": str(exc)}
