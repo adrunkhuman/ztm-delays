@@ -7,6 +7,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,13 +27,48 @@ from ztm_matcher.schemas import (
     MANIFEST_VERSION,
     NORMALIZED_GPS_SCHEMA,
     NORMALIZED_GPS_SCHEMA_VERSION,
+    OPERATIONAL_CROSSING_SCHEMA_VERSION,
+    PASSENGER_ARRIVAL_SCHEMA_VERSION,
+    PASSENGER_STOP_ARRIVAL_SCHEMA,
     SCHEDULE_SCHEMA_VERSION,
     SEMANTICS_SCHEMA_VERSION,
+    STOP_CROSSING_SCHEMA,
     TRAVERSAL_EVIDENCE_SCHEMA,
 )
 from ztm_matcher.semantics import duties, iter_stop_semantics
+from ztm_matcher.stop_alignment import align_stop_crossings
 
 SEMANTICS_BATCH_ROWS = 10_000
+STOP_ALIGNMENT_ROW_GROUP_ROWS = 25_000
+STOP_ALIGNMENT_SEMANTIC_COLUMNS = (
+    "stop_id",
+    "stop_group_id",
+    "stop_lat",
+    "stop_lon",
+    "stop_sequence",
+    "arrival_time_seconds",
+    "departure_time_seconds",
+    "pickup_type",
+    "drop_off_type",
+    "stop_service_class",
+    "stop_execution_class",
+    "classification_confidence",
+    "classification_reason",
+    "classification_evidence",
+    "is_passenger_stop",
+    "are_passenger_boundaries_settled",
+    "first_passenger_stop_sequence",
+    "last_passenger_stop_sequence",
+)
+STOP_ALIGNMENT_EXECUTION_KEY = (
+    "service_date",
+    "processing_date",
+    "gtfs_snapshot_id",
+    "duty_chain_id",
+    "trip_order",
+    "trip_id",
+    "vehicle_number",
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +77,297 @@ class VehicleStream:
 
     vehicle_number: str
     pings: pa.Table
+
+
+@dataclass(frozen=True)
+class StopAlignmentWorker:
+    """Pickle-safe description of a deterministic contiguous vehicle chunk."""
+
+    index: int
+    vehicle_numbers: tuple[str, ...]
+    normalized_path: Path
+    inputs_path: Path
+    shard_dir: Path
+    memory_limit: str
+    temp_limit: str
+    max_vehicle_rows: int
+
+
+class OrderedArrowRows:
+    """Incrementally consume rows ordered by vehicle_number."""
+
+    def __init__(self, reader: pa.RecordBatchReader) -> None:
+        self._rows = (row for batch in reader for row in batch.to_pylist())
+        self.current = next(self._rows, None)
+
+    def pop(self) -> dict[str, Any]:
+        if self.current is None:
+            raise StopIteration
+        row = self.current
+        self.current = next(self._rows, None)
+        return row
+
+
+def _balanced_vehicle_chunks(vehicle_numbers: list[str], worker_count: int) -> list[tuple[str, ...]]:
+    """Split sorted vehicles into contiguous chunks that differ by at most one vehicle."""
+    active_workers = min(worker_count, len(vehicle_numbers))
+    if active_workers == 0:
+        return []
+    quotient, remainder = divmod(len(vehicle_numbers), active_workers)
+    chunks = []
+    start = 0
+    for index in range(active_workers):
+        stop = start + quotient + (index < remainder)
+        chunks.append(tuple(vehicle_numbers[start:stop]))
+        start = stop
+    return chunks
+
+
+def _stop_alignment_counts() -> dict[str, int]:
+    return {
+        "operational_stop_crossings": 0,
+        "passenger_stop_arrivals": 0,
+        "missing_stops": 0,
+        "ambiguous_trips": 0,
+        "vehicle_groups": 0,
+        "execution_trips": 0,
+    }
+
+
+def _write_stop_alignment(
+    execution: dict[str, Any] | None,
+    semantics: list[dict[str, Any]],
+    pings: list[dict[str, Any]],
+    operational_rows: list[dict[str, Any]],
+    passenger_rows: list[dict[str, Any]],
+    counts: dict[str, int],
+) -> None:
+    """Align one course and append its rows to bounded worker-local buffers."""
+    if execution is None:
+        return
+    lower = max(
+        execution["ownership_interval_start_time"],
+        execution["source_ping_start_time"] or execution["ownership_interval_start_time"],
+    )
+    upper = min(
+        execution["ownership_interval_end_time"],
+        execution["source_ping_end_time"] or execution["ownership_interval_end_time"],
+    )
+    result = align_stop_crossings(execution, semantics, [ping for ping in pings if lower <= ping["gps_time"] <= upper])
+    operational_rows.extend(result.operational_crossings)
+    passenger_rows.extend(result.passenger_arrivals)
+    counts["operational_stop_crossings"] += len(result.operational_crossings)
+    counts["passenger_stop_arrivals"] += len(result.passenger_arrivals)
+    counts["missing_stops"] += result.missing_stop_count
+    counts["ambiguous_trips"] += int(result.ambiguous)
+    counts["execution_trips"] += 1
+
+
+def _flush_stop_alignment_rows(
+    rows: list[dict[str, Any]], writer: pq.ParquetWriter, schema: pa.Schema, *, final: bool = False
+) -> None:
+    """Write full deterministic row groups and retain at most one partial group."""
+    while len(rows) >= STOP_ALIGNMENT_ROW_GROUP_ROWS:
+        batch = rows[:STOP_ALIGNMENT_ROW_GROUP_ROWS]
+        writer.write_table(pa.Table.from_pylist(batch, schema=schema))
+        del rows[:STOP_ALIGNMENT_ROW_GROUP_ROWS]
+    if final and rows:
+        writer.write_table(pa.Table.from_pylist(rows, schema=schema))
+        rows.clear()
+
+
+def _cleanup_stop_alignment_worker(
+    operational_rows: list[dict[str, Any]],
+    passenger_rows: list[dict[str, Any]],
+    operational_writer: pq.ParquetWriter | None,
+    passenger_writer: pq.ParquetWriter | None,
+    connections: tuple[duckdb.DuckDBPyConnection | None, ...],
+) -> None:
+    """Flush and close every resource, reporting only the first cleanup failure."""
+    cleanup_error: BaseException | None = None
+
+    def clean_up(action: Any) -> None:
+        nonlocal cleanup_error
+        try:
+            action()
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+
+    if operational_writer is not None:
+        clean_up(
+            lambda: _flush_stop_alignment_rows(operational_rows, operational_writer, STOP_CROSSING_SCHEMA, final=True)
+        )
+    if passenger_writer is not None:
+        clean_up(
+            lambda: _flush_stop_alignment_rows(
+                passenger_rows, passenger_writer, PASSENGER_STOP_ARRIVAL_SCHEMA, final=True
+            )
+        )
+    if operational_writer is not None:
+        clean_up(operational_writer.close)
+    if passenger_writer is not None:
+        clean_up(passenger_writer.close)
+    for connection in connections:
+        if connection is not None:
+            clean_up(connection.close)
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def _pings_for_stop_alignment_vehicle(
+    rows: OrderedArrowRows, vehicle_number: str, max_vehicle_rows: int
+) -> list[dict[str, Any]]:
+    """Consume one vehicle's bounded GPS group from the ordered chunk reader."""
+    if rows.current is not None and str(rows.current["vehicle_number"]) < vehicle_number:
+        raise RuntimeError("normalized GPS rows are not ordered by worker vehicle")
+    pings: list[dict[str, Any]] = []
+    while rows.current is not None and str(rows.current["vehicle_number"]) == vehicle_number:
+        if len(pings) >= max_vehicle_rows:
+            raise fail("resource_limit", f"vehicle {vehicle_number} exceeds max_vehicle_rows", 14)
+        pings.append(rows.pop())
+    return pings
+
+
+def _write_stop_alignment_vehicle(
+    rows: OrderedArrowRows,
+    vehicle_number: str,
+    pings: list[dict[str, Any]],
+    operational_rows: list[dict[str, Any]],
+    passenger_rows: list[dict[str, Any]],
+    counts: dict[str, int],
+    operational_writer: pq.ParquetWriter,
+    passenger_writer: pq.ParquetWriter,
+) -> None:
+    """Consume and align one vehicle's executions without retaining the chunk's inputs."""
+    if rows.current is not None and str(rows.current["vehicle_number"]) < vehicle_number:
+        raise RuntimeError("stop alignment inputs are not ordered by worker vehicle")
+    execution_key: tuple[object, ...] | None = None
+    execution: dict[str, Any] | None = None
+    semantics: list[dict[str, Any]] = []
+    while rows.current is not None and str(rows.current["vehicle_number"]) == vehicle_number:
+        row = rows.pop()
+        row_key = tuple(row[name] for name in STOP_ALIGNMENT_EXECUTION_KEY)
+        if execution_key is not None and row_key != execution_key:
+            _write_stop_alignment(execution, semantics, pings, operational_rows, passenger_rows, counts)
+            _flush_stop_alignment_rows(operational_rows, operational_writer, STOP_CROSSING_SCHEMA)
+            _flush_stop_alignment_rows(passenger_rows, passenger_writer, PASSENGER_STOP_ARRIVAL_SCHEMA)
+            execution = None
+            semantics = []
+        if execution is None:
+            execution_key = row_key
+            execution = {name: row[name] for name in DUTY_EXECUTION_SCHEMA.names}
+        semantics.append({name: row[f"semantic_{name}"] for name in STOP_ALIGNMENT_SEMANTIC_COLUMNS})
+    if execution is not None:
+        _write_stop_alignment(execution, semantics, pings, operational_rows, passenger_rows, counts)
+        _flush_stop_alignment_rows(operational_rows, operational_writer, STOP_CROSSING_SCHEMA)
+        _flush_stop_alignment_rows(passenger_rows, passenger_writer, PASSENGER_STOP_ARRIVAL_SCHEMA)
+
+
+def _run_stop_alignment_worker(worker: StopAlignmentWorker) -> dict[str, int]:
+    """Align a chunk with an isolated, single-threaded DuckDB connection."""
+    worker.shard_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = worker.shard_dir / f"duckdb-{worker.index:03d}"
+    normalized_temp_dir = temp_dir / "normalized"
+    inputs_temp_dir = temp_dir / "inputs"
+    normalized_temp_dir.mkdir(parents=True)
+    inputs_temp_dir.mkdir()
+    operational_path = worker.shard_dir / f"{worker.index:03d}-operational.parquet"
+    passenger_path = worker.shard_dir / f"{worker.index:03d}-passenger.parquet"
+    normalized_connection: duckdb.DuckDBPyConnection | None = None
+    inputs_connection: duckdb.DuckDBPyConnection | None = None
+    operational_writer: pq.ParquetWriter | None = None
+    passenger_writer: pq.ParquetWriter | None = None
+    operational_rows: list[dict[str, Any]] = []
+    passenger_rows: list[dict[str, Any]] = []
+    counts = _stop_alignment_counts()
+    primary_error: BaseException | None = None
+    normalized_sql = str(worker.normalized_path).replace("'", "''")
+    inputs_sql = str(worker.inputs_path).replace("'", "''")
+    try:
+        normalized_connection = duckdb.connect()
+        inputs_connection = duckdb.connect()
+        for connection, connection_temp_dir in (
+            (normalized_connection, normalized_temp_dir),
+            (inputs_connection, inputs_temp_dir),
+        ):
+            connection.execute("set threads to 1")
+            connection.execute(f"set memory_limit to '{worker.memory_limit}'")
+            connection.execute(f"set max_temp_directory_size to '{worker.temp_limit}'")
+            connection.execute(f"set temp_directory to '{str(connection_temp_dir).replace("'", "''")}'")
+        operational_writer = pq.ParquetWriter(operational_path, STOP_CROSSING_SCHEMA, compression="zstd")
+        passenger_writer = pq.ParquetWriter(passenger_path, PASSENGER_STOP_ARRIVAL_SCHEMA, compression="zstd")
+        normalized_rows = OrderedArrowRows(
+            normalized_connection.execute(
+                f"""
+                select * from read_parquet('{normalized_sql}')
+                where vehicle_number in (select unnest(?))
+                order by vehicle_number, gps_time, ingested_at, line, brigade
+                """,
+                [list(worker.vehicle_numbers)],
+            ).to_arrow_reader(SEMANTICS_BATCH_ROWS)
+        )
+        input_rows = OrderedArrowRows(
+            inputs_connection.execute(
+                f"""
+                select * from read_parquet('{inputs_sql}')
+                where vehicle_number in (select unnest(?))
+                order by vehicle_number, ownership_interval_start_time, service_date, duty_chain_id,
+                    trip_order, trip_id, semantic_stop_sequence
+                """,
+                [list(worker.vehicle_numbers)],
+            ).to_arrow_reader(SEMANTICS_BATCH_ROWS)
+        )
+        for vehicle_number in worker.vehicle_numbers:
+            pings = _pings_for_stop_alignment_vehicle(normalized_rows, vehicle_number, worker.max_vehicle_rows)
+            counts["vehicle_groups"] += 1
+            _write_stop_alignment_vehicle(
+                input_rows,
+                vehicle_number,
+                pings,
+                operational_rows,
+                passenger_rows,
+                counts,
+                operational_writer,
+                passenger_writer,
+            )
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        try:
+            _cleanup_stop_alignment_worker(
+                operational_rows,
+                passenger_rows,
+                operational_writer,
+                passenger_writer,
+                (normalized_connection, inputs_connection),
+            )
+        except BaseException:
+            if primary_error is None:
+                raise
+    return counts
+
+
+def _merge_stop_alignment_shards(
+    shard_dir: Path, worker_count: int, output_path: Path, schema: pa.Schema, artifact_name: str
+) -> None:
+    """Concatenate contiguous vehicle shards in chunk order into one ordered artifact."""
+    writer = pq.ParquetWriter(output_path, schema, compression="zstd")
+    buffered: pa.Table | None = None
+    try:
+        for index in range(worker_count):
+            shard = shard_dir / f"{index:03d}-{artifact_name}.parquet"
+            for batch in pq.ParquetFile(shard).iter_batches(batch_size=STOP_ALIGNMENT_ROW_GROUP_ROWS):
+                table = pa.Table.from_batches([batch], schema=schema)
+                buffered = table if buffered is None else pa.concat_tables([buffered, table])
+                while buffered.num_rows >= STOP_ALIGNMENT_ROW_GROUP_ROWS:
+                    writer.write_table(buffered.slice(0, STOP_ALIGNMENT_ROW_GROUP_ROWS))
+                    buffered = buffered.slice(STOP_ALIGNMENT_ROW_GROUP_ROWS)
+        if buffered is not None and buffered.num_rows:
+            writer.write_table(buffered)
+    finally:
+        writer.close()
 
 
 def _identity(path: Path, *, relative: bool = False) -> dict[str, object]:
@@ -81,6 +408,8 @@ class ReconstructionRun:
         self.config, self.connection, self.work_dir, self.normalized_path = config, None, None, None
 
     def __enter__(self) -> "ReconstructionRun":
+        if self.config.alignment_workers < 1:
+            raise fail("invalid_configuration", "alignment_workers must be positive", 2)
         self.config.output_dir.parent.mkdir(parents=True, exist_ok=True)
         self.work_dir = self.config.output_dir.parent / f".{self.config.output_dir.name}.incomplete-{uuid.uuid4().hex}"
         self.work_dir.mkdir()
@@ -214,6 +543,7 @@ class ReconstructionRun:
         self.normalized_path = work / "normalized_gps.parquet"
         normalized_rows = normalize(connection, files, self.config.processing_date, self.normalized_path)
         execution_counts = self.align_execution()
+        crossing_counts = self.align_stops()
         input_rows = sum(pq.ParquetFile(file).metadata.num_rows for file in files)
         if pq.read_schema(self.normalized_path) != NORMALIZED_GPS_SCHEMA:
             raise fail("invalid_output", "normalized GPS artifact schema validation failed", 15)
@@ -227,6 +557,8 @@ class ReconstructionRun:
                 "schedule": SCHEDULE_SCHEMA_VERSION,
                 "stop_semantics": SEMANTICS_SCHEMA_VERSION,
                 "duty_execution": EXECUTION_SCHEMA_VERSION,
+                "operational_stop_crossings": OPERATIONAL_CROSSING_SCHEMA_VERSION,
+                "passenger_stop_arrivals": PASSENGER_ARRIVAL_SCHEMA_VERSION,
             },
             "inputs": {"gps": [_identity(file) for file in files], "gtfs_zip": _identity(self.config.gtfs_zip)},
             "outputs": {
@@ -234,6 +566,8 @@ class ReconstructionRun:
                 "duty_schedule": _identity(work / "duty_schedule.parquet", relative=True),
                 "stop_semantics": _identity(work / "stop_semantics.parquet", relative=True),
                 "duty_execution": _identity(work / "duty_execution.parquet", relative=True),
+                "operational_stop_crossings": _identity(work / "operational_stop_crossings.parquet", relative=True),
+                "passenger_stop_arrivals": _identity(work / "passenger_stop_arrivals.parquet", relative=True),
             },
             "missing_hours": missing,
         }
@@ -256,6 +590,14 @@ class ReconstructionRun:
             "max_vehicle_rows": int(vehicle_stats[1]) if vehicle_stats else 0,
             "duty_execution_rows": sum(execution_counts.values()),
             "duty_execution_status_counts": dict(sorted(execution_counts.items())),
+            "operational_stop_crossings": crossing_counts["operational_stop_crossings"],
+            "passenger_stop_arrivals": crossing_counts["passenger_stop_arrivals"],
+            "stop_alignment_missing_stops": crossing_counts["missing_stops"],
+            "stop_alignment_ambiguous_trips": crossing_counts["ambiguous_trips"],
+            "stop_alignment_vehicle_groups": crossing_counts["vehicle_groups"],
+            "stop_alignment_execution_trips": crossing_counts["execution_trips"],
+            "stop_alignment_workers": self.config.alignment_workers,
+            "stop_alignment_worker_chunks": crossing_counts["worker_chunks"],
             "swapping_observed": None if process["current_swap_bytes"] is None else process["current_swap_bytes"] > 0,
             **process,
         }
@@ -327,6 +669,94 @@ class ReconstructionRun:
             output_writer.close()
             evidence_path.unlink(missing_ok=True)
             (work / ".terminal_courses.parquet").unlink(missing_ok=True)
+        return counts
+
+    def align_stops(self) -> dict[str, int]:
+        """Align active vehicles in deterministic chunks and merge private worker shards."""
+        work = self._work()
+        execution_path = str(work / "duty_execution.parquet").replace("'", "''")
+        semantics_path = str(work / "stop_semantics.parquet").replace("'", "''")
+        inputs_path = work / ".stop_alignment_inputs.parquet"
+        inputs_sql = str(inputs_path).replace("'", "''")
+        shard_dir = work / ".stop-alignment-shards"
+        counts = _stop_alignment_counts()
+        semantic_columns = ", ".join(
+            f"semantics.{column} as semantic_{column}" for column in STOP_ALIGNMENT_SEMANTIC_COLUMNS
+        )
+        try:
+            # Join the large semantics artifact once; ordered row groups let vehicle filters skip unrelated inputs.
+            self._connection().execute(
+                f"""
+                copy (
+                    select executions.*, {semantic_columns}
+                    from read_parquet('{execution_path}') as executions
+                    inner join read_parquet('{semantics_path}') as semantics
+                        on executions.service_date = semantics.service_date
+                        and executions.processing_date = semantics.processing_date
+                        and executions.gtfs_snapshot_id = semantics.gtfs_snapshot_id
+                        and executions.duty_chain_id = semantics.duty_chain_id
+                        and executions.trip_id = semantics.trip_id
+                    where executions.execution_status = 'executed'
+                      and executions.confidence = 'high'
+                      and executions.ownership_interval_start_time is not null
+                      and executions.ownership_interval_end_time is not null
+                    order by executions.vehicle_number, executions.ownership_interval_start_time,
+                        executions.service_date, executions.duty_chain_id, executions.trip_order,
+                        executions.trip_id, semantics.stop_sequence
+                ) to '{inputs_sql}' (format parquet, compression zstd, row_group_size {STOP_ALIGNMENT_ROW_GROUP_ROWS})
+                """
+            )
+            vehicle_numbers = [
+                str(row[0])
+                for row in self._connection()
+                .execute(f"select distinct vehicle_number from read_parquet('{inputs_sql}') order by vehicle_number")
+                .fetchall()
+            ]
+            chunks = _balanced_vehicle_chunks(vehicle_numbers, self.config.alignment_workers)
+            workers = [
+                StopAlignmentWorker(
+                    index,
+                    chunk,
+                    self.normalized_path or work / "normalized_gps.parquet",
+                    inputs_path,
+                    shard_dir,
+                    self.config.memory_limit,
+                    self.config.temp_limit,
+                    self.config.max_vehicle_rows,
+                )
+                for index, chunk in enumerate(chunks)
+            ]
+            if len(workers) == 1:
+                worker_counts = [_run_stop_alignment_worker(workers[0])]
+            elif workers:
+                with ProcessPoolExecutor(max_workers=len(workers)) as executor:
+                    worker_counts = [
+                        future.result()
+                        for future in (executor.submit(_run_stop_alignment_worker, worker) for worker in workers)
+                    ]
+            else:
+                worker_counts = []
+            for worker_count in worker_counts:
+                for key in counts:
+                    counts[key] += worker_count[key]
+            counts["worker_chunks"] = len(workers)
+            _merge_stop_alignment_shards(
+                shard_dir,
+                len(workers),
+                work / "operational_stop_crossings.parquet",
+                STOP_CROSSING_SCHEMA,
+                "operational",
+            )
+            _merge_stop_alignment_shards(
+                shard_dir,
+                len(workers),
+                work / "passenger_stop_arrivals.parquet",
+                PASSENGER_STOP_ARRIVAL_SCHEMA,
+                "passenger",
+            )
+        finally:
+            inputs_path.unlink(missing_ok=True)
+            shutil.rmtree(shard_dir, ignore_errors=True)
         return counts
 
     def _schedule_rows_for_stream(self, stream: VehicleStream) -> list[dict[str, Any]]:

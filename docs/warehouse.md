@@ -77,6 +77,11 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 | `agg_service_coverage` | Schedule-aware observed-service coverage by scheduled start date/hour. |
 | `mart_pipeline_status` | Historical archive health by operational date and mode. |
 
+The local matcher can additionally emit `operational_stop_crossings-v1` and
+`passenger-stop-arrival-v1` Parquet artifacts. The first is complete operational
+lineage, including technical posts; the second is a settled-passenger-only adapter
+toward `fct_stop_arrival`. They are not yet a warehouse replacement.
+
 ## Dimensions
 
 Archive-safe dimensions are date-ranged where history matters:

@@ -22,6 +22,7 @@ class RunConfig:
     temp_limit: str = "20GB"
     max_vehicle_rows: int = 1_000_000
     allow_missing_hours: bool = False
+    alignment_workers: int = 1
 
     def as_manifest(self) -> dict[str, object]:
         """Return JSON-safe config values."""

@@ -7,7 +7,8 @@ BigQuery.
 ```shell
 uv run --project matcher ztm-matcher prepare --processing-date 2026-07-09 \
   --snapshot-id 2026-07-08T00:00:00Z_37117bdef8d6 --gps-root cache/raw/gps \
-  --gtfs-zip cache/gtfs/snapshot.zip --output-dir work/2026-07-09
+  --gtfs-zip cache/gtfs/snapshot.zip --output-dir work/2026-07-09 \
+  --alignment-workers 8
 ```
 
 GPS partitions are `vehicle_type={bus,tram}/date=YYYY-MM-DD/hour=HH/*.parquet`.
@@ -23,7 +24,8 @@ partial-day diagnostic run must opt in with `--allow-missing-hours`; the missing
 inventory remains recorded in its manifest.
 
 Success atomically publishes normalized GPS, duty schedule, stop semantics,
-`duty_execution.parquet`, manifest, and metrics. `duty_execution` has exactly
+`duty_execution.parquet`, `operational_stop_crossings.parquet`,
+`passenger_stop_arrivals.parquet`, manifest, and metrics. `duty_execution` has exactly
 one outcome per scheduled course: `executed`, `missed`, `skipped`,
 `short_turned`, `vehicle_change_signal`, or `uncertain`. A vehicle-change
 signal is competing GPS evidence, not a claim that a physical vehicle swap
@@ -52,3 +54,26 @@ duty fallback cannot receive high confidence.
 The July 9 VPS proof with duty alignment measured about 1.63 GiB peak process
 RSS with this limit and zero matcher swap. The lower DuckDB allowance trades
 bounded temporary I/O for enough memory headroom to add stop alignment.
+
+## Stop Alignment
+
+The runtime reads one high-confidence executed course and its bounded vehicle
+GPS interval at a time. It generates only 1--180 second consecutive segments,
+then selects one bounded dynamic-programming path through stop *occurrences*
+ordered by `stop_sequence`; a repeated `stop_id` is not collapsed. Segment reuse,
+time regression, and crossings outside ownership/source bounds are hard rejects.
+Distance, scheduled residual, and use of an expanded radius are soft costs.
+
+`operational_stop_crossings-v1` retains direct technical and passenger movement
+with segment diagnostics. `passenger_stop_arrivals-v1` is its settled-passenger
+subset and is the explicit Parquet adapter toward `fct_stop_arrival`. Unknown
+passenger boundaries cannot enter that subset. Missing stops produce no inferred
+arrival: #102 remains responsible for any separately qualified interpolation.
+
+Stop alignment defaults to `--alignment-workers 1`, which is the VPS-safe
+setting. For local development, `--alignment-workers 8` splits the sorted active
+vehicle IDs into contiguous balanced chunks. Each worker has an isolated DuckDB
+connection with one thread and the configured memory and temporary-disk caps;
+only compact counts return to the parent. Workers write private Parquet shards,
+which the parent merges in chunk order, so logical artifacts do not depend on
+worker count and each fixed worker-count run has deterministic output bytes.

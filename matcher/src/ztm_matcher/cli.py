@@ -23,14 +23,20 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--temp-limit", default="20GB")
     prepare.add_argument("--max-vehicle-rows", type=int, default=1_000_000)
     prepare.add_argument(
+        "--alignment-workers",
+        type=int,
+        default=1,
+        help="Concurrent vehicle chunks for stop alignment; each worker uses one DuckDB thread.",
+    )
+    prepare.add_argument(
         "--allow-missing-hours",
         action="store_true",
         help="Prepare a known partial day while retaining missing hours in the manifest.",
     )
     args = parser.parse_args(argv)
     try:
-        if args.threads < 1 or args.max_vehicle_rows < 1:
-            raise fail("invalid_configuration", "threads and max_vehicle_rows must be positive", 2)
+        if args.threads < 1 or args.max_vehicle_rows < 1 or args.alignment_workers < 1:
+            raise fail("invalid_configuration", "threads, max_vehicle_rows, and alignment_workers must be positive", 2)
         output = Path(args.output_dir)
         config = RunConfig(
             parse_date(args.processing_date),
@@ -44,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
             args.temp_limit,
             args.max_vehicle_rows,
             args.allow_missing_hours,
+            args.alignment_workers,
         )
         with ReconstructionRun(config) as run:
             result = run.prepare()
