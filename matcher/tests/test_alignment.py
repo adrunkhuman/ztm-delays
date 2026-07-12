@@ -232,18 +232,18 @@ def test_coherent_vehicle_path_beats_a_competing_single_course_candidate() -> No
 def test_long_consistent_delay_and_skipped_middle_retain_later_traversal() -> None:
     first, missing, last = _course("first"), _course("missing", 2), _course("last", 3)
     delayed_pings = [
-        _ping(100, 0.0),
-        _ping(101, 0.01),
-        _ping(102, 0.02),
-        _ping(140, 0.0),
-        _ping(141, 0.01),
-        _ping(142, 0.02),
+        _ping(50, 0.0),
+        _ping(51, 0.01),
+        _ping(52, 0.02),
+        _ping(90, 0.0),
+        _ping(91, 0.01),
+        _ping(92, 0.02),
     ]
     outcomes = settle_duty([first, missing, last], _evidence(first, delayed_pings) + _evidence(last, delayed_pings))
 
     assert [row["execution_status"] for row in outcomes] == ["executed", "skipped", "executed"]
-    assert outcomes[0]["ownership_interval_start_time"] == BASE + timedelta(minutes=101)
-    assert outcomes[2]["ownership_interval_start_time"] == BASE + timedelta(minutes=141)
+    assert outcomes[0]["ownership_interval_start_time"] == BASE + timedelta(minutes=51)
+    assert outcomes[2]["ownership_interval_start_time"] == BASE + timedelta(minutes=91)
 
 
 def test_competing_duties_cannot_own_the_same_physical_interval() -> None:
@@ -298,8 +298,8 @@ def test_implausible_schedule_offsets_cannot_own_an_ordinary_course() -> None:
     too_late = {
         **template,
         "traversal_id": "too-late",
-        "departure_event_time": BASE + timedelta(hours=2, minutes=1),
-        "destination_event_time": BASE + timedelta(hours=2, minutes=20),
+        "departure_event_time": BASE + timedelta(hours=1, minutes=1),
+        "destination_event_time": BASE + timedelta(hours=1, minutes=20),
     }
 
     outcome = settle_duty([course], [too_early, too_late])[0]
@@ -310,9 +310,7 @@ def test_implausible_schedule_offsets_cannot_own_an_ordinary_course() -> None:
 
 def test_replacement_course_has_a_wider_but_bounded_schedule_window() -> None:
     course = _course("replacement", line="Z26")
-    evidence = _evidence(
-        course, [_ping(180, 0.0, line="Z26"), _ping(181, 0.01, line="Z26"), _ping(182, 0.02, line="Z26")]
-    )
+    evidence = _evidence(course, [_ping(80, 0.0, line="Z26"), _ping(81, 0.01, line="Z26"), _ping(82, 0.02, line="Z26")])
 
     outcome = settle_duty([course], evidence)[0]
 
