@@ -6,6 +6,7 @@ import json
 import zipfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -15,7 +16,7 @@ import ztm_matcher.runtime as runtime
 from ztm_matcher import ReconstructionRun, RunConfig
 from ztm_matcher.cli import main
 from ztm_matcher.errors import MatcherError
-from ztm_matcher.gtfs import load
+from ztm_matcher.gtfs import Snapshot, load, select
 from ztm_matcher.overnight_proof import build_overnight_proof_report
 from ztm_matcher.runtime import STOP_ALIGNMENT_ROW_GROUP_ROWS, _flush_stop_alignment_rows
 from ztm_matcher.schemas import (
@@ -29,6 +30,7 @@ from ztm_matcher.schemas import (
     STOP_CROSSING_SCHEMA,
     TRIP_UNIVERSE_SCHEMA,
 )
+from ztm_matcher.semantics import duties, iter_stop_semantics
 
 
 def _gps(root: Path, rows: list[dict[str, object]]) -> None:
@@ -101,6 +103,9 @@ def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
             ["non-zone1", "n43", "svc", "Outside", "0", "four", "4", "s"],
             ["depot", "n44", "svc", "Depot", "0", "five", "5", "s"],
             ["technical", "n45", "svc", "Technical", "0", "six", "6", "s"],
+            ["all-technical", "n46", "svc", "Technical", "0", "seven", "7", "s"],
+            ["malformed-previous", "n47", "svc", "Previous", "0", "eight", "8", "s"],
+            ["malformed", "n47", "svc", "Malformed", "0", "eight", "8", "s"],
         ],
         "stop_times.txt": [
             ["trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time", "pickup_type", "drop_off_type"],
@@ -117,6 +122,12 @@ def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
             ["depot", "300002", "2", "02:00:00", "02:00:00", "0", "0"],
             ["technical", "400001", "1", "01:00:00", "01:00:00", "1", "1"],
             ["technical", "400002", "2", "02:00:00", "02:00:00", "0", "0"],
+            ["all-technical", "500001", "1", "01:00:00", "01:00:00", "1", "1"],
+            ["all-technical", "500002", "2", "02:00:00", "02:00:00", "1", "1"],
+            ["malformed-previous", "100001", "1", "01:00:00", "01:00:00", "0", "0"],
+            ["malformed-previous", "100004", "2", "02:00:00", "02:00:00", "0", "0"],
+            ["malformed", "100001", "1", "01:30:00", "01:30:00", "0", "0"],
+            ["malformed", "100004", "2", "02:30:00", "02:30:00", "0", "0"],
         ],
         "stops.txt": [
             ["stop_id", "stop_name", "stop_code", "stop_lat", "stop_lon", "zone_id", "stop_name_stem", "town_name"],
@@ -130,6 +141,8 @@ def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
             ["300002", "G", "8", "52.207", "21.007", "1", "G", "Warszawa"],
             ["400001", "H", "9", "52.208", "21.008", "1", "H", "Warszawa"],
             ["400002", "I", "10", "52.209", "21.009", "1", "I", "Warszawa"],
+            ["500001", "J", "11", "52.210", "21.010", "1", "J", "Warszawa"],
+            ["500002", "K", "12", "52.211", "21.011", "1", "K", "Warszawa"],
         ],
         "shapes.txt": [["shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"], ["s", "52.2", "21", "1"]],
         "routes.txt": [
@@ -138,6 +151,8 @@ def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
             ["n43", "N43", "3"],
             ["n44", "N44", "3"],
             ["n45", "N45", "3"],
+            ["n46", "N46", "3"],
+            ["n47", "N47", "3"],
         ],
         "calendar_dates.txt": [
             ["service_id", "date", "exception_type"],
@@ -152,6 +167,19 @@ def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
                 rows = [row[:5] + row[6:] for row in rows]
             csv.writer(stream).writerows(rows)
             archive.writestr(name, stream.getvalue())
+
+
+def _trip_universe_inputs(zip_path: Path) -> tuple[Snapshot, list[dict[str, Any]], set[tuple[date, str]]]:
+    snapshot = load(zip_path, "synthetic", date(2026, 1, 15))
+    duty_rows = duties(select(snapshot, date(2026, 1, 15)), snapshot)
+    settled_passenger_trips = {
+        (semantic["service_date"], semantic["trip_id"])
+        for semantic in iter_stop_semantics(duty_rows, snapshot)
+        if semantic["are_passenger_boundaries_settled"]
+        and semantic["is_passenger_stop"]
+        and semantic["stop_execution_class"] == "passenger"
+    }
+    return snapshot, duty_rows, settled_passenger_trips
 
 
 def _row(**changes: object) -> dict[str, object]:
@@ -561,8 +589,41 @@ def test_schedule_trip_universe_classifies_zone_depot_technical_and_short_turns(
     assert not universe["non-zone1"]["is_zone1_public_ranking_trip"]
     assert not universe["depot"]["is_public_passenger_segment"]
     assert universe["technical"]["is_public_passenger_segment"]
+    assert not universe["all-technical"]["is_public_passenger_segment"]
+    assert not universe["malformed"]["is_public_passenger_segment"]
     assert universe["short"]["is_short_turn_part_trip"]
     assert universe["short"]["terminal_pair_rank"] == 2
+    assert not universe["short"]["is_zone1_public_ranking_trip"]
+
+
+def test_trip_universe_writes_from_in_memory_schedule_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _ranking_gtfs(zip_path)
+    snapshot, duty_rows, settled_passenger_trips = _trip_universe_inputs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+
+    def unexpected_duckdb_access() -> None:
+        raise AssertionError("trip-universe writer must not query DuckDB")
+
+    with ReconstructionRun(config) as run:
+        monkeypatch.setattr(run, "_connection", unexpected_duckdb_access)
+        universe_path = run._work() / "trip_universe.parquet"
+        run._write_trip_universe(duty_rows, snapshot, settled_passenger_trips, universe_path)
+        universe = {row["trip_id"]: row for row in pq.read_table(universe_path).to_pylist()}
+
+    assert pq.read_schema(output / "trip_universe.parquet") == TRIP_UNIVERSE_SCHEMA
+    assert universe["technical"]["is_public_passenger_segment"]
+    assert not universe["all-technical"]["is_public_passenger_segment"]
+    assert not universe["malformed"]["is_public_passenger_segment"]
+    assert not universe["non-zone1"]["is_zone1_public_ranking_trip"]
     assert not universe["short"]["is_zone1_public_ranking_trip"]
 
 
@@ -633,12 +694,12 @@ def test_trip_universe_cleans_temporary_files_and_closes_writer_on_failure(
         return writer
 
     with ReconstructionRun(config) as run:
-        run.prepare_schedule()
         work = run._work()
+        snapshot, duty_rows, settled_passenger_trips = _trip_universe_inputs(zip_path)
         monkeypatch.setattr(runtime.pq, "ParquetWriter", failing_writer)
         failed_output = work / "failed_trip_universe.parquet"
         with pytest.raises(OSError, match="simulated parquet write failure"):
-            run._write_trip_universe(work / "duty_schedule.parquet", work / "stop_semantics.parquet", failed_output)
+            run._write_trip_universe(duty_rows, snapshot, settled_passenger_trips, failed_output)
 
     assert writer is not None
     assert writer.closed

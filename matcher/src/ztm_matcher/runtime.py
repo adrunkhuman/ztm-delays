@@ -9,6 +9,8 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from datetime import date
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +23,7 @@ from ztm_matcher.config import RunConfig
 from ztm_matcher.errors import fail
 from ztm_matcher.facts import build_facts
 from ztm_matcher.gps import discover, hourly_counts, normalize
-from ztm_matcher.gtfs import load, select
+from ztm_matcher.gtfs import Snapshot, load, select
 from ztm_matcher.schemas import (
     DUTY_EXECUTION_SCHEMA,
     EXECUTION_SCHEMA_VERSION,
@@ -50,7 +52,7 @@ from ztm_matcher.stop_alignment import align_stop_crossings
 
 SEMANTICS_BATCH_ROWS = 10_000
 STOP_ALIGNMENT_ROW_GROUP_ROWS = 25_000
-TRIP_UNIVERSE_BATCH_ROWS = 10_000
+TRIP_UNIVERSE_BATCH_ROWS = 25_000
 STOP_ALIGNMENT_SEMANTIC_COLUMNS = (
     "stop_id",
     "stop_group_id",
@@ -154,6 +156,74 @@ def _write_trip_universe_group(
         if len(output_rows) >= TRIP_UNIVERSE_BATCH_ROWS:
             writer.write_table(pa.Table.from_pylist(output_rows, schema=TRIP_UNIVERSE_SCHEMA))
             output_rows.clear()
+
+
+def _rank_trip_universe_terminal_pairs(group: list[dict[str, Any]]) -> None:
+    """Set deterministic terminal-pair counts and ranks for one line-direction group."""
+    counts: dict[tuple[str, str], int] = {}
+    for row in group:
+        if row["is_public_passenger_segment"]:
+            pair = (row["origin_stop_id"], row["destination_stop_id"])
+            counts[pair] = counts.get(pair, 0) + 1
+    ranks = {
+        pair: rank
+        for rank, (pair, _) in enumerate(
+            sorted(counts.items(), key=lambda item: (-item[1], item[0][0], item[0][1])), start=1
+        )
+    }
+    for row in group:
+        pair = (row["origin_stop_id"], row["destination_stop_id"])
+        row["terminal_pair_trip_count"] = counts.get(pair, 0)
+        row["terminal_pair_rank"] = ranks.get(pair, 999999)
+
+
+def _trip_universe_base_rows(
+    duty_rows: list[dict[str, Any]], snapshot: Snapshot, settled_passenger_trips: set[tuple[date, str]]
+) -> list[dict[str, Any]]:
+    """Build compact per-course ranking inputs from the already loaded schedule snapshot."""
+    base_rows = []
+    for duty_row in duty_rows:
+        if duty_row["mode"] not in {"bus", "tram"}:
+            continue
+        stop_ids = tuple(
+            stop_time.stop_id
+            for stop_time in sorted(snapshot.stop_times.get(duty_row["trip_id"], []), key=lambda row: row.stop_sequence)
+        )
+        non_zone1_stop_count = sum(
+            snapshot.stops.get(stop_id) is None or snapshot.stops[stop_id].effective_zone_id != "1"
+            for stop_id in stop_ids
+        )
+        is_public_passenger_segment = (
+            duty_row["is_public_service_segment"] is True
+            and duty_row["is_malformed_duty_segment"] is False
+            and (duty_row["service_date"], duty_row["trip_id"]) in settled_passenger_trips
+        )
+        base_rows.append(
+            {
+                "gtfs_snapshot_id": duty_row["gtfs_snapshot_id"],
+                "processing_date": duty_row["processing_date"],
+                "service_date": duty_row["service_date"],
+                "duty_chain_id": duty_row["duty_chain_id"],
+                "trip_id": duty_row["trip_id"],
+                "line": duty_row["line"],
+                "mode": duty_row["mode"],
+                "direction_id": duty_row["direction_id"],
+                "origin_stop_id": duty_row["origin_stop_id"],
+                "destination_stop_id": duty_row["destination_stop_id"],
+                "ordered_stop_ids": "|".join(stop_ids),
+                "stop_count": len(stop_ids),
+                "non_zone1_stop_count": non_zone1_stop_count,
+                "is_public_service_segment": duty_row["is_public_service_segment"],
+                "is_public_passenger_segment": is_public_passenger_segment,
+                "terminal_pair_trip_count": 0,
+                "terminal_pair_rank": 999999,
+                "is_short_turn_part_trip": False,
+                "is_zone1_only": False,
+                "is_zone1_public_ranking_trip": False,
+                "stop_ids": stop_ids,
+            }
+        )
+    return base_rows
 
 
 def _balanced_vehicle_chunks(vehicle_numbers: list[str], worker_count: int) -> list[tuple[str, ...]]:
@@ -505,7 +575,14 @@ class ReconstructionRun:
         semantics_writer: pq.ParquetWriter | None = None
         semantics_columns: set[str] | None = None
         semantics_count = 0
+        settled_passenger_trips: set[tuple[date, str]] = set()
         for semantic in iter_stop_semantics(rows, snapshot):
+            if (
+                semantic["are_passenger_boundaries_settled"]
+                and semantic["is_passenger_stop"]
+                and semantic["stop_execution_class"] == "passenger"
+            ):
+                settled_passenger_trips.add((semantic["service_date"], semantic["trip_id"]))
             semantics_batch.append(semantic)
             if len(semantics_batch) < SEMANTICS_BATCH_ROWS:
                 continue
@@ -538,7 +615,7 @@ class ReconstructionRun:
             raise fail("invalid_output", "stop semantics do not satisfy stop-semantics-v1", 15)
         if pq.read_schema(semantics_path) != STOP_SEMANTICS_SCHEMA:
             raise fail("invalid_output", "stop semantics schema validation failed", 15)
-        self._write_trip_universe(work / "duty_schedule.parquet", semantics_path, work / "trip_universe.parquet")
+        self._write_trip_universe(rows, snapshot, settled_passenger_trips, work / "trip_universe.parquet")
         schedule_sql = str(work / "duty_schedule.parquet").replace("'", "''")
         semantics_sql = str(semantics_path).replace("'", "''")
         terminal_sql = str(work / ".terminal_courses.parquet").replace("'", "''")
@@ -578,84 +655,36 @@ class ReconstructionRun:
         )
         return len(rows)
 
-    def _write_trip_universe(self, schedule: Path, semantics: Path, output: Path) -> None:
+    def _write_trip_universe(
+        self,
+        duty_rows: list[dict[str, Any]],
+        snapshot: Snapshot,
+        settled_passenger_trips: set[tuple[date, str]],
+        output: Path,
+    ) -> None:
         """Persist the schedule-derived local analogue of the serving ranking universe."""
-        schedule_sql, semantics_sql = (
-            str(schedule).replace("'", "''"),
-            str(semantics).replace("'", "''"),
-        )
-        compact = output.with_name(f".{output.stem}.compact.{uuid.uuid4().hex}.parquet")
         temporary_output = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
-        compact_sql = str(compact).replace("'", "''")
         writer: pq.ParquetWriter | None = None
         try:
-            self._connection().execute(
-                f"""
-                copy (
-                    with trip_stops as (
-                        select schedule.gtfs_snapshot_id, schedule.processing_date, schedule.service_date,
-                            schedule.duty_chain_id, schedule.trip_id, schedule.line, schedule.mode,
-                            schedule.direction_id::bigint direction_id, schedule.origin_stop_id,
-                            schedule.destination_stop_id, schedule.stop_count::bigint stop_count,
-                            schedule.is_public_service_segment, schedule.is_malformed_duty_segment,
-                            string_agg(semantics.stop_id, '|' order by semantics.stop_sequence) as ordered_stop_ids,
-                            list(semantics.stop_id order by semantics.stop_sequence) as stop_ids,
-                            countif(coalesce(semantics.effective_zone_id, '') != '1')::bigint as non_zone1_stop_count,
-                            bool_or(
-                                semantics.are_passenger_boundaries_settled
-                                and semantics.is_passenger_stop
-                                and semantics.stop_execution_class = 'passenger'
-                            ) as has_settled_passenger_stops
-                        from read_parquet('{schedule_sql}') schedule
-                        inner join read_parquet('{semantics_sql}') semantics
-                            on schedule.gtfs_snapshot_id = semantics.gtfs_snapshot_id
-                            and schedule.processing_date = semantics.processing_date
-                            and schedule.service_date = semantics.service_date
-                            and schedule.duty_chain_id = semantics.duty_chain_id
-                            and schedule.trip_id = semantics.trip_id
-                        where schedule.mode in ('bus', 'tram')
-                        group by all
-                    ), public_segments as (
-                        select *, coalesce(is_public_service_segment, false)
-                            and not coalesce(is_malformed_duty_segment, true)
-                            and coalesce(has_settled_passenger_stops, false) as is_public_passenger_segment
-                        from trip_stops
-                    ), terminal_counts as (
-                        select gtfs_snapshot_id, service_date, line, direction_id, origin_stop_id, destination_stop_id,
-                            count(*)::bigint as terminal_pair_trip_count
-                        from public_segments
-                        where is_public_passenger_segment
-                        group by all
-                    ), terminal_ranks as (
-                        select *, row_number() over (
-                            partition by gtfs_snapshot_id, service_date, line, direction_id
-                            order by terminal_pair_trip_count desc, origin_stop_id, destination_stop_id
-                        )::bigint as terminal_pair_rank
-                        from terminal_counts
-                    )
-                    select public_segments.* exclude (is_malformed_duty_segment, has_settled_passenger_stops),
-                        coalesce(terminal_ranks.terminal_pair_trip_count, 0)::bigint as terminal_pair_trip_count,
-                        coalesce(terminal_ranks.terminal_pair_rank, 999999)::bigint as terminal_pair_rank
-                    from public_segments
-                    left join terminal_ranks
-                        using (gtfs_snapshot_id, service_date, line, direction_id, origin_stop_id, destination_stop_id)
-                    order by gtfs_snapshot_id, service_date, line, direction_id, trip_id, duty_chain_id
-                ) to '{compact_sql}' (format parquet, compression zstd)
-                """
+            base_rows = _trip_universe_base_rows(duty_rows, snapshot, settled_passenger_trips)
+            base_rows.sort(
+                key=lambda row: (
+                    row["gtfs_snapshot_id"],
+                    row["service_date"],
+                    row["line"],
+                    row["direction_id"],
+                    row["trip_id"],
+                    row["duty_chain_id"],
+                )
             )
             writer = pq.ParquetWriter(temporary_output, TRIP_UNIVERSE_SCHEMA, compression="zstd")
             output_rows: list[dict[str, Any]] = []
-            group: list[dict[str, Any]] = []
-            group_key: tuple[Any, ...] | None = None
-            for batch in pq.ParquetFile(compact).iter_batches(batch_size=TRIP_UNIVERSE_BATCH_ROWS):
-                for row in batch.to_pylist():
-                    row_key = (row["gtfs_snapshot_id"], row["service_date"], row["line"], row["direction_id"])
-                    if group_key is not None and row_key != group_key:
-                        _write_trip_universe_group(group, output_rows, writer)
-                        group.clear()
-                    group_key = row_key
-                    group.append(row)
-            if group:
+            for _, group_rows in groupby(
+                base_rows,
+                key=lambda row: (row["gtfs_snapshot_id"], row["service_date"], row["line"], row["direction_id"]),
+            ):
+                group = list(group_rows)
+                _rank_trip_universe_terminal_pairs(group)
                 _write_trip_universe_group(group, output_rows, writer)
             if output_rows:
                 writer.write_table(pa.Table.from_pylist(output_rows, schema=TRIP_UNIVERSE_SCHEMA))
@@ -667,10 +696,7 @@ class ReconstructionRun:
                 if writer is not None:
                     writer.close()
             finally:
-                try:
-                    compact.unlink(missing_ok=True)
-                finally:
-                    temporary_output.unlink(missing_ok=True)
+                temporary_output.unlink(missing_ok=True)
         if pq.read_schema(output) != TRIP_UNIVERSE_SCHEMA:
             raise fail("invalid_output", "trip universe schema validation failed", 15)
 
