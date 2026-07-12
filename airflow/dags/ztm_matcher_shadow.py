@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -248,7 +249,7 @@ class ShadowConfig:
     strict: bool
     dataset: str | None
     workspace_root: Path
-    command: str
+    command: tuple[str, ...]
     project_dir: Path | None
     timeout_seconds: int
     marker_prefix: str
@@ -261,12 +262,20 @@ class ShadowConfig:
     def from_env(cls) -> ShadowConfig:
         """Read the shadow-only runtime configuration."""
         project_dir = os.getenv("MATCHER_SHADOW_PROJECT_DIR", "/opt/airflow/matcher").strip()
+        try:
+            command = tuple(
+                shlex.split(
+                    os.getenv("MATCHER_SHADOW_COMMAND", "uv run --locked --project /opt/airflow/matcher ztm-matcher")
+                )
+            )
+        except ValueError as error:
+            raise ValueError("MATCHER_SHADOW_COMMAND has invalid shell-style quoting") from error
         return cls(
             enabled=_env_bool("MATCHER_SHADOW_ENABLED", False),
             strict=_env_bool("MATCHER_SHADOW_STRICT", False),
             dataset=os.getenv("BIGQUERY_MATCHER_SHADOW_DATASET", "").strip() or None,
             workspace_root=Path(os.getenv("MATCHER_SHADOW_WORKSPACE_ROOT", "/opt/airflow/matcher-shadow")),
-            command=os.getenv("MATCHER_SHADOW_COMMAND", "ztm-matcher").strip() or "ztm-matcher",
+            command=command,
             project_dir=Path(project_dir) if project_dir else None,
             timeout_seconds=_env_positive_int("MATCHER_SHADOW_TIMEOUT_SECONDS", 45 * 60),
             marker_prefix=os.getenv("MATCHER_SHADOW_GCS_PREFIX", "shadow/matcher").strip(),
@@ -278,6 +287,13 @@ class ShadowConfig:
 
     def validate(self) -> None:
         """Reject enabled configurations that could reach canonical datasets."""
+        if not self.command:
+            raise ValueError("MATCHER_SHADOW_COMMAND must not be empty")
+        if self.project_dir is None:
+            raise ValueError("MATCHER_SHADOW_PROJECT_DIR is required")
+        command_projects = _command_projects(self.command)
+        if len(command_projects) != 1 or Path(command_projects[0]) != self.project_dir:
+            raise ValueError("MATCHER_SHADOW_COMMAND --project must match MATCHER_SHADOW_PROJECT_DIR")
         if not self.enabled:
             return
         if not self.dataset:
@@ -290,8 +306,6 @@ class ShadowConfig:
         _strict_posix_name(self.marker_prefix)
         if not self.workspace_root.is_absolute():
             raise ValueError("MATCHER_SHADOW_WORKSPACE_ROOT must be absolute")
-        if ".." in Path(self.command).parts:
-            raise ValueError("MATCHER_SHADOW_COMMAND must not contain path traversal")
         for name, value in (
             ("MATCHER_SHADOW_MAX_GPS_OBJECTS", self.max_gps_objects),
             ("MATCHER_SHADOW_MAX_GPS_BYTES", self.max_gps_bytes),
@@ -326,6 +340,17 @@ class ArtifactValidation:
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     return default if value is None else value.strip().lower() == "true"
+
+
+def _command_projects(command: tuple[str, ...]) -> tuple[str, ...]:
+    """Return explicitly supplied uv project paths without interpreting a shell command."""
+    projects = []
+    for index, argument in enumerate(command):
+        if argument == "--project" and index + 1 < len(command):
+            projects.append(command[index + 1])
+        elif argument.startswith("--project="):
+            projects.append(argument.removeprefix("--project="))
+    return tuple(projects)
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -512,7 +537,7 @@ def _matcher_argv(
     config: ShadowConfig, processing_date: str, snapshot_id: str, gps_root: Path, gtfs_zip: Path, output: Path
 ) -> list[str]:
     return [
-        config.command,
+        *config.command,
         "prepare",
         "--processing-date",
         processing_date,
@@ -543,6 +568,7 @@ def _invoke_matcher(argv: list[str], config: ShadowConfig) -> None:
         cwd=config.project_dir,
         check=True,
         timeout=config.timeout_seconds,
+        shell=False,
     )
 
 

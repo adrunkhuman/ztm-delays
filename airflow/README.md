@@ -23,7 +23,7 @@ Runtime env defaults match the current VPS:
 | `MATCHER_SHADOW_KEEP_WORKSPACE` | `false` |
 | `BIGQUERY_MATCHER_SHADOW_DATASET` | Required when enabled; no default |
 | `MATCHER_SHADOW_WORKSPACE_ROOT` | `/opt/airflow/matcher-shadow` |
-| `MATCHER_SHADOW_COMMAND` | `ztm-matcher` |
+| `MATCHER_SHADOW_COMMAND` | `uv run --locked --project /opt/airflow/matcher ztm-matcher` |
 | `MATCHER_SHADOW_PROJECT_DIR` | `/opt/airflow/matcher` |
 | `MATCHER_SHADOW_TIMEOUT_SECONDS` | `2700` |
 | `MATCHER_SHADOW_GCS_PREFIX` | `shadow/matcher` |
@@ -36,9 +36,9 @@ Runtime env defaults match the current VPS:
 - `/opt/airflow/serving` is writable by Airflow when serving exports are enabled.
 - The frontend reads the same serving host directory as DuckDB plus `.meta.json`; it does not read BigQuery or GCS.
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
-- The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, and `duckdb`.
+- The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, `duckdb`, `numpy`, `pyarrow`, `pytz`, `uv`, and Python 3.13.
 - The service account can read/write the configured GCS bucket and load/query the configured BigQuery datasets.
-- Enabling matcher shadow requires an image with the installed `ztm-matcher` command and `pyarrow`, plus a read-only matcher project mount at `MATCHER_SHADOW_PROJECT_DIR`. This repository change does not alter the deployed image, mounts, IAM, or environment.
+- Enabling matcher shadow requires only this read-only Coolify bind: `/home/ubuntu/ztm-pipeline/matcher` to `/opt/airflow/matcher`. Set `UV_PROJECT_ENVIRONMENT=/opt/airflow/matcher-shadow-venv` so `uv` does not write to that mount, and ensure `MATCHER_SHADOW_WORKSPACE_ROOT` is writable. No image rebuild is required.
 
 ## DAG Boundaries
 
@@ -62,8 +62,8 @@ Runtime env defaults match the current VPS:
 
 `dag_daily_gps` has an optional `matcher_shadow` TaskGroup. Its load task starts only after the selected current GTFS snapshot and `stg_gps__pings` test. Its compare/commit task waits for that load plus all current/prior `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` test endpoints. Neither task is upstream of canonical facts, marts, serving, or `gps_models_date`.
 
-- Leave `MATCHER_SHADOW_ENABLED=false` until the dedicated BigQuery dataset, image, mount, and IAM have been provisioned outside this repository. The task fails closed if an enabled run has no dataset or if it names `ztm_raw`, `ztm_int`, or `ztm_marts`.
-- The load task accepts only normalized GCS names below the expected GPS/GTFS prefixes, bounds inventory/downloads by object count, aggregate bytes, and free-disk reserve, invokes the installed matcher with `threads=2`, `alignment-workers=1`, `320MB`, `20GB`, and validates artifact schema, batches, lineage, and grain with bounded local DuckDB queries. Both shadow tasks have a 60-minute Airflow execution timeout; the matcher subprocess remains separately timed out.
+- Leave `MATCHER_SHADOW_ENABLED=false` until the dedicated BigQuery dataset, Coolify matcher bind, writable workspace, and IAM have been provisioned outside this repository. The task fails closed if an enabled run has no dataset or if it names `ztm_raw`, `ztm_int`, or `ztm_marts`.
+- The load task accepts only normalized GCS names below the expected GPS/GTFS prefixes, bounds inventory/downloads by object count, aggregate bytes, and free-disk reserve, invokes the matcher through `uv` with `threads=2`, `alignment-workers=1`, `320MB`, `20GB`, and validates artifact schema, batches, lineage, and grain with bounded local DuckDB queries. Both shadow tasks have a 60-minute Airflow execution timeout; the matcher subprocess remains separately timed out.
 - It loads only run-scoped `matcher_shadow_*` tables with explicit schemas and `WRITE_TRUNCATE`. The load task writes replaceable run-scoped `pending.json` metadata, not a completion signal. After canonical fact tests succeed, the compare task reads that same-run metadata/tables and writes immutable `commit.json` with create-only GCS semantics. A pre-existing marker is accepted only if its JSON content is identical.
 - `MATCHER_SHADOW_STRICT=false` reports a shadow error without stopping canonical publication. Set it to `true` only when a shadow failure should fail the DAG run. Structural lineage/grain violations always prevent a marker; aggregate differences are recorded in the marker and do not fail the shadow run.
 

@@ -32,6 +32,70 @@ def test_enabled_shadow_rejects_missing_or_canonical_dataset(monkeypatch: pytest
         shadow.ShadowConfig.from_env().validate()
 
 
+def test_matcher_command_is_parsed_and_prepended_to_prepare_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MATCHER_SHADOW_COMMAND", "uv run --locked --project /opt/airflow/matcher ztm-matcher")
+    shadow = _load_shadow_module()
+    config = shadow.ShadowConfig.from_env()
+
+    assert config.command == ("uv", "run", "--locked", "--project", "/opt/airflow/matcher", "ztm-matcher")
+    assert shadow._matcher_argv(
+        config, "2026-07-09", "snapshot", tmp_path / "gps", tmp_path / "gtfs.zip", tmp_path / "out"
+    ) == [
+        "uv",
+        "run",
+        "--locked",
+        "--project",
+        "/opt/airflow/matcher",
+        "ztm-matcher",
+        "prepare",
+        "--processing-date",
+        "2026-07-09",
+        "--snapshot-id",
+        "snapshot",
+        "--gps-root",
+        str(tmp_path / "gps"),
+        "--gtfs-zip",
+        str(tmp_path / "gtfs.zip"),
+        "--output-dir",
+        str(tmp_path / "out"),
+        "--threads",
+        "2",
+        "--alignment-workers",
+        "1",
+        "--memory-limit",
+        "320MB",
+        "--temp-limit",
+        "20GB",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "error"),
+    [
+        ("", "must not be empty"),
+        ("uv run --locked --project /other ztm-matcher", "must match"),
+    ],
+)
+def test_matcher_command_rejects_empty_or_inconsistent_project(
+    monkeypatch: pytest.MonkeyPatch, command: str, error: str
+) -> None:
+    monkeypatch.setenv("MATCHER_SHADOW_COMMAND", command)
+    shadow = _load_shadow_module()
+
+    with pytest.raises(ValueError, match=error):
+        shadow.ShadowConfig.from_env().validate()
+
+
+def test_matcher_command_rejects_malformed_quoting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MATCHER_SHADOW_COMMAND", "uv run --project '/opt/airflow/matcher ztm-matcher")
+    shadow = _load_shadow_module()
+
+    with pytest.raises(ValueError, match="invalid shell-style quoting"):
+        shadow.ShadowConfig.from_env()
+
+
 def test_arrow_schema_uses_data_type_objects_for_repeated_fields() -> None:
     pa = pytest.importorskip("pyarrow")
     shadow = _load_shadow_module()
@@ -132,7 +196,7 @@ def test_content_addressed_table_identity_preserves_committed_tables() -> None:
 
 def test_run_id_hash_prevents_sanitized_and_truncated_collisions(tmp_path: Path) -> None:
     shadow = _load_shadow_module()
-    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, "matcher", None, 1, "shadow/matcher")
+    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher")
     slash = "manual/run"
     underscore = "manual_run"
     long_a = "x" * 100 + "a"
@@ -148,7 +212,7 @@ def test_run_id_hash_prevents_sanitized_and_truncated_collisions(tmp_path: Path)
 
 def test_identical_run_and_artifact_resolve_identical_identities(tmp_path: Path) -> None:
     shadow = _load_shadow_module()
-    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, "matcher", None, 1, "shadow/matcher")
+    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher")
     spec = shadow.ARTIFACTS[0]
     first = shadow._table_identity("shadow", "manual/run", spec, "a" * 64)
     second = shadow._table_identity("shadow", "manual/run", spec, "a" * 64)
@@ -164,7 +228,7 @@ def test_identical_run_and_artifact_resolve_identical_identities(tmp_path: Path)
 
 def test_marker_uses_create_only_precondition_and_rejects_conflicts(tmp_path: Path) -> None:
     shadow = _load_shadow_module()
-    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, "matcher", None, 1, "shadow/matcher")
+    config = shadow.ShadowConfig(True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher")
     bucket = FakeMarkerBucket(existing=None)
     marker = {"run_id": "run", "state": "committed"}
 
@@ -183,7 +247,7 @@ def test_marker_uses_create_only_precondition_and_rejects_conflicts(tmp_path: Pa
 
 def test_pending_verification_rejects_table_for_different_artifact() -> None:
     shadow = _load_shadow_module()
-    config = shadow.ShadowConfig(True, False, "shadow", Path("workspace"), "matcher", None, 1, "shadow/matcher")
+    config = shadow.ShadowConfig(True, False, "shadow", Path("workspace"), ("matcher",), None, 1, "shadow/matcher")
     pending = {
         "artifacts": {spec.key: {"sha256": "a" * 64} for spec in shadow.ARTIFACTS},
         "tables": {spec.key: shadow._table_identity("shadow", "run", spec, "b" * 64) for spec in shadow.ARTIFACTS},
@@ -222,7 +286,7 @@ def test_input_bounds_apply_before_download(monkeypatch: pytest.MonkeyPatch, tmp
         False,
         "shadow",
         tmp_path,
-        "matcher",
+        ("matcher",),
         None,
         1,
         "shadow/matcher",
@@ -238,7 +302,7 @@ def test_input_bounds_apply_before_download(monkeypatch: pytest.MonkeyPatch, tmp
         False,
         "shadow",
         tmp_path,
-        "matcher",
+        ("matcher",),
         None,
         1,
         "shadow/matcher",
@@ -253,7 +317,7 @@ def test_input_bounds_apply_before_download(monkeypatch: pytest.MonkeyPatch, tmp
         False,
         "shadow",
         tmp_path,
-        "matcher",
+        ("matcher",),
         None,
         1,
         "shadow/matcher",
@@ -283,7 +347,6 @@ def test_load_writes_pending_not_marker_and_compare_commits_afterwards(
     monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
     monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
-    monkeypatch.setenv("MATCHER_SHADOW_PROJECT_DIR", "")
     shadow = _load_shadow_module()
     artifact = shadow.ArtifactValidation(tmp_path / "artifact.parquet", 1, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
     events: list[str] = []
@@ -320,7 +383,6 @@ def test_load_rejects_conflicting_marker_before_loading_tables(monkeypatch: pyte
     monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
     monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
-    monkeypatch.setenv("MATCHER_SHADOW_PROJECT_DIR", "")
     shadow = _load_shadow_module()
     artifact = shadow.ArtifactValidation(tmp_path / "artifact.parquet", 1, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
     events: list[str] = []
