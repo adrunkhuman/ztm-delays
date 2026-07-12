@@ -44,9 +44,9 @@ CANONICAL_FACT_TABLES = {
 }
 VEHICLE_TYPES = ("bus", "tram")
 ARTIFACT_SCHEMA_VERSIONS = {
-    "trip": "reconstruction-trip-facts-v2",
-    "stop_arrival": "reconstruction-stop-arrivals-v2",
-    "expected_stop_event": "reconstruction-expected-stop-events-v2",
+    "reconstruction_trip_facts": "reconstruction-trip-facts-v2",
+    "reconstruction_stop_arrivals": "reconstruction-stop-arrivals-v2",
+    "reconstruction_expected_stop_events": "reconstruction-expected-stop-events-v2",
     "trip_universe": "trip-universe-v1",
 }
 IDENTIFIER_PATTERN = re.compile(r"[^a-z0-9_]+")
@@ -699,7 +699,7 @@ def _validate_outputs(
     outputs = manifest.get("outputs")
     if not isinstance(schema_versions, dict) or not isinstance(outputs, dict):
         raise TypeError("Matcher manifest has no schema/output inventory")
-    required = {spec.key for spec in ARTIFACTS} | {"trip_universe"}
+    required = {Path(spec.filename).stem for spec in ARTIFACTS} | {"trip_universe"}
     if required - schema_versions.keys() or required - outputs.keys():
         raise RuntimeError("Matcher manifest is missing required reconstruction artifacts or trip universe")
     for key in required:
@@ -710,8 +710,9 @@ def _validate_outputs(
     metrics = _read_metrics(output)
     validated = {}
     for spec in ARTIFACTS:
+        manifest_key = Path(spec.filename).stem
         artifact = _inspect_artifact(output / spec.filename, spec, processing_date, snapshot_id)
-        expected_identity = outputs[spec.key]
+        expected_identity = outputs[manifest_key]
         if not isinstance(expected_identity, dict) or expected_identity.get("sha256") != artifact.sha256:
             raise RuntimeError(f"Matcher manifest hash mismatch for {spec.key}")
         if expected_identity.get("bytes") != artifact.bytes:
