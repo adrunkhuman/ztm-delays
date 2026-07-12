@@ -62,7 +62,7 @@ DEFAULT_MAX_GPS_BYTES = 20 * 1024**3
 DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024**3
 DEFAULT_MAX_COMPARISON_BYTES = 5 * 1024**3
 DEFAULT_MAX_MARKER_BYTES = 20 * 1024**2
-COMPARISON_CONTRACT_VERSION = "matcher-shadow-comparison-v3"
+COMPARISON_CONTRACT_VERSION = "matcher-shadow-comparison-v4"
 DEFAULT_GATE_CURRENT_RETENTION_MIN = 0.75
 DEFAULT_GATE_PRIOR_RETENTION_MIN = 0.40
 DEFAULT_GATE_COMPLETE_RATE_DROP_MAX = 0.15
@@ -964,6 +964,7 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
                     trip.end_delay_seconds
                 from `{trip_table}` as trip
                 where trip.gps_date = @processing_date
+                  and trip.gtfs_snapshot_id = @gtfs_snapshot_id
                   and trip.service_date in unnest(@service_dates)
                   and (
                       trip.service_date = @processing_date
@@ -1036,13 +1037,20 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
 
 
 def _comparison_report(
-    client: Any, processing_date: str, shadow_tables: dict[str, dict[str, str]], max_comparison_bytes: int
+    client: Any,
+    processing_date: str,
+    snapshot_id: str,
+    shadow_tables: dict[str, dict[str, str]],
+    max_comparison_bytes: int,
 ) -> dict[str, object]:
+    if not snapshot_id.strip():
+        raise ValueError("Matcher shadow comparison requires a nonempty snapshot ID")
     dates = [date.fromisoformat(processing_date) - timedelta(days=1), date.fromisoformat(processing_date)]
     config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter("service_dates", "DATE", dates),
             bigquery.ScalarQueryParameter("processing_date", "DATE", date.fromisoformat(processing_date)),
+            bigquery.ScalarQueryParameter("gtfs_snapshot_id", "STRING", snapshot_id),
         ],
         maximum_bytes_billed=max_comparison_bytes,
     )
@@ -1611,9 +1619,12 @@ def run_matcher_shadow_compare_commit(
     pending = _read_pending(storage_client, config, processing_date, run_id)
     if pending.get("processing_date") != processing_date or pending.get("run_id") != run_id:
         raise RuntimeError("Matcher shadow pending metadata does not match this DAG run")
+    snapshot_id = pending.get("snapshot_id")
+    if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+        raise RuntimeError("Matcher shadow pending metadata has no snapshot ID")
     tables = _pending_tables(config, run_id, pending)
     comparison = _comparison_report(
-        bigquery.Client(project=GCP_PROJECT), processing_date, tables, config.max_comparison_bytes
+        bigquery.Client(project=GCP_PROJECT), processing_date, snapshot_id, tables, config.max_comparison_bytes
     )
     raw_metrics = pending.get("metrics")
     if not isinstance(raw_metrics, dict):

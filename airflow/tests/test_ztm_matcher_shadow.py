@@ -845,6 +845,7 @@ def test_load_writes_pending_not_marker_and_compare_commits_afterwards(
     pending = {
         "run_id": "run",
         "processing_date": "2026-07-09",
+        "snapshot_id": "snapshot",
         "metrics": {},
         "artifacts": {spec.key: {"sha256": artifact.sha256} for spec in shadow.ARTIFACTS},
         "tables": {
@@ -853,18 +854,23 @@ def test_load_writes_pending_not_marker_and_compare_commits_afterwards(
         },
     }
     monkeypatch.setattr(shadow, "_read_pending", lambda *_args: pending)
+    comparison_calls: list[tuple[object, ...]] = []
+
+    def comparison_report(*args: object) -> dict[str, object]:
+        comparison_calls.append(args)
+        events.append("compare")
+        return {"service_dates": ["2026-07-08", "2026-07-09"], "aggregates": [], "differences": []}
+
+    marker: dict[str, object] = {}
+    monkeypatch.setattr(shadow, "_comparison_report", comparison_report)
     monkeypatch.setattr(
-        shadow,
-        "_comparison_report",
-        lambda *_args: (
-            events.append("compare")
-            or {"service_dates": ["2026-07-08", "2026-07-09"], "aggregates": [], "differences": []}
-        ),
+        shadow, "_write_marker", lambda *_args: marker.update(_args[-1]) or events.append("marker") or "gs://marker"
     )
-    monkeypatch.setattr(shadow, "_write_marker", lambda *_args: events.append("marker") or "gs://marker")
 
     assert shadow.run_matcher_shadow_compare_commit("2026-07-09", "run", context)["marker_uri"] == "gs://marker"
     assert events[-2:] == ["compare", "marker"]
+    assert comparison_calls[0][1:] == ("2026-07-09", "snapshot", pending["tables"], 5 * 1024**3)
+    assert marker["snapshot_id"] == "snapshot"
 
 
 def test_shadow_gate_reports_july9_like_quality_and_advisory_delay_difference() -> None:
@@ -1038,6 +1044,7 @@ def test_comparison_query_and_marker_bounds_are_configured(monkeypatch: pytest.M
     assert "approx_quantiles" in query
     assert "abs_delay_over_3600_count" in query
     assert "gtfs_snapshot_id" in query
+    assert query.count("trip.gtfs_snapshot_id = @gtfs_snapshot_id") == len(shadow.COMPARISON_ARTIFACTS) * 2
     assert "line" in query
     assert "trip.scheduled_end_time >= timestamp(@processing_date, 'Europe/Warsaw')" in query
     assert query.count("from cohort as fact") == 2
@@ -1058,6 +1065,45 @@ def test_comparison_query_and_marker_bounds_are_configured(monkeypatch: pytest.M
         shadow.ShadowConfig.from_env()
 
 
+def test_comparison_report_binds_exact_snapshot_and_rejects_empty_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shadow = _load_shadow_module()
+    query_calls: list[tuple[str, Any]] = []
+
+    class QueryClient:
+        def query(self, query: str, *, job_config: object) -> object:
+            query_calls.append((query, job_config))
+            return types.SimpleNamespace(result=list)
+
+    monkeypatch.setattr(shadow.bigquery, "ArrayQueryParameter", lambda *args: args, raising=False)
+    monkeypatch.setattr(shadow.bigquery, "QueryJobConfig", lambda **kwargs: kwargs)
+    tables = {spec.key: {"table_id": f"project.shadow.{spec.key}"} for spec in shadow.ARTIFACTS}
+
+    report = shadow._comparison_report(QueryClient(), "2026-07-09", "snapshot-a", tables, 123)
+
+    assert report["comparison_contract_version"] == "matcher-shadow-comparison-v4"
+    parameters = query_calls[0][1]["query_parameters"]
+    assert any(
+        getattr(parameter, "name", None) == "gtfs_snapshot_id" and getattr(parameter, "value", None) == "snapshot-a"
+        for parameter in parameters
+    )
+    with pytest.raises(ValueError, match="nonempty snapshot"):
+        shadow._comparison_report(QueryClient(), "2026-07-09", "   ", tables, 123)
+    assert len(query_calls) == 1
+
+
+def test_comparison_query_excludes_later_canonical_snapshot_from_same_date_cohort() -> None:
+    shadow = _load_shadow_module()
+    query = shadow._comparison_query(
+        {spec.key: {"table_id": f"project.shadow.{spec.key}"} for spec in shadow.ARTIFACTS}
+    )
+    cohorts = query.split(" union all ")
+
+    assert len(cohorts) == len(shadow.COMPARISON_ARTIFACTS) * 2
+    assert all("trip.gtfs_snapshot_id = @gtfs_snapshot_id" in cohort for cohort in cohorts)
+
+
 def test_strict_compare_rejects_hard_gate_failure_before_marker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1070,6 +1116,7 @@ def test_strict_compare_rejects_hard_gate_failure_before_marker(
     pending = {
         "run_id": "run",
         "processing_date": "2026-07-09",
+        "snapshot_id": "snapshot",
         "metrics": {"peak_rss_bytes": 1, "swapping_observed": False},
         "artifacts": artifact,
         "tables": {
