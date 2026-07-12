@@ -22,4 +22,5 @@ convention = "google"
 "dags/dag_serving_export.py" = ["S608"]
 # Shadow queries interpolate only module-defined canonical tables and sanitized run-scoped tables.
 # Cloud clients are intentionally duck-typed so unit tests do not require provider packages.
-"dags/ztm_matcher_shadow.py" = ["ANN401", "C901", "PLC0415", "PLR0912", "PLR0913", "S608"]
+"dags/ztm_matcher_shadow.py" = ["ANN401", "C901", "PLC0415", "PLR0912", "PLR0913", "PLR0915", "S608"]
+"dags/matcher_historical_correction.py" = ["ANN401", "S608"]

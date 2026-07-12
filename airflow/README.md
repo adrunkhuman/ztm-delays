@@ -30,6 +30,15 @@ Runtime env defaults match the current VPS:
 | `MATCHER_SHADOW_MAX_GPS_OBJECTS` | `5000` |
 | `MATCHER_SHADOW_MAX_GPS_BYTES` | `21474836480` (20 GiB) |
 | `MATCHER_SHADOW_MIN_FREE_DISK_BYTES` | `5368709120` (5 GiB) |
+| `MATCHER_SHADOW_MAX_COMPARISON_BYTES` | `5368709120` (5 GiB) |
+| `MATCHER_SHADOW_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
+| `MATCHER_SHADOW_GATE_CURRENT_ROW_RETENTION_MIN` | `0.75` |
+| `MATCHER_SHADOW_GATE_PRIOR_ROW_RETENTION_MIN` | `0.40` |
+| `MATCHER_SHADOW_GATE_COMPLETE_RATE_DROP_MAX` | `0.15` |
+| `MATCHER_SHADOW_GATE_EXPECTED_RATE_DELTA_MAX` | `0.15` |
+| `MATCHER_SHADOW_GATE_DELAY_PERCENTILE_RATIO_MAX` | `2.0` |
+| `MATCHER_SHADOW_GATE_DELAY_TAIL_DELTA_MAX` | `0.15` |
+| `MATCHER_SHADOW_GATE_PEAK_RSS_BYTES_MAX` | `2147483648` (2 GiB) |
 
 - Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
 - `dbt/` is mounted at `DBT_PROJECT_DIR`.
@@ -65,7 +74,9 @@ Runtime env defaults match the current VPS:
 - Leave `MATCHER_SHADOW_ENABLED=false` until the dedicated BigQuery dataset, Coolify matcher bind, writable workspace, and IAM have been provisioned outside this repository. The task fails closed if an enabled run has no dataset or if it names `ztm_raw`, `ztm_int`, or `ztm_marts`.
 - The load task accepts only normalized GCS names below the expected GPS/GTFS prefixes, bounds inventory/downloads by object count, aggregate bytes, and free-disk reserve, invokes the matcher through `uv` with `threads=2`, `alignment-workers=1`, `320MB`, `20GB`, and validates artifact schema, batches, lineage, and grain with bounded local DuckDB queries. Both shadow tasks have a 60-minute Airflow execution timeout; the matcher subprocess remains separately timed out.
 - It loads only run-scoped `matcher_shadow_*` tables with explicit schemas and `WRITE_TRUNCATE`. The load task writes replaceable run-scoped `pending.json` metadata, not a completion signal. After canonical fact tests succeed, the compare task reads that same-run metadata/tables and writes immutable `commit.json` with create-only GCS semantics. A pre-existing marker is accepted only if its JSON content is identical.
-- `MATCHER_SHADOW_STRICT=false` reports a shadow error without stopping canonical publication. Set it to `true` only when a shadow failure should fail the DAG run. Structural lineage/grain violations always prevent a marker; aggregate differences are recorded in the marker and do not fail the shadow run.
+- `MATCHER_SHADOW_STRICT=false` reports a shadow error without stopping canonical publication. In strict mode only structural-grain and resource-bound gate failures prevent a marker; aggregate/quality/delay evidence remains non-cutover evidence. Markers record `comparison_contract_version`, `quality_gate`, duty-status counts, and stop ambiguity/missing diagnostics.
+
+`matcher_historical_correction.py` is a manual, read-only planner, not a DAG. It requires explicit start/end dates, rejects dates before the warehouse history start, limits the range to 31 days by default, rejects 2026-07-05 through 2026-07-07, inventories immutable GCS inputs, and emits no cloud mutation unless an optional report destination is requested.
 
 Smoke-check an enabled non-production run by confirming a marker under `gs://$GCS_BUCKET/shadow/matcher/processing_date=YYYY-MM-DD/run_id=.../commit.json`, its three run-scoped tables, and current/prior rows in the marker comparison. Do not treat a marker as a cutover signal.
 

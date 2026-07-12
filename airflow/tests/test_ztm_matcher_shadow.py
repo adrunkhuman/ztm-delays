@@ -366,6 +366,7 @@ def test_load_writes_pending_not_marker_and_compare_commits_afterwards(
     pending = {
         "run_id": "run",
         "processing_date": "2026-07-09",
+        "metrics": {},
         "artifacts": {spec.key: {"sha256": artifact.sha256} for spec in shadow.ARTIFACTS},
         "tables": {
             spec.key: shadow._table_identity("matcher_shadow", "run", spec, artifact.sha256)
@@ -373,11 +374,162 @@ def test_load_writes_pending_not_marker_and_compare_commits_afterwards(
         },
     }
     monkeypatch.setattr(shadow, "_read_pending", lambda *_args: pending)
-    monkeypatch.setattr(shadow, "_comparison_report", lambda *_args: events.append("compare") or {"aggregates": []})
+    monkeypatch.setattr(
+        shadow,
+        "_comparison_report",
+        lambda *_args: (
+            events.append("compare")
+            or {"service_dates": ["2026-07-08", "2026-07-09"], "aggregates": [], "differences": []}
+        ),
+    )
     monkeypatch.setattr(shadow, "_write_marker", lambda *_args: events.append("marker") or "gs://marker")
 
     assert shadow.run_matcher_shadow_compare_commit("2026-07-09", "run", context)["marker_uri"] == "gs://marker"
     assert events[-2:] == ["compare", "marker"]
+
+
+def test_shadow_gate_reports_july9_like_quality_and_advisory_delay_difference() -> None:
+    shadow = _load_shadow_module()
+    aggregates = []
+    for source, complete, partial, broken in (("canonical", 80, 15, 5), ("shadow", 70, 25, 5)):
+        for quality, count in (("complete", complete), ("partial", partial), ("broken", broken)):
+            aggregates.append(
+                {
+                    "artifact": "trip",
+                    "source": source,
+                    "service_date": "2026-07-09",
+                    "mode": "bus",
+                    "line": "20",
+                    "gtfs_snapshot_id": "snapshot",
+                    "trip_quality": quality,
+                    "observation_status": None,
+                    "row_count": count,
+                    "distinct_grains": count,
+                    "delay_p50_seconds": 60 if source == "canonical" else 180,
+                    "delay_p90_seconds": 120,
+                    "delay_p95_seconds": 180,
+                    "abs_delay_over_3600_count": 1,
+                }
+            )
+    comparison = {
+        "service_dates": ["2026-07-08", "2026-07-09"],
+        "aggregates": aggregates,
+        "differences": [{"group": ["trip"]}],
+    }
+
+    gate = shadow.evaluate_shadow_gate(comparison, {"peak_rss_bytes": 1024, "swapping_observed": False})
+
+    assert gate["status"] == "warn"
+    assert gate["manual_review_required"] is True
+    assert gate["trip_quality_rates"][0]["rates"]["complete"]["delta_percentage_points"] == -0.1
+    assert any(issue["category"] == "delay" and issue["level"] == "warn" for issue in gate["issues"])
+
+
+def test_shadow_gate_fails_structural_resource_and_quality_bounds() -> None:
+    shadow = _load_shadow_module()
+    aggregate = {
+        "artifact": "trip",
+        "source": "shadow",
+        "service_date": "2026-07-09",
+        "mode": "tram",
+        "line": "145",
+        "gtfs_snapshot_id": "snapshot",
+        "trip_quality": "complete",
+        "observation_status": None,
+        "row_count": 10,
+        "distinct_grains": 9,
+        "delay_p50_seconds": 1,
+        "delay_p90_seconds": 1,
+        "delay_p95_seconds": 1,
+        "abs_delay_over_3600_count": 0,
+    }
+    canonical = aggregate | {"source": "canonical", "row_count": 100, "distinct_grains": 100}
+    gate = shadow.evaluate_shadow_gate(
+        {"service_dates": ["2026-07-08", "2026-07-09"], "aggregates": [aggregate, canonical], "differences": []},
+        {"peak_rss_bytes": shadow.DEFAULT_GATE_PEAK_RSS_BYTES + 1, "swapping_observed": True},
+    )
+
+    assert gate["status"] == "fail"
+    assert gate["structural_violations"]
+    assert shadow._gate_has_hard_failure(gate) is True
+
+
+def test_comparison_query_and_marker_bounds_are_configured(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    shadow = _load_shadow_module()
+    query = shadow._comparison_query(
+        {spec.key: {"table_id": f"project.shadow.{spec.key}"} for spec in shadow.ARTIFACTS}
+    )
+    assert "approx_quantiles" in query
+    assert "abs_delay_over_3600_count" in query
+    assert "gtfs_snapshot_id" in query
+    assert "line" in query
+    config = shadow.ShadowConfig(
+        True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher", max_marker_bytes=1
+    )
+    with pytest.raises(RuntimeError, match="marker exceeds"):
+        shadow._write_marker(
+            FakeStorageClient(FakeMarkerBucket(existing=None)), config, "2026-07-09", "run", {"x": "y"}
+        )
+    monkeypatch.setenv("MATCHER_SHADOW_MAX_COMPARISON_BYTES", "0")
+    with pytest.raises(ValueError, match="positive"):
+        shadow.ShadowConfig.from_env()
+
+
+def test_strict_compare_rejects_hard_gate_failure_before_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
+    monkeypatch.setenv("MATCHER_SHADOW_STRICT", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
+    monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
+    shadow = _load_shadow_module()
+    artifact = {spec.key: {"sha256": "a" * 64} for spec in shadow.ARTIFACTS}
+    pending = {
+        "run_id": "run",
+        "processing_date": "2026-07-09",
+        "metrics": {"peak_rss_bytes": 1, "swapping_observed": False},
+        "artifacts": artifact,
+        "tables": {
+            spec.key: shadow._table_identity("matcher_shadow", "run", spec, "a" * 64) for spec in shadow.ARTIFACTS
+        },
+    }
+    monkeypatch.setattr(shadow, "_read_pending", lambda *_args: pending)
+    monkeypatch.setattr(
+        shadow,
+        "_comparison_report",
+        lambda *_args: {
+            "service_dates": ["2026-07-08", "2026-07-09"],
+            "aggregates": [
+                {
+                    "artifact": "trip",
+                    "source": "shadow",
+                    "service_date": "2026-07-09",
+                    "mode": "bus",
+                    "line": "118",
+                    "gtfs_snapshot_id": "snapshot",
+                    "trip_quality": "complete",
+                    "observation_status": None,
+                    "row_count": 2,
+                    "distinct_grains": 1,
+                    "delay_p50_seconds": 1,
+                    "delay_p90_seconds": 1,
+                    "delay_p95_seconds": 1,
+                    "abs_delay_over_3600_count": 0,
+                }
+            ],
+            "differences": [],
+        },
+    )
+    monkeypatch.setattr(shadow, "_write_marker", lambda *_args: pytest.fail("strict failure must not write marker"))
+    monkeypatch.setattr(shadow.bigquery, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow.storage, "Client", lambda **_kwargs: object())
+
+    with pytest.raises(RuntimeError, match="strict gate"):
+        shadow.run_matcher_shadow_compare_commit(
+            "2026-07-09",
+            "run",
+            {"enabled": True, "status": "loaded_pending", "processing_date": "2026-07-09", "run_id": "run"},
+        )
 
 
 def test_load_rejects_conflicting_marker_before_loading_tables(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -57,6 +57,17 @@ VALIDATION_BATCH_SIZE = 8_192
 DEFAULT_MAX_GPS_OBJECTS = 5_000
 DEFAULT_MAX_GPS_BYTES = 20 * 1024**3
 DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024**3
+DEFAULT_MAX_COMPARISON_BYTES = 5 * 1024**3
+DEFAULT_MAX_MARKER_BYTES = 20 * 1024**2
+COMPARISON_CONTRACT_VERSION = "matcher-shadow-comparison-v2"
+DEFAULT_GATE_CURRENT_RETENTION_MIN = 0.75
+DEFAULT_GATE_PRIOR_RETENTION_MIN = 0.40
+DEFAULT_GATE_COMPLETE_RATE_DROP_MAX = 0.15
+DEFAULT_GATE_EXPECTED_RATE_DELTA_MAX = 0.15
+DEFAULT_GATE_DELAY_PERCENTILE_RATIO_MAX = 2.0
+DEFAULT_GATE_DELAY_TAIL_DELTA_MAX = 0.15
+DEFAULT_GATE_PEAK_RSS_BYTES = 2 * 1024**3
+COMPARISON_DATE_COUNT = 2
 
 
 @dataclass(frozen=True)
@@ -257,6 +268,8 @@ class ShadowConfig:
     max_gps_objects: int = DEFAULT_MAX_GPS_OBJECTS
     max_gps_bytes: int = DEFAULT_MAX_GPS_BYTES
     min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
+    max_comparison_bytes: int = DEFAULT_MAX_COMPARISON_BYTES
+    max_marker_bytes: int = DEFAULT_MAX_MARKER_BYTES
 
     @classmethod
     def from_env(cls) -> ShadowConfig:
@@ -283,6 +296,8 @@ class ShadowConfig:
             max_gps_objects=_env_positive_int("MATCHER_SHADOW_MAX_GPS_OBJECTS", DEFAULT_MAX_GPS_OBJECTS),
             max_gps_bytes=_env_positive_int("MATCHER_SHADOW_MAX_GPS_BYTES", DEFAULT_MAX_GPS_BYTES),
             min_free_disk_bytes=_env_positive_int("MATCHER_SHADOW_MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES),
+            max_comparison_bytes=_env_positive_int("MATCHER_SHADOW_MAX_COMPARISON_BYTES", DEFAULT_MAX_COMPARISON_BYTES),
+            max_marker_bytes=_env_positive_int("MATCHER_SHADOW_MAX_MARKER_BYTES", DEFAULT_MAX_MARKER_BYTES),
         )
 
     def validate(self) -> None:
@@ -310,6 +325,8 @@ class ShadowConfig:
             ("MATCHER_SHADOW_MAX_GPS_OBJECTS", self.max_gps_objects),
             ("MATCHER_SHADOW_MAX_GPS_BYTES", self.max_gps_bytes),
             ("MATCHER_SHADOW_MIN_FREE_DISK_BYTES", self.min_free_disk_bytes),
+            ("MATCHER_SHADOW_MAX_COMPARISON_BYTES", self.max_comparison_bytes),
+            ("MATCHER_SHADOW_MAX_MARKER_BYTES", self.max_marker_bytes),
         ):
             if value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -361,6 +378,17 @@ def _env_positive_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be a positive integer") from exc
     if parsed < 1:
         raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _env_nonnegative_float(name: str, default: float) -> float:
+    value = os.getenv(name, str(default)).strip()
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative number") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be a non-negative number")
     return parsed
 
 
@@ -815,33 +843,47 @@ def _comparison_query(shadow_tables: dict[str, dict[str, str]]) -> str:
         status = "cast(null as string)" if spec.key != "expected_stop_event" else "observation_status"
         grain = ", ".join(spec.grain)
         for source, table in (("shadow", shadow), ("canonical", canonical)):
+            # Matcher expected-event artifacts already contain only settled passenger stops.
+            passenger_filter = (
+                "and is_passenger_stop and are_passenger_boundaries_settled"
+                if spec.key == "expected_stop_event" and source == "canonical"
+                else ""
+            )
             sections.append(
                 f"""
-                select '{spec.key}' as artifact, '{source}' as source, service_date, mode,
+                select '{spec.key}' as artifact, '{source}' as source, service_date, mode, line, gtfs_snapshot_id,
                     trip_quality, {status} as observation_status, count(*) as row_count,
                     count(distinct to_json_string(struct({grain}))) as distinct_grains,
                     avg({delay}) as avg_delay_seconds,
+                    approx_quantiles({delay}, 100)[offset(50)] as delay_p50_seconds,
+                    approx_quantiles({delay}, 100)[offset(90)] as delay_p90_seconds,
+                    approx_quantiles({delay}, 100)[offset(95)] as delay_p95_seconds,
+                    countif(abs({delay}) > 3600) as abs_delay_over_3600_count,
+                    countif({status} = 'uncertain') as uncertain_count,
+                    countif({status} = 'missed') as missed_count,
                     countif({source_date} != service_date) as overnight_rows,
                     count(distinct {source_date}) as source_date_count,
                     array_agg(distinct cast({source_date} as string) ignore nulls order by cast({source_date} as string)) as source_dates
                 from `{table}`
                 where service_date in unnest(@service_dates)
                   and {processing_field} = @processing_date
-                group by artifact, source, service_date, mode, trip_quality, observation_status
+                  {passenger_filter}
+                group by artifact, source, service_date, mode, line, gtfs_snapshot_id, trip_quality, observation_status
                 """
             )
     return " union all ".join(sections)
 
 
 def _comparison_report(
-    client: Any, processing_date: str, shadow_tables: dict[str, dict[str, str]]
+    client: Any, processing_date: str, shadow_tables: dict[str, dict[str, str]], max_comparison_bytes: int
 ) -> dict[str, object]:
     dates = [date.fromisoformat(processing_date) - timedelta(days=1), date.fromisoformat(processing_date)]
     config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter("service_dates", "DATE", dates),
             bigquery.ScalarQueryParameter("processing_date", "DATE", date.fromisoformat(processing_date)),
-        ]
+        ],
+        maximum_bytes_billed=max_comparison_bytes,
     )
     rows = [
         {key: _json_value(value) for key, value in (dict(row.items()) if hasattr(row, "items") else dict(row)).items()}
@@ -851,7 +893,18 @@ def _comparison_report(
     rows.sort(key=lambda row: _json_bytes(row).decode("utf-8"))
     grouped: dict[tuple[object, ...], dict[str, dict[str, object]]] = {}
     for row in rows:
-        key = tuple(row[field] for field in ("artifact", "service_date", "mode", "trip_quality", "observation_status"))
+        key = tuple(
+            row[field]
+            for field in (
+                "artifact",
+                "service_date",
+                "mode",
+                "line",
+                "gtfs_snapshot_id",
+                "trip_quality",
+                "observation_status",
+            )
+        )
         grouped.setdefault(key, {})[str(row["source"])] = row
     differences = [
         {"group": list(key), "shadow": values.get("shadow"), "canonical": values.get("canonical")}
@@ -859,7 +912,12 @@ def _comparison_report(
         if _comparison_payload(values.get("shadow")) != _comparison_payload(values.get("canonical"))
     ]
     differences.sort(key=lambda difference: _json_bytes(difference).decode("utf-8"))
-    return {"service_dates": [item.isoformat() for item in dates], "aggregates": rows, "differences": differences}
+    return {
+        "comparison_contract_version": COMPARISON_CONTRACT_VERSION,
+        "service_dates": [item.isoformat() for item in dates],
+        "aggregates": rows,
+        "differences": differences,
+    }
 
 
 def _comparison_payload(row: dict[str, object] | None) -> dict[str, object] | None:
@@ -921,6 +979,8 @@ def _write_marker(
     name = _marker_name(config, processing_date, run_id)
     blob = client.bucket(GCS_BUCKET).blob(name)
     payload = _json_bytes(marker)
+    if len(payload) > config.max_marker_bytes:
+        raise RuntimeError(f"Matcher shadow marker exceeds configured size: {len(payload)} > {config.max_marker_bytes}")
     try:
         blob.upload_from_string(payload, content_type="application/json", if_generation_match=0)
     except PreconditionFailed as exc:
@@ -929,6 +989,238 @@ def _write_marker(
                 f"Matcher shadow commit marker already exists with different content: gs://{GCS_BUCKET}/{name}"
             ) from exc
     return f"gs://{GCS_BUCKET}/{name}"
+
+
+def _gate_thresholds() -> dict[str, object]:
+    """Return all committed gate settings, including advisory thresholds."""
+    return {
+        "current_row_retention_min": _env_nonnegative_float(
+            "MATCHER_SHADOW_GATE_CURRENT_ROW_RETENTION_MIN", DEFAULT_GATE_CURRENT_RETENTION_MIN
+        ),
+        "prior_row_retention_min": _env_nonnegative_float(
+            "MATCHER_SHADOW_GATE_PRIOR_ROW_RETENTION_MIN", DEFAULT_GATE_PRIOR_RETENTION_MIN
+        ),
+        "complete_rate_drop_max": _env_nonnegative_float(
+            "MATCHER_SHADOW_GATE_COMPLETE_RATE_DROP_MAX", DEFAULT_GATE_COMPLETE_RATE_DROP_MAX
+        ),
+        "expected_rate_delta_max": _env_nonnegative_float(
+            "MATCHER_SHADOW_GATE_EXPECTED_RATE_DELTA_MAX", DEFAULT_GATE_EXPECTED_RATE_DELTA_MAX
+        ),
+        "delay_percentile_ratio_max": _env_nonnegative_float(
+            "MATCHER_SHADOW_GATE_DELAY_PERCENTILE_RATIO_MAX", DEFAULT_GATE_DELAY_PERCENTILE_RATIO_MAX
+        ),
+        "delay_tail_delta_max": _env_nonnegative_float(
+            "MATCHER_SHADOW_GATE_DELAY_TAIL_DELTA_MAX", DEFAULT_GATE_DELAY_TAIL_DELTA_MAX
+        ),
+        "peak_rss_bytes_max": _env_positive_int("MATCHER_SHADOW_GATE_PEAK_RSS_BYTES_MAX", DEFAULT_GATE_PEAK_RSS_BYTES),
+        "swapping_observed_must_be": False,
+    }
+
+
+def _gate_issue(level: str, category: str, message: str, **details: object) -> dict[str, object]:
+    return {"level": level, "category": category, "message": message, **details}
+
+
+def _ratio(numerator: float, denominator: float) -> float | None:
+    return None if denominator == 0 else round(float(numerator) / float(denominator), 6)
+
+
+def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, object]) -> dict[str, object]:
+    """Evaluate deterministic shadow evidence; it never grants canonical ownership."""
+    thresholds = _gate_thresholds()
+    aggregates, dates = comparison.get("aggregates", []), comparison.get("service_dates", [])
+    if not isinstance(aggregates, list) or not isinstance(dates, list) or len(dates) != COMPARISON_DATE_COUNT:
+        raise ValueError("Matcher shadow comparison requires aggregate rows for prior and current dates")
+    _, current_date = (str(value) for value in dates)
+    issues: list[dict[str, object]] = []
+    paired: dict[tuple[str, ...], dict[str, dict[str, object]]] = {}
+    retention_counts: dict[tuple[str, str, str], int] = {}
+    trip_counts: dict[tuple[str, str, str], dict[str, int]] = {}
+    expected_counts: dict[tuple[str, str, str], list[int]] = {}
+    for row in aggregates:
+        if not isinstance(row, dict) or row.get("source") not in {"shadow", "canonical"}:
+            raise ValueError("Matcher shadow comparison contains an invalid aggregate row")
+        source, count, distinct = str(row["source"]), int(row.get("row_count", 0)), int(row.get("distinct_grains", 0))
+        if count != distinct:
+            issues.append(
+                _gate_issue(
+                    "fail",
+                    "structural",
+                    "row count differs from distinct grain count",
+                    source=source,
+                    artifact=row.get("artifact"),
+                    service_date=row.get("service_date"),
+                    mode=row.get("mode"),
+                    row_count=count,
+                    distinct_grains=distinct,
+                )
+            )
+        key = tuple(
+            str(row.get(field) or "")
+            for field in (
+                "artifact",
+                "service_date",
+                "mode",
+                "line",
+                "gtfs_snapshot_id",
+                "trip_quality",
+                "observation_status",
+            )
+        )
+        paired.setdefault(key, {})[source] = row
+        retention_key = (str(row.get("artifact") or ""), str(row.get("service_date") or ""), source)
+        retention_counts[retention_key] = retention_counts.get(retention_key, 0) + count
+        rate_key = (str(row.get("service_date") or ""), str(row.get("mode") or ""), source)
+        if row.get("artifact") == "trip":
+            quality = str(row.get("trip_quality") or "unknown")
+            trip_counts.setdefault(rate_key, {})[quality] = trip_counts.setdefault(rate_key, {}).get(quality, 0) + count
+        if row.get("artifact") == "expected_stop_event":
+            values = expected_counts.setdefault(rate_key, [0, 0, 0])
+            values[0] += count
+            values[1] += int(row.get("uncertain_count", 0))
+            values[2] += int(row.get("missed_count", 0))
+
+    retention = []
+    delay_changes = []
+    for artifact, service_date in sorted({key[:2] for key in retention_counts}):
+        shadow_rows = retention_counts.get((artifact, service_date, "shadow"), 0)
+        canonical_rows = retention_counts.get((artifact, service_date, "canonical"), 0)
+        threshold = float(
+            thresholds["current_row_retention_min"]
+            if service_date == current_date
+            else thresholds["prior_row_retention_min"]
+        )
+        evidence = {
+            "artifact": artifact,
+            "service_date": service_date,
+            "shadow_rows": shadow_rows,
+            "canonical_rows": canonical_rows,
+            "ratio": _ratio(shadow_rows, canonical_rows),
+            "minimum": threshold,
+        }
+        retention.append(evidence)
+        if canonical_rows and (evidence["ratio"] is None or float(evidence["ratio"]) < threshold):
+            issues.append(_gate_issue("fail", "retention", "shadow row retention below threshold", **evidence))
+    for key, sources in sorted(paired.items()):
+        shadow, canonical = sources.get("shadow"), sources.get("canonical")
+        if shadow is None or canonical is None:
+            continue
+        for percentile in ("p50", "p90", "p95"):
+            shadow_value, canonical_value = (
+                shadow.get(f"delay_{percentile}_seconds"),
+                canonical.get(f"delay_{percentile}_seconds"),
+            )
+            ratio = (
+                None
+                if shadow_value is None or canonical_value in (None, 0)
+                else round(abs(float(shadow_value)) / abs(float(canonical_value)), 6)
+            )
+            evidence = {"group": list(key), "percentile": percentile, "ratio": ratio}
+            delay_changes.append(evidence)
+            if ratio is not None and ratio > float(thresholds["delay_percentile_ratio_max"]):
+                issues.append(
+                    _gate_issue("warn", "delay", "delay percentile ratio exceeds advisory threshold", **evidence)
+                )
+        tail_ratio = _ratio(
+            int(shadow.get("abs_delay_over_3600_count", 0)) - int(canonical.get("abs_delay_over_3600_count", 0)),
+            int(canonical.get("abs_delay_over_3600_count", 0)),
+        )
+        evidence = {"group": list(key), "tail_count_delta_ratio": tail_ratio}
+        delay_changes.append(evidence)
+        if tail_ratio is not None and abs(tail_ratio) > float(thresholds["delay_tail_delta_max"]):
+            issues.append(_gate_issue("warn", "delay", "delay tail changed beyond advisory threshold", **evidence))
+
+    trip_quality_rates = []
+    expected_status_rates = []
+    for service_date, mode in sorted({key[:2] for key in trip_counts}):
+        shadow, canonical = (
+            trip_counts.get((service_date, mode, "shadow"), {}),
+            trip_counts.get((service_date, mode, "canonical"), {}),
+        )
+        shadow_total, canonical_total = sum(shadow.values()), sum(canonical.values())
+        rates: dict[str, dict[str, float | None]] = {}
+        for quality in ("complete", "partial", "broken"):
+            shadow_rate, canonical_rate = (
+                _ratio(shadow.get(quality, 0), shadow_total),
+                _ratio(canonical.get(quality, 0), canonical_total),
+            )
+            rates[quality] = {
+                "shadow": shadow_rate,
+                "canonical": canonical_rate,
+                "delta_percentage_points": None
+                if shadow_rate is None or canonical_rate is None
+                else round(shadow_rate - canonical_rate, 6),
+            }
+        evidence = {"service_date": service_date, "mode": mode, "rates": rates}
+        trip_quality_rates.append(evidence)
+        complete_delta = rates["complete"]["delta_percentage_points"]
+        if complete_delta is not None and complete_delta < -float(thresholds["complete_rate_drop_max"]):
+            issues.append(_gate_issue("fail", "quality", "complete trip rate dropped beyond threshold", **evidence))
+    for service_date, mode in sorted({key[:2] for key in expected_counts}):
+        shadow, canonical = (
+            expected_counts.get((service_date, mode, "shadow"), [0, 0, 0]),
+            expected_counts.get((service_date, mode, "canonical"), [0, 0, 0]),
+        )
+        evidence: dict[str, object] = {"service_date": service_date, "mode": mode, "rates": {}}
+        for label, index in (("uncertain", 1), ("missed", 2)):
+            shadow_rate, canonical_rate = _ratio(shadow[index], shadow[0]), _ratio(canonical[index], canonical[0])
+            delta = None if shadow_rate is None or canonical_rate is None else round(shadow_rate - canonical_rate, 6)
+            evidence["rates"][label] = {
+                "shadow": shadow_rate,
+                "canonical": canonical_rate,
+                "delta_percentage_points": delta,
+            }
+            if delta is not None and abs(delta) > float(thresholds["expected_rate_delta_max"]):
+                issues.append(
+                    _gate_issue(
+                        "warn", "expected_status", f"{label} rate changed beyond advisory threshold", **evidence
+                    )
+                )
+        expected_status_rates.append(evidence)
+
+    resource_bounds = {
+        "peak_rss_bytes": metrics.get("peak_rss_bytes"),
+        "swapping_observed": metrics.get("swapping_observed"),
+        "peak_rss_bytes_max": thresholds["peak_rss_bytes_max"],
+        "swapping_observed_must_be": False,
+    }
+    if resource_bounds["peak_rss_bytes"] is not None and int(resource_bounds["peak_rss_bytes"]) > int(
+        resource_bounds["peak_rss_bytes_max"]
+    ):
+        issues.append(_gate_issue("fail", "resource", "peak RSS exceeds configured bound", **resource_bounds))
+    if resource_bounds["swapping_observed"] is True:
+        issues.append(_gate_issue("fail", "resource", "swapping was observed", **resource_bounds))
+    differences = comparison.get("differences", [])
+    if not isinstance(differences, list):
+        raise TypeError("Matcher shadow comparison differences must be a list")
+    status = "fail" if any(issue["level"] == "fail" for issue in issues) else "warn" if issues else "pass"
+    return {
+        "status": status,
+        "manual_review_required": bool(differences),
+        "comparison_contract_version": COMPARISON_CONTRACT_VERSION,
+        "thresholds": thresholds,
+        "structural_violations": [issue for issue in issues if issue["category"] == "structural"],
+        "resource_bounds": resource_bounds,
+        "retention": retention,
+        "trip_quality_rates": trip_quality_rates,
+        "expected_status_rates": expected_status_rates,
+        "delay_changes": delay_changes,
+        "issues": issues,
+    }
+
+
+def _gate_has_hard_failure(gate: dict[str, object]) -> bool:
+    return any(
+        isinstance(issue, dict) and issue.get("level") == "fail" and issue.get("category") in {"structural", "resource"}
+        for issue in gate.get("issues", [])
+    )
+
+
+def _marker_diagnostics(metrics: dict[str, object]) -> dict[str, object]:
+    return {
+        name: metrics.get(name)
+        for name in ("duty_execution_status_counts", "stop_alignment_missing_stops", "stop_alignment_ambiguous_trips")
+    }
 
 
 def _reject_conflicting_marker(
@@ -1051,9 +1343,29 @@ def run_matcher_shadow_compare_commit(
     if pending.get("processing_date") != processing_date or pending.get("run_id") != run_id:
         raise RuntimeError("Matcher shadow pending metadata does not match this DAG run")
     tables = _pending_tables(config, run_id, pending)
-    comparison = _comparison_report(bigquery.Client(project=GCP_PROJECT), processing_date, tables)
-    marker_uri = _write_marker(storage_client, config, processing_date, run_id, pending | {"comparison": comparison})
-    return {"enabled": True, "status": "committed", "marker_uri": marker_uri}
+    comparison = _comparison_report(
+        bigquery.Client(project=GCP_PROJECT), processing_date, tables, config.max_comparison_bytes
+    )
+    metrics = pending.get("metrics")
+    if not isinstance(metrics, dict):
+        raise TypeError("Matcher shadow pending metadata has no metrics object")
+    gate = evaluate_shadow_gate(comparison, metrics)
+    if config.strict and _gate_has_hard_failure(gate):
+        raise RuntimeError("Matcher shadow strict gate rejected a structural or resource failure")
+    marker_uri = _write_marker(
+        storage_client,
+        config,
+        processing_date,
+        run_id,
+        pending
+        | {
+            "comparison": comparison,
+            "comparison_contract_version": COMPARISON_CONTRACT_VERSION,
+            "quality_gate": gate,
+            "diagnostics": _marker_diagnostics(metrics),
+        },
+    )
+    return {"enabled": True, "status": "committed", "marker_uri": marker_uri, "quality_gate_status": gate["status"]}
 
 
 def _validate_run_workspace(config: ShadowConfig, workspace: Path) -> None:
