@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from importlib import import_module
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from google.api_core.exceptions import Conflict, NotFound, PreconditionFailed
@@ -66,6 +66,7 @@ DEFAULT_GATE_COMPLETE_RATE_DROP_MAX = 0.15
 DEFAULT_GATE_EXPECTED_RATE_DELTA_MAX = 0.15
 DEFAULT_GATE_DELAY_PERCENTILE_RATIO_MAX = 2.0
 DEFAULT_GATE_DELAY_TAIL_DELTA_MAX = 0.15
+DEFAULT_GATE_MATERIAL_LINE_ROWS = 20
 DEFAULT_GATE_PEAK_RSS_BYTES = 2 * 1024**3
 COMPARISON_DATE_COUNT = 2
 
@@ -947,7 +948,10 @@ def _write_pending(
 
 def _read_pending(client: Any, config: ShadowConfig, processing_date: str, run_id: str) -> dict[str, object]:
     blob = client.bucket(GCS_BUCKET).blob(_pending_name(config, processing_date, run_id))
-    pending = json.loads(blob.download_as_bytes())
+    payload = _read_bounded_blob(blob, config, "pending metadata")
+    if payload is None:
+        raise AssertionError("required pending metadata was unexpectedly absent")
+    pending = json.loads(payload)
     if not isinstance(pending, dict):
         raise TypeError("Matcher shadow pending metadata is not an object")
     return pending
@@ -955,13 +959,39 @@ def _read_pending(client: Any, config: ShadowConfig, processing_date: str, run_i
 
 def _read_marker(client: Any, config: ShadowConfig, processing_date: str, run_id: str) -> dict[str, object] | None:
     blob = client.bucket(GCS_BUCKET).blob(_marker_name(config, processing_date, run_id))
-    try:
-        marker = json.loads(blob.download_as_bytes())
-    except NotFound:
+    payload = _read_bounded_blob(blob, config, "commit marker", missing_ok=True)
+    if payload is None:
         return None
+    marker = json.loads(payload)
     if not isinstance(marker, dict):
         raise TypeError("Matcher shadow commit marker is not an object")
     return marker
+
+
+def _read_bounded_blob(blob: Any, config: ShadowConfig, label: str, *, missing_ok: bool = False) -> bytes | None:
+    """Read small JSON metadata only after checking its current object metadata."""
+    try:
+        if not blob.exists():
+            if missing_ok:
+                return None
+            raise RuntimeError(f"Matcher shadow {label} does not exist")
+        blob.reload()
+    except NotFound:
+        if missing_ok:
+            return None
+        raise RuntimeError(f"Matcher shadow {label} does not exist") from None
+    size = getattr(blob, "size", None)
+    if not isinstance(size, int) or size < 0:
+        raise RuntimeError(f"Matcher shadow {label} has no valid byte size")
+    if size > config.max_marker_bytes:
+        raise RuntimeError(f"Matcher shadow {label} exceeds configured size: {size} > {config.max_marker_bytes}")
+    payload = blob.download_as_bytes()
+    if len(payload) > config.max_marker_bytes:
+        raise RuntimeError(
+            f"Matcher shadow {label} exceeds configured size after metadata check: "
+            f"{len(payload)} > {config.max_marker_bytes}"
+        )
+    return payload
 
 
 def _marker_is_identical(existing: bytes, payload: bytes) -> bool:
@@ -984,14 +1014,15 @@ def _write_marker(
     try:
         blob.upload_from_string(payload, content_type="application/json", if_generation_match=0)
     except PreconditionFailed as exc:
-        if not _marker_is_identical(blob.download_as_bytes(), payload):
+        existing = _read_bounded_blob(blob, config, "existing commit marker", missing_ok=True)
+        if existing is None or not _marker_is_identical(existing, payload):
             raise RuntimeError(
                 f"Matcher shadow commit marker already exists with different content: gs://{GCS_BUCKET}/{name}"
             ) from exc
     return f"gs://{GCS_BUCKET}/{name}"
 
 
-def _gate_thresholds() -> dict[str, object]:
+def _gate_thresholds() -> dict[str, Any]:
     """Return all committed gate settings, including advisory thresholds."""
     return {
         "current_row_retention_min": _env_nonnegative_float(
@@ -1012,6 +1043,9 @@ def _gate_thresholds() -> dict[str, object]:
         "delay_tail_delta_max": _env_nonnegative_float(
             "MATCHER_SHADOW_GATE_DELAY_TAIL_DELTA_MAX", DEFAULT_GATE_DELAY_TAIL_DELTA_MAX
         ),
+        "material_line_rows_min": _env_positive_int(
+            "MATCHER_SHADOW_GATE_MATERIAL_LINE_ROWS_MIN", DEFAULT_GATE_MATERIAL_LINE_ROWS
+        ),
         "peak_rss_bytes_max": _env_positive_int("MATCHER_SHADOW_GATE_PEAK_RSS_BYTES_MAX", DEFAULT_GATE_PEAK_RSS_BYTES),
         "swapping_observed_must_be": False,
     }
@@ -1028,13 +1062,20 @@ def _ratio(numerator: float, denominator: float) -> float | None:
 def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, object]) -> dict[str, object]:
     """Evaluate deterministic shadow evidence; it never grants canonical ownership."""
     thresholds = _gate_thresholds()
-    aggregates, dates = comparison.get("aggregates", []), comparison.get("service_dates", [])
-    if not isinstance(aggregates, list) or not isinstance(dates, list) or len(dates) != COMPARISON_DATE_COUNT:
+    raw_aggregates, raw_dates = comparison.get("aggregates", []), comparison.get("service_dates", [])
+    if (
+        not isinstance(raw_aggregates, list)
+        or not isinstance(raw_dates, list)
+        or len(raw_dates) != COMPARISON_DATE_COUNT
+    ):
         raise ValueError("Matcher shadow comparison requires aggregate rows for prior and current dates")
+    aggregates = cast("list[dict[str, Any]]", raw_aggregates)
+    dates = cast("list[Any]", raw_dates)
     _, current_date = (str(value) for value in dates)
     issues: list[dict[str, object]] = []
-    paired: dict[tuple[str, ...], dict[str, dict[str, object]]] = {}
-    retention_counts: dict[tuple[str, str, str], int] = {}
+    paired: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
+    mode_counts: dict[tuple[str, str, str, str], int] = {}
+    line_counts: dict[tuple[str, str, str, str, str], int] = {}
     trip_counts: dict[tuple[str, str, str], dict[str, int]] = {}
     expected_counts: dict[tuple[str, str, str], list[int]] = {}
     for row in aggregates:
@@ -1068,8 +1109,16 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
             )
         )
         paired.setdefault(key, {})[source] = row
-        retention_key = (str(row.get("artifact") or ""), str(row.get("service_date") or ""), source)
-        retention_counts[retention_key] = retention_counts.get(retention_key, 0) + count
+        artifact, service_date, mode, line = (
+            str(row.get("artifact") or ""),
+            str(row.get("service_date") or ""),
+            str(row.get("mode") or ""),
+            str(row.get("line") or ""),
+        )
+        mode_key = (artifact, service_date, mode, source)
+        mode_counts[mode_key] = mode_counts.get(mode_key, 0) + count
+        line_key = (artifact, service_date, mode, line, source)
+        line_counts[line_key] = line_counts.get(line_key, 0) + count
         rate_key = (str(row.get("service_date") or ""), str(row.get("mode") or ""), source)
         if row.get("artifact") == "trip":
             quality = str(row.get("trip_quality") or "unknown")
@@ -1081,26 +1130,60 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
             values[2] += int(row.get("missed_count", 0))
 
     retention = []
+    material_line_retention = []
     delay_changes = []
-    for artifact, service_date in sorted({key[:2] for key in retention_counts}):
-        shadow_rows = retention_counts.get((artifact, service_date, "shadow"), 0)
-        canonical_rows = retention_counts.get((artifact, service_date, "canonical"), 0)
+    canonical_mode_keys = {key[:3] for key in mode_counts if key[3] == "canonical"}
+    for artifact, service_date, mode in sorted(canonical_mode_keys):
+        shadow_rows = mode_counts.get((artifact, service_date, mode, "shadow"), 0)
+        canonical_rows = mode_counts[(artifact, service_date, mode, "canonical")]
         threshold = float(
             thresholds["current_row_retention_min"]
             if service_date == current_date
             else thresholds["prior_row_retention_min"]
         )
+        retention_ratio = _ratio(shadow_rows, canonical_rows)
         evidence = {
             "artifact": artifact,
             "service_date": service_date,
+            "mode": mode,
             "shadow_rows": shadow_rows,
             "canonical_rows": canonical_rows,
-            "ratio": _ratio(shadow_rows, canonical_rows),
+            "ratio": retention_ratio,
             "minimum": threshold,
         }
         retention.append(evidence)
-        if canonical_rows and (evidence["ratio"] is None or float(evidence["ratio"]) < threshold):
-            issues.append(_gate_issue("fail", "retention", "shadow row retention below threshold", **evidence))
+        if shadow_rows == 0:
+            issues.append(_gate_issue("fail", "retention", "shadow mode is completely missing", **evidence))
+        elif retention_ratio is not None and retention_ratio < threshold:
+            issues.append(_gate_issue("fail", "retention", "shadow mode row retention below threshold", **evidence))
+    canonical_line_keys = {key[:4] for key in line_counts if key[4] == "canonical"}
+    for artifact, service_date, mode, line in sorted(canonical_line_keys):
+        canonical_rows = line_counts[(artifact, service_date, mode, line, "canonical")]
+        if canonical_rows < int(thresholds["material_line_rows_min"]):
+            continue
+        shadow_rows = line_counts.get((artifact, service_date, mode, line, "shadow"), 0)
+        threshold = float(
+            thresholds["current_row_retention_min"]
+            if service_date == current_date
+            else thresholds["prior_row_retention_min"]
+        )
+        retention_ratio = _ratio(shadow_rows, canonical_rows)
+        evidence = {
+            "artifact": artifact,
+            "service_date": service_date,
+            "mode": mode,
+            "line": line,
+            "shadow_rows": shadow_rows,
+            "canonical_rows": canonical_rows,
+            "ratio": retention_ratio,
+            "minimum": threshold,
+        }
+        material_line_retention.append(evidence)
+        mode_shadow_rows = mode_counts.get((artifact, service_date, mode, "shadow"), 0)
+        if shadow_rows == 0 and mode_shadow_rows:
+            issues.append(_gate_issue("fail", "retention", "material line is completely missing", **evidence))
+        elif shadow_rows and retention_ratio is not None and retention_ratio < threshold:
+            issues.append(_gate_issue("warn", "retention", "material line retention below threshold", **evidence))
     for key, sources in sorted(paired.items()):
         shadow, canonical = sources.get("shadow"), sources.get("canonical")
         if shadow is None or canonical is None:
@@ -1110,29 +1193,54 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
                 shadow.get(f"delay_{percentile}_seconds"),
                 canonical.get(f"delay_{percentile}_seconds"),
             )
+            difference = (
+                None
+                if shadow_value is None or canonical_value is None
+                else round(float(shadow_value) - float(canonical_value), 6)
+            )
             ratio = (
                 None
-                if shadow_value is None or canonical_value in (None, 0)
+                if canonical_value in (None, 0) or shadow_value is None
                 else round(abs(float(shadow_value)) / abs(float(canonical_value)), 6)
             )
-            evidence = {"group": list(key), "percentile": percentile, "ratio": ratio}
+            evidence = {
+                "group": list(key),
+                "percentile": percentile,
+                "shadow_seconds": shadow_value,
+                "canonical_seconds": canonical_value,
+                "difference_seconds": difference,
+                "absolute_difference_seconds": None if difference is None else abs(difference),
+                "ratio": ratio,
+            }
             delay_changes.append(evidence)
-            if ratio is not None and ratio > float(thresholds["delay_percentile_ratio_max"]):
+            if canonical_value == 0 and shadow_value not in (None, 0):
+                issues.append(_gate_issue("warn", "delay", "delay percentile changed from zero baseline", **evidence))
+            elif ratio is not None and ratio > float(thresholds["delay_percentile_ratio_max"]):
                 issues.append(
                     _gate_issue("warn", "delay", "delay percentile ratio exceeds advisory threshold", **evidence)
                 )
-        tail_ratio = _ratio(
-            int(shadow.get("abs_delay_over_3600_count", 0)) - int(canonical.get("abs_delay_over_3600_count", 0)),
-            int(canonical.get("abs_delay_over_3600_count", 0)),
+        shadow_tail_rate = _ratio(int(shadow.get("abs_delay_over_3600_count", 0)), int(shadow.get("row_count", 0)))
+        canonical_tail_rate = _ratio(
+            int(canonical.get("abs_delay_over_3600_count", 0)), int(canonical.get("row_count", 0))
         )
-        evidence = {"group": list(key), "tail_count_delta_ratio": tail_ratio}
+        tail_delta = (
+            None
+            if shadow_tail_rate is None or canonical_tail_rate is None
+            else round((shadow_tail_rate - canonical_tail_rate) * 100, 6)
+        )
+        evidence = {
+            "group": list(key),
+            "shadow_tail_rate": shadow_tail_rate,
+            "canonical_tail_rate": canonical_tail_rate,
+            "tail_rate_delta_percentage_points": tail_delta,
+        }
         delay_changes.append(evidence)
-        if tail_ratio is not None and abs(tail_ratio) > float(thresholds["delay_tail_delta_max"]):
+        if tail_delta is not None and abs(tail_delta) > float(thresholds["delay_tail_delta_max"]) * 100:
             issues.append(_gate_issue("warn", "delay", "delay tail changed beyond advisory threshold", **evidence))
 
     trip_quality_rates = []
     expected_status_rates = []
-    for service_date, mode in sorted({key[:2] for key in trip_counts}):
+    for service_date, mode in sorted({key[:2] for key in trip_counts if key[2] == "canonical"}):
         shadow, canonical = (
             trip_counts.get((service_date, mode, "shadow"), {}),
             trip_counts.get((service_date, mode, "canonical"), {}),
@@ -1140,10 +1248,8 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
         shadow_total, canonical_total = sum(shadow.values()), sum(canonical.values())
         rates: dict[str, dict[str, float | None]] = {}
         for quality in ("complete", "partial", "broken"):
-            shadow_rate, canonical_rate = (
-                _ratio(shadow.get(quality, 0), shadow_total),
-                _ratio(canonical.get(quality, 0), canonical_total),
-            )
+            shadow_rate = 0.0 if shadow_total == 0 else _ratio(shadow.get(quality, 0), shadow_total)
+            canonical_rate = 0.0 if canonical_total == 0 else _ratio(canonical.get(quality, 0), canonical_total)
             rates[quality] = {
                 "shadow": shadow_rate,
                 "canonical": canonical_rate,
@@ -1184,9 +1290,8 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
         "peak_rss_bytes_max": thresholds["peak_rss_bytes_max"],
         "swapping_observed_must_be": False,
     }
-    if resource_bounds["peak_rss_bytes"] is not None and int(resource_bounds["peak_rss_bytes"]) > int(
-        resource_bounds["peak_rss_bytes_max"]
-    ):
+    peak_rss = cast("Any", resource_bounds["peak_rss_bytes"])
+    if peak_rss is not None and int(peak_rss) > int(resource_bounds["peak_rss_bytes_max"]):
         issues.append(_gate_issue("fail", "resource", "peak RSS exceeds configured bound", **resource_bounds))
     if resource_bounds["swapping_observed"] is True:
         issues.append(_gate_issue("fail", "resource", "swapping was observed", **resource_bounds))
@@ -1202,6 +1307,7 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
         "structural_violations": [issue for issue in issues if issue["category"] == "structural"],
         "resource_bounds": resource_bounds,
         "retention": retention,
+        "material_line_retention": material_line_retention,
         "trip_quality_rates": trip_quality_rates,
         "expected_status_rates": expected_status_rates,
         "delay_changes": delay_changes,
@@ -1210,9 +1316,12 @@ def evaluate_shadow_gate(comparison: dict[str, object], metrics: dict[str, objec
 
 
 def _gate_has_hard_failure(gate: dict[str, object]) -> bool:
+    issues = gate.get("issues", [])
+    if not isinstance(issues, list):
+        return False
     return any(
         isinstance(issue, dict) and issue.get("level") == "fail" and issue.get("category") in {"structural", "resource"}
-        for issue in gate.get("issues", [])
+        for issue in issues
     )
 
 
@@ -1346,9 +1455,10 @@ def run_matcher_shadow_compare_commit(
     comparison = _comparison_report(
         bigquery.Client(project=GCP_PROJECT), processing_date, tables, config.max_comparison_bytes
     )
-    metrics = pending.get("metrics")
-    if not isinstance(metrics, dict):
+    raw_metrics = pending.get("metrics")
+    if not isinstance(raw_metrics, dict):
         raise TypeError("Matcher shadow pending metadata has no metrics object")
+    metrics = cast("dict[str, object]", raw_metrics)
     gate = evaluate_shadow_gate(comparison, metrics)
     if config.strict and _gate_has_hard_failure(gate):
         raise RuntimeError("Matcher shadow strict gate rejected a structural or resource failure")

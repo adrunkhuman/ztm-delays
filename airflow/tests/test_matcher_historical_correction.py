@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from .test_dag_daily_gps import _install_airflow_stubs, _install_google_stubs
+from .test_dag_daily_gps import PreconditionFailed, _install_airflow_stubs, _install_google_stubs
 
 
 def _query_config(**kwargs: object) -> types.SimpleNamespace:
@@ -49,6 +49,8 @@ def test_historical_plan_inventories_exact_mapping_without_mutation() -> None:
 
     assert plan["read_only"] is True
     assert plan["days"][0]["gtfs_snapshot_id"] == "snapshot-9"
+    assert plan["days"][0]["gps_inventory_by_mode"]["bus"]["count"] == 1
+    assert plan["days"][0]["gps_inventory_by_mode"]["tram"]["bytes"] == 20
     assert plan["estimated_input_totals"]["gps_objects"] == 2
     assert bq_client.query_calls == 1
     assert bq_client.mutation_calls == []
@@ -71,10 +73,29 @@ def test_historical_plan_refuses_missing_mapping_or_input() -> None:
             )
         ]
     )
-    with pytest.raises(RuntimeError, match="GPS input inventory is missing"):
+    with pytest.raises(RuntimeError, match="missing bus objects"):
         planner.build_historical_correction_plan(
             "2026-07-09", "2026-07-09", bq_client=bq_client, storage_client=FakeStorageClient(no_gps=True)
         )
+    with pytest.raises(RuntimeError, match="missing tram objects"):
+        planner.build_historical_correction_plan(
+            "2026-07-09",
+            "2026-07-09",
+            bq_client=bq_client,
+            storage_client=FakeStorageClient(missing_mode="tram"),
+        )
+
+
+def test_plan_report_upload_is_create_only() -> None:
+    planner = _load_planner()
+    client = FakeUploadClient()
+
+    planner.upload_plan_report({"plan": "one"}, client, "gs://reports/plan.json")
+
+    assert client.report_blob.if_generation_match == 0
+    client.report_blob.conflict = True
+    with pytest.raises(RuntimeError, match="already exists"):
+        planner.upload_plan_report({"plan": "two"}, client, "gs://reports/plan.json")
 
 
 class FakeBigQueryClient:
@@ -115,6 +136,8 @@ class FakeBucket:
         if self.storage_client.no_gps:
             return []
         mode = "bus" if "vehicle_type=bus" in prefix else "tram"
+        if self.storage_client.missing_mode == mode:
+            return []
         return [FakeBlob(f"{prefix}hour=01/part-{mode}.parquet", 20)]
 
     def __getattr__(self, name: str) -> object:
@@ -125,12 +148,41 @@ class FakeBucket:
 
 
 class FakeStorageClient:
-    def __init__(self, *, no_gps: bool = False) -> None:
+    def __init__(self, *, no_gps: bool = False, missing_mode: str | None = None) -> None:
         self.no_gps = no_gps
+        self.missing_mode = missing_mode
         self.mutation_calls: list[str] = []
 
     def bucket(self, name: str) -> FakeBucket:
         return FakeBucket(name, self)
+
+
+class FakeUploadBlob:
+    def __init__(self) -> None:
+        self.conflict = False
+        self.if_generation_match: int | None = None
+
+    def upload_from_string(self, _payload: str, **kwargs: object) -> None:
+        value = kwargs.get("if_generation_match")
+        self.if_generation_match = value if isinstance(value, int) else None
+        if self.conflict:
+            raise PreconditionFailed("exists")
+
+
+class FakeUploadBucket:
+    def __init__(self, report_blob: FakeUploadBlob) -> None:
+        self.report_blob = report_blob
+
+    def blob(self, _name: str) -> FakeUploadBlob:
+        return self.report_blob
+
+
+class FakeUploadClient:
+    def __init__(self) -> None:
+        self.report_blob = FakeUploadBlob()
+
+    def bucket(self, _name: str) -> FakeUploadBucket:
+        return FakeUploadBucket(self.report_blob)
 
 
 def _load_planner() -> types.ModuleType:

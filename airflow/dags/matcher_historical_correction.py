@@ -7,9 +7,10 @@ import json
 import os
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
+from google.api_core.exceptions import PreconditionFailed
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
     BIGQUERY_INT_DATASET,
@@ -90,19 +91,27 @@ def _snapshot_inventory(client: Any, uri: str) -> dict[str, object]:
     return _gcs_identity(blob) | {"gcs_path": uri}
 
 
-def _gps_inventory(client: Any, processing_date: str) -> list[dict[str, object]]:
+def _gps_inventory(client: Any, processing_date: str) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     bucket = client.bucket(GCS_BUCKET)
-    objects = []
+    objects: list[dict[str, Any]] = []
+    by_mode: dict[str, dict[str, Any]] = {}
     for mode in ("bus", "tram"):
         prefix = f"{RAW_GPS_PREFIX}/vehicle_type={mode}/date={processing_date}/"
-        objects.extend(
-            _gcs_identity(blob) | {"mode": mode}
+        mode_objects = [
+            cast("dict[str, Any]", _gcs_identity(blob) | {"mode": mode})
             for blob in bucket.list_blobs(prefix=prefix)
             if str(getattr(blob, "name", "")).endswith(".parquet") and "/part-" in str(getattr(blob, "name", ""))
-        )
-    if not objects:
-        raise RuntimeError(f"GPS input inventory is missing for {processing_date}")
-    return sorted(objects, key=lambda item: str(item["name"]))
+        ]
+        if not mode_objects:
+            raise RuntimeError(f"GPS input inventory is missing {mode} objects for {processing_date}")
+        mode_objects.sort(key=lambda item: str(item["name"]))
+        objects.extend(mode_objects)
+        by_mode[mode] = {
+            "objects": mode_objects,
+            "count": len(mode_objects),
+            "bytes": sum(int(item["bytes"]) for item in mode_objects),
+        }
+    return sorted(objects, key=lambda item: str(item["name"])), by_mode
 
 
 def build_historical_correction_plan(
@@ -130,11 +139,11 @@ def build_historical_correction_plan(
     missing = [item.isoformat() for item in planned_dates if item.isoformat() not in mappings]
     if missing:
         raise RuntimeError(f"No exact GTFS snapshot mapping for: {', '.join(missing)}")
-    days = []
+    days: list[dict[str, Any]] = []
     for processing_day in planned_dates:
         processing_date = processing_day.isoformat()
         mapping = mappings[processing_date]
-        gps_objects = _gps_inventory(storage_client, processing_date)
+        gps_objects, gps_inventory_by_mode = _gps_inventory(storage_client, processing_date)
         snapshot = _snapshot_inventory(storage_client, mapping["gcs_path"])
         days.append(
             {
@@ -142,6 +151,7 @@ def build_historical_correction_plan(
                 "gtfs_snapshot_id": mapping["gtfs_snapshot_id"],
                 "gtfs_snapshot": snapshot,
                 "gps_inventory": gps_objects,
+                "gps_inventory_by_mode": gps_inventory_by_mode,
                 "affected_partitions": {
                     "current_service_date": processing_date,
                     "prior_service_date": (processing_day - timedelta(days=1)).isoformat(),
@@ -181,13 +191,18 @@ def write_plan_report(plan: dict[str, object], path: Path) -> None:
 
 
 def upload_plan_report(plan: dict[str, object], client: Any, gcs_uri: str) -> None:
-    """Upload a requested report only; this is the planner's sole optional cloud mutation."""
+    """Create a requested report once; this is the planner's sole optional cloud mutation."""
     parsed = urlparse(gcs_uri)
     if parsed.scheme != "gs" or not parsed.netloc or not parsed.path:
         raise ValueError("GCS report URI must be gs://bucket/object")
-    client.bucket(parsed.netloc).blob(parsed.path.removeprefix("/")).upload_from_string(
-        json.dumps(plan, sort_keys=True, indent=2) + "\n", content_type="application/json"
-    )
+    try:
+        client.bucket(parsed.netloc).blob(parsed.path.removeprefix("/")).upload_from_string(
+            json.dumps(plan, sort_keys=True, indent=2) + "\n",
+            content_type="application/json",
+            if_generation_match=0,
+        )
+    except PreconditionFailed as exc:
+        raise RuntimeError("Historical correction plan report already exists; choose a new GCS URI") from exc
 
 
 def main(argv: list[str] | None = None) -> int:

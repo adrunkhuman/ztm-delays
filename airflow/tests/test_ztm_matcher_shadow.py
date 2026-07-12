@@ -245,6 +245,29 @@ def test_marker_uses_create_only_precondition_and_rejects_conflicts(tmp_path: Pa
         shadow._write_marker(FakeStorageClient(conflict), config, "2026-07-09", "run", marker)
 
 
+def test_pending_marker_and_conflict_reads_are_bounded_before_download(tmp_path: Path) -> None:
+    shadow = _load_shadow_module()
+    config = shadow.ShadowConfig(
+        True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher", max_marker_bytes=1
+    )
+    bucket = FakeMarkerBucket(existing=b"{}")
+
+    with pytest.raises(RuntimeError, match="commit marker exceeds"):
+        shadow._read_marker(FakeStorageClient(bucket), config, "2026-07-09", "run")
+    assert bucket.blob_instance.download_called is False
+    assert bucket.blob_instance.reload_called is True
+    with pytest.raises(RuntimeError, match="pending metadata exceeds"):
+        shadow._read_pending(FakeStorageClient(bucket), config, "2026-07-09", "run")
+    assert bucket.blob_instance.download_called is False
+    conflict_config = shadow.ShadowConfig(
+        True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher", max_marker_bytes=2
+    )
+    conflict_bucket = FakeMarkerBucket(existing=b'{"x":1}')
+    with pytest.raises(RuntimeError, match="existing commit marker exceeds"):
+        shadow._write_marker(FakeStorageClient(conflict_bucket), conflict_config, "2026-07-09", "run", {})
+    assert conflict_bucket.blob_instance.download_called is False
+
+
 def test_pending_verification_rejects_table_for_different_artifact() -> None:
     shadow = _load_shadow_module()
     config = shadow.ShadowConfig(True, False, "shadow", Path("workspace"), ("matcher",), None, 1, "shadow/matcher")
@@ -454,6 +477,103 @@ def test_shadow_gate_fails_structural_resource_and_quality_bounds() -> None:
     assert shadow._gate_has_hard_failure(gate) is True
 
 
+def test_shadow_gate_requires_canonical_mode_retention_and_material_lines() -> None:
+    shadow = _load_shadow_module()
+
+    def aggregate(source: str, mode: str, line: str, rows: int) -> dict[str, object]:
+        return {
+            "artifact": "trip",
+            "source": source,
+            "service_date": "2026-07-09",
+            "mode": mode,
+            "line": line,
+            "gtfs_snapshot_id": "snapshot",
+            "trip_quality": "complete",
+            "observation_status": None,
+            "row_count": rows,
+            "distinct_grains": rows,
+            "delay_p50_seconds": 0,
+            "delay_p90_seconds": 0,
+            "delay_p95_seconds": 0,
+            "abs_delay_over_3600_count": 0,
+        }
+
+    gate = shadow.evaluate_shadow_gate(
+        {
+            "service_dates": ["2026-07-08", "2026-07-09"],
+            "aggregates": [
+                aggregate("canonical", "bus", "10", 80),
+                aggregate("canonical", "bus", "20", 20),
+                aggregate("shadow", "bus", "10", 95),
+                aggregate("shadow", "bus", "20", 5),
+                aggregate("canonical", "tram", "1", 50),
+            ],
+            "differences": [],
+        },
+        {"peak_rss_bytes": 1, "swapping_observed": False},
+    )
+
+    tram = next(item for item in gate["retention"] if item["mode"] == "tram")
+    assert tram["shadow_rows"] == 0
+    assert any(issue["message"] == "shadow mode is completely missing" for issue in gate["issues"])
+    assert any(issue["category"] == "quality" and issue["level"] == "fail" for issue in gate["issues"])
+    assert any(issue["message"] == "material line retention below threshold" for issue in gate["issues"])
+
+
+def test_shadow_gate_delay_zero_baseline_is_advisory_and_reports_absolute_deltas() -> None:
+    shadow = _load_shadow_module()
+    base = {
+        "artifact": "trip",
+        "service_date": "2026-07-09",
+        "mode": "bus",
+        "line": "10",
+        "gtfs_snapshot_id": "snapshot",
+        "trip_quality": "complete",
+        "observation_status": None,
+        "row_count": 20,
+        "distinct_grains": 20,
+        "delay_p50_seconds": 0,
+        "delay_p90_seconds": 0,
+        "delay_p95_seconds": 0,
+        "abs_delay_over_3600_count": 0,
+    }
+    comparison = {
+        "service_dates": ["2026-07-08", "2026-07-09"],
+        "aggregates": [base | {"source": "canonical"}, base | {"source": "shadow"}],
+        "differences": [],
+    }
+
+    assert shadow.evaluate_shadow_gate(comparison, {})["status"] == "pass"
+    comparison["aggregates"][1] = comparison["aggregates"][1] | {"delay_p50_seconds": 10}
+    gate = shadow.evaluate_shadow_gate(comparison, {})
+
+    change = next(item for item in gate["delay_changes"] if item.get("percentile") == "p50")
+    assert change["difference_seconds"] == 10
+    assert change["absolute_difference_seconds"] == 10
+    assert any(issue["message"] == "delay percentile changed from zero baseline" for issue in gate["issues"])
+    assert shadow._gate_has_hard_failure(gate) is False
+
+
+def test_artifact_validation_failure_never_writes_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
+    monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
+    shadow = _load_shadow_module()
+    artifact = shadow.ArtifactValidation(tmp_path / "artifact.parquet", 1, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
+    events: list[str] = []
+    _stub_load(monkeypatch, shadow, artifact, events)
+    monkeypatch.setattr(
+        shadow,
+        "_validate_outputs",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("artifact validation failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="artifact validation failed"):
+        shadow.run_matcher_shadow_load("2026-07-09", "snapshot", "run")
+
+    assert events == ["matcher"]
+
+
 def test_comparison_query_and_marker_bounds_are_configured(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     shadow = _load_shadow_module()
     query = shadow._comparison_query(
@@ -603,6 +723,18 @@ class FakeMarkerBlob:
         self.existing = existing
         self.payload = b""
         self.if_generation_match: int | None = None
+        self.download_called = False
+        self.reload_called = False
+
+    @property
+    def size(self) -> int:
+        return len(self.existing if self.existing is not None else self.payload)
+
+    def exists(self) -> bool:
+        return self.existing is not None or bool(self.payload)
+
+    def reload(self) -> None:
+        self.reload_called = True
 
     def upload_from_string(self, payload: bytes, **kwargs: Any) -> None:
         self.if_generation_match = kwargs.get("if_generation_match")
@@ -611,6 +743,7 @@ class FakeMarkerBlob:
         self.payload = payload
 
     def download_as_bytes(self) -> bytes:
+        self.download_called = True
         return self.existing if self.existing is not None else self.payload
 
 
