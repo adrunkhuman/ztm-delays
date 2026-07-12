@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from ztm_matcher import stop_alignment
 from ztm_matcher.alignment import _distance_meters
 from ztm_matcher.stop_alignment import (
     AMBIGUITY_COST,
@@ -17,6 +18,7 @@ from ztm_matcher.stop_alignment import (
     _align,
     _candidate_cost,
     _missing_cost,
+    _scheduled_time,
     _segment_distance_m,
     align_stop_crossings,
     crossing_candidates,
@@ -152,6 +154,34 @@ def _exhaustive_align(
     return best, ambiguous
 
 
+def _unpruned_align(
+    stops: list[dict[str, Any]], candidates: list[list[CrossingCandidate]]
+) -> tuple[tuple[CrossingCandidate | None, ...], bool]:
+    """Small regression oracle without beam pruning."""
+    states: list[tuple[int, float, tuple[CrossingCandidate | None, ...]]] = [(0, 0.0, ())]
+    for stop, alternatives in zip(stops, candidates, strict=True):
+        next_states = [
+            (selected_count, cost + _missing_cost(stop), selected + (None,))
+            for selected_count, cost, selected in states
+        ]
+        for selected_count, cost, selected in states:
+            previous = next((candidate for candidate in reversed(selected) if candidate is not None), None)
+            for candidate in alternatives:
+                if previous and (
+                    candidate.segment_index <= previous.segment_index or candidate.actual_time < previous.actual_time
+                ):
+                    continue
+                next_states.append((selected_count + 1, cost + _candidate_cost(candidate), selected + (candidate,)))
+        states = next_states
+    states.sort(key=lambda state: (-state[0], state[1], _signature(state[2])))
+    best_count, best_cost, best = states[0]
+    ambiguous = any(
+        selected_count == best_count and cost - best_cost <= AMBIGUITY_COST and selected != best
+        for selected_count, cost, selected in states[1:]
+    )
+    return best, ambiguous
+
+
 def _objective(
     stops: list[dict[str, Any]], selected: tuple[CrossingCandidate | None, ...]
 ) -> tuple[int, float, tuple[tuple[int, int], ...]]:
@@ -178,6 +208,18 @@ def test_ports_segment_interpolation_uneven_interpolation_and_snapshot_identity(
     assert row["arrival_delay_seconds"] == 20
     assert row["detection_method"] == "segment_within_250m"
     assert (row["stop_group_id"], row["pickup_type"], row["drop_off_type"]) == ("same", 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("service_date", "seconds", "expected"),
+    [
+        (date(2026, 3, 29), 2 * 3600 + 30 * 60, datetime(2026, 3, 29, 1, 30, tzinfo=UTC)),
+        (date(2026, 10, 25), 2 * 3600 + 30 * 60, datetime(2026, 10, 25, 0, 30, tzinfo=UTC)),
+        (date(2026, 1, 15), 25 * 3600, datetime(2026, 1, 16, tzinfo=UTC)),
+    ],
+)
+def test_scheduled_time_uses_warsaw_wall_clock(service_date: date, seconds: int, expected: datetime) -> None:
+    assert _scheduled_time(service_date, seconds) == expected
 
 
 def test_global_path_uses_stop_sequence_not_stop_id_and_supports_loop() -> None:
@@ -252,6 +294,41 @@ def test_vectorized_candidates_preserve_scalar_metrics_and_segment_order() -> No
             assert candidate.start_distance_m == pytest.approx(scalar_start_distance, rel=1e-12, abs=1e-9)
             assert candidate.end_distance_m == pytest.approx(scalar_end_distance, rel=1e-12, abs=1e-9)
             assert candidate.actual_time == candidate.segment_start["gps_time"] + timedelta(seconds=expected_seconds)
+
+
+def test_candidate_generation_chunks_segments_without_changing_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    segment_count = 17
+    execution = _execution(
+        service_date=date(2026, 1, 14),
+        ownership_interval_end_time=BASE + timedelta(seconds=segment_count * 60),
+        source_ping_end_time=BASE + timedelta(seconds=segment_count * 60),
+    )
+    stops = [_stop(1, 0.0), _stop(2, 0.004)]
+    pings = [_ping(index * 60, index * 0.0005) for index in range(segment_count + 1)]
+
+    monkeypatch.setattr(stop_alignment, "SEGMENT_CANDIDATE_CHUNK_SIZE", segment_count)
+    unchunked = crossing_candidates(execution, stops, pings)
+
+    matrix_widths: list[int] = []
+    matrix_shapes: list[tuple[int, ...]] = []
+    original_matrices = stop_alignment._candidate_matrices
+
+    def bounded_matrices(
+        matrix_stops: list[dict[str, Any]], matrix_segments: list[tuple[int, dict[str, Any], dict[str, Any]]]
+    ) -> tuple[object, object, object, object]:
+        matrix_widths.append(len(matrix_segments))
+        matrices = original_matrices(matrix_stops, matrix_segments)
+        matrix_shapes.append(matrices[0].shape)
+        return matrices
+
+    monkeypatch.setattr(stop_alignment, "SEGMENT_CANDIDATE_CHUNK_SIZE", 4)
+    monkeypatch.setattr(stop_alignment, "_candidate_matrices", bounded_matrices)
+    chunked = crossing_candidates(execution, stops, pings)
+
+    assert chunked == unchunked
+    assert matrix_widths == [4, 4, 4, 4, 1]
+    assert matrix_shapes == [(2, 4), (2, 4), (2, 4), (2, 4), (2, 1)]
+    assert max(matrix_widths) <= stop_alignment.SEGMENT_CANDIDATE_CHUNK_SIZE
 
 
 def test_technical_crossings_are_lineage_only_and_unknown_boundaries_emit_no_passenger_arrival() -> None:
@@ -346,6 +423,27 @@ def test_prefix_best_alignment_matches_exhaustive_beam_on_deterministic_matrices
         assert actual == expected, f"matrix {matrix_number}"
         assert _objective(stops, actual) == _objective(stops, expected), f"matrix {matrix_number}"
         assert actual_ambiguous == expected_ambiguous, f"matrix {matrix_number}"
+
+
+def test_beam_preserves_missing_and_early_frontiers_against_unpruned_oracle() -> None:
+    stops = [{}, {}, {}]
+    candidates = [
+        [_candidate(0, 1)],
+        [_candidate(1, segment_index, distance_m=1_000_000.0) for segment_index in range(2, 66)],
+        [_candidate(2, 2)],
+    ]
+
+    expected, expected_ambiguous = _unpruned_align(stops, candidates)
+    actual, actual_ambiguous = _align(stops, candidates)
+
+    assert len(candidates[1]) == MAX_ALIGNMENT_STATES
+    assert _signature(expected) == (
+        (1, int((BASE + timedelta(minutes=1)).timestamp())),
+        (-1, -1),
+        (2, int((BASE + timedelta(minutes=2)).timestamp())),
+    )
+    assert actual == expected
+    assert actual_ambiguous == expected_ambiguous
 
 
 def test_ownership_bounds_exclude_handoff_and_partial_gps_stays_bounded() -> None:

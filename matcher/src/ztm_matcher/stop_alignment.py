@@ -15,6 +15,7 @@ EXPANDED_RADIUS_METERS = 250.0
 MAX_SEGMENT_GAP_SECONDS = 180
 MAX_ALIGNMENT_STATES = 64
 MAX_CANDIDATES_PER_STOP = 64
+SEGMENT_CANDIDATE_CHUNK_SIZE = 4096
 AMBIGUITY_COST = 0.25
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -78,9 +79,10 @@ def _segment_distance_m(start: dict[str, Any], end: dict[str, Any], stop: dict[s
 def _scheduled_time(service_date: date, seconds: int | None) -> datetime | None:
     if seconds is None:
         return None
-    # Add GTFS elapsed seconds after converting local midnight to an absolute instant.
-    midnight = datetime.combine(service_date, time(), WARSAW).astimezone(UTC)
-    return midnight + timedelta(seconds=int(seconds))
+    # GTFS times advance in Warsaw wall-clock space. The UTC round-trip normalizes
+    # spring-forward gaps; fold=0 chooses the first fall-back occurrence.
+    local = (datetime.combine(service_date, time()) + timedelta(seconds=int(seconds))).replace(tzinfo=WARSAW, fold=0)
+    return local.astimezone(UTC).astimezone(WARSAW).astimezone(UTC)
 
 
 def _radius(stop: dict[str, Any]) -> float:
@@ -204,37 +206,40 @@ def crossing_candidates(
     if not segments:
         return result
 
-    distances, start_distances, end_distances, arrival_seconds = _candidate_matrices(
-        [stop for _, stop, _, _ in eligible_stops], segments
-    )
     radii = np.asarray([radius for _, _, _, radius in eligible_stops])[:, np.newaxis]
-    within_radius = distances <= radii
-    for matrix_stop_index, (stop_index, _, scheduled, radius) in enumerate(eligible_stops):
-        for matrix_segment_index in np.flatnonzero(within_radius[matrix_stop_index]):
-            segment_index, start, end = segments[int(matrix_segment_index)]
-            distance = float(distances[matrix_stop_index, matrix_segment_index])
-            start_distance = float(start_distances[matrix_stop_index, matrix_segment_index])
-            end_distance = float(end_distances[matrix_stop_index, matrix_segment_index])
-            seconds = int(arrival_seconds[matrix_stop_index, matrix_segment_index])
-            result[stop_index].append(
-                CrossingCandidate(
-                    stop_index,
-                    segment_index,
-                    start["gps_time"] + timedelta(seconds=seconds),
-                    scheduled,
-                    distance,
-                    start_distance,
-                    end_distance,
-                    radius,
-                    start,
-                    end,
+    eligible_stop_rows = [stop for _, stop, _, _ in eligible_stops]
+    for chunk_start in range(0, len(segments), SEGMENT_CANDIDATE_CHUNK_SIZE):
+        chunk = segments[chunk_start : chunk_start + SEGMENT_CANDIDATE_CHUNK_SIZE]
+        distances, start_distances, end_distances, arrival_seconds = _candidate_matrices(eligible_stop_rows, chunk)
+        within_radius = distances <= radii
+        for matrix_stop_index, (stop_index, _, scheduled, radius) in enumerate(eligible_stops):
+            for matrix_segment_index in np.flatnonzero(within_radius[matrix_stop_index]):
+                segment_index, start, end = chunk[int(matrix_segment_index)]
+                distance = float(distances[matrix_stop_index, matrix_segment_index])
+                start_distance = float(start_distances[matrix_stop_index, matrix_segment_index])
+                end_distance = float(end_distances[matrix_stop_index, matrix_segment_index])
+                seconds = int(arrival_seconds[matrix_stop_index, matrix_segment_index])
+                result[stop_index].append(
+                    CrossingCandidate(
+                        stop_index,
+                        segment_index,
+                        start["gps_time"] + timedelta(seconds=seconds),
+                        scheduled,
+                        distance,
+                        start_distance,
+                        end_distance,
+                        radius,
+                        start,
+                        end,
+                    )
                 )
-            )
-            if len(result[stop_index]) >= MAX_CANDIDATES_PER_STOP * 2:
-                result[stop_index] = sorted(
-                    result[stop_index],
-                    key=lambda item: (item.actual_time, item.distance_m, item.segment_index),
-                )[:MAX_CANDIDATES_PER_STOP]
+                if len(result[stop_index]) >= MAX_CANDIDATES_PER_STOP * 2:
+                    result[stop_index] = sorted(
+                        result[stop_index],
+                        key=lambda item: (item.actual_time, item.distance_m, item.segment_index),
+                    )[:MAX_CANDIDATES_PER_STOP]
+
+    for stop_index, _, _, _ in eligible_stops:
         # Bound dense terminal dwell evidence before the global beam consumes it.
         result[stop_index].sort(
             key=lambda item: (item.actual_time, item.distance_m, item.segment_index, item.segment_end["gps_time"])
@@ -290,6 +295,26 @@ def _rank_signatures(states: list[_AlignmentState]) -> list[_AlignmentState]:
             rank,
         )
     return [state for state in ranked if state is not None]
+
+
+def _prune_states(states: list[_AlignmentState]) -> list[_AlignmentState]:
+    """Retain deterministic history frontiers while keeping the beam bounded."""
+    best_by_segment: dict[int | None, _AlignmentState] = {}
+    for state in sorted(states, key=_transition_key):
+        best_by_segment.setdefault(state.last_segment, state)
+
+    retained: list[_AlignmentState] = []
+    no_segment = best_by_segment.pop(None, None)
+    if no_segment is not None:
+        retained.append(no_segment)
+    if best_by_segment and len(retained) < MAX_ALIGNMENT_STATES:
+        # The earliest physical frontier can be the only predecessor for a later crossing.
+        retained.append(best_by_segment.pop(min(best_by_segment)))
+    for state in sorted(best_by_segment.values(), key=_transition_key):
+        if len(retained) >= MAX_ALIGNMENT_STATES:
+            break
+        retained.append(state)
+    return _rank_signatures(retained)
 
 
 def _selected(state: _AlignmentState) -> tuple[CrossingCandidate | None, ...]:
@@ -362,14 +387,7 @@ def _align(
             )
         # A direct, monotone crossing is stronger evidence than schedule adherence. Cost only
         # breaks ties between paths that explain the same number of scheduled occurrences.
-        next_states.sort(key=_transition_key)
-        # Equivalent histories have the same last physical segment and retain only the deterministic winner.
-        retained: dict[int | None, _AlignmentState] = {}
-        for state in next_states:
-            retained.setdefault(state.last_segment, state)
-            if len(retained) >= MAX_ALIGNMENT_STATES:
-                break
-        states = _rank_signatures(list(retained.values()))
+        states = _prune_states(next_states)
     states.sort(key=_state_key)
     best = states[0]
     selected = _selected(best)
