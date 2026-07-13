@@ -4,7 +4,6 @@ with grouped_events as (
     select
         gtfs_snapshot_id,
         service_date,
-        matched_duty_chain_id,
         trip_id,
         vehicle_number,
         stop_sequence,
@@ -28,10 +27,6 @@ with grouped_events as (
             or quality_flags is null
             or service_observation_class is null
             or service_observation_flags is null
-            or matching_method is null
-            or matched_duty_chain_id is null
-            or candidate_rank is null
-            or matching_flags is null
             or stop_id is null
             or stop_group_id is null
             or stop_post_code is null
@@ -71,7 +66,7 @@ with grouped_events as (
         ) as status_violations
     from {{ ref('fct_expected_stop_event') }}
     where service_date = date('{{ test_service_date }}')
-    group by gtfs_snapshot_id, service_date, matched_duty_chain_id, trip_id, vehicle_number, stop_sequence
+    group by gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence
 ),
 
 contract_counts as (

@@ -4,14 +4,12 @@ This dbt project transforms BigQuery raw tables for the ZTM pipeline.
 
 Use Python `3.13` for local dbt commands. The current dbt stack is verified with `dbt-core 1.11.11` and `dbt-bigquery 1.11.3`.
 
-GPS staging and completeness models require `processing_date`. Trip and arrival matching require `gtfs_snapshot_id`; nightly Airflow runs pass the latest dimension-built GTFS snapshot available at rebuild time:
+GPS staging and completeness models require `processing_date`. The Python matcher owns trip and arrival reconstruction; dbt enriches its stable inputs and publishes current/prior service-date facts:
 
 ```bash
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select stg_gps__pings --vars '{"processing_date": "YYYY-MM-DD"}'
 
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_ping_trip int_stop_arrivals --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
-
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select int_trip_summary fct_trip fct_stop_arrival --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID"}'
+uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select fct_trip fct_stop_arrival fct_expected_stop_event --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID", "publish_service_date": "SERVICE_DATE"}'
 
 uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select mart_day_completeness agg_service_coverage mart_pipeline_status --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD"}'
 ```
@@ -24,13 +22,11 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select dim_line 
 
 Historical facts bake labels from the selected snapshot used for their rebuild. `_current` dimensions are present-day convenience surfaces only and must not be used to relabel historical facts.
 
-`fct_trip` and `fct_stop_arrival` overwrite `publish_service_date`, defaulting to `processing_date`. Production publishes both `processing_date` and `processing_date - 1` so after-midnight GPS can complete overnight trips without deleting daytime rows.
-
-Python reconstruction is opt-in. Matcher input source declarations alone change no model behavior; `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` remain on the legacy/default path unless `use_python_reconstruction: true` is supplied. A cutover publication must select all three facts plus their schedule-history dependencies and publish both current and prior service dates using the same retained matcher processing partition. Do not enable one fact adapter independently.
+The three facts overwrite `publish_service_date`, defaulting to `processing_date`. Production publishes both `processing_date` and `processing_date - 1` from stable matcher-input partitions so after-midnight GPS can complete overnight trips without deleting daytime rows.
 
 Schedule versions are per-line timetable fingerprints derived from selected snapshots across collected history. They intentionally exclude display labels and unstable GTFS identifiers. Nightly runs use the latest built GTFS snapshot and republish the prior service date, so late corrections for yesterday are picked up by the next run.
 
-`mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` incrementally replace the inclusive `[aggregation_start_date, processing_date]` partitions; normal Airflow runs pass the prior date as `aggregation_start_date` because observed overnight trips can land on the next GPS date and facts publish both current and prior service dates. A 2026-06-25-through-current lag check found complete/partial `int_trip_summary` rows only at same-day and next-day lag, supporting the two-day normal coverage window. `mart_day_completeness` summarizes raw GPS presence by GPS date and mode. `agg_service_coverage` compares scheduled trips to regular/truncated/modified observed service candidates from `int_trip_summary` by scheduled service hour, excludes matching failures, and partitions rows by `scheduled_start_date`; overnight rows can keep the prior GTFS `service_date`. `mart_pipeline_status` combines completeness, matching, trip quality, settled service coverage, stop-arrival output counts, and GTFS freshness by operational status date and mode; its `service_date` field is aligned to GPS processing date and scheduled-start date, not necessarily GTFS service_date for overnight trips. Treat `mart_pipeline_status` rows as generated operational reports for their partition, not as a table that refreshes every historical row with the latest global status every night.
+`mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` incrementally replace the inclusive `[aggregation_start_date, processing_date]` partitions. `mart_day_completeness` summarizes raw GPS presence. `agg_service_coverage` compares scheduled trips with complete/partial trip facts. `mart_pipeline_status` combines ingestion completeness, trip quality, settled service coverage, stop-arrival counts, and GTFS freshness.
 
 ## Test Tiers
 

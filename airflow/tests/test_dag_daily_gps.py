@@ -241,8 +241,7 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     expected_groups = {
         "snapshot_group": ("snapshot_lookup", "Snapshot lookup"),
         "staging_group": ("staging", "Staging"),
-        "matcher_shadow_group": ("matcher_shadow", "Matcher shadow"),
-        "trip_group": ("trip_reconstruction", "Trip reconstruction"),
+        "matcher_group": ("matcher", "Python matcher"),
         "current_facts_group": ("current_facts", "Current facts"),
         "prior_facts_group": ("prior_facts", "Prior facts"),
         "completeness_group": ("completeness_coverage", "Completeness and coverage"),
@@ -260,21 +259,20 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PROCESSING_DATE
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PRIOR_SERVICE_DATE
     assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
-    assert dag.TRIP_MATCHING_SCHEDULE_MODELS in dag.dbt_run_int_ping_trip.kwargs["bash_command"]
-    assert dag.TRIP_MATCHING_SCHEDULE_MODELS not in dag.dbt_run_int_trip_summary.kwargs["bash_command"]
-    trip_matching_command = dag.dbt_run_int_ping_trip.kwargs["bash_command"]
+    fact_dependency_command = dag.dbt_run_matcher_fact_dependencies.kwargs["bash_command"]
     for selector in [
         "stg_gtfs__trips",
         "stg_gtfs__stop_times",
         "stg_gtfs__stops",
         "stg_gtfs__routes",
         "stg_gtfs__calendar_dates",
-        "int_gtfs_duty_chain",
         "int_gtfs_processing_snapshot",
         "int_gtfs_trip_schedule_history",
+        "int_gtfs_trip_schedule",
+        "int_gtfs_duty_chain",
         "dim_schedule_version",
     ]:
-        assert selector in trip_matching_command
+        assert selector in fact_dependency_command
     assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
     assert "--exclude test_type:unit" in dag.dbt_test_fct_expected_stop_event_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PROCESSING_DATE in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
@@ -282,7 +280,6 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert dag.EXPECTED_STOP_EVENT_FACT_MODEL in dag.dbt_run_fct_expected_stop_event_current.kwargs["bash_command"]
     assert dag.PIPELINE_STATUS_MODEL in dag.dbt_run_pipeline_status.kwargs["bash_command"]
     assert "--exclude tag:audit" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
-    assert "--exclude tag:audit" in dag.dbt_test_int_ping_trip.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_int_gps_hourly_completeness.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_serving_universe.kwargs["bash_command"]
@@ -304,32 +301,22 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
 
     expected_edges = [
         (dag.dbt_run_stg_gps_pings, dag.dbt_test_stg_gps_pings),
-        (dag.selected_gtfs_snapshot, dag.dbt_run_int_ping_trip),
-        (dag.dbt_test_stg_gps_pings, dag.dbt_run_int_ping_trip),
-        (dag.selected_gtfs_snapshot, dag.matcher_shadow_load),
-        (dag.dbt_test_stg_gps_pings, dag.matcher_shadow_load),
+        (dag.selected_gtfs_snapshot, dag.matcher_load),
+        (dag.dbt_test_stg_gps_pings, dag.matcher_load),
+        (dag.matcher_load, dag.matcher_publish),
+        (dag.selected_gtfs_snapshot, dag.dbt_run_matcher_fact_dependencies),
         (dag.dbt_test_stg_gps_pings, dag.dbt_run_int_gps_hourly_completeness),
-        (dag.dbt_run_int_ping_trip, dag.dbt_test_int_ping_trip),
-        (dag.dbt_test_int_ping_trip, dag.dbt_run_int_stop_arrivals),
         (dag.dbt_run_int_gps_hourly_completeness, dag.dbt_test_int_gps_hourly_completeness),
-        (dag.dbt_run_int_stop_arrivals, dag.dbt_test_int_stop_arrivals),
-        (dag.dbt_test_int_stop_arrivals, dag.dbt_run_int_trip_summary),
-        (dag.dbt_run_int_trip_summary, dag.dbt_test_int_trip_summary),
-        (dag.dbt_test_int_trip_summary, dag.dbt_run_fct_trip_current),
-        (dag.dbt_test_int_trip_summary, dag.dbt_run_fct_trip_prior),
+        (dag.matcher_publish, dag.dbt_run_fct_trip_current),
+        (dag.matcher_publish, dag.dbt_run_fct_trip_prior),
+        (dag.dbt_run_matcher_fact_dependencies, dag.dbt_run_fct_trip_current),
+        (dag.dbt_run_matcher_fact_dependencies, dag.dbt_run_fct_trip_prior),
         (dag.dbt_test_fct_trip_current, dag.dbt_run_fct_stop_arrival_current),
         (dag.dbt_test_fct_trip_prior, dag.dbt_run_fct_stop_arrival_prior),
         (dag.dbt_test_fct_stop_arrival_current, dag.dbt_run_fct_expected_stop_event_current),
         (dag.dbt_run_fct_expected_stop_event_current, dag.dbt_test_fct_expected_stop_event_current),
         (dag.dbt_test_fct_stop_arrival_prior, dag.dbt_run_fct_expected_stop_event_prior),
         (dag.dbt_run_fct_expected_stop_event_prior, dag.dbt_test_fct_expected_stop_event_prior),
-        (dag.matcher_shadow_load, dag.matcher_shadow_compare_commit),
-        (dag.dbt_test_fct_trip_current, dag.matcher_shadow_compare_commit),
-        (dag.dbt_test_fct_stop_arrival_current, dag.matcher_shadow_compare_commit),
-        (dag.dbt_test_fct_expected_stop_event_current, dag.matcher_shadow_compare_commit),
-        (dag.dbt_test_fct_trip_prior, dag.matcher_shadow_compare_commit),
-        (dag.dbt_test_fct_stop_arrival_prior, dag.matcher_shadow_compare_commit),
-        (dag.dbt_test_fct_expected_stop_event_prior, dag.matcher_shadow_compare_commit),
         (dag.dbt_test_fct_expected_stop_event_current, dag.dbt_run_completeness_and_coverage),
         (dag.dbt_test_fct_expected_stop_event_prior, dag.dbt_run_completeness_and_coverage),
         (dag.dbt_test_int_gps_hourly_completeness, dag.dbt_run_completeness_and_coverage),
@@ -355,9 +342,11 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert dag.LOG_BIGQUERY_DBT_JOB_COSTS is False
     assert dag.log_bigquery_dbt_job_costs not in dag.dbt_test_serving_marts.downstream
     assert dag.emit_gps_models_date_asset in dag.dbt_test_serving_marts.downstream
-    assert dag.matcher_shadow_load.kwargs["execution_timeout"] == dag.timedelta(minutes=60)
-    assert dag.matcher_shadow_compare_commit.kwargs["execution_timeout"] == dag.timedelta(minutes=60)
-    assert dag.matcher_shadow_compare_commit.downstream == []
+    assert dag.matcher_load.kwargs["execution_timeout"] == dag.timedelta(minutes=60)
+    assert dag.matcher_publish.kwargs["execution_timeout"] == dag.timedelta(minutes=60)
+    assert dag.matcher_load.function.__name__ == "matcher_load"
+    assert dag.matcher_publish.function.__name__ == "matcher_publish"
+    assert dag.dbt_run_fct_trip_current in dag.matcher_publish.downstream
     assert dag.log_bigquery_dbt_job_costs.kwargs == {"do_xcom_push": False}
     assert dag.watcher in dag.dbt_test_serving_marts.downstream
     assert dag.fail_on_any_task_failure.kwargs["retries"] == 0
@@ -595,6 +584,9 @@ def _install_google_stubs() -> None:
     bigquery_module.WriteDisposition = types.SimpleNamespace(WRITE_APPEND="WRITE_APPEND")
     bigquery_module.TimePartitioningType = types.SimpleNamespace(DAY="DAY")
     bigquery_module.TimePartitioning = FakeTimePartitioning
+    bigquery_module.Dataset = FakeDataset
+    bigquery_module.Table = FakeTable
+    bigquery_module.SchemaField = FakeSchemaField
     bigquery_module.LoadJobConfig = FakeLoadJobConfig
     bigquery_module.QueryJobConfig = FakeQueryJobConfig
     bigquery_module.ScalarQueryParameter = FakeScalarQueryParameter
@@ -739,6 +731,27 @@ class FakeTimePartitioning:
         self.type_ = type_
         self.field = field
         self.require_partition_filter = require_partition_filter
+
+
+class FakeDataset:
+    def __init__(self, dataset_id: str) -> None:
+        self.dataset_id = dataset_id
+        self.location: str | None = None
+
+
+class FakeSchemaField:
+    def __init__(self, name: str, field_type: str, mode: str = "NULLABLE") -> None:
+        self.name = name
+        self.field_type = field_type
+        self.mode = mode
+
+
+class FakeTable:
+    def __init__(self, table_id: str, schema: list[FakeSchemaField]) -> None:
+        self.table_id = table_id
+        self.schema = schema
+        self.time_partitioning: FakeTimePartitioning | None = None
+        self.labels: dict[str, str] = {}
 
 
 class FakeLoadJobConfig:

@@ -27,7 +27,7 @@ FACT_ROW_GROUP_ROWS = 25_000
 
 
 def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
-    """Port dbt ``int_trip_summary`` quality and service-observation policy."""
+    """Apply canonical trip-quality and service-observation policy."""
     passenger_boundaries_unsettled = metrics.get("are_passenger_boundaries_settled") is False
     expected = int(metrics["passenger_stops_expected"])
     detected = int(metrics["passenger_stops_detected"])

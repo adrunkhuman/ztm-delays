@@ -2,7 +2,7 @@ version: 2
 
 sources:
   - name: matcher_input
-    description: Stable, opt-in Python matcher artifacts. This dataset is owned by the explicit cutover promotion path, never by raw, intermediate, or marts Airflow tasks.
+    description: Stable Python matcher artifacts published by the nightly GPS DAG. Raw, intermediate, and marts tasks do not write this dataset.
     database: "{{ env_var('GCP_PROJECT', 'ztm-data') }}"
     schema: "{{ env_var('BIGQUERY_MATCHER_INPUT_DATASET', 'ztm_matcher_input') }}"
     tables:
@@ -152,7 +152,6 @@ unit_tests:
       vars:
         processing_date: '2026-01-16'
         publish_service_date: '2026-01-15'
-        use_python_reconstruction: true
     given:
       - input: source('matcher_input', 'reconstruction_trip_facts')
         format: sql
@@ -199,6 +198,15 @@ unit_tests:
             '100101' as stop_id, 0 as stop_sequence
           union all
           select 'snapshot-1', date '2026-01-16', date '2026-01-15', 'trip-1', '1001', '100102', 1
+      - input: source('matcher_input', 'reconstruction_stop_semantics')
+        format: sql
+        rows: |
+          select
+            'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as processing_date,
+            date '2026-01-15' as service_date, 'trip-1' as trip_id, '100101' as stop_id,
+            0 as stop_sequence, true as is_passenger_stop
+          union all
+          select 'snapshot-1', date '2026-01-16', date '2026-01-15', 'trip-1', '100102', 1, true
       - input: ref('stg_gtfs__stops')
         rows:
           - {gtfs_snapshot_id: snapshot-older, stop_id: '100101', stop_name: Origin}
@@ -230,7 +238,6 @@ unit_tests:
       vars:
         processing_date: '2026-01-16'
         publish_service_date: '2026-01-15'
-        use_python_reconstruction: true
     given:
       - input: source('matcher_input', 'reconstruction_stop_arrivals')
         format: sql

@@ -19,30 +19,20 @@ Runtime env defaults match the current VPS:
 | `DBT_PROJECT_DIR` | `/opt/airflow/dbt` |
 | `RAW_GPS_PREFIX` | `raw/gps` |
 | `RAW_GTFS_PREFIX` | `raw/gtfs` |
-| `MATCHER_SHADOW_ENABLED` | `false` |
-| `MATCHER_SHADOW_STRICT` | `false` |
-| `MATCHER_SHADOW_KEEP_WORKSPACE` | `false` |
-| `BIGQUERY_MATCHER_SHADOW_DATASET` | Required when enabled; no default |
-| `MATCHER_SHADOW_WORKSPACE_ROOT` | `/opt/airflow/matcher-shadow` |
-| `MATCHER_SHADOW_COMMAND` | `uv run --locked --project /opt/airflow/matcher ztm-matcher` |
-| `MATCHER_SHADOW_PROJECT_DIR` | `/opt/airflow/matcher` |
-| `MATCHER_SHADOW_TIMEOUT_SECONDS` | `2700` |
-| `MATCHER_SHADOW_GCS_PREFIX` | `shadow/matcher` |
-| `MATCHER_SHADOW_MAX_GPS_OBJECTS` | `5000` |
-| `MATCHER_SHADOW_MAX_GPS_BYTES` | `21474836480` (20 GiB) |
-| `MATCHER_SHADOW_MIN_FREE_DISK_BYTES` | `5368709120` (5 GiB) |
-| `MATCHER_SHADOW_MAX_COMPARISON_BYTES` | `5368709120` (5 GiB) |
-| `MATCHER_SHADOW_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
-| `MATCHER_SHADOW_GATE_CURRENT_ROW_RETENTION_MIN` | `0.75` |
-| `MATCHER_SHADOW_GATE_PRIOR_ROW_RETENTION_MIN` | `0.40` |
-| `MATCHER_SHADOW_GATE_COMPLETE_RATE_DROP_MAX` | `0.15` |
-| `MATCHER_SHADOW_GATE_EXPECTED_RATE_DELTA_MAX` | `0.15` |
-| `MATCHER_SHADOW_GATE_DELAY_PERCENTILE_RATIO_MAX` | `2.0` |
-| `MATCHER_SHADOW_GATE_DELAY_TAIL_DELTA_MAX` | `0.15` |
-| `MATCHER_SHADOW_GATE_MATERIAL_LINE_ROWS_MIN` | `20` |
-| `MATCHER_SHADOW_GATE_PEAK_RSS_BYTES_MAX` | `2147483648` (2 GiB) |
-| `MATCHER_CUTOVER_ENABLED` | `false` |
-| `MATCHER_CUTOVER_MAX_BYTES` | `5368709120` (5 GiB) |
+| `MATCHER_ENABLED` | `false` |
+| `BIGQUERY_MATCHER_STAGING_DATASET` | Required when enabled; no default |
+| `MATCHER_WORKSPACE_ROOT` | `/opt/airflow/matcher-work` |
+| `MATCHER_COMMAND` | `uv run --locked --project /opt/airflow/matcher ztm-matcher` |
+| `MATCHER_PROJECT_DIR` | `/opt/airflow/matcher` |
+| `MATCHER_TIMEOUT_SECONDS` | `2700` |
+| `MATCHER_GCS_PREFIX` | `matcher/runs` |
+| `MATCHER_KEEP_WORKSPACE` | `false` |
+| `MATCHER_MAX_GPS_OBJECTS` | `5000` |
+| `MATCHER_MAX_GPS_BYTES` | `21474836480` (20 GiB) |
+| `MATCHER_MIN_FREE_DISK_BYTES` | `5368709120` (5 GiB) |
+| `MATCHER_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
+| `MATCHER_MAX_RSS_BYTES` | `2147483648` (2 GiB) |
+| `MATCHER_MAX_PUBLICATION_BYTES` | `5368709120` (5 GiB) |
 
 - Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
 - `dbt/` is mounted at `DBT_PROJECT_DIR`.
@@ -51,7 +41,7 @@ Runtime env defaults match the current VPS:
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
 - The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, `duckdb`, `numpy`, `pyarrow`, `pytz`, `uv`, and Python 3.13.
 - The service account can read/write the configured GCS bucket and load/query the configured BigQuery datasets.
-- Enabling matcher shadow requires only this read-only Coolify bind: `/home/ubuntu/ztm-pipeline/matcher` to `/opt/airflow/matcher`. Set `UV_PROJECT_ENVIRONMENT=/opt/airflow/matcher-shadow-venv` so `uv` does not write to that mount, and ensure `MATCHER_SHADOW_WORKSPACE_ROOT` is writable. No image rebuild is required.
+- Mount the matcher source read-only at `/opt/airflow/matcher`. Set `UV_PROJECT_ENVIRONMENT` to a writable path outside that mount, and keep `MATCHER_WORKSPACE_ROOT` writable.
 
 ## DAG Boundaries
 
@@ -71,32 +61,19 @@ Runtime env defaults match the current VPS:
 - `dag_serving_export` is manual; use a fresh `export_id` for every run.
 - Default dbt tests stay bounded. Full-history schedule/version and broad aggregate audits are manual jobs.
 
-## Matcher Shadow
+## Python Matcher
 
-`dag_daily_gps` has an optional `matcher_shadow` TaskGroup. Its load task starts only after the selected current GTFS snapshot and `stg_gps__pings` test. Its compare/commit task waits for that load plus all current/prior `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` test endpoints. Neither task is upstream of canonical facts, marts, serving, or `gps_models_date`.
+`dag_daily_gps` runs the Python matcher as its only reconstruction path. It starts after snapshot selection and GPS staging validation, downloads immutable GPS/GTFS inputs, invokes the bounded matcher, validates the outputs, and loads content-addressed run tables.
 
-- Leave `MATCHER_SHADOW_ENABLED=false` until the dedicated BigQuery dataset, Coolify matcher bind, writable workspace, and IAM have been provisioned outside this repository. The task fails closed if an enabled run has no dataset or if it names `ztm_raw`, `ztm_int`, or `ztm_marts`.
-- The load task accepts only normalized GCS names below the expected GPS/GTFS prefixes, bounds inventory/downloads by object count, aggregate bytes, and free-disk reserve, invokes the matcher through `uv` with `threads=2`, `alignment-workers=1`, `384MB`, `20GB`, and validates artifact schema, batches, lineage, and grain with bounded local DuckDB queries. Both shadow tasks have a 60-minute Airflow execution timeout; the matcher subprocess remains separately timed out.
-- It loads only run-scoped `matcher_shadow_*` tables with explicit schemas and `WRITE_TRUNCATE`. The load task writes replaceable run-scoped `pending.json` metadata, not a completion signal. After canonical fact tests succeed, the compare task reads that same-run metadata/tables and writes immutable `commit.json` with create-only GCS semantics. A pre-existing marker is accepted only if its JSON content is identical.
-- Marker and pending JSON reads check GCS existence and refreshed object size before download; both are limited by `MATCHER_SHADOW_MAX_MARKER_BYTES`.
-- Retention is evaluated independently for every canonical artifact/service-date/mode group. Current-date trip mode retention is hard. Material-line, passenger-adapter, and prior-date retention differences are warnings requiring manual review; a completely absent material line remains visible as a warning. Delay is advisory only: reports include percentile-second deltas and tail-rate percentage-point deltas, zero-to-zero baselines pass, and a nonzero shadow zero-baseline is a warning.
-- `MATCHER_SHADOW_STRICT=false` reports a shadow error without stopping canonical publication. Non-strict comparison gate failures still commit the evidence marker. In strict mode structural-grain, resource-bound, and current-date trip mode retention failures prevent a marker; aggregate quality and delay evidence remain review evidence. Markers record `comparison_contract_version`, `quality_gate`, duty-status counts, and stop ambiguity/missing diagnostics.
+Production requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, the matcher source mount, and writable workspace and `uv` environment paths.
 
-`matcher_historical_correction.py` is a manual, read-only planner, not a DAG. It requires explicit start/end dates, rejects dates before the warehouse history start, limits the range to 31 days by default, rejects 2026-07-05 through 2026-07-07, inventories immutable GCS inputs, and emits no cloud mutation unless an optional report destination is requested.
+Before publication, Airflow verifies artifact schemas, hashes, snapshot lineage, row grains, processing dates, non-empty outputs, bus/tram coverage, accepted-execution counts, peak RSS, and zero swap. It then replaces the four stable `ztm_matcher_input` partitions in one BigQuery transaction. The stable dataset and tables are created idempotently on first publication.
 
-Smoke-check an enabled non-production run by confirming a marker under `gs://$GCS_BUCKET/shadow/matcher/processing_date=YYYY-MM-DD/run_id=.../commit.json`, its four run-scoped artifacts (including complete `stop_semantics`), and current/prior rows in the three-fact marker comparison. Do not treat a marker as a cutover signal.
+The three fact artifacts are partitioned by `gps_date`; stop semantics is partitioned by `processing_date`. dbt publishes `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` for current and prior service dates, then rebuilds coverage, status, and serving marts.
 
-## Matcher Cutover
+Minimal recovery is to fix the matcher/configuration and rerun the processing date. Raw GPS and GTFS remain immutable, stable input replacement is atomic, fact publication uses partition overwrite, and serving export keeps its previous artifact until a new export succeeds.
 
-Cutover remains disabled and is not wired into any DAG. The manual helper promotes a passing, content-addressed shadow marker only when `MATCHER_CUTOVER_ENABLED=true`, `MATCHER_SHADOW_ENABLED=true`, and the input dataset is a strict BigQuery dataset ID distinct from shadow, raw, intermediate, and marts datasets. A sole `resource / swapping was observed` failure may be accepted manually by passing `accepted_gate_exception` to `promote_validated_shadow_artifacts()`. The exception must match the exact processing date and run ID, include a reason, approver, timezone-bearing approval timestamp, and a maximum accepted current process swap no greater than 64 MiB; observed swap must be within that bound. Retention, structural, and all other failures remain blocking. The accepted exception and measured bytes are written to immutable `promotion.json`.
-
-The three fact artifacts and their stages contain exactly one `gps_date`, equal to `processing_date`; complete `stop_semantics` instead contains exactly one `processing_date` partition. `service_date` may be the prior or current service day. Stable matcher input retains one partition per processing date. Prior-service publication therefore reads the retained previous `gps_date` fact partition plus the current overnight delta, while snapshot-specific semantics join by their `processing_date`.
-
-Both source artifacts and immutable content-addressed stages are fully checked before stable mutation, including ordered schema, labels, partition field, row count, and partition/processing lineage. A stage is created only by its deterministic content- and run-bound query job: a retry recovers that exact successful job and verifies its SQL, destination when exposed by BigQuery, location, byte cap, and parameters. Existing tables are never accepted independently of that job. One byte-capped BigQuery transaction then replaces all four stable partitions with explicit column lists: the three fact `gps_date` partitions and the `stop_semantics.processing_date` partition. Post-commit checks scan only the replaced partition, so retained history is not treated as an error. The promotion marker is create-only and is written only after post-commit validation.
-
-Before invoking promotion, the operator must create and retain external table copies of all four stable input partitions. The helper records pre-promotion counts but does not create backups or perform rollback. If post-commit validation fails, the transaction is already committed and no marker is written; restore the externally captured partitions. `matcher_cutover_publication_dbt_args()` returns the current/prior history/schedule dependencies plus `fct_trip fct_stop_arrival fct_expected_stop_event` selectors and `use_python_reconstruction=true` vars; it does not select the current-only semantics model.
-
-The true trip adapter first selects one logical trip by `(service_date, trip_id, vehicle_number)`, ranking quality before newest `gps_date`, then enriches only that winner. It joins schedule history by snapshot, processing/GPS date, service date, and trip ID; settled passenger endpoints come from the retained expected-event adapter and snapshot-specific stop names. Stop arrivals and expected events join retained matcher stop semantics by snapshot, processing/GPS date, service date, trip ID, and stop sequence where applicable; no true-path fact reads the current-only semantics model. Stop arrivals retain `source_gps_date` and do not require it to equal the selected trip fact's publication `gps_date`.
+`matcher_historical_correction.py` produces bounded, read-only plans for explicitly approved historical corrections.
 
 ## Serving Export
 

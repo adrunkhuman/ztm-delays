@@ -1,5 +1,6 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
 {% set aggregation_start_date = var("aggregation_start_date", processing_date) %}
+{% set max_gps_date = var("max_gps_date", processing_date) %}
 {% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
 {% set start_date = modules.datetime.datetime.strptime(aggregation_start_date, "%Y-%m-%d").date() %}
 {% set end_date = modules.datetime.datetime.strptime(processing_date, "%Y-%m-%d").date() %}
@@ -123,12 +124,13 @@ observed_trips as (
             when 'modified' then 1
             else 0
         end as service_observation_rank
-    from {{ ref('int_trip_summary') }}
-    where gps_date between date('{{ aggregation_start_date }}')
+    from {{ ref('fct_trip') }}
+    where service_date between date_sub(date('{{ aggregation_start_date }}'), interval 1 day)
         and date('{{ processing_date }}')
+      and gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ max_gps_date }}')
       and date(scheduled_start_time, 'Europe/Warsaw') between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
-      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
       and service_observation_class in ('regular', 'truncated', 'modified')
 ),
 
@@ -214,7 +216,6 @@ from expected_by_hour as expected
 left join observed_by_hour as observed
     on expected.service_date = observed.service_date
     and expected.scheduled_start_date = observed.scheduled_start_date
-    and expected.gtfs_snapshot_id = observed.gtfs_snapshot_id
     and expected.line = observed.line
     and expected.direction_id = observed.direction_id
     and expected.trip_headsign = observed.trip_headsign

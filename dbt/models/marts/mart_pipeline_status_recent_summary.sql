@@ -14,7 +14,6 @@ grouped as (
         min(service_date) as first_date,
         max(service_date) as last_date,
         safe_divide(sum(completeness_ratio * stop_arrivals_count), nullif(sum(if(completeness_ratio is not null, stop_arrivals_count, 0)), 0)) as completeness_ratio,
-        safe_divide(sum(match_rate * stop_arrivals_count), nullif(sum(if(match_rate is not null, stop_arrivals_count, 0)), 0)) as match_rate,
         safe_divide(sum(observed_service_minutes), nullif(sum(expected_service_minutes), 0)) as service_coverage_ratio,
         sum(trips_complete) as trips_complete,
         sum(trips_broken) as trips_broken,
@@ -26,12 +25,12 @@ grouped as (
 
 select
     *,
-    least(coalesce(completeness_ratio, 1.0), coalesce(match_rate, 1.0), coalesce(service_coverage_ratio, 1.0)) as health_ratio,
+    least(coalesce(completeness_ratio, 1.0), coalesce(service_coverage_ratio, 1.0)) as health_ratio,
     case
-        when completeness_ratio is null and match_rate is null and service_coverage_ratio is null then 'no data'
-        when least(coalesce(completeness_ratio, 1.0), coalesce(match_rate, 1.0), coalesce(service_coverage_ratio, 1.0)) >= 0.9 then 'good'
-        when least(coalesce(completeness_ratio, 1.0), coalesce(match_rate, 1.0), coalesce(service_coverage_ratio, 1.0)) >= 0.7 then 'usable'
-        when least(coalesce(completeness_ratio, 1.0), coalesce(match_rate, 1.0), coalesce(service_coverage_ratio, 1.0)) > 0 then 'patchy'
+        when completeness_ratio is null and service_coverage_ratio is null then 'no data'
+        when least(coalesce(completeness_ratio, 1.0), coalesce(service_coverage_ratio, 1.0)) >= 0.9 then 'good'
+        when least(coalesce(completeness_ratio, 1.0), coalesce(service_coverage_ratio, 1.0)) >= 0.7 then 'usable'
+        when least(coalesce(completeness_ratio, 1.0), coalesce(service_coverage_ratio, 1.0)) > 0 then 'patchy'
         else 'missing'
     end as health_label
 from grouped

@@ -19,7 +19,6 @@ from ztm_matcher.cli import main
 from ztm_matcher.errors import MatcherError
 from ztm_matcher.gps import normalize
 from ztm_matcher.gtfs import Snapshot, load, select
-from ztm_matcher.overnight_proof import build_overnight_proof_report
 from ztm_matcher.runtime import STOP_ALIGNMENT_ROW_GROUP_ROWS, _flush_stop_alignment_rows
 from ztm_matcher.schemas import (
     DUTY_EXECUTION_SCHEMA,
@@ -1043,7 +1042,6 @@ def test_prior_service_gtfs_after_midnight_gps_produces_complete_lineage(tmp_pat
         trips = pq.read_table(work / "reconstruction_trip_facts.parquet").to_pylist()
         arrivals = pq.read_table(work / "reconstruction_stop_arrivals.parquet").to_pylist()
         expected = pq.read_table(work / "reconstruction_expected_stop_events.parquet").to_pylist()
-        report = build_overnight_proof_report(work)
 
     assert trips[0]["service_date"] == date(2026, 1, 14)
     assert trips[0]["processing_date"] == date(2026, 1, 15)
@@ -1063,13 +1061,6 @@ def test_prior_service_gtfs_after_midnight_gps_produces_complete_lineage(tmp_pat
         datetime(2026, 1, 15, 0, 5, tzinfo=UTC),
     ]
     assert [row["source_gps_date"] for row in expected] == [date(2026, 1, 15)] * 2
-    assert report["prior_n_line_complete_ranking_arrival_counts"] == {"N42": 2}
-    assert report["contract_violation_counts"]["no_healthy_n_line_at_ranking_floor"] == 1
-    assert all(
-        count == 0
-        for name, count in report["contract_violation_counts"].items()
-        if name != "no_healthy_n_line_at_ranking_floor"
-    )
 
 
 @pytest.mark.parametrize(

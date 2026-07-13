@@ -9,7 +9,7 @@ Raw BigQuery tables are rebuildable from immutable GCS inputs:
 
 Rebuild order:
 
-1. Recreate or empty the target v2 datasets: `ztm_raw`, `ztm_stg`, `ztm_int`, `ztm_marts`.
+1. Recreate or empty the target datasets: `ztm_raw`, `ztm_stg`, `ztm_int`, `ztm_marts`, and `ztm_matcher_input`.
 1. Rebuild `raw_gtfs_snapshots` deterministically from GCS object names and file hashes. Object names encode
    `snapshot_timestamp`; `snapshot_id` is `{snapshot_timestamp}_{sha256[:12]}`.
 1. Reload each GTFS ZIP into `ztm_raw.raw_gtfs_*` with deterministic load job IDs.
@@ -22,35 +22,24 @@ Rebuild order:
 1. Build dbt models by processing date and selected GTFS snapshot.
 1. Validate backfilled facts, completeness, coverage, and serving export inputs before exposing rebuilt data.
 
-The old `ztm_bq` dataset has been removed; recovery now targets `ztm_raw`, `ztm_stg`, `ztm_int`, and `ztm_marts`.
+The old `ztm_bq` dataset has been removed; recovery now targets `ztm_raw`, `ztm_stg`, `ztm_int`, `ztm_marts`, and `ztm_matcher_input`.
 
 ## Per-Date Rebuild
 
-For one GPS date, load raw GPS parts first, then run dbt with the Warsaw-local processing date and the latest
-dimension-built GTFS snapshot available at rebuild time:
+For one GPS date, load raw GPS parts, run the matcher with the mapped snapshot, promote its validated artifacts, then publish dbt facts for the current and prior service dates. The scheduled DAG owns this sequence; prefer a targeted DAG run over manual commands.
 
 ```bash
 dbt build --select stg_gps__pings int_gps_hourly_completeness \
   --vars '{"processing_date":"YYYY-MM-DD"}'
 
-dbt build --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__calendar_dates int_ping_trip \
-  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
-
-dbt build --select stg_gtfs__stop_times stg_gtfs__stops int_stop_arrivals \
-  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
-
-dbt build --select int_trip_summary \
-  --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
-
-dbt build --select fct_trip fct_stop_arrival \
+dbt build --select fct_trip fct_stop_arrival fct_expected_stop_event \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"PROCESSING_DATE"}'
 
-dbt build --select fct_trip fct_stop_arrival \
+dbt build --select fct_trip fct_stop_arrival fct_expected_stop_event \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"PRIOR_SERVICE_DATE","aggregation_start_date":"PRIOR_SERVICE_DATE"}'
 ```
 
-GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving
-facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the
+Matcher inputs are partitioned by processing date. Serving facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the
 production DAG publishes both the current service date and the prior service date for each GPS processing date. A prior
 service-date partition can contain rows from two GPS dates with different governing GTFS snapshots; fact publication
 preserves each row's snapshot lineage and joins schedule metadata on `gtfs_snapshot_id`.
@@ -67,7 +56,7 @@ Loop over dates in order. For every GPS processing date, ensure at least one GTF
 schedule dimensions have been built. Nightly rebuilds use the latest built snapshot available at rebuild time, not a
 same-day cutoff rule.
 
-For each GPS processing date, rebuild the GPS/intermediate models, then publish facts for the current service date and
+For each GPS processing date, rerun the matcher publication, then publish facts for the current service date and
 the prior service date. Publishing the prior date incorporates after-midnight observations without relabeling prior-day
 rows to the current processing date's snapshot. After detail exists, rebuild completeness, coverage, aggregate, and
 pipeline-status marts over the collected-history window.
@@ -77,10 +66,7 @@ After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each
 publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an
 individual stop detection.
 
-Changes to stop-crossing reconstruction do not update existing incremental partitions on deployment. To apply such a
-correction historically, rerun each affected GPS processing date with its mapped GTFS snapshot through
-`int_stop_arrivals` and `int_trip_summary`, then republish both the current and prior service-date fact partitions
-before rebuilding dependent marts and serving exports. A full raw GPS or GTFS reload is not required.
+Changes to reconstruction do not update existing partitions on deployment. Reprocess each affected GPS date with its mapped snapshot, then republish current/prior facts and dependent marts. A raw reload is not required.
 
 ## Raw GPS Volume
 
@@ -118,123 +104,26 @@ sanitizes it, and writes `poller_status` plus `last_export_at` into `ztm.duckdb.
 seconds are exported as `stale`. Missing or malformed heartbeat data is exported as `unknown`, not as a serving-export
 failure.
 
-## Matcher Shadow Runs
+## Matcher Runs
 
-The matcher shadow branch is disabled by default and is not a production cutover. Before enabling it in a non-production
-environment, provision a separate `BIGQUERY_MATCHER_SHADOW_DATASET` that is not `ztm_raw`, `ztm_int`, or `ztm_marts`;
-grant only the required read/load/query permissions; and add the read-only Coolify bind
-`/home/ubuntu/ztm-pipeline/matcher` to `/opt/airflow/matcher`. Set
-`UV_PROJECT_ENVIRONMENT=/opt/airflow/matcher-shadow-venv` so `uv` does not write to the matcher mount, and ensure
-`MATCHER_SHADOW_WORKSPACE_ROOT` is writable. No image rebuild is required.
+`dag_daily_gps` uses the Python matcher as its sole reconstruction path.
 
-Enable only the shadow path with `MATCHER_SHADOW_ENABLED=true`. Its load task starts after snapshot selection and GPS
-staging validation, uses the exact `raw_gtfs_snapshots.gcs_path` for the mapped snapshot, and does not emit a GPS asset
-or feed canonical publication. Its compare/commit task waits for the load plus the current/prior `fct_trip`,
-`fct_stop_arrival`, and `fct_expected_stop_event` test endpoints. Each retry removes the prior run-scoped workspace
-before creating its attempt workspace. The sanitized run scope ends with a stable hash of the original Airflow run ID,
-preventing sanitization and truncation collisions. Shadow table and load job IDs bind that run identity and the
-validated artifact SHA-256; a conflicting existing job must be successful and target the expected content-addressed
-table.
+Matcher runs require `MATCHER_ENABLED=true`, isolated staging and matcher-input datasets, the read-only matcher source at
+`/opt/airflow/matcher`, a writable `MATCHER_WORKSPACE_ROOT`, and a separate
+`UV_PROJECT_ENVIRONMENT` so `uv` never writes to the matcher mount.
 
-Smoke checks for a successful run:
+For each processing date, the DAG reads immutable GPS inputs and the pinned GTFS snapshot, then runs the bounded matcher.
+Before publication, it verifies non-empty artifacts, exact schemas and snapshot lineage, unique grains, accepted-execution
+counts, complete mode coverage, RSS no greater than the configured limit, and zero swap.
 
-1. Find exactly one new `commit.json` below `shadow/matcher/processing_date=YYYY-MM-DD/run_id=.../`. `pending.json` is
-   replaceable work metadata and is never a completion signal.
-1. Check the marker's three shadow table IDs, job IDs, artifact hashes/rows, matcher metrics,
-   `comparison_contract_version`, `quality_gate`, diagnostics, and current/prior comparison aggregates.
-1. Confirm all referenced tables are in the dedicated shadow dataset and no canonical table has a new job from this
-   task.
-1. Complete manual review when `quality_gate.manual_review_required` is true: inspect known lines `20`, `118`, and
-   `145`; run the #132 fixture tests; explain any service loss; and confirm no unexplained delay-percentile collapse.
-   Delay aggregate changes are advisory evidence, never ownership acceptance.
+After validation, the DAG idempotently creates the stable matcher-input dataset and tables when absent, then atomically
+replaces all four processing-date partitions. It publishes current and prior service-date dbt facts only after publication,
+followed by coverage, pipeline-status, and serving marts. A validation failure leaves the previous stable partitions and
+canonical facts unchanged.
 
-Run the matcher fixture coverage with
-`uv run pytest tests/test_gtfs_semantics.py tests/test_alignment.py tests/test_stop_alignment.py` from `matcher/`. All
-tests must pass; inspect any changed ownership/status fixture rather than updating expected output mechanically.
-
-- `duty_execution_status_counts`: compare `executed`, `missed`, `uncertain`, and vehicle-change counts with the prior
-  accepted run; investigate unexplained step changes.
-- `stop_alignment_missing_stops`: treat as coverage context; investigate a sharp increase or concentration on reviewed
-  material lines.
-- `stop_alignment_ambiguous_trips`: inspect ownership candidates when the count increases materially; ambiguity must not
-  be hidden by higher retention.
-- `quality_gate.issues[level=fail]`: block promotion unless the sole failure is an explicitly approved bounded swap
-  exception.
-- `quality_gate.issues[level=warn]`: complete and record manual review; warnings are not automatic ownership acceptance.
-
-Artifact validation failures, including lineage or duplicate-grain failures, prevent `pending.json`, comparison, and a
-marker in either mode. Workspaces are removed after pending metadata or failure by default; set
-`MATCHER_SHADOW_KEEP_WORKSPACE=true` only for an explicitly supervised investigation. Prior shadow tables and markers
-remain intact. A changed artifact under an already committed run ID gets a new table identity, then is rejected before
-load when the existing marker's immutable content differs. Marker, pending, and marker-conflict reads check existence
-and refreshed object size before download and reject objects over the 20 MiB default. A concurrent marker conflict after
-that check can leave uncommitted content-addressed tables; inspect them and delete only tables unreferenced by retained
-marker or pending metadata. With `MATCHER_SHADOW_STRICT=false` load or comparison failure is logged and canonical work
-can still complete; non-strict comparison gate failures still commit their evidence marker. Strict mode rejects hard
-structural/resource failures and current-date trip retention failures before marker creation. Retention is independently
-evaluated per artifact/service-date/mode: only current-date trip mode retention is hard. Material-line, current-date
-`fct_stop_arrival`, and current-date `fct_expected_stop_event` retention differences warn for manual review because
-line-level deltas require interpretation and the local passenger adapters suppress unsettled rows. All
-prior-service-date retention differences are warnings because #113 owns overnight proof. Delay changes are warnings
-only: zero-to-zero baselines pass, nonzero shadow values against a zero canonical baseline warn, and reports include
-percentile-second differences plus tail-rate percentage-point deltas. Differences and delay aggregates are evidence, not
-cutover acceptance. Defaults cap input at 5,000 GPS objects/20 GiB, comparison scans at 5 GiB, marker payloads at 20
-MiB, and retain a 5 GiB free-disk reserve before download; increase them only with a measured budget.
-
-The pre-cutover canonical `fct_expected_stop_event` table does not yet expose passenger-boundary semantic columns, while
-the Python expected-event adapter is passenger-only. Shadow expected-event retention is therefore a conservative
-comparison against the broader canonical table until the Python-backed warehouse adapter is enabled; treat that delta as
-manual-review evidence rather than exact parity.
-
-For a historical correction investigation, run the standalone `matcher_historical_correction.py` planner manually with
-explicit `--start-date` and `--end-date`. It is not scheduled and neither downloads nor loads data. It rejects ranges
-before `WAREHOUSE_HISTORY_START_DATE`, ranges over 31 days unless explicitly configured, degraded 2026-07-05 through
-2026-07-07 dates, missing snapshot inputs, or a missing bus or tram GPS object; ordinary hour gaps remain valid. The
-plan records each mode's object inventory, count, and bytes. An optional GCS report is create-only
-(`if_generation_match=0`): an existing object is an error, never an overwrite. The generated correction query is a
-placeholder, not an executable correction command. Any execution requires a separate approval and procedure covering
-per-date snapshot selection, current/prior publication, dependent mart rebuilds, serving export, external rollback
-copies, and byte caps.
-
-Shadow-to-canonical promotion is manual-only and never called by a DAG. Before invoking
-`promote_validated_shadow_artifacts(processing_date, run_id)`, set the cutover/shadow environment, verify the exact
-immutable marker, and create retained BigQuery copies of all four stable matcher-input partitions. The helper validates
-and atomically replaces those four processing-date partitions, records pre-counts, and writes create-only
-`promotion.json`; it does not create backups or perform rollback. Restore the external copies if post-commit validation
-fails. A sole reviewed swap failure may use `accepted_gate_exception` bound to the exact date/run with reason, approver,
-timezone-aware approval time, and a maximum observed process swap no greater than 64 MiB. All correctness and retention
-failures remain blocking. Canonical current/prior dbt publication and serving validation require separate authorization
-after stable-input promotion.
-
-Use a reviewed backup suffix containing the processing date and sanitized run ID. Before promotion, create BigQuery
-snapshot-table copies of `reconstruction_trip_facts`, `reconstruction_stop_arrivals`,
-`reconstruction_expected_stop_events`, and `reconstruction_stop_semantics` in the isolated matcher-input dataset, then
-verify each copy's schema, partition field, and target partition row count. Keep the snapshots until canonical facts and
-serving are validated. Restore all four target partitions in one BigQuery transaction from those snapshots if rollback
-is required.
-
-Invoke the helper from the Airflow environment so its repository code, credentials, location, and byte caps match
-production:
-
-```python
-from ztm_matcher_shadow import promote_validated_shadow_artifacts
-
-promote_validated_shadow_artifacts(
-    "2026-07-10",
-    "manual__matcher_shadow_20260710_v3_reanchor",
-    accepted_gate_exception={
-        "processing_date": "2026-07-10",
-        "run_id": "manual__matcher_shadow_20260710_v3_reanchor",
-        "reason": "Reviewed cold-page swap with RSS below the production bound",
-        "approved_by": "APPROVER",
-        "approved_at": "2026-07-13T01:45:00+00:00",
-        "max_current_swap_bytes": 32 * 1024**2,
-    },
-)
-```
-
-Omit `accepted_gate_exception` for a passing marker. Never place approval credentials or secrets in the exception;
-`approved_by` is an audit identity only. Promotion is authorized separately from canonical dbt publication.
+Retries and recovery rerun the same processing date from immutable GPS and pinned GTFS inputs. They must not select a
+newer snapshot implicitly. `matcher_historical_correction.py` creates read-only plans for separately approved retained-history
+work; it does not download, load, publish, or mutate warehouse data.
 
 ## Deployment Sync
 
@@ -244,9 +133,9 @@ Deploy steps:
 - SSH to `ubuntu@vps`;
 - fail on tracked VPS worktree changes;
 - run `git -C /home/ubuntu/ztm-pipeline pull --ff-only origin master`;
-- smoke-check Airflow DAG parsing, `airflow dags list`, and `dbt parse` inside the Airflow container.
+- verify host/container matcher hashes, canonical matcher environment and mounts, Airflow DAG parsing, `airflow dags list`, and `dbt parse` inside the Airflow container.
 
-It does not rebuild containers or run dbt models.
+It does not rebuild containers or run dbt models. If the matcher bind hash is stale, redeploy Airflow in Coolify and rerun the workflow.
 
 Required GitHub secrets:
 

@@ -40,36 +40,23 @@ with trip_facts as (
     where service_date = date('{{ publish_service_date }}')
 ),
 
-matched_trip_lineage_raw as (
+matcher_expected_events as (
     select
         gtfs_snapshot_id,
+        gps_date,
+        source_gps_date,
         service_date,
         trip_id,
         vehicle_number,
-        any_value(matching_method) as matching_method,
-        any_value(matched_duty_chain_id) as matched_duty_chain_id,
-        any_value(matched_duty_chain_source) as matched_duty_chain_source,
-        any_value(matched_duty_chain_source_id) as matched_duty_chain_source_id,
-        min(candidate_rank) as candidate_rank,
-        max(candidate_count) as candidate_count,
-        max(line_match_candidate_count) as line_match_candidate_count,
-        array_concat_agg(matching_flags) as raw_matching_flags
-    from {{ ref('int_ping_trip') }}
+        stop_sequence,
+        observation_status,
+        actual_arrival_time,
+        delay_seconds,
+        uncertainty_evidence
+    from {{ source('matcher_input', 'reconstruction_expected_stop_events') }}
     where service_date = date('{{ publish_service_date }}')
       and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
       and gps_date <= date('{{ var("processing_date") }}')
-    group by gtfs_snapshot_id, service_date, trip_id, vehicle_number
-),
-
-matched_trip_lineage as (
-    select
-        * except (raw_matching_flags),
-        array(
-            select distinct flag
-            from unnest(raw_matching_flags) as flag
-            order by flag
-        ) as matching_flags
-    from matched_trip_lineage_raw
 ),
 
 scheduled_stops as (
@@ -104,26 +91,14 @@ scheduled_stops as (
             interval stop_times.departure_time_seconds second
         ) as scheduled_departure_time
     from (
-        {% if var('use_python_reconstruction', false) %}
         select distinct gtfs_snapshot_id, gps_date, service_date, trip_id
         from trip_facts
-        {% else %}
-        select distinct gtfs_snapshot_id, service_date, trip_id
-        from trip_facts
-        {% endif %}
     ) as trip_spine
-    {% if var('use_python_reconstruction', false) %}
     inner join {{ source('matcher_input', 'reconstruction_stop_semantics') }} as stop_times
         on trip_spine.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and trip_spine.gps_date = stop_times.processing_date
         and trip_spine.service_date = stop_times.service_date
         and trip_spine.trip_id = stop_times.trip_id
-    {% else %}
-    inner join {{ ref('int_gtfs_trip_stop_semantics') }} as stop_times
-        on trip_spine.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
-        and trip_spine.service_date = stop_times.service_date
-        and trip_spine.trip_id = stop_times.trip_id
-    {% endif %}
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
         and stop_times.stop_id = stops.stop_id
@@ -192,7 +167,7 @@ expected_events as (
     select
         trip_facts.gtfs_snapshot_id,
         trip_facts.gps_date,
-        observed_arrivals.source_gps_date,
+        coalesce(observed_arrivals.source_gps_date, matcher_expected_events.source_gps_date) as source_gps_date,
         trip_facts.service_date,
         trip_facts.trip_id,
         trip_facts.vehicle_number,
@@ -214,14 +189,6 @@ expected_events as (
         trip_facts.quality_flags,
         trip_facts.service_observation_class,
         trip_facts.service_observation_flags,
-        matched_trip_lineage.matching_method,
-        matched_trip_lineage.matched_duty_chain_id,
-        matched_trip_lineage.matched_duty_chain_source,
-        matched_trip_lineage.matched_duty_chain_source_id,
-        matched_trip_lineage.candidate_rank,
-        matched_trip_lineage.candidate_count,
-        matched_trip_lineage.line_match_candidate_count,
-        matched_trip_lineage.matching_flags,
         scheduled_stops.stop_id,
         scheduled_stops.stop_group_id,
         scheduled_stops.stop_post_code,
@@ -243,8 +210,9 @@ expected_events as (
         scheduled_stops.last_passenger_stop_sequence,
         scheduled_stops.scheduled_arrival_time,
         scheduled_stops.scheduled_departure_time,
-        observed_arrivals.actual_arrival_time,
-        observed_arrivals.delay_seconds,
+        matcher_expected_events.actual_arrival_time,
+        matcher_expected_events.delay_seconds,
+        matcher_expected_events.uncertainty_evidence,
         timestamp_trunc(scheduled_stops.scheduled_arrival_time, hour, 'Europe/Warsaw') as hour_bracket,
         observed_arrivals.detection_method,
         observed_arrivals.stop_match_radius_m,
@@ -254,12 +222,15 @@ expected_events as (
         observed_arrivals.segment_start_time,
         observed_arrivals.segment_end_time,
         observed_arrivals.segment_duration_seconds,
-        observed_arrivals.actual_arrival_time is not null as is_observed,
-        exists(
-            select 1
-            from unnest(coalesce(matched_trip_lineage.matching_flags, array<string>[])) as flag
-            where flag in ('uncertain_assignment', 'candidate_overlap', 'likely_vehicle_swap')
-        ) as is_match_uncertain
+        case
+            when matcher_expected_events.observation_status is not null
+                then matcher_expected_events.observation_status = 'observed'
+            else observed_arrivals.actual_arrival_time is not null
+        end as is_observed,
+        coalesce(matcher_expected_events.observation_status = 'uncertain', false)
+            or trip_facts.trip_quality = 'broken'
+            or trip_facts.service_observation_class = 'matching_failure' as is_match_uncertain,
+        matcher_expected_events.observation_status as matcher_observation_status
     from trip_facts
     inner join scheduled_stops
         on trip_facts.gtfs_snapshot_id = scheduled_stops.gtfs_snapshot_id
@@ -270,17 +241,19 @@ expected_events as (
         and scheduled_stops.stop_group_id = stop_group_names.stop_group_id
     inner join calendar_dates
         on trip_facts.service_date = calendar_dates.service_date
-    left join matched_trip_lineage
-        on trip_facts.gtfs_snapshot_id = matched_trip_lineage.gtfs_snapshot_id
-        and trip_facts.service_date = matched_trip_lineage.service_date
-        and trip_facts.trip_id = matched_trip_lineage.trip_id
-        and trip_facts.vehicle_number = matched_trip_lineage.vehicle_number
     left join observed_arrivals
         on trip_facts.gtfs_snapshot_id = observed_arrivals.gtfs_snapshot_id
         and trip_facts.service_date = observed_arrivals.service_date
         and trip_facts.trip_id = observed_arrivals.trip_id
         and trip_facts.vehicle_number = observed_arrivals.vehicle_number
         and scheduled_stops.stop_sequence = observed_arrivals.stop_sequence
+    left join matcher_expected_events
+        on trip_facts.gtfs_snapshot_id = matcher_expected_events.gtfs_snapshot_id
+        and trip_facts.gps_date = matcher_expected_events.gps_date
+        and trip_facts.service_date = matcher_expected_events.service_date
+        and trip_facts.trip_id = matcher_expected_events.trip_id
+        and trip_facts.vehicle_number = matcher_expected_events.vehicle_number
+        and scheduled_stops.stop_sequence = matcher_expected_events.stop_sequence
 )
 
 select
@@ -308,14 +281,6 @@ select
     quality_flags,
     service_observation_class,
     service_observation_flags,
-    matching_method,
-    matched_duty_chain_id,
-    matched_duty_chain_source,
-    matched_duty_chain_source_id,
-    candidate_rank,
-    candidate_count,
-    line_match_candidate_count,
-    matching_flags,
     stop_id,
     stop_group_id,
     stop_post_code,
@@ -339,6 +304,7 @@ select
     scheduled_departure_time,
     actual_arrival_time,
     delay_seconds,
+    uncertainty_evidence,
     hour_bracket,
     detection_method,
     stop_match_radius_m,
@@ -355,6 +321,7 @@ select
             or stop_service_class = 'not_in_passenger_service'
             then 'not_in_passenger_service'
         when stop_execution_class = 'unknown' or not are_passenger_boundaries_settled then 'uncertain'
+        when matcher_observation_status is not null then matcher_observation_status
         when is_observed then 'observed'
         when is_match_uncertain or service_observation_class = 'matching_failure' then 'uncertain'
         when stop_service_class = 'request' then 'skipped_optional'

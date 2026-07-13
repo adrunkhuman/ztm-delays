@@ -113,7 +113,7 @@ def _metrics(**changes: object) -> dict[str, Any]:
         ),
     ],
 )
-def test_trip_quality_fixtures_port_int_trip_summary(
+def test_trip_quality_fixtures_cover_canonical_policy(
     name: str, changes: dict[str, object], quality: str, service_class: str, required_flags: set[str]
 ) -> None:
     result = classify_trip(_metrics(**changes))

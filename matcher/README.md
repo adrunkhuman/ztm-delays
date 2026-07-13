@@ -71,9 +71,8 @@ chosen vehicle traversal: it remains high-confidence execution ownership with
 `passenger_boundaries_unknown` evidence, while passenger semantics stay
 suppressed. `line_brigade` duty fallback cannot receive high confidence.
 
-The July 9 VPS proof with duty alignment measured about 1.63 GiB peak process
-RSS with this limit and zero matcher swap. The lower DuckDB allowance trades
-bounded temporary I/O for enough memory headroom to add stop alignment.
+The DuckDB allowance reserves memory for stop alignment and may trade bounded
+temporary I/O for lower process RSS.
 
 ## Stop Alignment
 
@@ -89,8 +88,7 @@ with segment diagnostics for every high-confidence owned execution.
 `passenger_stop_arrivals-v1` is its settled-passenger subset and is the explicit
 Parquet adapter toward `fct_stop_arrival`. Unknown passenger boundaries cannot
 enter that subset or produce a confident passenger delay. Missing stops produce
-no inferred arrival: #102 remains responsible for any separately qualified
-interpolation.
+no inferred arrival; interpolation is outside the runtime contract.
 
 Stop alignment defaults to `--alignment-workers 1`, which is the VPS-safe
 setting. For local development, `--alignment-workers 8` splits the sorted active
@@ -117,9 +115,8 @@ calculate each accepted ownership interval's max ping gap and speed; it never
 loads a GPS day into Python. Trip quality is then streamed one trip record at a
 time. Duplicate accepted trip or direct-arrival grains reject the run.
 
-The parity source for quality and service-observation policy is
-`dbt/models/intermediate/int_trip_summary.sql`. The Python port retains its
-thresholds: complete coverage `.80`, broken coverage `.30`,
+The matcher owns quality and service-observation policy. Its thresholds are:
+complete coverage `.80`, broken coverage `.30`,
 ping gap `900` seconds, zero-based-safe terminal tolerance `2`, stale lag
 `120` seconds, sequence gap `4`, speed `50 m/s`, and extreme delay `3600`
 seconds. It emits the same trip-quality, quality-flag, service-observation
@@ -142,7 +139,7 @@ an accepted trip. A high-confidence direct crossing is `observed`; a medium or
 ambiguous direct crossing is `uncertain`; if trip assignment failed, absent
 regular and request stops are also `uncertain`; otherwise absent request stops
 are `skipped_optional` and regular stops are `missed`. Technical stops are
-excluded. `interpolated` is deliberately not emitted before #102. Prior service
+excluded. The runtime does not emit `interpolated` events. Prior service
 dates remain intact through `processing_date`, `gps_date`, and, for direct
 arrival facts, `source_gps_date`.
 
@@ -159,30 +156,3 @@ actual `service_date`; warehouse `int_serving_trip_universe` groups by
 documented conservative approximation, not a claim of byte-for-byte dbt
 parity. Eligibility is copied into trip and direct-arrival facts only through
 this persisted artifact.
-
-## Overnight Evidence Gate
-
-Run the local proof against the three published reconstruction artifacts and
-`trip_universe.parquet`. It does not query BigQuery:
-
-```shell
-uv run --project matcher ztm-matcher overnight-proof \
-  --input-dir work/2026-07-09 \
-  --report-json work/2026-07-09/overnight-proof.json
-```
-
-The command uses DuckDB aggregates over Parquet rather than loading artifacts
-into Python. It writes deterministic JSON with SHA-256 artifact identities,
-processing and snapshot IDs, prior-service quality, N-line complete
-ranking-universe arrival counts, the unchanged line-ranking floor of 20,
-eligibility, and every contract violation count. It verifies fact eligibility
-against the persisted schedule artifact, requires every artifact `gps_date` to
-equal its `processing_date`, and rejects any non-observed expected event with
-actual, delay, or source-GPS data. It returns nonzero unless the artifacts have
-no violations, include prior-service evidence, and include at least one healthy
-N line at the floor. It does not require every N line to meet the floor.
-
-Processing dates `2026-07-05` through `2026-07-07` are rejected as degraded
-evidence. The expected real proof is the July 9, 2026 local matcher output:
-after-midnight GPS for the July 8 service date must retain July 9 processing and
-source GPS lineage while supplying a healthy prior-service N line.

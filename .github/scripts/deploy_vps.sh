@@ -33,8 +33,21 @@ fi
 
 echo "Airflow container found"
 
+host_matcher_hash="$(sha256sum "$repo_dir/matcher/src/ztm_matcher/runtime.py" | cut -d' ' -f1)"
+container_matcher_hash="$(sudo -n docker exec "$airflow_container" sha256sum /opt/airflow/matcher/src/ztm_matcher/runtime.py | cut -d' ' -f1)"
+if [[ "$host_matcher_hash" != "$container_matcher_hash" ]]; then
+  echo "Airflow matcher bind is stale; redeploy Airflow in Coolify and rerun this workflow" >&2
+  exit 1
+fi
+
 sudo -n docker exec -i "$airflow_container" python <<'PY'
+import os
+import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, "/opt/airflow/dags")
+from ztm_matcher import MatcherConfig
 
 for path in (
     Path("/opt/airflow/dags/ztm_airflow_common.py"),
@@ -42,8 +55,29 @@ for path in (
     Path("/opt/airflow/dags/dag_gtfs_load.py"),
     Path("/opt/airflow/dags/dag_daily_gps.py"),
     Path("/opt/airflow/dags/dag_serving_export.py"),
+    Path("/opt/airflow/dags/ztm_matcher.py"),
 ):
     compile(path.read_text(), str(path), "exec")
+
+matcher = MatcherConfig.from_env()
+matcher.validate()
+if not matcher.enabled:
+    raise RuntimeError("Matcher requires MATCHER_ENABLED=true")
+if not Path("/opt/airflow/matcher").is_dir():
+    raise RuntimeError("Matcher bind is missing")
+uv_environment_value = os.environ.get("UV_PROJECT_ENVIRONMENT", "")
+if not uv_environment_value:
+    raise RuntimeError("Matcher requires UV_PROJECT_ENVIRONMENT")
+uv_environment = Path(uv_environment_value)
+if not uv_environment.is_absolute() or uv_environment == Path("/opt/airflow/matcher") or Path("/opt/airflow/matcher") in uv_environment.parents:
+    raise RuntimeError("UV_PROJECT_ENVIRONMENT must be an absolute writable path outside the matcher bind")
+uv_environment.mkdir(parents=True, exist_ok=True)
+if not os.access(uv_environment, os.W_OK):
+    raise RuntimeError(f"UV_PROJECT_ENVIRONMENT is not writable: {uv_environment}")
+matcher.workspace_root.mkdir(parents=True, exist_ok=True)
+if not os.access(matcher.workspace_root, os.W_OK):
+    raise RuntimeError(f"Matcher workspace is not writable: {matcher.workspace_root}")
+subprocess.run([*matcher.command, "--help"], cwd=matcher.project_dir, check=True, stdout=subprocess.DEVNULL)
 PY
 
 expected_dags=(

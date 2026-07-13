@@ -59,13 +59,13 @@ jobs:
           cache-dependency-glob: airflow/pyproject.toml
 
       - name: Compile Airflow DAGs
-        run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py airflow/dags/dag_serving_export.py
+        run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/ztm_matcher.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py airflow/dags/dag_serving_export.py
 
       - name: Lint Airflow
         run: uvx ruff check airflow
 
       - name: Test Airflow DAG boundaries
-        run: uvx --with pytest --with tzdata --with duckdb pytest airflow/tests
+        run: uvx --with pytest --with tzdata --with duckdb --with pyarrow pytest airflow/tests
 
   matcher:
     name: Matcher
@@ -167,7 +167,7 @@ jobs:
       - name: Compile dbt warehouse models
         run: >-
           uv run dbt compile --profiles-dir .
-          --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates int_ping_trip int_stop_arrivals int_gtfs_trip_schedule int_gtfs_duty_chain int_schedule_version int_trip_summary int_serving_trip_universe dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_schedule_version dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current dim_serving_date fct_trip fct_stop_arrival fct_expected_stop_event mart_day_completeness agg_service_coverage mart_pipeline_status mart_pipeline_status_recent_summary mart_mode_window_summary mart_line_window_summary mart_stop_group_window_summary mart_stop_post_window_summary mart_entity_rankings mart_entity_daily_summary mart_entity_timeline_daily mart_hour_window_summary mart_worst_delay_event mart_line_reliability_daily mart_trip_daily mart_trip_mode_daily_summary mart_trip_line_daily mart_line_trip_group_daily mart_line_course_window mart_line_course_stop_window mart_stop_line_window_summary mart_stop_post_line_group_window mart_stop_group_line_group_window rpt_schedule_day_mapping_evidence rpt_ranking_universe_evidence agg_line_stop_period agg_stop_period agg_time_period agg_line_daily
+          --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates int_gtfs_trip_schedule int_gtfs_duty_chain int_schedule_version int_serving_trip_universe dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_schedule_version dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current dim_serving_date fct_trip fct_stop_arrival fct_expected_stop_event mart_day_completeness agg_service_coverage mart_pipeline_status mart_pipeline_status_recent_summary mart_mode_window_summary mart_line_window_summary mart_stop_group_window_summary mart_stop_post_window_summary mart_entity_rankings mart_entity_daily_summary mart_entity_timeline_daily mart_hour_window_summary mart_worst_delay_event mart_line_reliability_daily mart_trip_daily mart_trip_mode_daily_summary mart_trip_line_daily mart_line_trip_group_daily mart_line_course_window mart_line_course_stop_window mart_stop_line_window_summary mart_stop_post_line_group_window mart_stop_group_line_group_window rpt_schedule_day_mapping_evidence rpt_ranking_universe_evidence
           --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
         working-directory: dbt
 

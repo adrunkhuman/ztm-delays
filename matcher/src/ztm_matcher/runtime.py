@@ -814,6 +814,18 @@ class ReconstructionRun:
             "group by vehicle_type, vehicle_number)"
         ).fetchone()
         artifact_bytes = sum(path.stat().st_size for path in work.iterdir() if path.is_file())
+        execution_sql = str(work / "duty_execution.parquet").replace("'", "''")
+        accepted_fact_executions = connection.execute(
+            f"""
+            select count(*)
+            from read_parquet('{execution_sql}')
+            where execution_status = 'executed'
+              and confidence = 'high'
+              and duty_chain_source != 'line_brigade'
+              and ownership_interval_start_time is not null
+              and ownership_interval_end_time is not null
+            """
+        ).fetchone()
         process = _process_measurements()
         metrics = {
             "input_rows": input_rows,
@@ -829,6 +841,7 @@ class ReconstructionRun:
             "max_vehicle_rows": int(vehicle_stats[1]) if vehicle_stats else 0,
             "duty_execution_rows": sum(execution_counts.values()),
             "duty_execution_status_counts": dict(sorted(execution_counts.items())),
+            "accepted_fact_executions": int(accepted_fact_executions[0]) if accepted_fact_executions else 0,
             "operational_stop_crossings": crossing_counts["operational_stop_crossings"],
             "passenger_stop_arrivals": crossing_counts["passenger_stop_arrivals"],
             "stop_alignment_missing_stops": crossing_counts["missing_stops"],

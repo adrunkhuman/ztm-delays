@@ -66,10 +66,8 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 | `stg_gtfs__*` | Snapshot-aware GTFS staging across all loaded snapshots. |
 | `int_gtfs_trip_schedule` | Scheduled trips under the selected snapshot, scoped to processing/service-date overlap. |
 | `int_gtfs_duty_chain` | Ordered scheduled duty segments by snapshot, service date, and duty identity. |
-| `int_ping_trip` | Settled GPS ping assignment to duty-chain trip candidates. |
 | `int_schedule_version` | Timetable-version ranges by `line`, `direction_id`, and `schedule_day_type`. |
-| `int_stop_arrivals` | Reconstructed scheduled stop arrivals from GPS movement. |
-| `int_trip_summary` | Observed vehicle trip candidates with quality flags. |
+| `ztm_matcher_input.reconstruction_*` | Stable processing-date partitions produced by the bounded Python matcher. |
 | `fct_trip` | Serving fact for observed trips, partitioned by `service_date`. |
 | `fct_stop_arrival` | Serving detail fact for detected stop arrivals, partitioned by `service_date`. |
 | `fct_expected_stop_event` | Serving trip-detail fact with every scheduled stop for each matched vehicle trip and explicit observation status. |
@@ -77,22 +75,16 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 | `agg_service_coverage` | Schedule-aware observed-service coverage by scheduled start date/hour. |
 | `mart_pipeline_status` | Historical archive health by operational date and mode. |
 
-The local matcher can additionally emit `operational_stop_crossings-v1` and
+The matcher additionally emits `operational_stop_crossings-v1` and
 `passenger-stop-arrival-v1` Parquet artifacts. The first is complete operational
 lineage, including technical posts, for high-confidence vehicle ownership even
 when passenger boundaries are unsettled. The second is a settled-passenger-only
 adapter toward `fct_stop_arrival`; unsettled rows intentionally emit no confident
-passenger arrival or delay. They are not yet a warehouse replacement.
+passenger arrival or delay.
 
-## Matcher Shadow Boundary
+## Matcher Publication
 
-The optional Airflow matcher shadow path is a comparison harness, not an alternate warehouse path. When enabled, its load phase reads the mapped snapshot ZIP and immutable processing-date GPS objects, writes three local adapter facts only to a dedicated `BIGQUERY_MATCHER_SHADOW_DATASET`, and records replaceable run-scoped `pending.json` metadata. Its comparison phase waits for successful current/prior canonical fact tests, reads the same run-scoped shadow tables, then writes the immutable GCS commit marker. It never writes `ztm_raw`, `ztm_int`, `ztm_marts`, canonical dbt models, assets, or serving exports.
-
-Shadow tables are content-addressed by the validated artifact SHA-256 and collision-resistant run identity, and use explicit adapter schemas. They must not be queried as canonical facts: the local adapter does not include the canonical dimension enrichments. The marker records object generations/sizes/hashes, artifact rows/hashes, table/job IDs, matcher metrics, and partition-filtered current/prior comparison aggregates. It is uploaded with `if_generation_match=0`; an existing marker is accepted only when JSON-identical. A missing marker means the candidate run is incomplete or failed; `pending.json` alone does not signal completion. A changed artifact for an already committed run cannot replace the old table or marker; it can leave uncommitted content-addressed shadow tables. Retain those for investigation, then manually delete only tables not referenced by a retained marker or pending record. Prior markers and shadow tables are otherwise retained for inspection.
-
-Current-date trip mode retention is a hard gate failure. Material-line retention is warning-level manual-review evidence, including a completely absent material line. Current-date `stop_arrival` and `expected_stop_event` retention differences are also warnings because those local adapters are intentionally passenger-only and suppress unsettled passenger boundaries. All prior-service-date retention differences are warnings; the separate overnight proof gate owns that evidence. Structural and resource violations remain hard failures.
-
-Cutover remains a separate manual authorization. The branch includes disabled Python-backed adapters and a helper that atomically promotes four stable matcher-input partitions; it is not called by a DAG. Operators must create external copies of the previous stable partitions before promotion because the helper records counts but does not create rollback backups. Canonical fact publication remains a subsequent current/prior dbt operation with `use_python_reconstruction=true`.
+`dag_daily_gps` runs the bounded Python matcher from immutable processing-date GPS and a pinned GTFS ZIP. It validates schemas, lineage, grains, non-empty artifacts, RSS, and swap before atomically replacing four stable `ztm_matcher_input` partitions. Current and prior canonical facts then enrich those inputs with warehouse dimensions. Run-scoped content-addressed tables and immutable markers remain diagnostic evidence, not an alternate fact source.
 
 ## Dimensions
 
@@ -156,9 +148,7 @@ When `block_id` is missing, the model falls back to `line:brigade`. Treat fallba
 
 Depot pull-out and pull-in trips stay in `int_gtfs_duty_chain` for matcher continuity. Use `is_public_service_segment` to exclude depot-only service from public views.
 
-`int_ping_trip` is the settled archive matcher. It assigns each eligible GPS ping to one duty-chain trip candidate using line, timing, duty-chain continuity, and overlap diagnostics.
-
-Spatial and stop-progression scores are reserved for later matcher work. Stop-event reconstruction stays in `int_stop_arrivals`.
+The Python matcher owns vehicle duty alignment, stop progression, trip quality, and expected-stop state. dbt does not reconstruct observations.
 
 ## Completeness And Coverage
 

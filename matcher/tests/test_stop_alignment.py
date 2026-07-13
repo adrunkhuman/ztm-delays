@@ -138,7 +138,7 @@ def test_alignment_does_not_splice_abruptly_different_delay_regimes() -> None:
 def _exhaustive_align(
     stops: list[dict[str, Any]], candidates: list[list[CrossingCandidate]]
 ) -> tuple[tuple[CrossingCandidate | None, ...], bool]:
-    """The pre-optimization transition expansion, retained as a test oracle."""
+    """Reference transition expansion used as a regression oracle."""
     states: list[tuple[int, float, tuple[CrossingCandidate | None, ...]]] = [(0, 0.0, ())]
     for stop, alternatives in zip(stops, candidates, strict=True):
         next_states = [
@@ -173,7 +173,7 @@ def _exhaustive_align(
 def _unpruned_align(
     stops: list[dict[str, Any]], candidates: list[list[CrossingCandidate]]
 ) -> tuple[tuple[CrossingCandidate | None, ...], bool]:
-    """Small regression oracle without beam pruning."""
+    """Reference implementation used to validate beam-pruned selection."""
     states: list[tuple[int, float, tuple[CrossingCandidate | None, ...]]] = [(0, 0.0, ())]
     for stop, alternatives in zip(stops, candidates, strict=True):
         next_states = [
