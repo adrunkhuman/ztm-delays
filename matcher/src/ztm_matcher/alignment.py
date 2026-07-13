@@ -176,6 +176,7 @@ def _plausible_schedule_offset(course: dict[str, Any], candidate: dict[str, Any]
 def _requires_later_course_reanchor(
     previous_course: dict[str, Any], previous: dict[str, Any], course: dict[str, Any], candidate: dict[str, Any]
 ) -> bool:
+    """Detect service resuming under a later course after an unexplained terminal-cycle absence."""
     previous_delay = (previous["departure_event_time"] - previous_course["scheduled_start_time"]).total_seconds()
     delay = (candidate["departure_event_time"] - course["scheduled_start_time"]).total_seconds()
     terminal_absence = (candidate["origin_event_time"] - previous["destination_event_time"]).total_seconds()

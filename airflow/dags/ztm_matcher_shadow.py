@@ -1563,7 +1563,7 @@ def run_matcher_shadow_load(
     output = workspace / "output"
     _validate_run_workspace(config, workspace)
     try:
-        # Clear stale attempts before each retry; the marker retains all evidence we need afterwards.
+        # Cleanup is local only; loaded tables and pending/commit metadata retain durable retry evidence.
         shutil.rmtree(run_workspace, ignore_errors=True)
         workspace.mkdir(parents=True, exist_ok=False)
         bq_client = bigquery.Client(project=GCP_PROJECT)
@@ -2015,6 +2015,7 @@ def _validate_manual_gate_exception(
     marker: dict[str, object],
     exception: dict[str, object] | None,
 ) -> dict[str, object] | None:
+    """Allow only an audited swap exception; correctness and retention failures remain blocking."""
     gate = marker.get("quality_gate")
     if isinstance(gate, dict) and gate.get("status") == "pass":
         if exception is not None:
@@ -2078,8 +2079,8 @@ def promote_validated_shadow_artifacts(
 ) -> dict[str, object]:
     """Promote one validated shadow run; no DAG task calls this manual-only function.
 
-    The rollback boundary is a table copy of each previous stable input partition,
-    taken before this function is invoked. This function replaces no other partition.
+    External copies of each previous stable input partition are a precondition.
+    This function records counts but neither creates those copies nor performs rollback.
     """
     shadow = ShadowConfig.from_env()
     shadow.validate()
