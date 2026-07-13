@@ -244,6 +244,60 @@ def test_stage_failure_prevents_any_stable_mutation(monkeypatch: pytest.MonkeyPa
     assert mutations == []
 
 
+def test_promotion_records_accepted_swap_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MATCHER_CUTOVER_ENABLED", "true")
+    monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
+    monkeypatch.setenv("BIGQUERY_MATCHER_INPUT_DATASET", "matcher_input")
+    monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
+    shadow = _load_shadow_module()
+    marker = {
+        "processing_date": "2026-07-10",
+        "run_id": "run",
+        "quality_gate": {
+            "status": "fail",
+            "issues": [{"level": "fail", "category": "resource", "message": "swapping was observed"}],
+        },
+        "metrics": {"current_swap_bytes": 27_627_520},
+        "artifacts": {spec.key: {"sha256": "a" * 64, "rows": 1} for spec in shadow.ARTIFACTS},
+    }
+    tables = {spec.key: shadow._table_identity("matcher_shadow", "run", spec, "a" * 64) for spec in shadow.ARTIFACTS}
+    written: list[dict[str, object]] = []
+    monkeypatch.setattr(shadow.storage, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow.bigquery, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow, "_read_marker", lambda *_args: marker)
+    monkeypatch.setattr(shadow, "_pending_tables", lambda *_args: tables)
+    monkeypatch.setattr(shadow, "_require_exact_processing_partition", lambda *_args: 1)
+    monkeypatch.setattr(shadow, "_stage_artifact", lambda *_args: None)
+    monkeypatch.setattr(shadow, "_verify_table_contract", lambda *_args: None)
+    monkeypatch.setattr(shadow, "_stable_partition_counts", lambda *_args: {"partition_rows": 0})
+    monkeypatch.setattr(shadow, "_query_job", lambda *_args: None)
+    monkeypatch.setattr(shadow, "_require_stable_processing_partition", lambda *_args: 1)
+    monkeypatch.setattr(
+        shadow,
+        "_write_promotion_marker",
+        lambda _client, _config, _date, _run, payload: written.append(payload) or "gs://bucket/promotion.json",
+    )
+    exception = {
+        "processing_date": "2026-07-10",
+        "run_id": "run",
+        "reason": "Reviewed cold-page swap with RSS below the production bound",
+        "approved_by": "operator@example.com",
+        "approved_at": "2026-07-13T01:45:00Z",
+        "max_current_swap_bytes": 32 * 1024**2,
+    }
+
+    result = shadow.promote_validated_shadow_artifacts("2026-07-10", "run", accepted_gate_exception=exception)
+
+    assert result["status"] == "promoted"
+    assert written[0]["accepted_gate_exception"] == {
+        **exception,
+        "approved_at": "2026-07-13T01:45:00+00:00",
+        "observed_current_swap_bytes": 27_627_520,
+        "accepted_failure": {"level": "fail", "category": "resource", "message": "swapping was observed"},
+    }
+
+
 def test_promotion_marker_is_create_only_and_idempotent(tmp_path: Path) -> None:
     shadow = _load_shadow_module()
     config = shadow.ShadowConfig(True, False, "shadow", tmp_path, ("matcher",), None, 1, "shadow/matcher")

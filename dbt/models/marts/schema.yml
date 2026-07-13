@@ -1716,7 +1716,7 @@ unit_tests:
         publish_service_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
         use_python_reconstruction: true
-    given:
+    given: &fct_expected_stop_event_given
       - input: ref('fct_trip')
         format: sql
         rows: |
@@ -1798,7 +1798,7 @@ unit_tests:
             'chain-prior', 'block_id', 'block-prior', 1, 1, 1, array<string>[]
       - input: source('matcher_input', 'reconstruction_stop_semantics')
         format: sql
-        rows: |
+        rows: &fct_expected_stop_semantics_rows |
           select
             base.*,
             date '2026-01-15' as service_date,
@@ -1834,6 +1834,9 @@ unit_tests:
           union all select 'trip-4', '100108', 0, 31200, 31200, 0, 0, 'regular', 'snapshot-valid'
           union all select 'trip-1', '100101', 0, 27000, 27000, 0, 0, 'regular', 'snapshot-prior'
           ) as base
+      - input: ref('int_gtfs_trip_stop_semantics')
+        format: sql
+        rows: *fct_expected_stop_semantics_rows
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1890,7 +1893,7 @@ unit_tests:
             'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 0,
             timestamp('2026-01-15 07:30:30+01'), 30, 'segment_within_75m', 75.0, 8.0, 9.0, 10.0,
             timestamp('2026-01-15 07:30:00+01'), timestamp('2026-01-15 07:31:00+01'), 60
-    expect:
+    expect: &fct_expected_stop_event_expect
       format: sql
       rows: |
         select
@@ -2050,6 +2053,17 @@ unit_tests:
           timestamp('2026-01-15 07:30:30+01'), 30, timestamp('2026-01-15 07:00:00+01'),
           'segment_within_75m', 75.0, 8.0, 9.0, 10.0, timestamp('2026-01-15 07:30:00+01'),
           timestamp('2026-01-15 07:31:00+01'), 60, true, false, 'observed'
+
+  - name: fct_expected_stop_event_preserves_default_reconstruction_contract
+    model: fct_expected_stop_event
+    overrides:
+      vars:
+        processing_date: '2026-01-16'
+        publish_service_date: '2026-01-15'
+        gtfs_snapshot_id: 'snapshot-valid'
+        use_python_reconstruction: false
+    given: *fct_expected_stop_event_given
+    expect: *fct_expected_stop_event_expect
 
   - name: dim_line_current_uses_selected_snapshot_and_collects_headsigns
     model: dim_line_current
