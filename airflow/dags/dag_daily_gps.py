@@ -34,7 +34,7 @@ from ztm_airflow_common import (
     dbt_command,
     dbt_vars,
 )
-from ztm_matcher_shadow import publish_matcher_canonical_artifacts, run_matcher_shadow_load
+from ztm_matcher import publish_matcher_artifacts, run_matcher_load
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -51,7 +51,8 @@ INT_GTFS_PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_
 DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
 MATCHER_FACT_DEPENDENCY_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__routes stg_gtfs__calendar_dates"
-    " int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version dim_schedule_version"
+    " int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_gtfs_trip_schedule int_gtfs_duty_chain"
+    " int_schedule_version dim_schedule_version"
 )
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 TRIP_FACT_MODEL = "fct_trip"
@@ -324,37 +325,35 @@ with DAG(
             "--exclude test_type:generic",
         )
 
-    with TaskGroup(
-        "matcher_canonical", group_display_name="Canonical Python matcher", prefix_group_id=False
-    ) as matcher_canonical_group:
+    with TaskGroup("matcher", group_display_name="Python matcher", prefix_group_id=False) as matcher_group:
 
         @task(execution_timeout=timedelta(minutes=60))
-        def run_matcher_canonical_load(processing_date: str, snapshot_id: object) -> dict[str, object]:
+        def matcher_load(processing_date: str, snapshot_id: object) -> dict[str, object]:
             """Run the bounded matcher and load validated content-addressed artifacts."""
             context = get_current_context()
             dag_run = context.get("dag_run")
             task_instance = context.get("ti")
-            run_id = str(getattr(dag_run, "run_id", "manual-canonical"))
+            run_id = str(getattr(dag_run, "run_id", "manual-matcher"))
             try_number = int(getattr(task_instance, "try_number", 1) or 1)
-            result = run_matcher_shadow_load(processing_date, str(snapshot_id), run_id, try_number=try_number)
+            result = run_matcher_load(processing_date, str(snapshot_id), run_id, try_number=try_number)
             if not result.get("enabled"):
-                raise RuntimeError("Canonical matcher requires MATCHER_SHADOW_ENABLED=true")
+                raise RuntimeError("Matcher requires MATCHER_ENABLED=true")
             return result
 
         @task(execution_timeout=timedelta(minutes=60))
-        def publish_matcher_canonical(processing_date: str, pending_context: object) -> dict[str, object]:
-            """Promote validated artifacts into stable matcher-input partitions."""
+        def matcher_publish(processing_date: str, pending_context: object) -> dict[str, object]:
+            """Publish validated artifacts into stable matcher-input partitions."""
             if not isinstance(pending_context, dict):
-                raise TypeError("Matcher canonical load task returned invalid pending context")
-            run_id = str(getattr(get_current_context().get("dag_run"), "run_id", "manual-canonical"))
-            return publish_matcher_canonical_artifacts(
+                raise TypeError("Matcher load task returned invalid pending context")
+            run_id = str(getattr(get_current_context().get("dag_run"), "run_id", "manual-matcher"))
+            return publish_matcher_artifacts(
                 processing_date,
                 run_id,
                 cast("dict[str, object]", pending_context),
             )
 
-        matcher_canonical_load = run_matcher_canonical_load(PROCESSING_DATE, selected_gtfs_snapshot)
-        matcher_canonical_publish = publish_matcher_canonical(PROCESSING_DATE, matcher_canonical_load)
+        matcher_load = matcher_load(PROCESSING_DATE, selected_gtfs_snapshot)
+        matcher_publish = matcher_publish(PROCESSING_DATE, matcher_load)
 
     dbt_run_matcher_fact_dependencies = _dbt_task(
         "dbt_run_matcher_fact_dependencies",
@@ -535,22 +534,18 @@ with DAG(
             """Fail the DAG run when the single-sink graph propagates an upstream failure."""
             raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
 
-    selected_gtfs_snapshot >> matcher_canonical_load
+    selected_gtfs_snapshot >> matcher_load
     selected_gtfs_snapshot >> dbt_run_matcher_fact_dependencies
     selected_prior_gtfs_snapshot >> dbt_run_prior_coverage_schedule
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
-    dbt_test_stg_gps_pings >> matcher_canonical_load
-    matcher_canonical_load >> matcher_canonical_publish
+    dbt_test_stg_gps_pings >> matcher_load
+    matcher_load >> matcher_publish
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
-    (
-        [matcher_canonical_publish, dbt_run_matcher_fact_dependencies]
-        >> dbt_run_fct_trip_current
-        >> dbt_test_fct_trip_current
-    )
+    ([matcher_publish, dbt_run_matcher_fact_dependencies] >> dbt_run_fct_trip_current >> dbt_test_fct_trip_current)
     dbt_test_fct_trip_current >> dbt_run_fct_stop_arrival_current >> dbt_test_fct_stop_arrival_current
     dbt_test_fct_stop_arrival_current >> dbt_run_fct_expected_stop_event_current
     dbt_run_fct_expected_stop_event_current >> dbt_test_fct_expected_stop_event_current
-    [matcher_canonical_publish, dbt_run_matcher_fact_dependencies] >> dbt_run_fct_trip_prior >> dbt_test_fct_trip_prior
+    [matcher_publish, dbt_run_matcher_fact_dependencies] >> dbt_run_fct_trip_prior >> dbt_test_fct_trip_prior
     dbt_test_fct_trip_prior >> dbt_run_fct_stop_arrival_prior >> dbt_test_fct_stop_arrival_prior
     dbt_test_fct_stop_arrival_prior >> dbt_run_fct_expected_stop_event_prior
     dbt_run_fct_expected_stop_event_prior >> dbt_test_fct_expected_stop_event_prior

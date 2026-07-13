@@ -178,7 +178,7 @@ def build_historical_correction_plan(
         "days": days,
         "sequential_commands": [
             "bq query --use_legacy_sql=false --dry_run --maximum_bytes_billed=$MATCHER_HISTORICAL_MAX_QUERY_BYTES '<bounded correction query>'",
-            "Review this plan, the dry-run estimate, #132 fixture results, and shadow quality_gate before any manual reconstruction.",
+            "Review this plan and its dry-run estimate before any manual reconstruction.",
             "Run one approved processing date at a time; no scheduled publication or canonical partition replacement is authorized by this planner.",
         ],
         "rollback_boundary": "No canonical data is changed by planning. Any future correction must stop before its first approved partition replacement; restoring prior canonical partitions is outside this tool.",

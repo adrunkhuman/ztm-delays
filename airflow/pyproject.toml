@@ -20,7 +20,6 @@ convention = "google"
 "dags/dag_daily_gps.py" = ["S608"]
 # The serving export DAG queries fixed mart table names and metadata constants, not user input.
 "dags/dag_serving_export.py" = ["S608"]
-# Shadow queries interpolate only module-defined canonical tables and sanitized run-scoped tables.
-# Cloud clients are intentionally duck-typed so unit tests do not require provider packages.
-"dags/ztm_matcher_shadow.py" = ["ANN401", "C901", "PLC0415", "PLR0912", "PLR0913", "PLR0915", "S608"]
+# Cloud clients are intentionally duck-typed and query identifiers are constrained by local matcher contracts.
+"dags/ztm_matcher.py" = ["ANN401", "C901", "PLR0912", "PLR0913", "S608"]
 "dags/matcher_historical_correction.py" = ["ANN401", "S608"]

@@ -2,7 +2,7 @@ version: 2
 
 sources:
   - name: matcher_input
-    description: Stable, opt-in Python matcher artifacts. This dataset is owned by the explicit cutover promotion path, never by raw, intermediate, or marts Airflow tasks.
+    description: Stable Python matcher artifacts published by the nightly GPS DAG. Raw, intermediate, and marts tasks do not write this dataset.
     database: "{{ env_var('GCP_PROJECT', 'ztm-data') }}"
     schema: "{{ env_var('BIGQUERY_MATCHER_INPUT_DATASET', 'ztm_matcher_input') }}"
     tables:

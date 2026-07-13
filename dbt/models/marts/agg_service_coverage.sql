@@ -98,43 +98,40 @@ expected_by_hour as (
 
 observed_trips as (
     select
-        schedule.service_date,
-        date(schedule.scheduled_start_time, 'Europe/Warsaw') as scheduled_start_date,
-        schedule.gtfs_snapshot_id,
-        schedule.line,
-        schedule.route_short_name,
-        schedule.mode,
-        schedule.direction_id,
-        schedule.trip_headsign,
-        schedule.schedule_day_type,
-        schedule.schedule_service_ids,
-        schedule.schedule_version_id,
-        schedule.trip_id,
-        schedule.scheduled_start_time,
-        matcher.actual_start_time,
-        matcher.actual_end_time,
-        matcher.service_observation_class,
-        case matcher.trip_quality
+        service_date,
+        date(scheduled_start_time, 'Europe/Warsaw') as scheduled_start_date,
+        gtfs_snapshot_id,
+        line,
+        route_short_name,
+        mode,
+        direction_id,
+        trip_headsign,
+        schedule_day_type,
+        schedule_service_ids,
+        schedule_version_id,
+        trip_id,
+        scheduled_start_time,
+        actual_start_time,
+        actual_end_time,
+        service_observation_class,
+        case trip_quality
             when 'complete' then 2
             when 'partial' then 1
         end as trip_quality_rank,
-        case matcher.service_observation_class
+        case service_observation_class
             when 'regular' then 3
             when 'truncated' then 2
             when 'modified' then 1
             else 0
         end as service_observation_rank
-    from {{ source('matcher_input', 'reconstruction_trip_facts') }} as matcher
-    inner join scheduled_trips as schedule
-        on matcher.gtfs_snapshot_id = schedule.gtfs_snapshot_id
-        and matcher.service_date = schedule.service_date
-        and matcher.trip_id = schedule.trip_id
-    where matcher.gps_date between date('{{ aggregation_start_date }}')
-        and date('{{ max_gps_date }}')
-      and date(schedule.scheduled_start_time, 'Europe/Warsaw') between date('{{ aggregation_start_date }}')
+    from {{ ref('fct_trip') }}
+    where service_date between date_sub(date('{{ aggregation_start_date }}'), interval 1 day)
         and date('{{ processing_date }}')
-      and matcher.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-      and matcher.service_observation_class in ('regular', 'truncated', 'modified')
+      and gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ max_gps_date }}')
+      and date(scheduled_start_time, 'Europe/Warsaw') between date('{{ aggregation_start_date }}')
+        and date('{{ processing_date }}')
+      and service_observation_class in ('regular', 'truncated', 'modified')
 ),
 
 observed_trip_best_quality as (
@@ -219,7 +216,6 @@ from expected_by_hour as expected
 left join observed_by_hour as observed
     on expected.service_date = observed.service_date
     and expected.scheduled_start_date = observed.scheduled_start_date
-    and expected.gtfs_snapshot_id = observed.gtfs_snapshot_id
     and expected.line = observed.line
     and expected.direction_id = observed.direction_id
     and expected.trip_headsign = observed.trip_headsign

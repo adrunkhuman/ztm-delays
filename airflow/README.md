@@ -19,30 +19,20 @@ Runtime env defaults match the current VPS:
 | `DBT_PROJECT_DIR` | `/opt/airflow/dbt` |
 | `RAW_GPS_PREFIX` | `raw/gps` |
 | `RAW_GTFS_PREFIX` | `raw/gtfs` |
-| `MATCHER_SHADOW_ENABLED` | `false` |
-| `MATCHER_SHADOW_STRICT` | `false` |
-| `MATCHER_SHADOW_KEEP_WORKSPACE` | `false` |
-| `BIGQUERY_MATCHER_SHADOW_DATASET` | Required when enabled; no default |
-| `MATCHER_SHADOW_WORKSPACE_ROOT` | `/opt/airflow/matcher-shadow` |
-| `MATCHER_SHADOW_COMMAND` | `uv run --locked --project /opt/airflow/matcher ztm-matcher` |
-| `MATCHER_SHADOW_PROJECT_DIR` | `/opt/airflow/matcher` |
-| `MATCHER_SHADOW_TIMEOUT_SECONDS` | `2700` |
-| `MATCHER_SHADOW_GCS_PREFIX` | `shadow/matcher` |
-| `MATCHER_SHADOW_MAX_GPS_OBJECTS` | `5000` |
-| `MATCHER_SHADOW_MAX_GPS_BYTES` | `21474836480` (20 GiB) |
-| `MATCHER_SHADOW_MIN_FREE_DISK_BYTES` | `5368709120` (5 GiB) |
-| `MATCHER_SHADOW_MAX_COMPARISON_BYTES` | `5368709120` (5 GiB) |
-| `MATCHER_SHADOW_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
-| `MATCHER_SHADOW_GATE_CURRENT_ROW_RETENTION_MIN` | `0.75` |
-| `MATCHER_SHADOW_GATE_PRIOR_ROW_RETENTION_MIN` | `0.40` |
-| `MATCHER_SHADOW_GATE_COMPLETE_RATE_DROP_MAX` | `0.15` |
-| `MATCHER_SHADOW_GATE_EXPECTED_RATE_DELTA_MAX` | `0.15` |
-| `MATCHER_SHADOW_GATE_DELAY_PERCENTILE_RATIO_MAX` | `2.0` |
-| `MATCHER_SHADOW_GATE_DELAY_TAIL_DELTA_MAX` | `0.15` |
-| `MATCHER_SHADOW_GATE_MATERIAL_LINE_ROWS_MIN` | `20` |
-| `MATCHER_SHADOW_GATE_PEAK_RSS_BYTES_MAX` | `2147483648` (2 GiB) |
-| `MATCHER_CUTOVER_ENABLED` | `false` |
-| `MATCHER_CUTOVER_MAX_BYTES` | `5368709120` (5 GiB) |
+| `MATCHER_ENABLED` | `false` |
+| `BIGQUERY_MATCHER_STAGING_DATASET` | Required when enabled; no default |
+| `MATCHER_WORKSPACE_ROOT` | `/opt/airflow/matcher-work` |
+| `MATCHER_COMMAND` | `uv run --locked --project /opt/airflow/matcher ztm-matcher` |
+| `MATCHER_PROJECT_DIR` | `/opt/airflow/matcher` |
+| `MATCHER_TIMEOUT_SECONDS` | `2700` |
+| `MATCHER_GCS_PREFIX` | `matcher/runs` |
+| `MATCHER_KEEP_WORKSPACE` | `false` |
+| `MATCHER_MAX_GPS_OBJECTS` | `5000` |
+| `MATCHER_MAX_GPS_BYTES` | `21474836480` (20 GiB) |
+| `MATCHER_MIN_FREE_DISK_BYTES` | `5368709120` (5 GiB) |
+| `MATCHER_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
+| `MATCHER_MAX_RSS_BYTES` | `2147483648` (2 GiB) |
+| `MATCHER_MAX_PUBLICATION_BYTES` | `5368709120` (5 GiB) |
 
 - Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
 - `dbt/` is mounted at `DBT_PROJECT_DIR`.
@@ -51,7 +41,7 @@ Runtime env defaults match the current VPS:
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
 - The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, `duckdb`, `numpy`, `pyarrow`, `pytz`, `uv`, and Python 3.13.
 - The service account can read/write the configured GCS bucket and load/query the configured BigQuery datasets.
-- Canonical matcher execution requires this read-only Coolify bind: `/home/ubuntu/ztm-pipeline/matcher` to `/opt/airflow/matcher`. Set `UV_PROJECT_ENVIRONMENT=/opt/airflow/matcher-shadow-venv` so `uv` does not write to that mount, and ensure `MATCHER_SHADOW_WORKSPACE_ROOT` is writable. Redeploy Airflow after matcher code changes so the bind is refreshed.
+- Mount the matcher source read-only at `/opt/airflow/matcher`. Set `UV_PROJECT_ENVIRONMENT` to a writable path outside that mount, and keep `MATCHER_WORKSPACE_ROOT` writable.
 
 ## DAG Boundaries
 
@@ -71,19 +61,19 @@ Runtime env defaults match the current VPS:
 - `dag_serving_export` is manual; use a fresh `export_id` for every run.
 - Default dbt tests stay bounded. Full-history schedule/version and broad aggregate audits are manual jobs.
 
-## Canonical Matcher
+## Python Matcher
 
-`dag_daily_gps` runs the Python matcher as its only reconstruction path. The canonical TaskGroup starts after snapshot selection and GPS staging validation, downloads immutable GPS/GTFS inputs, invokes the bounded matcher, validates artifact schema/lineage/grain, and loads content-addressed run tables. It then commits hard-invariant evidence and atomically replaces four stable `ztm_matcher_input` partitions before dbt publishes current/prior facts.
+`dag_daily_gps` runs the Python matcher as its only reconstruction path. It starts after snapshot selection and GPS staging validation, downloads immutable GPS/GTFS inputs, invokes the bounded matcher, validates the outputs, and loads content-addressed run tables.
 
-Production requires `MATCHER_SHADOW_ENABLED=true`, `MATCHER_CUTOVER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_SHADOW_DATASET`, the matcher bind, and a writable workspace. Historical `SHADOW` names remain in environment variables and table prefixes for compatibility; they no longer mean that legacy comparison controls publication.
+Production requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, the matcher source mount, and writable workspace and `uv` environment paths.
 
-Canonical gates require non-empty trip, stop-arrival, expected-event, and stop-semantics artifacts; validated lineage and unique grains; RSS at or below the configured 2 GiB bound; and measured zero swap. Failure leaves existing stable input partitions and canonical facts unchanged. The stable input dataset/tables are created idempotently on first publication.
+Before publication, Airflow verifies artifact schemas, hashes, snapshot lineage, row grains, processing dates, non-empty outputs, bus/tram coverage, accepted-execution counts, peak RSS, and zero swap. It then replaces the four stable `ztm_matcher_input` partitions in one BigQuery transaction. The stable dataset and tables are created idempotently on first publication.
 
-The three fact artifacts are partitioned by `gps_date`; stop semantics is partitioned by `processing_date`. dbt publishes `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` for current and prior service dates, then rebuilds coverage, status, and serving marts. Legacy BigQuery ping matching and stop reconstruction are not scheduled or retained.
+The three fact artifacts are partitioned by `gps_date`; stop semantics is partitioned by `processing_date`. dbt publishes `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` for current and prior service dates, then rebuilds coverage, status, and serving marts.
 
 Minimal recovery is to fix the matcher/configuration and rerun the processing date. Raw GPS and GTFS remain immutable, stable input replacement is atomic, fact publication uses partition overwrite, and serving export keeps its previous artifact until a new export succeeds.
 
-`matcher_historical_correction.py` remains a manual, read-only planner for later retained-history work.
+`matcher_historical_correction.py` produces bounded, read-only plans for explicitly approved historical corrections.
 
 ## Serving Export
 

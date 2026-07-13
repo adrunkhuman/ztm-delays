@@ -1076,7 +1076,7 @@ unit_tests:
         rows: |
           select '187' as route_id, '187' as route_short_name, 3 as route_type, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'M1', 'M1', 1, 'metro', 'snapshot-valid'
-      - input: source('matcher_input', 'reconstruction_trip_facts')
+      - input: ref('fct_trip')
         format: sql
         rows: |
           select
@@ -1120,7 +1120,7 @@ unit_tests:
             'truncated'
           union all
           select
-            'snapshot-valid',
+            'snapshot-next-day',
             date '2026-01-16',
             date '2026-01-14',
             'trip-overnight',

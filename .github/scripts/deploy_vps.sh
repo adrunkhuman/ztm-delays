@@ -42,11 +42,12 @@ fi
 
 sudo -n docker exec -i "$airflow_container" python <<'PY'
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, "/opt/airflow/dags")
-from ztm_matcher_shadow import CutoverConfig, ShadowConfig
+from ztm_matcher import MatcherConfig
 
 for path in (
     Path("/opt/airflow/dags/ztm_airflow_common.py"),
@@ -54,34 +55,30 @@ for path in (
     Path("/opt/airflow/dags/dag_gtfs_load.py"),
     Path("/opt/airflow/dags/dag_daily_gps.py"),
     Path("/opt/airflow/dags/dag_serving_export.py"),
-    Path("/opt/airflow/dags/ztm_matcher_shadow.py"),
+    Path("/opt/airflow/dags/ztm_matcher.py"),
 ):
     compile(path.read_text(), str(path), "exec")
 
-shadow = ShadowConfig.from_env()
-shadow.validate()
-cutover = CutoverConfig.from_env()
-cutover.validate(shadow)
-if not shadow.enabled or not cutover.enabled:
-    raise RuntimeError("Canonical matcher requires MATCHER_SHADOW_ENABLED=true and MATCHER_CUTOVER_ENABLED=true")
+matcher = MatcherConfig.from_env()
+matcher.validate()
+if not matcher.enabled:
+    raise RuntimeError("Matcher requires MATCHER_ENABLED=true")
 if not Path("/opt/airflow/matcher").is_dir():
-    raise RuntimeError("Canonical matcher bind is missing")
+    raise RuntimeError("Matcher bind is missing")
 uv_environment_value = os.environ.get("UV_PROJECT_ENVIRONMENT", "")
 if not uv_environment_value:
-    raise RuntimeError("Canonical matcher requires UV_PROJECT_ENVIRONMENT")
+    raise RuntimeError("Matcher requires UV_PROJECT_ENVIRONMENT")
 uv_environment = Path(uv_environment_value)
 if not uv_environment.is_absolute() or uv_environment == Path("/opt/airflow/matcher") or Path("/opt/airflow/matcher") in uv_environment.parents:
     raise RuntimeError("UV_PROJECT_ENVIRONMENT must be an absolute writable path outside the matcher bind")
 uv_environment.mkdir(parents=True, exist_ok=True)
 if not os.access(uv_environment, os.W_OK):
     raise RuntimeError(f"UV_PROJECT_ENVIRONMENT is not writable: {uv_environment}")
-shadow.workspace_root.mkdir(parents=True, exist_ok=True)
-if not os.access(shadow.workspace_root, os.W_OK):
-    raise RuntimeError(f"Canonical matcher workspace is not writable: {shadow.workspace_root}")
+matcher.workspace_root.mkdir(parents=True, exist_ok=True)
+if not os.access(matcher.workspace_root, os.W_OK):
+    raise RuntimeError(f"Matcher workspace is not writable: {matcher.workspace_root}")
+subprocess.run([*matcher.command, "--help"], cwd=matcher.project_dir, check=True, stdout=subprocess.DEVNULL)
 PY
-
-sudo -n docker exec "$airflow_container" sh -lc \
-  'cd /opt/airflow/matcher && uv run --locked --project /opt/airflow/matcher ztm-matcher --help >/dev/null'
 
 expected_dags=(
   dag_gtfs_poll

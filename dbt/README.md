@@ -26,7 +26,7 @@ The three facts overwrite `publish_service_date`, defaulting to `processing_date
 
 Schedule versions are per-line timetable fingerprints derived from selected snapshots across collected history. They intentionally exclude display labels and unstable GTFS identifiers. Nightly runs use the latest built GTFS snapshot and republish the prior service date, so late corrections for yesterday are picked up by the next run.
 
-`mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` incrementally replace the inclusive `[aggregation_start_date, processing_date]` partitions. `mart_day_completeness` summarizes raw GPS presence. `agg_service_coverage` compares scheduled trips with complete/partial canonical trip facts. `mart_pipeline_status` combines ingestion completeness, trip quality, settled service coverage, stop-arrival counts, and GTFS freshness; per-ping legacy match rate is no longer part of the contract.
+`mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` incrementally replace the inclusive `[aggregation_start_date, processing_date]` partitions. `mart_day_completeness` summarizes raw GPS presence. `agg_service_coverage` compares scheduled trips with complete/partial trip facts. `mart_pipeline_status` combines ingestion completeness, trip quality, settled service coverage, stop-arrival counts, and GTFS freshness.
 
 ## Test Tiers
 

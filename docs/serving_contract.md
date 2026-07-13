@@ -256,7 +256,6 @@ Column-level removal candidates:
 | Ranking rows | Zone-1 public-service universe excludes non-qualifying entities. |
 | Night (`N`) lines | Effectively excluded from rankings because `rank_eligibility_min_arrivals` is unmet due to a known midnight-fragmentation bug in trip matching ([#113](https://github.com/adrunkhuman/ztm-pipeline/issues/113)). |
 | Best rank ties | Old best ranking used `on_time_rate desc, median_delay_seconds asc`; new ranking is single-metric `on_time_rate` only. |
-| Matcher coverage | Arrival volumes are about 1.5-3x higher per entity and delay medians shift upward versus the previous artifact because the legacy matcher misassigned pings to the following trip once delay exceeded about 30s, systematically dropping delayed trips and biasing historical delay stats low. Fact grain checks showed `rows_ = distinct_grain` for `fct_stop_arrival`, `fct_trip`, and `fct_expected_stop_event`, so this is not duplicate publishing. |
 
 ## Implementation Gates
 

@@ -56,7 +56,7 @@ Loop over dates in order. For every GPS processing date, ensure at least one GTF
 schedule dimensions have been built. Nightly rebuilds use the latest built snapshot available at rebuild time, not a
 same-day cutoff rule.
 
-For each GPS processing date, rerun the matcher and promotion, then publish facts for the current service date and
+For each GPS processing date, rerun the matcher publication, then publish facts for the current service date and
 the prior service date. Publishing the prior date incorporates after-midnight observations without relabeling prior-day
 rows to the current processing date's snapshot. After detail exists, rebuild completeness, coverage, aggregate, and
 pipeline-status marts over the collected-history window.
@@ -104,26 +104,26 @@ sanitizes it, and writes `poller_status` plus `last_export_at` into `ztm.duckdb.
 seconds are exported as `stale`. Missing or malformed heartbeat data is exported as `unknown`, not as a serving-export
 failure.
 
-## Canonical Matcher Runs
+## Matcher Runs
 
-`dag_daily_gps` uses the Python matcher as its sole reconstruction path. There is no legacy matcher or comparison gate.
+`dag_daily_gps` uses the Python matcher as its sole reconstruction path.
 
-Canonical runs require `MATCHER_SHADOW_ENABLED=true`, `MATCHER_CUTOVER_ENABLED=true`, isolated shadow and matcher-input
-datasets, the read-only matcher bind at `/opt/airflow/matcher`, a writable `MATCHER_SHADOW_WORKSPACE_ROOT`, and a separate
+Matcher runs require `MATCHER_ENABLED=true`, isolated staging and matcher-input datasets, the read-only matcher source at
+`/opt/airflow/matcher`, a writable `MATCHER_WORKSPACE_ROOT`, and a separate
 `UV_PROJECT_ENVIRONMENT` so `uv` never writes to the matcher mount.
 
 For each processing date, the DAG reads immutable GPS inputs and the pinned GTFS snapshot, then runs the bounded matcher.
-Publication requires non-empty artifacts, exact schema and snapshot lineage, unique grains, RSS no greater than 2 GiB,
-and zero swap. Legacy or canonical output comparison is not a gate.
+Before publication, it verifies non-empty artifacts, exact schemas and snapshot lineage, unique grains, accepted-execution
+counts, complete mode coverage, RSS no greater than the configured limit, and zero swap.
 
 After validation, the DAG idempotently creates the stable matcher-input dataset and tables when absent, then atomically
-replaces all four processing-date partitions. It publishes current and prior service-date dbt facts only after promotion,
+replaces all four processing-date partitions. It publishes current and prior service-date dbt facts only after publication,
 followed by coverage, pipeline-status, and serving marts. A validation failure leaves the previous stable partitions and
 canonical facts unchanged.
 
 Retries and recovery rerun the same processing date from immutable GPS and pinned GTFS inputs. They must not select a
-newer snapshot implicitly. `matcher_historical_correction.py` remains a read-only planner for separately approved retained
-history work; it does not download, load, promote, or mutate warehouse data.
+newer snapshot implicitly. `matcher_historical_correction.py` creates read-only plans for separately approved retained-history
+work; it does not download, load, publish, or mutate warehouse data.
 
 ## Deployment Sync
 
