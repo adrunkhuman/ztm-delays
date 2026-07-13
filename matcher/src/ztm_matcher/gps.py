@@ -81,10 +81,11 @@ def normalize(
                 {diagnostic_sql}
             ), dedup as (
               select *, row_number() over (
-                partition by vehicle_number, gps_time order by ingested_at desc, line, brigade, lat, lon, vehicle_type
+                partition by vehicle_type, vehicle_number, gps_time
+                order by ingested_at desc, line, brigade, lat, lon
               ) rank from source
             ) select line, brigade, lat, lon, gps_time, vehicle_number, vehicle_type, ingested_at, gps_date from dedup
-              where rank = 1 order by vehicle_number, gps_time, ingested_at, line, brigade
+              where rank = 1 order by vehicle_type, vehicle_number, gps_time, ingested_at, line, brigade
         """,
         )
         output.parent.mkdir(parents=True, exist_ok=True)

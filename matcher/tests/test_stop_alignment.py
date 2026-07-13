@@ -488,3 +488,42 @@ def test_ownership_bounds_exclude_handoff_and_partial_gps_stays_bounded() -> Non
 
     assert result.operational_crossings[0]["segment_start_time"] >= execution["ownership_interval_start_time"]
     assert result.operational_crossings[0]["line"] == "145"
+
+
+def test_first_stop_can_use_source_bounded_pre_ownership_segment() -> None:
+    execution = _execution(
+        service_date=date(2026, 1, 14),
+        source_ping_start_time=BASE,
+        ownership_interval_start_time=BASE + timedelta(seconds=60),
+        ownership_interval_end_time=BASE + timedelta(seconds=180),
+        source_ping_end_time=BASE + timedelta(seconds=180),
+    )
+    stop = _stop(1, 0.0)
+    stop["arrival_time_seconds"] = 25 * 3600
+
+    result = align_stop_crossings(execution, [stop], [_ping(50, 0.0), _ping(70, 0.002), _ping(120, 0.004)])
+
+    assert len(result.operational_crossings) == 1
+    assert result.operational_crossings[0]["stop_sequence"] == 1
+    assert result.operational_crossings[0]["segment_start_time"] == BASE + timedelta(seconds=50)
+    assert result.passenger_arrivals == result.operational_crossings
+
+
+def test_pre_ownership_segment_cannot_match_later_stop() -> None:
+    execution = _execution(
+        service_date=date(2026, 1, 14),
+        source_ping_start_time=BASE,
+        ownership_interval_start_time=BASE + timedelta(seconds=60),
+        ownership_interval_end_time=BASE + timedelta(seconds=180),
+        source_ping_end_time=BASE + timedelta(seconds=180),
+    )
+    first, later = _stop(1, 0.01), _stop(2, 0.0)
+    first["arrival_time_seconds"], later["arrival_time_seconds"] = 25 * 3600, 25 * 3600 + 60
+
+    candidates = crossing_candidates(
+        execution,
+        [first, later],
+        [_ping(50, 0.0), _ping(70, 0.002), _ping(120, 0.004)],
+    )
+
+    assert candidates == [[], []]

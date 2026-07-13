@@ -142,6 +142,7 @@ unit_tests:
           union all select '187', 'D21', 52.2297, 21.0122, timestamp('2026-01-15 11:03:00+00:00'), '1235', 1, timestamp('2026-01-15 11:04:00+00:00')
           union all select '187', '0013', 52.2297, 21.0122, timestamp('2026-01-15 11:05:00+00:00'), 'd. 35154', 1, timestamp('2026-01-15 11:06:00+00:00')
           union all select 'L19', '0772', 107.5736318, 21.0689015, timestamp('2026-01-15 11:07:00+00:00'), '35153', 1, timestamp('2026-01-15 11:08:00+00:00')
+          union all select '31', '0001', 52.2397, 21.0222, timestamp('2026-01-15 11:00:00+00:00'), '1234', 2, timestamp('2026-01-15 11:01:30+00:00')
     expect:
       rows:
         - line: '187'
@@ -152,6 +153,15 @@ unit_tests:
           vehicle_number: '1234'
           vehicle_type: 1
           ingested_at: '2026-01-15 11:02:00+00:00'
+          gps_date: '2026-01-15'
+        - line: '31'
+          brigade: '1'
+          lat: 52.2397
+          lon: 21.0222
+          gps_time: '2026-01-15 11:00:00+00:00'
+          vehicle_number: '1234'
+          vehicle_type: 2
+          ingested_at: '2026-01-15 11:01:30+00:00'
           gps_date: '2026-01-15'
 
   - name: stg_gps__pings_uses_warsaw_local_processing_date

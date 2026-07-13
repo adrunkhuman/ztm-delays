@@ -264,6 +264,7 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
                 )) / nullif(date_diff('second', lag(gps.gps_time) over trip_window, gps.gps_time), 0) speed_mps
             from accepted inner join read_parquet('{_quoted(gps)}') gps
                 on accepted.vehicle_number = gps.vehicle_number
+                and accepted.vehicle_type = gps.vehicle_type
                 and gps.gps_time between accepted.ownership_interval_start_time and accepted.ownership_interval_end_time
             window trip_window as (
                 partition by accepted.gtfs_snapshot_id, accepted.processing_date, accepted.service_date,
@@ -410,7 +411,9 @@ def build_facts(
             inner join read_parquet('{trip_sql}') trips
                 using (gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number)
             left join read_parquet('{_quoted(normalized_gps)}') segment
-                on arrivals.vehicle_number = segment.vehicle_number and arrivals.segment_start_time = segment.gps_time
+                on arrivals.vehicle_type = segment.vehicle_type
+                and arrivals.vehicle_number = segment.vehicle_number
+                and arrivals.segment_start_time = segment.gps_time
             where arrivals.alignment_confidence = 'high'
             order by trips.gtfs_snapshot_id, trips.service_date, trips.trip_id, trips.vehicle_number,
                 arrivals.stop_sequence
@@ -465,7 +468,9 @@ def build_facts(
                 and arrivals.is_passenger_stop
                 and arrivals.stop_execution_class = 'passenger'
             left join read_parquet('{_quoted(normalized_gps)}') segment
-                on arrivals.vehicle_number = segment.vehicle_number and arrivals.segment_start_time = segment.gps_time
+                on arrivals.vehicle_type = segment.vehicle_type
+                and arrivals.vehicle_number = segment.vehicle_number
+                and arrivals.segment_start_time = segment.gps_time
             where semantics.are_passenger_boundaries_settled and semantics.is_passenger_stop
               and semantics.stop_execution_class = 'passenger'
             order by trips.gtfs_snapshot_id, trips.service_date, trips.trip_id, trips.vehicle_number,
