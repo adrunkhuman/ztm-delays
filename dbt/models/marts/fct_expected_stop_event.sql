@@ -104,13 +104,26 @@ scheduled_stops as (
             interval stop_times.departure_time_seconds second
         ) as scheduled_departure_time
     from (
+        {% if var('use_python_reconstruction', false) %}
+        select distinct gtfs_snapshot_id, gps_date, service_date, trip_id
+        from trip_facts
+        {% else %}
         select distinct gtfs_snapshot_id, service_date, trip_id
         from trip_facts
+        {% endif %}
     ) as trip_spine
+    {% if var('use_python_reconstruction', false) %}
+    inner join {{ source('matcher_input', 'reconstruction_stop_semantics') }} as stop_times
+        on trip_spine.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
+        and trip_spine.gps_date = stop_times.processing_date
+        and trip_spine.service_date = stop_times.service_date
+        and trip_spine.trip_id = stop_times.trip_id
+    {% else %}
     inner join {{ ref('int_gtfs_trip_stop_semantics') }} as stop_times
         on trip_spine.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and trip_spine.service_date = stop_times.service_date
         and trip_spine.trip_id = stop_times.trip_id
+    {% endif %}
     inner join {{ ref('stg_gtfs__stops') }} as stops
         on stop_times.gtfs_snapshot_id = stops.gtfs_snapshot_id
         and stop_times.stop_id = stops.stop_id

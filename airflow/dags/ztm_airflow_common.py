@@ -5,11 +5,14 @@ import logging
 import os
 import shlex
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from airflow.sdk import Asset
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +26,7 @@ BIGQUERY_RAW_DATASET = _env("BIGQUERY_RAW_DATASET", "ztm_raw")
 BIGQUERY_STG_DATASET = _env("BIGQUERY_STG_DATASET", "ztm_stg")
 BIGQUERY_INT_DATASET = _env("BIGQUERY_INT_DATASET", "ztm_int")
 BIGQUERY_MARTS_DATASET = _env("BIGQUERY_MARTS_DATASET", "ztm_marts")
+BIGQUERY_MATCHER_INPUT_DATASET = _env("BIGQUERY_MATCHER_INPUT_DATASET", "ztm_matcher_input")
 BIGQUERY_LOCATION = _env("BIGQUERY_LOCATION", "europe-north1")
 GCS_BUCKET = _env("GCS_BUCKET", "ztm-analytics-bucket")
 DBT_PROJECT_DIR = _env("DBT_PROJECT_DIR", "/opt/airflow/dbt")
@@ -42,7 +46,7 @@ RAW_GPS_DATE_ASSET = Asset("x-ztm://gps/raw-date")
 GPS_MODELS_DATE_ASSET = Asset("x-ztm://gps/models-date")
 
 
-def airflow_failure_alert(context: dict[str, Any]) -> None:
+def airflow_failure_alert(context: Mapping[str, Any]) -> None:
     """Emit a bounded failure alert without depending on Airflow metadata DB access."""
     payload = _airflow_failure_payload(context)
     LOGGER.error("Airflow task failed: %s", json.dumps(payload, sort_keys=True))
@@ -67,7 +71,7 @@ def airflow_failure_alert(context: dict[str, Any]) -> None:
         LOGGER.exception("Failed to send Airflow failure webhook")
 
 
-def _airflow_failure_payload(context: dict[str, Any]) -> dict[str, object]:
+def _airflow_failure_payload(context: Mapping[str, Any]) -> dict[str, object]:
     task_instance = context.get("task_instance") or context.get("ti")
     dag_run = context.get("dag_run")
     return {

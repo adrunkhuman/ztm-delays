@@ -10,20 +10,24 @@ Raw BigQuery tables are rebuildable from immutable GCS inputs:
 Rebuild order:
 
 1. Recreate or empty the target v2 datasets: `ztm_raw`, `ztm_stg`, `ztm_int`, `ztm_marts`.
-2. Rebuild `raw_gtfs_snapshots` deterministically from GCS object names and file hashes. Object names encode `snapshot_timestamp`; `snapshot_id` is `{snapshot_timestamp}_{sha256[:12]}`.
-3. Reload each GTFS ZIP into `ztm_raw.raw_gtfs_*` with deterministic load job IDs.
-4. Run GTFS staging, then rebuild archive-safe dimensions: `dim_line`, `dim_stop_post`, `dim_stop_group`, `dim_date`, and `dim_schedule_date`.
-5. Rebuild schedule-version models from loaded GTFS history: `int_gtfs_trip_schedule`, `int_schedule_version`, and `dim_schedule_version`.
-6. Build `_current` lookup tables only for the selected serving snapshot.
-7. Reload GPS Parquet files into `ztm_raw.raw_gps_pings` with deterministic per-URI load job IDs.
-8. Build dbt models by processing date and selected GTFS snapshot.
-9. Validate backfilled facts, completeness, coverage, and serving export inputs before exposing rebuilt data.
+1. Rebuild `raw_gtfs_snapshots` deterministically from GCS object names and file hashes. Object names encode
+   `snapshot_timestamp`; `snapshot_id` is `{snapshot_timestamp}_{sha256[:12]}`.
+1. Reload each GTFS ZIP into `ztm_raw.raw_gtfs_*` with deterministic load job IDs.
+1. Run GTFS staging, then rebuild archive-safe dimensions: `dim_line`, `dim_stop_post`, `dim_stop_group`, `dim_date`,
+   and `dim_schedule_date`.
+1. Rebuild schedule-version models from loaded GTFS history: `int_gtfs_trip_schedule`, `int_schedule_version`, and
+   `dim_schedule_version`.
+1. Build `_current` lookup tables only for the selected serving snapshot.
+1. Reload GPS Parquet files into `ztm_raw.raw_gps_pings` with deterministic per-URI load job IDs.
+1. Build dbt models by processing date and selected GTFS snapshot.
+1. Validate backfilled facts, completeness, coverage, and serving export inputs before exposing rebuilt data.
 
 The old `ztm_bq` dataset has been removed; recovery now targets `ztm_raw`, `ztm_stg`, `ztm_int`, and `ztm_marts`.
 
 ## Per-Date Rebuild
 
-For one GPS date, load raw GPS parts first, then run dbt with the Warsaw-local processing date and the latest dimension-built GTFS snapshot available at rebuild time:
+For one GPS date, load raw GPS parts first, then run dbt with the Warsaw-local processing date and the latest
+dimension-built GTFS snapshot available at rebuild time:
 
 ```bash
 dbt build --select stg_gps__pings int_gps_hourly_completeness \
@@ -45,19 +49,38 @@ dbt build --select fct_trip fct_stop_arrival \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"PRIOR_SERVICE_DATE","aggregation_start_date":"PRIOR_SERVICE_DATE"}'
 ```
 
-GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the production DAG publishes both the current service date and the prior service date for each GPS processing date. A prior service-date partition can contain rows from two GPS dates with different governing GTFS snapshots; fact publication preserves each row's snapshot lineage and joins schedule metadata on `gtfs_snapshot_id`.
+GPS staging and intermediate models use static-partition `insert_overwrite` for the selected `processing_date`. Serving
+facts are partitioned by `service_date` and overwrite `publish_service_date`. To complete overnight trips safely, the
+production DAG publishes both the current service date and the prior service date for each GPS processing date. A prior
+service-date partition can contain rows from two GPS dates with different governing GTFS snapshots; fact publication
+preserves each row's snapshot lineage and joins schedule metadata on `gtfs_snapshot_id`.
 
-`insert_overwrite` replaces the listed partitions even when the compiled source query returns zero rows. Historical reruns must derive the governing GTFS snapshot from the warehouse processing-date mapping, not from the latest snapshot, and must stop on schedule-version or snapshot-lineage test failures before continuing to later dates. Those expensive lineage checks are tagged `audit`, excluded from normal DAG test paths, and run by `dag_weekly_audit`; if you run recovery manually, run the audit selector explicitly rather than relying on default DAG tests.
+`insert_overwrite` replaces the listed partitions even when the compiled source query returns zero rows. Historical
+reruns must derive the governing GTFS snapshot from the warehouse processing-date mapping, not from the latest snapshot,
+and must stop on schedule-version or snapshot-lineage test failures before continuing to later dates. Those expensive
+lineage checks are tagged `audit`, excluded from normal DAG test paths, and run by `dag_weekly_audit`; if you run
+recovery manually, run the audit selector explicitly rather than relying on default DAG tests.
 
 ## Date-Range Backfill
 
-Loop over dates in order. For every GPS processing date, ensure at least one GTFS snapshot has been loaded and its schedule dimensions have been built. Nightly rebuilds use the latest built snapshot available at rebuild time, not a same-day cutoff rule.
+Loop over dates in order. For every GPS processing date, ensure at least one GTFS snapshot has been loaded and its
+schedule dimensions have been built. Nightly rebuilds use the latest built snapshot available at rebuild time, not a
+same-day cutoff rule.
 
-For each GPS processing date, rebuild the GPS/intermediate models, then publish facts for the current service date and the prior service date. Publishing the prior date incorporates after-midnight observations without relabeling prior-day rows to the current processing date's snapshot. After detail exists, rebuild completeness, coverage, aggregate, and pipeline-status marts over the collected-history window.
+For each GPS processing date, rebuild the GPS/intermediate models, then publish facts for the current service date and
+the prior service date. Publishing the prior date incorporates after-midnight observations without relabeling prior-day
+rows to the current processing date's snapshot. After detail exists, rebuild completeness, coverage, aggregate, and
+pipeline-status marts over the collected-history window.
 
-After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each processing batch and that `schedule_version_id` resolves to a version covering the row's GPS processing date. Stop-arrival facts carry both publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an individual stop detection.
+After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each processing batch and that
+`schedule_version_id` resolves to a version covering the row's GPS processing date. Stop-arrival facts carry both
+publishing `gps_date` and `source_gps_date`; use `source_gps_date` when debugging which raw GPS partition produced an
+individual stop detection.
 
-Changes to stop-crossing reconstruction do not update existing incremental partitions on deployment. To apply such a correction historically, rerun each affected GPS processing date with its mapped GTFS snapshot through `int_stop_arrivals` and `int_trip_summary`, then republish both the current and prior service-date fact partitions before rebuilding dependent marts and serving exports. A full raw GPS or GTFS reload is not required.
+Changes to stop-crossing reconstruction do not update existing incremental partitions on deployment. To apply such a
+correction historically, rerun each affected GPS processing date with its mapped GTFS snapshot through
+`int_stop_arrivals` and `int_trip_summary`, then republish both the current and prior service-date fact partitions
+before rebuilding dependent marts and serving exports. A full raw GPS or GTFS reload is not required.
 
 ## Raw GPS Volume
 
@@ -68,15 +91,150 @@ cd poller
 uv run python measure_raw_gps_volume.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 ```
 
-The command defaults to `gs://ztm-analytics-bucket/raw/gps`; pass `--bucket` and `--prefix` for other environments. It does not query BigQuery. Use `--include-row-counts` only for a small bounded window when row counts are needed, because it downloads each matched Parquet object to read file metadata. Production durability uses periodic append-safe GCS flushes plus a bounded local JSON spool at `/var/lib/ztm-poller-spool`; compressed GCS volume is only a lower-bound sizing proxy. Revisit the default 100 MiB cap only with measured object/byte volume, expected outage duration, flush cadence, explicit disk budget, and crash-loss tolerance.
+The command defaults to `gs://ztm-analytics-bucket/raw/gps`; pass `--bucket` and `--prefix` for other environments. It
+does not query BigQuery. Use `--include-row-counts` only for a small bounded window when row counts are needed, because
+it downloads each matched Parquet object to read file metadata. Production durability uses periodic append-safe GCS
+flushes plus a bounded local JSON spool at `/var/lib/ztm-poller-spool`; compressed GCS volume is only a lower-bound
+sizing proxy. Revisit the default 100 MiB cap only with measured object/byte volume, expected outage duration, flush
+cadence, explicit disk budget, and crash-loss tolerance.
 
 ## Recovery And Alerting
 
-Airflow orchestration DAGs use bounded transient retries by default: two retries with a five-minute delay. Failure watcher tasks keep `retries=0` so persistent upstream failures still make the DAG run fail loudly after retries are exhausted. Raw BigQuery load retries are safe because load job IDs are deterministic; dbt retries are only for transient execution failures and do not hide data-quality failures after the retry budget is spent. Manual serving export does not retry because its deterministic extract jobs are tied to one `export_id`; rerun it with a new `export_id` after fixing the failure.
+Airflow orchestration DAGs use bounded transient retries by default: two retries with a five-minute delay. Failure
+watcher tasks keep `retries=0` so persistent upstream failures still make the DAG run fail loudly after retries are
+exhausted. Raw BigQuery load retries are safe because load job IDs are deterministic; dbt retries are only for transient
+execution failures and do not hide data-quality failures after the retry budget is spent. Manual serving export does not
+retry because its deterministic extract jobs are tied to one `export_id`; rerun it with a new `export_id` after fixing
+the failure.
 
-Set `AIRFLOW_FAILURE_WEBHOOK_URL` to an HTTPS endpoint to receive structured task/DAG failure callbacks. If it is unset, failures are still logged in Airflow. Do not clear failed historical DAG runs just to make the UI green; leave persistent data-quality failures as incident evidence until the underlying issue is understood. Clear or rerun only after fixing transient infrastructure issues, correcting configuration, or intentionally reprocessing a partition/snapshot.
+Set `AIRFLOW_FAILURE_WEBHOOK_URL` to an HTTPS endpoint to receive structured task/DAG failure callbacks. If it is unset,
+failures are still logged in Airflow. Do not clear failed historical DAG runs just to make the UI green; leave
+persistent data-quality failures as incident evidence until the underlying issue is understood. Clear or rerun only
+after fixing transient infrastructure issues, correcting configuration, or intentionally reprocessing a
+partition/snapshot.
 
-The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS_PATH` or `health/poller/latest.json`, sanitizes it, and writes `poller_status` plus `last_export_at` into `ztm.duckdb.meta.json`. Heartbeats older than 180 seconds are exported as `stale`. Missing or malformed heartbeat data is exported as `unknown`, not as a serving-export failure.
+The serving export reads the private poller heartbeat from `POLLER_HEARTBEAT_GCS_PATH` or `health/poller/latest.json`,
+sanitizes it, and writes `poller_status` plus `last_export_at` into `ztm.duckdb.meta.json`. Heartbeats older than 180
+seconds are exported as `stale`. Missing or malformed heartbeat data is exported as `unknown`, not as a serving-export
+failure.
+
+## Matcher Shadow Runs
+
+The matcher shadow branch is disabled by default and is not a production cutover. Before enabling it in a non-production
+environment, provision a separate `BIGQUERY_MATCHER_SHADOW_DATASET` that is not `ztm_raw`, `ztm_int`, or `ztm_marts`;
+grant only the required read/load/query permissions; and add the read-only Coolify bind
+`/home/ubuntu/ztm-pipeline/matcher` to `/opt/airflow/matcher`. Set
+`UV_PROJECT_ENVIRONMENT=/opt/airflow/matcher-shadow-venv` so `uv` does not write to the matcher mount, and ensure
+`MATCHER_SHADOW_WORKSPACE_ROOT` is writable. No image rebuild is required.
+
+Enable only the shadow path with `MATCHER_SHADOW_ENABLED=true`. Its load task starts after snapshot selection and GPS
+staging validation, uses the exact `raw_gtfs_snapshots.gcs_path` for the mapped snapshot, and does not emit a GPS asset
+or feed canonical publication. Its compare/commit task waits for the load plus the current/prior `fct_trip`,
+`fct_stop_arrival`, and `fct_expected_stop_event` test endpoints. Each retry removes the prior run-scoped workspace
+before creating its attempt workspace. The sanitized run scope ends with a stable hash of the original Airflow run ID,
+preventing sanitization and truncation collisions. Shadow table and load job IDs bind that run identity and the
+validated artifact SHA-256; a conflicting existing job must be successful and target the expected content-addressed
+table.
+
+Smoke checks for a successful run:
+
+1. Find exactly one new `commit.json` below `shadow/matcher/processing_date=YYYY-MM-DD/run_id=.../`. `pending.json` is
+   replaceable work metadata and is never a completion signal.
+1. Check the marker's three shadow table IDs, job IDs, artifact hashes/rows, matcher metrics,
+   `comparison_contract_version`, `quality_gate`, diagnostics, and current/prior comparison aggregates.
+1. Confirm all referenced tables are in the dedicated shadow dataset and no canonical table has a new job from this
+   task.
+1. Complete manual review when `quality_gate.manual_review_required` is true: inspect known lines `20`, `118`, and
+   `145`; run the #132 fixture tests; explain any service loss; and confirm no unexplained delay-percentile collapse.
+   Delay aggregate changes are advisory evidence, never ownership acceptance.
+
+Run the matcher fixture coverage with
+`uv run pytest tests/test_gtfs_semantics.py tests/test_alignment.py tests/test_stop_alignment.py` from `matcher/`. All
+tests must pass; inspect any changed ownership/status fixture rather than updating expected output mechanically.
+
+- `duty_execution_status_counts`: compare `executed`, `missed`, `uncertain`, and vehicle-change counts with the prior
+  accepted run; investigate unexplained step changes.
+- `stop_alignment_missing_stops`: treat as coverage context; investigate a sharp increase or concentration on reviewed
+  material lines.
+- `stop_alignment_ambiguous_trips`: inspect ownership candidates when the count increases materially; ambiguity must not
+  be hidden by higher retention.
+- `quality_gate.issues[level=fail]`: block promotion unless the sole failure is an explicitly approved bounded swap
+  exception.
+- `quality_gate.issues[level=warn]`: complete and record manual review; warnings are not automatic ownership acceptance.
+
+Artifact validation failures, including lineage or duplicate-grain failures, prevent `pending.json`, comparison, and a
+marker in either mode. Workspaces are removed after pending metadata or failure by default; set
+`MATCHER_SHADOW_KEEP_WORKSPACE=true` only for an explicitly supervised investigation. Prior shadow tables and markers
+remain intact. A changed artifact under an already committed run ID gets a new table identity, then is rejected before
+load when the existing marker's immutable content differs. Marker, pending, and marker-conflict reads check existence
+and refreshed object size before download and reject objects over the 20 MiB default. A concurrent marker conflict after
+that check can leave uncommitted content-addressed tables; inspect them and delete only tables unreferenced by retained
+marker or pending metadata. With `MATCHER_SHADOW_STRICT=false` load or comparison failure is logged and canonical work
+can still complete; non-strict comparison gate failures still commit their evidence marker. Strict mode rejects hard
+structural/resource failures and current-date trip retention failures before marker creation. Retention is independently
+evaluated per artifact/service-date/mode: only current-date trip mode retention is hard. Material-line, current-date
+`fct_stop_arrival`, and current-date `fct_expected_stop_event` retention differences warn for manual review because
+line-level deltas require interpretation and the local passenger adapters suppress unsettled rows. All
+prior-service-date retention differences are warnings because #113 owns overnight proof. Delay changes are warnings
+only: zero-to-zero baselines pass, nonzero shadow values against a zero canonical baseline warn, and reports include
+percentile-second differences plus tail-rate percentage-point deltas. Differences and delay aggregates are evidence, not
+cutover acceptance. Defaults cap input at 5,000 GPS objects/20 GiB, comparison scans at 5 GiB, marker payloads at 20
+MiB, and retain a 5 GiB free-disk reserve before download; increase them only with a measured budget.
+
+The pre-cutover canonical `fct_expected_stop_event` table does not yet expose passenger-boundary semantic columns, while
+the Python expected-event adapter is passenger-only. Shadow expected-event retention is therefore a conservative
+comparison against the broader canonical table until the Python-backed warehouse adapter is enabled; treat that delta as
+manual-review evidence rather than exact parity.
+
+For a historical correction investigation, run the standalone `matcher_historical_correction.py` planner manually with
+explicit `--start-date` and `--end-date`. It is not scheduled and neither downloads nor loads data. It rejects ranges
+before `WAREHOUSE_HISTORY_START_DATE`, ranges over 31 days unless explicitly configured, degraded 2026-07-05 through
+2026-07-07 dates, missing snapshot inputs, or a missing bus or tram GPS object; ordinary hour gaps remain valid. The
+plan records each mode's object inventory, count, and bytes. An optional GCS report is create-only
+(`if_generation_match=0`): an existing object is an error, never an overwrite. The generated correction query is a
+placeholder, not an executable correction command. Any execution requires a separate approval and procedure covering
+per-date snapshot selection, current/prior publication, dependent mart rebuilds, serving export, external rollback
+copies, and byte caps.
+
+Shadow-to-canonical promotion is manual-only and never called by a DAG. Before invoking
+`promote_validated_shadow_artifacts(processing_date, run_id)`, set the cutover/shadow environment, verify the exact
+immutable marker, and create retained BigQuery copies of all four stable matcher-input partitions. The helper validates
+and atomically replaces those four processing-date partitions, records pre-counts, and writes create-only
+`promotion.json`; it does not create backups or perform rollback. Restore the external copies if post-commit validation
+fails. A sole reviewed swap failure may use `accepted_gate_exception` bound to the exact date/run with reason, approver,
+timezone-aware approval time, and a maximum observed process swap no greater than 64 MiB. All correctness and retention
+failures remain blocking. Canonical current/prior dbt publication and serving validation require separate authorization
+after stable-input promotion.
+
+Use a reviewed backup suffix containing the processing date and sanitized run ID. Before promotion, create BigQuery
+snapshot-table copies of `reconstruction_trip_facts`, `reconstruction_stop_arrivals`,
+`reconstruction_expected_stop_events`, and `reconstruction_stop_semantics` in the isolated matcher-input dataset, then
+verify each copy's schema, partition field, and target partition row count. Keep the snapshots until canonical facts and
+serving are validated. Restore all four target partitions in one BigQuery transaction from those snapshots if rollback
+is required.
+
+Invoke the helper from the Airflow environment so its repository code, credentials, location, and byte caps match
+production:
+
+```python
+from ztm_matcher_shadow import promote_validated_shadow_artifacts
+
+promote_validated_shadow_artifacts(
+    "2026-07-10",
+    "manual__matcher_shadow_20260710_v3_reanchor",
+    accepted_gate_exception={
+        "processing_date": "2026-07-10",
+        "run_id": "manual__matcher_shadow_20260710_v3_reanchor",
+        "reason": "Reviewed cold-page swap with RSS below the production bound",
+        "approved_by": "APPROVER",
+        "approved_at": "2026-07-13T01:45:00+00:00",
+        "max_current_swap_bytes": 32 * 1024**2,
+    },
+)
+```
+
+Omit `accepted_gate_exception` for a passing marker. Never place approval credentials or secrets in the exception;
+`approved_by` is an audit identity only. Promotion is authorized separately from canonical dbt publication.
 
 ## Deployment Sync
 
@@ -97,7 +255,8 @@ Required GitHub secrets:
 - `VPS_DEPLOY_SSH_KEY`
 - `VPS_DEPLOY_KNOWN_HOSTS`
 
-Optional GitHub vars override defaults: `VPS_DEPLOY_HOST`, `VPS_DEPLOY_USER`, `VPS_REPO_DIR`, and `AIRFLOW_CONTAINER_PREFIX`.
+Optional GitHub vars override defaults: `VPS_DEPLOY_HOST`, `VPS_DEPLOY_USER`, `VPS_REPO_DIR`, and
+`AIRFLOW_CONTAINER_PREFIX`.
 
 Keep SSH Tailscale-only. The workflow reaches the VPS through a tagged ephemeral Tailscale node.
 
@@ -105,14 +264,22 @@ Emergency hotfixes must be committed and pushed, or reverted intentionally, befo
 
 ## Airflow Cadence And Asset Graph
 
-DAG boundaries follow schedule, retry, and recovery semantics. TaskGroups may improve a DAG's graph view, but they do not replace separate DAGs with different triggers or recovery paths. The serving export is a publication step after marts exist, not part of ingestion/modeling.
+DAG boundaries follow schedule, retry, and recovery semantics. TaskGroups may improve a DAG's graph view, but they do
+not replace separate DAGs with different triggers or recovery paths. The serving export is a publication step after
+marts exist, not part of ingestion/modeling.
 
 - `dag_gtfs_poll` produces `gtfs_snapshot` only when the GTFS ZIP hash changes.
 - `dag_gtfs_load` consumes `gtfs_snapshot` and loads/tests the exact emitted snapshot.
-- `dag_gps_raw_load` produces partitioned `raw_gps_date` events keyed by Warsaw-local GPS date. This records an hourly raw-load attempt, not a complete-day guarantee; completeness/status marts determine health.
-- `dag_daily_gps` runs nightly at `04:00 Europe/Warsaw`, rebuilds one GPS processing date plus prior-date facts/serving partitions, and emits `gps_models_date` with both changed partition dates after marts/status succeed. The DAG ID is historical; hourly raw GPS asset events no longer trigger full warehouse rebuilds.
+- `dag_gps_raw_load` produces partitioned `raw_gps_date` events keyed by Warsaw-local GPS date. This records an hourly
+  raw-load attempt, not a complete-day guarantee; completeness/status marts determine health.
+- `dag_daily_gps` runs nightly at `04:00 Europe/Warsaw`, rebuilds one GPS processing date plus prior-date facts/serving
+  partitions, and emits `gps_models_date` with both changed partition dates after marts/status succeed. The DAG ID is
+  historical; hourly raw GPS asset events no longer trigger full warehouse rebuilds.
 
-Manual recovery remains explicit: trigger `dag_gtfs_load` with `snapshot_id`, `gcs_path`, and `processing_date`, or trigger `dag_daily_gps` with `processing_date` / partition key for the failed date. GTFS manual config must use `snapshot_id=YYYY-MM-DDTHH:MM:SSZ_<12 hex>`, `gcs_path=gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip`, and `processing_date=YYYY-MM-DD`. Rerun failed date partitions rather than clearing unrelated dates.
+Manual recovery remains explicit: trigger `dag_gtfs_load` with `snapshot_id`, `gcs_path`, and `processing_date`, or
+trigger `dag_daily_gps` with `processing_date` / partition key for the failed date. GTFS manual config must use
+`snapshot_id=YYYY-MM-DDTHH:MM:SSZ_<12 hex>`, `gcs_path=gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip`, and
+`processing_date=YYYY-MM-DD`. Rerun failed date partitions rather than clearing unrelated dates.
 
 ## dbt Test Tiers
 
@@ -120,15 +287,21 @@ Normal Airflow cadence must stay bounded and deliberate:
 
 - Hourly raw GPS loading only loads immutable GCS parts into raw BigQuery.
 - Nightly GPS warehouse work runs one processing date and its prior service-date fact publication.
-- `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` replace current and prior partitions independently with each date's governing GTFS snapshot. The DAG restores current-snapshot schedule views before serving models run.
-- Incremental serving marts rebuild the prior date before the current date after pipeline status succeeds; full-table serving models run only with the current date.
+- `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status` replace current and prior partitions
+  independently with each date's governing GTFS snapshot. The DAG restores current-snapshot schedule views before
+  serving models run.
+- Incremental serving marts rebuild the prior date before the current date after pipeline status succeeds; full-table
+  serving models run only with the current date.
 - GTFS load runs raw load, staging, dimensions, and cheap/default dimension tests.
 
 Expensive tests are audit jobs until operational maturity is higher. Do not add them back to default Airflow DAG paths.
 
-Audit-tagged tests are real tests, not vacuous pass-through SQL. Normal Airflow DAG tests exclude `tag:audit`; `dag_weekly_audit` runs `dbt test --select tag:audit` weekly. Manual recovery/backfill procedures that need lineage assurance must run the same selector and stop on failure before continuing to later dates.
+Audit-tagged tests are real tests, not vacuous pass-through SQL. Normal Airflow DAG tests exclude `tag:audit`;
+`dag_weekly_audit` runs `dbt test --select tag:audit` weekly. Manual recovery/backfill procedures that need lineage
+assurance must run the same selector and stop on failure before continuing to later dates.
 
-Nightly Airflow tests `mart_day_completeness`, `agg_service_coverage`, `mart_pipeline_status`, and the serving marts. Retired serving aggregate tests stay out of the default path.
+Nightly Airflow tests `mart_day_completeness`, `agg_service_coverage`, `mart_pipeline_status`, and the serving marts.
+Retired serving aggregate tests stay out of the default path.
 
 Manual GTFS schedule audit:
 
@@ -138,9 +311,13 @@ dbt test --select tag:audit \
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
 ```
 
-The schedule audit intentionally uses compact singular contract tests for required fields and accepted values, plus uniqueness/range/relationship tests. Do not re-add repeated generic column tests to these expensive views without a fresh byte estimate.
+The schedule audit intentionally uses compact singular contract tests for required fields and accepted values, plus
+uniqueness/range/relationship tests. Do not re-add repeated generic column tests to these expensive views without a
+fresh byte estimate.
 
-Manual fact/status audit for a recovery window. Run this before fact/status contract changes, serving-impacting changes, or periodic manual audits; do not put this selector back in the normal nightly path without a fresh byte estimate. The vars should match the recovery window.
+Manual fact/status audit for a recovery window. Run this before fact/status contract changes, serving-impacting changes,
+or periodic manual audits; do not put this selector back in the normal nightly path without a fresh byte estimate. The
+vars should match the recovery window.
 
 ```bash
 dbt test --select fct_trip fct_stop_arrival mart_day_completeness agg_service_coverage mart_pipeline_status \
@@ -148,13 +325,24 @@ dbt test --select fct_trip fct_stop_arrival mart_day_completeness agg_service_co
   --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID","publish_service_date":"YYYY-MM-DD","aggregation_start_date":"YYYY-MM-DD"}'
 ```
 
-For `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`, normal recovery should rerun each affected date with `processing_date` and `aggregation_start_date` set to that same date and with that date's governing snapshot. Do not rebuild a multi-date range under one snapshot. Wider manual backfills must switch the schedule views and snapshot variable per date.
+For `mart_day_completeness`, `agg_service_coverage`, and `mart_pipeline_status`, normal recovery should rerun each
+affected date with `processing_date` and `aggregation_start_date` set to that same date and with that date's governing
+snapshot. Do not rebuild a multi-date range under one snapshot. Wider manual backfills must switch the schedule views
+and snapshot variable per date.
 
-After `dag_daily_gps` finishes its normal dbt phases, it logs a BigQuery dbt cost summary from `INFORMATION_SCHEMA.JOBS_BY_USER`: job count, total bytes processed, total bytes billed, and top jobs by bytes. This is visibility only. Metadata collection failure is logged but does not block asset publication. Attribution is best-effort: it is scoped to the same BigQuery principal, project, and region, and filters on dbt query comments, so concurrent dbt jobs from the same principal can be included while jobs from another principal or without dbt comments can be missed.
+After `dag_daily_gps` finishes its normal dbt phases, it logs a BigQuery dbt cost summary from
+`INFORMATION_SCHEMA.JOBS_BY_USER`: job count, total bytes processed, total bytes billed, and top jobs by bytes. This is
+visibility only. Metadata collection failure is logged but does not block asset publication. Attribution is best-effort:
+it is scoped to the same BigQuery principal, project, and region, and filters on dbt query comments, so concurrent dbt
+jobs from the same principal can be included while jobs from another principal or without dbt comments can be missed.
 
 ## Serving Export
 
-`dag_serving_export` normally consumes the `gps_models_date` asset after nightly marts succeed. It can also be triggered manually after a wider mart rebuild. It exports the fixed frontend source-table allowlist to GCS Parquet under `gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds page-shaped DuckDB serving tables locally, validates the artifact, and atomically swaps the stable serving file. When changing the frontend serving surface, update the DAG source allowlist, derived-table SQL, tests, and `docs/serving_contract.md` together.
+`dag_serving_export` normally consumes the `gps_models_date` asset after nightly marts succeed. It can also be triggered
+manually after a wider mart rebuild. It exports the fixed frontend source-table allowlist to GCS Parquet under
+`gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds page-shaped DuckDB serving tables locally,
+validates the artifact, and atomically swaps the stable serving file. When changing the frontend serving surface, update
+the DAG source allowlist, derived-table SQL, tests, and `docs/serving_contract.md` together.
 
 Default output path inside the Airflow container:
 
@@ -162,7 +350,9 @@ Default output path inside the Airflow container:
 /opt/airflow/serving/ztm.duckdb
 ```
 
-Mount that directory to a stable VPS host path before using the export for the frontend. The frontend container should mount the same host path read-only and reopen DuckDB connections when `export_metadata.export_id` or the metadata JSON changes. A daily rebuild does not require a frontend container restart.
+Mount that directory to a stable VPS host path before using the export for the frontend. The frontend container should
+mount the same host path read-only and reopen DuckDB connections when `export_metadata.export_id` or the metadata JSON
+changes. A daily rebuild does not require a frontend container restart.
 
 Useful manual config:
 
@@ -178,35 +368,51 @@ Useful manual config:
 }
 ```
 
-Manual partition-cache exports must list every date changed by the preceding rebuild. Omit `changed_partition_dates` to extract complete source tables when the changed set is unknown.
+Manual partition-cache exports must list every date changed by the preceding rebuild. Omit `changed_partition_dates` to
+extract complete source tables when the changed set is unknown.
 
-Deployments that introduce or change canonical serving models must rebuild `int_serving_trip_execution`, `int_serving_stop_arrival`, and their dependent serving marts for every retained serving date before unpausing `dag_serving_export`. Verify `mart_trip_daily.gtfs_snapshot_id` is non-null across the retained range before publication. This is a one-time migration; normal nightly runs replace only prior/current serving partitions.
+Deployments that introduce or change canonical serving models must rebuild `int_serving_trip_execution`,
+`int_serving_stop_arrival`, and their dependent serving marts for every retained serving date before unpausing
+`dag_serving_export`. Verify `mart_trip_daily.gtfs_snapshot_id` is non-null across the retained range before
+publication. This is a one-time migration; normal nightly runs replace only prior/current serving partitions.
 
-The Airflow image must include the `duckdb` Python package. The export fails before publication if required mart tables are missing, required serving tables are empty, source bytes exceed the configured guardrail, the built DuckDB file exceeds its guardrail, or validation cannot query the expected tables.
+The Airflow image must include the `duckdb` Python package. The export fails before publication if required mart tables
+are missing, required serving tables are empty, source bytes exceed the configured guardrail, the built DuckDB file
+exceeds its guardrail, or validation cannot query the expected tables.
 
-DuckDB builds run with the current VPS resource profile: `memory_limit='1GB'`, `max_temp_directory_size='2GB'`, `threads=2`, and `preserve_insertion_order=false`. The DuckDB memory limit is separate from `max_duckdb_bytes`, which only guards the final output file size. Resource-pressure failures leave the stable serving file unchanged; free disk/memory or reduce the export scope, then rerun with a fresh `export_id`.
+DuckDB builds run with the current VPS resource profile: `memory_limit='1GB'`, `max_temp_directory_size='2GB'`,
+`threads=2`, and `preserve_insertion_order=false`. The DuckDB memory limit is separate from `max_duckdb_bytes`, which
+only guards the final output file size. Resource-pressure failures leave the stable serving file unchanged; free
+disk/memory or reduce the export scope, then rerun with a fresh `export_id`.
 
-Use a fresh `export_id` for every rerun. The export ID is embedded in deterministic BigQuery extract job IDs; failed or successful attempts reserve those job IDs even if GCS staging files are later removed.
+Use a fresh `export_id` for every rerun. The export ID is embedded in deterministic BigQuery extract job IDs; failed or
+successful attempts reserve those job IDs even if GCS staging files are later removed.
 
-The export queries BigQuery table metadata/date ranges, extracts tables to GCS, lists and downloads GCS staging objects, and writes the local serving file. If `cleanup_gcs_staging=true`, it also deletes staging objects after a successful export. Failed exports leave GCS staging files behind for inspection; remove them manually with:
+The export queries BigQuery table metadata/date ranges, extracts tables to GCS, lists and downloads GCS staging objects,
+and writes the local serving file. If `cleanup_gcs_staging=true`, it also deletes staging objects after a successful
+export. Failed exports leave GCS staging files behind for inspection; remove them manually with:
 
 ```bash
 gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=EXPORT_ID/
 ```
 
-Killed exports can also leave local hidden build artifacts under the serving directory. After confirming no serving export is running, remove them with:
+Killed exports can also leave local hidden build artifacts under the serving directory. After confirming no serving
+export is running, remove them with:
 
 ```bash
 rm -rf /opt/airflow/serving/.duckdb-tmp-EXPORT_ID \
   /opt/airflow/serving/.ztm.duckdb.EXPORT_ID.tmp*
 ```
 
-The stable DuckDB file and sidecar JSON are not swapped transactionally as one unit. The DuckDB file is the source of truth for consumers; use `export_metadata` inside the database when exact consistency matters. The sidecar is `ztm.duckdb.meta.json` by default and mirrors the same export summary for operational inspection.
+The stable DuckDB file and sidecar JSON are not swapped transactionally as one unit. The DuckDB file is the source of
+truth for consumers; use `export_metadata` inside the database when exact consistency matters. The sidecar is
+`ztm.duckdb.meta.json` by default and mirrors the same export summary for operational inspection.
 
 ## Operational Notes
 
 - Raw load retries are safe because job IDs are deterministic.
 - One malformed GPS coordinate should be filtered at staging and must not fail stop-arrival reconstruction.
 - Large ad-hoc BigQuery work should be dry-run and bounded by `maximum_bytes_billed`.
-- Default Airflow dbt tests must stay cheap enough for normal cadence; full-history schedule/version tests are manual audit work.
+- Default Airflow dbt tests must stay cheap enough for normal cadence; full-history schedule/version tests are manual
+  audit work.
 - The old `ztm_bq` dataset is gone; rebuild and recovery work should target the v2 datasets.

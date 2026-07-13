@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha1
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.bash import BashOperator
@@ -34,6 +34,7 @@ from ztm_airflow_common import (
     dbt_command,
     dbt_vars,
 )
+from ztm_matcher_shadow import run_matcher_shadow_compare_commit_task, run_matcher_shadow_load_task
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -328,6 +329,33 @@ with DAG(
         )
 
     with TaskGroup(
+        "matcher_shadow", group_display_name="Matcher shadow", prefix_group_id=False
+    ) as matcher_shadow_group:
+
+        @task(execution_timeout=timedelta(minutes=60))
+        def run_matcher_shadow_load_branch(processing_date: str, snapshot_id: object) -> dict[str, object]:
+            """Load validated shadow tables and leave a non-commit pending record."""
+            context = get_current_context()
+            dag_run = context.get("dag_run")
+            task_instance = context.get("ti")
+            run_id = str(getattr(dag_run, "run_id", "manual-shadow"))
+            try_number = int(getattr(task_instance, "try_number", 1) or 1)
+            return run_matcher_shadow_load_task(processing_date, str(snapshot_id), run_id, try_number=try_number)
+
+        @task(execution_timeout=timedelta(minutes=60))
+        def compare_matcher_shadow_branch(processing_date: str, pending_context: object) -> dict[str, object]:
+            """Commit shadow evidence only after all canonical fact tests succeed."""
+            if not isinstance(pending_context, dict):
+                raise TypeError("Matcher shadow load task returned invalid pending context")
+            run_id = str(getattr(get_current_context().get("dag_run"), "run_id", "manual-shadow"))
+            return run_matcher_shadow_compare_commit_task(
+                processing_date, run_id, cast("dict[str, object]", pending_context)
+            )
+
+        matcher_shadow_load = run_matcher_shadow_load_branch(PROCESSING_DATE, selected_gtfs_snapshot)
+        matcher_shadow_compare_commit = compare_matcher_shadow_branch(PROCESSING_DATE, matcher_shadow_load)
+
+    with TaskGroup(
         "trip_reconstruction", group_display_name="Trip reconstruction", prefix_group_id=False
     ) as trip_group:
         dbt_run_int_ping_trip, dbt_test_int_ping_trip = _dbt_run_test_pair(
@@ -522,8 +550,10 @@ with DAG(
             raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
 
     selected_gtfs_snapshot >> dbt_run_int_ping_trip
+    selected_gtfs_snapshot >> matcher_shadow_load
     selected_prior_gtfs_snapshot >> dbt_run_prior_coverage_schedule
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
+    dbt_test_stg_gps_pings >> matcher_shadow_load
     dbt_test_stg_gps_pings >> dbt_run_int_ping_trip >> dbt_test_int_ping_trip >> dbt_run_int_stop_arrivals
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
     dbt_run_int_stop_arrivals >> dbt_test_int_stop_arrivals >> dbt_run_int_trip_summary
@@ -536,6 +566,15 @@ with DAG(
     dbt_test_fct_trip_prior >> dbt_run_fct_stop_arrival_prior >> dbt_test_fct_stop_arrival_prior
     dbt_test_fct_stop_arrival_prior >> dbt_run_fct_expected_stop_event_prior
     dbt_run_fct_expected_stop_event_prior >> dbt_test_fct_expected_stop_event_prior
+    [
+        matcher_shadow_load,
+        dbt_test_fct_trip_current,
+        dbt_test_fct_stop_arrival_current,
+        dbt_test_fct_expected_stop_event_current,
+        dbt_test_fct_trip_prior,
+        dbt_test_fct_stop_arrival_prior,
+        dbt_test_fct_expected_stop_event_prior,
+    ] >> matcher_shadow_compare_commit
     for upstream_task in [
         dbt_test_fct_expected_stop_event_current,
         dbt_test_fct_expected_stop_event_prior,

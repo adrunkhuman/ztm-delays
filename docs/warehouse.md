@@ -77,6 +77,23 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 | `agg_service_coverage` | Schedule-aware observed-service coverage by scheduled start date/hour. |
 | `mart_pipeline_status` | Historical archive health by operational date and mode. |
 
+The local matcher can additionally emit `operational_stop_crossings-v1` and
+`passenger-stop-arrival-v1` Parquet artifacts. The first is complete operational
+lineage, including technical posts, for high-confidence vehicle ownership even
+when passenger boundaries are unsettled. The second is a settled-passenger-only
+adapter toward `fct_stop_arrival`; unsettled rows intentionally emit no confident
+passenger arrival or delay. They are not yet a warehouse replacement.
+
+## Matcher Shadow Boundary
+
+The optional Airflow matcher shadow path is a comparison harness, not an alternate warehouse path. When enabled, its load phase reads the mapped snapshot ZIP and immutable processing-date GPS objects, writes three local adapter facts only to a dedicated `BIGQUERY_MATCHER_SHADOW_DATASET`, and records replaceable run-scoped `pending.json` metadata. Its comparison phase waits for successful current/prior canonical fact tests, reads the same run-scoped shadow tables, then writes the immutable GCS commit marker. It never writes `ztm_raw`, `ztm_int`, `ztm_marts`, canonical dbt models, assets, or serving exports.
+
+Shadow tables are content-addressed by the validated artifact SHA-256 and collision-resistant run identity, and use explicit adapter schemas. They must not be queried as canonical facts: the local adapter does not include the canonical dimension enrichments. The marker records object generations/sizes/hashes, artifact rows/hashes, table/job IDs, matcher metrics, and partition-filtered current/prior comparison aggregates. It is uploaded with `if_generation_match=0`; an existing marker is accepted only when JSON-identical. A missing marker means the candidate run is incomplete or failed; `pending.json` alone does not signal completion. A changed artifact for an already committed run cannot replace the old table or marker; it can leave uncommitted content-addressed shadow tables. Retain those for investigation, then manually delete only tables not referenced by a retained marker or pending record. Prior markers and shadow tables are otherwise retained for inspection.
+
+Current-date trip mode retention is a hard gate failure. Material-line retention is warning-level manual-review evidence, including a completely absent material line. Current-date `stop_arrival` and `expected_stop_event` retention differences are also warnings because those local adapters are intentionally passenger-only and suppress unsettled passenger boundaries. All prior-service-date retention differences are warnings; the separate overnight proof gate owns that evidence. Structural and resource violations remain hard failures.
+
+Cutover remains a separate manual authorization. The branch includes disabled Python-backed adapters and a helper that atomically promotes four stable matcher-input partitions; it is not called by a DAG. Operators must create external copies of the previous stable partitions before promotion because the helper records counts but does not create rollback backups. Canonical fact publication remains a subsequent current/prior dbt operation with `use_python_reconstruction=true`.
+
 ## Dimensions
 
 Archive-safe dimensions are date-ranged where history matters:

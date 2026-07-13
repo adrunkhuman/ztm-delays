@@ -1,0 +1,298 @@
+version: 2
+
+sources:
+  - name: matcher_input
+    description: Stable, opt-in Python matcher artifacts. This dataset is owned by the explicit cutover promotion path, never by raw, intermediate, or marts Airflow tasks.
+    database: "{{ env_var('GCP_PROJECT', 'ztm-data') }}"
+    schema: "{{ env_var('BIGQUERY_MATCHER_INPUT_DATASET', 'ztm_matcher_input') }}"
+    tables:
+      - name: reconstruction_trip_facts
+        description: Python matcher reconstruction-trip-facts-v2 rows, partitioned by gps_date. Each retained artifact partition contains one gps_date equal to its processing_date; service_date may be prior or current.
+        columns:
+          - {name: gtfs_snapshot_id, data_type: string}
+          - {name: processing_date, data_type: date}
+          - {name: gps_date, data_type: date}
+          - {name: service_date, data_type: date}
+          - {name: trip_id, data_type: string}
+          - {name: vehicle_number, data_type: string}
+          - {name: line, data_type: string}
+          - {name: brigade, data_type: string}
+          - {name: mode, data_type: string}
+          - {name: scheduled_start_time, data_type: timestamp}
+          - {name: scheduled_end_time, data_type: timestamp}
+          - {name: actual_start_time, data_type: timestamp}
+          - {name: actual_end_time, data_type: timestamp}
+          - {name: start_delay_seconds, data_type: int64}
+          - {name: end_delay_seconds, data_type: int64}
+          - {name: passenger_stops_expected, data_type: int64}
+          - {name: passenger_stops_detected, data_type: int64}
+          - {name: detected_stop_ratio, data_type: float64}
+          - {name: optional_passenger_stops_expected, data_type: int64}
+          - {name: optional_passenger_stops_detected, data_type: int64}
+          - {name: first_detected_stop_sequence, data_type: int64}
+          - {name: last_detected_stop_sequence, data_type: int64}
+          - {name: max_stop_sequence_gap, data_type: int64}
+          - {name: max_ping_gap_seconds, data_type: int64}
+          - {name: max_speed_mps, data_type: float64}
+          - {name: is_first_stop_observed, data_type: boolean}
+          - {name: is_last_stop_observed, data_type: boolean}
+          - {name: has_non_monotonic_stop_progression, data_type: boolean}
+          - {name: has_impossible_speed_jump, data_type: boolean}
+          - {name: has_stale_stop_progression, data_type: boolean}
+          - {name: trip_quality, data_type: string}
+          - {name: quality_flags, data_type: array<string>}
+          - {name: service_observation_class, data_type: string}
+          - {name: service_observation_flags, data_type: array<string>}
+          - {name: is_zone1_public_ranking_trip, data_type: boolean}
+      - name: reconstruction_stop_arrivals
+        description: Python matcher reconstruction-stop-arrivals-v2 rows, partitioned by gps_date. Each retained artifact partition contains one gps_date equal to its processing_date; source_gps_date preserves stop-level source lineage.
+        columns:
+          - {name: gtfs_snapshot_id, data_type: string}
+          - {name: processing_date, data_type: date}
+          - {name: gps_date, data_type: date}
+          - {name: source_gps_date, data_type: date}
+          - {name: service_date, data_type: date}
+          - {name: trip_id, data_type: string}
+          - {name: vehicle_number, data_type: string}
+          - {name: line, data_type: string}
+          - {name: brigade, data_type: string}
+          - {name: mode, data_type: string}
+          - {name: stop_id, data_type: string}
+          - {name: stop_group_id, data_type: string}
+          - {name: stop_sequence, data_type: int64}
+          - {name: pickup_type, data_type: int64}
+          - {name: drop_off_type, data_type: int64}
+          - {name: stop_service_class, data_type: string}
+          - {name: scheduled_arrival_time, data_type: timestamp}
+          - {name: scheduled_departure_time, data_type: timestamp}
+          - {name: actual_arrival_time, data_type: timestamp}
+          - {name: delay_seconds, data_type: int64}
+          - {name: detection_method, data_type: string}
+          - {name: stop_match_radius_m, data_type: float64}
+          - {name: stop_distance_m, data_type: float64}
+          - {name: prev_ping_distance_m, data_type: float64}
+          - {name: next_ping_distance_m, data_type: float64}
+          - {name: segment_start_time, data_type: timestamp}
+          - {name: segment_end_time, data_type: timestamp}
+          - {name: segment_duration_seconds, data_type: int64}
+          - {name: alignment_confidence, data_type: string}
+          - {name: alignment_evidence, data_type: array<string>}
+          - {name: trip_quality, data_type: string}
+          - {name: quality_flags, data_type: array<string>}
+          - {name: service_observation_class, data_type: string}
+          - {name: service_observation_flags, data_type: array<string>}
+          - {name: is_zone1_public_ranking_trip, data_type: boolean}
+      - name: reconstruction_expected_stop_events
+        description: Python matcher reconstruction-expected-stop-events-v2 rows, partitioned by gps_date. These are passenger-only, boundary-settled occurrences used for the Python trip adapter's settled endpoints.
+        columns:
+          - {name: gtfs_snapshot_id, data_type: string}
+          - {name: processing_date, data_type: date}
+          - {name: gps_date, data_type: date}
+          - {name: source_gps_date, data_type: date}
+          - {name: service_date, data_type: date}
+          - {name: trip_id, data_type: string}
+          - {name: vehicle_number, data_type: string}
+          - {name: line, data_type: string}
+          - {name: brigade, data_type: string}
+          - {name: mode, data_type: string}
+          - {name: stop_id, data_type: string}
+          - {name: stop_group_id, data_type: string}
+          - {name: stop_sequence, data_type: int64}
+          - {name: pickup_type, data_type: int64}
+          - {name: drop_off_type, data_type: int64}
+          - {name: stop_service_class, data_type: string}
+          - {name: scheduled_arrival_time, data_type: timestamp}
+          - {name: scheduled_departure_time, data_type: timestamp}
+          - {name: observation_status, data_type: string}
+          - {name: actual_arrival_time, data_type: timestamp}
+          - {name: delay_seconds, data_type: int64}
+          - {name: uncertainty_evidence, data_type: array<string>}
+          - {name: trip_quality, data_type: string}
+          - {name: quality_flags, data_type: array<string>}
+          - {name: service_observation_class, data_type: string}
+          - {name: service_observation_flags, data_type: array<string>}
+      - name: reconstruction_stop_semantics
+        description: Python matcher stop-semantics-v3 rows, partitioned by processing_date. Each retained partition contains the pinned snapshot's complete operational stop sequence, timing, coordinates, classifications, and duty lineage for current and prior service dates.
+        columns:
+          - {name: gtfs_snapshot_id, data_type: string}
+          - {name: service_date, data_type: date}
+          - {name: processing_date, data_type: date}
+          - {name: trip_id, data_type: string}
+          - {name: stop_id, data_type: string}
+          - {name: stop_group_id, data_type: string}
+          - {name: stop_lat, data_type: float64}
+          - {name: stop_lon, data_type: float64}
+          - {name: zone_id, data_type: string}
+          - {name: effective_zone_id, data_type: string}
+          - {name: stop_sequence, data_type: int64}
+          - {name: arrival_time_seconds, data_type: int64}
+          - {name: departure_time_seconds, data_type: int64}
+          - {name: pickup_type, data_type: int64}
+          - {name: drop_off_type, data_type: int64}
+          - {name: stop_service_class, data_type: string}
+          - {name: duty_chain_id, data_type: string}
+          - {name: duty_chain_source, data_type: string}
+          - {name: duty_chain_source_id, data_type: string}
+          - {name: trip_order, data_type: int64}
+          - {name: previous_trip_id, data_type: string}
+          - {name: next_trip_id, data_type: string}
+          - {name: stop_execution_class, data_type: string}
+          - {name: classification_confidence, data_type: string}
+          - {name: classification_reason, data_type: string}
+          - {name: classification_evidence, data_type: array<string>}
+          - {name: is_passenger_stop, data_type: boolean}
+          - {name: are_passenger_boundaries_settled, data_type: boolean}
+          - {name: first_passenger_stop_sequence, data_type: int64}
+          - {name: last_passenger_stop_sequence, data_type: int64}
+
+unit_tests:
+  - name: fct_trip_python_adapter_enriches_and_prefers_current_overnight_quality
+    model: fct_trip
+    overrides:
+      vars:
+        processing_date: '2026-01-16'
+        publish_service_date: '2026-01-15'
+        use_python_reconstruction: true
+    given:
+      - input: source('matcher_input', 'reconstruction_trip_facts')
+        format: sql
+        rows: |
+          select
+            'snapshot-older' as gtfs_snapshot_id, date '2026-01-16' as processing_date, date '2026-01-15' as gps_date,
+            date '2026-01-15' as service_date, 'trip-1' as trip_id, '1001' as vehicle_number, 'wrong-line' as line,
+            '7' as brigade, 'bus' as mode, timestamp('2026-01-15 23:50:00+01') as scheduled_start_time,
+            timestamp('2026-01-16 00:20:00+01') as scheduled_end_time, timestamp('2026-01-15 23:51:00+01') as actual_start_time,
+            timestamp('2026-01-16 00:22:00+01') as actual_end_time, 60 as start_delay_seconds, 120 as end_delay_seconds,
+            2 as passenger_stops_expected, 1 as passenger_stops_detected, 0.5 as detected_stop_ratio,
+            0 as optional_passenger_stops_expected, 0 as optional_passenger_stops_detected, 0 as first_detected_stop_sequence,
+            0 as last_detected_stop_sequence, 1 as max_stop_sequence_gap, 60 as max_ping_gap_seconds, 10.0 as max_speed_mps,
+            true as is_first_stop_observed, false as is_last_stop_observed, false as has_non_monotonic_stop_progression,
+            false as has_impossible_speed_jump, false as has_stale_stop_progression, 'partial' as trip_quality,
+            ['short_end'] as quality_flags, 'truncated' as service_observation_class, ['short_end'] as service_observation_flags,
+            false as is_zone1_public_ranking_trip
+          union all
+          select
+            'snapshot-1', date '2026-01-16', date '2026-01-16', date '2026-01-15', 'trip-1', '1001', 'wrong-line', '7', 'bus',
+            timestamp('2026-01-15 23:50:00+01'), timestamp('2026-01-16 00:20:00+01'), timestamp('2026-01-15 23:51:00+01'),
+            timestamp('2026-01-16 00:21:00+01'), 60, 60, 2, 2, 1.0, 0, 0, 0, 1, 1, 60, 10.0, true, true, false, false, false,
+            'complete', array<string>[], 'regular', array<string>[], false
+      - input: ref('int_gtfs_trip_schedule_history')
+        rows:
+          - {gtfs_snapshot_id: snapshot-older, processing_date: '2026-01-15', service_date: '2026-01-15', trip_id: trip-1, line: '187', direction_id: 1, service_id: svc-1, trip_headsign: Central, shape_id: shape-1, schedule_day_type: friday, schedule_service_ids: svc-1}
+          - {gtfs_snapshot_id: snapshot-1, processing_date: '2026-01-16', service_date: '2026-01-15', trip_id: trip-1, line: '187', direction_id: 1, service_id: svc-1, trip_headsign: Central, shape_id: shape-1, schedule_day_type: friday, schedule_service_ids: svc-1}
+      - input: ref('stg_gtfs__routes')
+        rows:
+          - {gtfs_snapshot_id: snapshot-older, route_id: '187', route_short_name: '187', mode: bus}
+          - {gtfs_snapshot_id: snapshot-1, route_id: '187', route_short_name: '187', mode: bus}
+      - input: ref('dim_date')
+        rows:
+          - {service_date: '2026-01-15', day_type: weekday}
+      - input: ref('dim_schedule_version')
+        rows:
+          - {line: '187', direction_id: 1, schedule_day_type: friday, schedule_version_id: version-1, valid_from_date: '2026-01-01'}
+      - input: source('matcher_input', 'reconstruction_expected_stop_events')
+        format: sql
+        rows: |
+          select
+            'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as gps_date,
+            date '2026-01-15' as service_date, 'trip-1' as trip_id, '1001' as vehicle_number,
+            '100101' as stop_id, 0 as stop_sequence
+          union all
+          select 'snapshot-1', date '2026-01-16', date '2026-01-15', 'trip-1', '1001', '100102', 1
+      - input: ref('stg_gtfs__stops')
+        rows:
+          - {gtfs_snapshot_id: snapshot-older, stop_id: '100101', stop_name: Origin}
+          - {gtfs_snapshot_id: snapshot-older, stop_id: '100102', stop_name: Destination}
+          - {gtfs_snapshot_id: snapshot-1, stop_id: '100101', stop_name: Origin}
+          - {gtfs_snapshot_id: snapshot-1, stop_id: '100102', stop_name: Destination}
+    expect:
+      format: sql
+      rows: |
+        select
+          'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as gps_date, date '2026-01-15' as service_date,
+          'trip-1' as trip_id, '1001' as vehicle_number, '187' as line, '187' as route_short_name, 'bus' as mode,
+          '7' as brigade, 1 as vehicle_type, 1 as direction_id, 'svc-1' as service_id,
+          'Central' as trip_headsign, 'shape-1' as shape_id, 'weekday' as day_type, 'friday' as schedule_day_type,
+          'svc-1' as schedule_service_ids, 'version-1' as schedule_version_id, '100101' as origin_stop_id,
+          'Origin' as origin_stop_name, '100102' as destination_stop_id, 'Destination' as destination_stop_name,
+          timestamp('2026-01-15 23:50:00+01') as scheduled_start_time, timestamp('2026-01-16 00:20:00+01') as scheduled_end_time,
+          timestamp('2026-01-15 23:51:00+01') as actual_start_time, timestamp('2026-01-16 00:21:00+01') as actual_end_time,
+          60 as start_delay_seconds, 60 as end_delay_seconds, 2 as stops_expected, 2 as stops_detected, 1.0 as detected_stop_ratio,
+          0 as first_detected_stop_sequence, 1 as last_detected_stop_sequence, 1 as max_stop_sequence_gap, 60 as max_ping_gap_seconds,
+          10.0 as max_speed_mps, true as is_first_stop_observed, true as is_last_stop_observed,
+          false as has_non_monotonic_stop_progression, false as has_impossible_speed_jump, false as has_stale_stop_progression,
+          'complete' as trip_quality, array<string>[] as quality_flags, 'regular' as service_observation_class,
+          array<string>[] as service_observation_flags
+
+  - name: fct_stop_arrival_python_adapter_enriches_selected_passenger_stop
+    model: fct_stop_arrival
+    overrides:
+      vars:
+        processing_date: '2026-01-16'
+        publish_service_date: '2026-01-15'
+        use_python_reconstruction: true
+    given:
+      - input: source('matcher_input', 'reconstruction_stop_arrivals')
+        format: sql
+        rows: |
+          select
+            'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as gps_date,
+            date '2026-01-15' as source_gps_date, date '2026-01-15' as service_date,
+            'trip-1' as trip_id, '1001' as vehicle_number, '100101' as stop_id, 0 as stop_sequence,
+            timestamp('2026-01-15 23:50:00+01') as scheduled_arrival_time,
+            timestamp('2026-01-15 23:50:20+01') as scheduled_departure_time,
+            timestamp('2026-01-15 23:51:00+01') as actual_arrival_time, 60 as delay_seconds,
+            'python_segment' as detection_method, 75.0 as stop_match_radius_m, 12.0 as stop_distance_m,
+            15.0 as prev_ping_distance_m, 18.0 as next_ping_distance_m,
+            timestamp('2026-01-15 23:50:30+01') as segment_start_time,
+            timestamp('2026-01-15 23:51:30+01') as segment_end_time, 60 as segment_duration_seconds,
+            'complete' as trip_quality
+          union all
+          select
+            'snapshot-other', date '2026-01-16', date '2026-01-16', date '2026-01-15',
+            'trip-1', '1001', '100101', 0, timestamp('2026-01-15 23:50:00+01'),
+            timestamp('2026-01-15 23:50:20+01'), timestamp('2026-01-15 23:55:00+01'), 300,
+            'wrong_snapshot', 75.0, 12.0, 15.0, 18.0,
+            timestamp('2026-01-15 23:54:30+01'), timestamp('2026-01-15 23:55:30+01'), 60, 'complete'
+      - input: ref('fct_trip')
+        rows:
+          - {gtfs_snapshot_id: snapshot-1, gps_date: '2026-01-16', service_date: '2026-01-15', trip_id: trip-1, vehicle_number: '1001', line: '187', route_short_name: '187', mode: bus, brigade: '7', vehicle_type: 1, direction_id: 1, service_id: svc-1, trip_headsign: Central, shape_id: shape-1, day_type: weekday, schedule_day_type: friday, schedule_service_ids: svc-1, schedule_version_id: version-1, trip_quality: complete, quality_flags: [], service_observation_class: regular, service_observation_flags: [], has_non_monotonic_stop_progression: false}
+      - input: source('matcher_input', 'reconstruction_stop_semantics')
+        format: sql
+        rows: |
+          select
+            'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as processing_date,
+            date '2026-01-15' as service_date, 'trip-1' as trip_id, '100101' as stop_id,
+            '1001' as stop_group_id, 52.1 as stop_lat, 21.1 as stop_lon, 0 as stop_sequence,
+            0 as pickup_type, 0 as drop_off_type, 'regular' as stop_service_class,
+            'passenger' as stop_execution_class, 'high' as classification_confidence,
+            'gtfs_passenger_stop' as classification_reason,
+            ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop,
+            true as are_passenger_boundaries_settled
+      - input: ref('stg_gtfs__stops')
+        rows:
+          - {gtfs_snapshot_id: snapshot-1, stop_id: '100101', stop_name: Main, stop_lat: 52.1, stop_lon: 21.1}
+      - input: ref('dim_date')
+        rows:
+          - {service_date: '2026-01-15', is_holiday: false}
+    expect:
+      format: sql
+      rows: |
+        select
+          'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as gps_date, date '2026-01-15' as source_gps_date,
+          date '2026-01-15' as service_date, 'trip-1' as trip_id, '1001' as vehicle_number, '187' as line,
+          '187' as route_short_name, 'bus' as mode, '7' as brigade, 1 as vehicle_type, 1 as direction_id,
+          'svc-1' as service_id, 'Central' as trip_headsign, 'shape-1' as shape_id, 'weekday' as day_type,
+          false as is_holiday, 'friday' as schedule_day_type, 'svc-1' as schedule_service_ids,
+          'version-1' as schedule_version_id, 'complete' as trip_quality, array<string>[] as quality_flags,
+          'regular' as service_observation_class, array<string>[] as service_observation_flags, '100101' as stop_id,
+          '1001' as stop_group_id, '01' as stop_post_code, 'Main' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon,
+          'Main' as stop_group_name, 0 as stop_sequence, 0 as pickup_type, 0 as drop_off_type,
+          'regular' as stop_service_class, 'passenger' as stop_execution_class, 'high' as classification_confidence,
+          'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence,
+          true as are_passenger_boundaries_settled, timestamp('2026-01-15 23:50:00+01') as scheduled_arrival_time,
+          timestamp('2026-01-15 23:50:20+01') as scheduled_departure_time, timestamp('2026-01-15 23:51:00+01') as actual_arrival_time,
+          60 as delay_seconds, timestamp('2026-01-15 23:00:00+01') as hour_bracket, 'python_segment' as detection_method,
+          75.0 as stop_match_radius_m, 12.0 as stop_distance_m, 15.0 as prev_ping_distance_m, 18.0 as next_ping_distance_m,
+          timestamp('2026-01-15 23:50:30+01') as segment_start_time, timestamp('2026-01-15 23:51:30+01') as segment_end_time,
+          60 as segment_duration_seconds
