@@ -560,13 +560,18 @@ class ReconstructionRun:
             raise fail("invalid_output", "pinned snapshot has no trips overlapping the processing date", 15)
         rows = duties(selected, snapshot)
         if self.config.diagnostic_line or self.config.diagnostic_trip_id:
+            selector_lines = (
+                {line.strip() for line in self.config.diagnostic_line.split(",") if line.strip()}
+                if self.config.diagnostic_line
+                else None
+            )
+            if self.config.diagnostic_line and not selector_lines:
+                raise fail("invalid_configuration", "diagnostic line selector is empty", 2)
             targets = [
                 row
                 for row in rows
                 if (
-                    self.config.diagnostic_line is None
-                    or row["line"] == self.config.diagnostic_line
-                    or row["route_short_name"] == self.config.diagnostic_line
+                    selector_lines is None or row["line"] in selector_lines or row["route_short_name"] in selector_lines
                 )
                 and (self.config.diagnostic_trip_id is None or row["trip_id"] == self.config.diagnostic_trip_id)
             ]

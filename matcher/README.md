@@ -21,8 +21,9 @@ uv run --project matcher ztm-matcher prepare --processing-date 2026-07-09 \
   --line Z26 --vehicle-number 9812
 ```
 
-Line and trip selectors retain every course in each matching duty and every GPS
-line used by those duties. Vehicle selection then narrows GPS observations.
+Line selectors accept one line or a comma-separated list. Line and trip
+selectors retain every course in each matching duty and every GPS line used by
+those duties. Vehicle selection then narrows GPS observations.
 Diagnostic outputs are investigation artifacts, not complete daily publication
 partitions. Omitting all selectors preserves the production full-day behavior.
 

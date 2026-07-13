@@ -29,7 +29,11 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="Concurrent vehicle chunks for stop alignment; each worker uses one DuckDB thread.",
     )
-    prepare.add_argument("--line", dest="diagnostic_line", help="Retain duties containing this line.")
+    prepare.add_argument(
+        "--line",
+        dest="diagnostic_line",
+        help="Retain duties containing one line or a comma-separated line list.",
+    )
     prepare.add_argument(
         "--vehicle-number", dest="diagnostic_vehicle_number", help="Retain GPS from this vehicle only."
     )

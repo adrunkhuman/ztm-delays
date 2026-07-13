@@ -394,6 +394,29 @@ def test_prepare_diagnostic_trip_filters_schedule_and_gps(tmp_path: Path) -> Non
     assert {row["trip_id"] for row in pq.read_table(output / "duty_schedule.parquet").to_pylist()} == {"today"}
 
 
+def test_prepare_schedule_accepts_comma_separated_diagnostic_lines(tmp_path: Path) -> None:
+    zip_path = tmp_path / "snapshot.zip"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        tmp_path / "output",
+        tmp_path / "metrics.json",
+        diagnostic_line="187, missing",
+    )
+
+    run = ReconstructionRun(config)
+    with pytest.raises(RuntimeError, match="stop before publication"):
+        with run:
+            schedule_rows = run.prepare_schedule()
+            raise RuntimeError("stop before publication")
+
+    assert schedule_rows == 2
+    assert run.diagnostic_lines == {"r1"}
+
+
 def test_stop_alignment_inputs_are_removed_after_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root, zip_path, output = tmp_path / "gps", tmp_path / "snapshot.zip", tmp_path / "failed"
     _gtfs(zip_path)
