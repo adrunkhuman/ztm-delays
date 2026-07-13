@@ -114,6 +114,8 @@ def test_cutover_accepts_only_exact_bounded_swap_exception() -> None:
         "processing_date": "2026-07-10",
         "run_id": "run",
         "reason": "Reviewed cold-page swap with RSS below the production bound",
+        "approved_by": "operator@example.com",
+        "approved_at": "2026-07-13T01:45:00Z",
         "max_current_swap_bytes": 32 * 1024**2,
     }
 
@@ -121,6 +123,7 @@ def test_cutover_accepts_only_exact_bounded_swap_exception() -> None:
 
     assert accepted == {
         **exception,
+        "approved_at": "2026-07-13T01:45:00+00:00",
         "observed_current_swap_bytes": 27_627_520,
         "accepted_failure": {"level": "fail", "category": "resource", "message": "swapping was observed"},
     }
@@ -133,6 +136,28 @@ def test_cutover_accepts_only_exact_bounded_swap_exception() -> None:
             marker,
             {**exception, "max_current_swap_bytes": shadow.MAX_MANUAL_SWAP_EXCEPTION_BYTES + 1},
         )
+    with pytest.raises(RuntimeError, match="observed swap exceeds"):
+        shadow._validate_manual_gate_exception(
+            "2026-07-10", "run", marker, {**exception, "max_current_swap_bytes": 16 * 1024**2}
+        )
+    with pytest.raises(RuntimeError, match="sole swap failure"):
+        shadow._validate_manual_gate_exception(
+            "2026-07-10",
+            "run",
+            {
+                **marker,
+                "quality_gate": {
+                    "status": "fail",
+                    "issues": [
+                        *marker["quality_gate"]["issues"],
+                        {"level": "fail", "category": "retention", "message": "retention failed"},
+                    ],
+                },
+            },
+            exception,
+        )
+    with pytest.raises(RuntimeError, match="already passing"):
+        shadow._validate_manual_gate_exception("2026-07-10", "run", {"quality_gate": {"status": "pass"}}, exception)
 
 
 def test_promotion_identities_are_deterministic_and_bound_to_content_hash() -> None:

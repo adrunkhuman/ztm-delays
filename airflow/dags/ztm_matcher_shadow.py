@@ -15,7 +15,7 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from importlib import import_module
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
@@ -2025,9 +2025,21 @@ def _validate_manual_gate_exception(
     if exception.get("processing_date") != processing_date or exception.get("run_id") != run_id:
         raise RuntimeError("Matcher cutover gate exception does not match this processing date and run")
     reason = exception.get("reason")
+    approved_by = exception.get("approved_by")
+    approved_at = exception.get("approved_at")
     max_swap = exception.get("max_current_swap_bytes")
     if not isinstance(reason, str) or not reason.strip():
         raise RuntimeError("Matcher cutover gate exception requires an operator reason")
+    if not isinstance(approved_by, str) or not approved_by.strip():
+        raise RuntimeError("Matcher cutover gate exception requires an approver")
+    if not isinstance(approved_at, str):
+        raise TypeError("Matcher cutover gate exception requires an approval timestamp")
+    try:
+        approval_time = datetime.fromisoformat(approved_at)
+    except ValueError as exc:
+        raise RuntimeError("Matcher cutover gate exception has an invalid approval timestamp") from exc
+    if approval_time.tzinfo is None or approval_time.utcoffset() is None:
+        raise RuntimeError("Matcher cutover gate exception approval timestamp must include a timezone")
     if not isinstance(max_swap, int) or not 0 < max_swap <= MAX_MANUAL_SWAP_EXCEPTION_BYTES:
         raise RuntimeError("Matcher cutover swap exception exceeds the manual exception bound")
     issues = gate.get("issues") if isinstance(gate, dict) else None
@@ -2050,6 +2062,8 @@ def _validate_manual_gate_exception(
         "processing_date": processing_date,
         "run_id": run_id,
         "reason": reason.strip(),
+        "approved_by": approved_by.strip(),
+        "approved_at": approval_time.isoformat(),
         "max_current_swap_bytes": max_swap,
         "observed_current_swap_bytes": observed_swap,
         "accepted_failure": failures[0],
