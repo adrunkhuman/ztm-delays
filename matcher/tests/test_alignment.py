@@ -305,7 +305,7 @@ def test_implausible_schedule_offsets_cannot_own_an_ordinary_course() -> None:
     outcome = settle_duty([course], [too_early, too_late])[0]
 
     assert outcome["execution_status"] == "uncertain"
-    assert outcome["execution_reason"] == "implausible_schedule_offset"
+    assert outcome["execution_reason"] == "implausible_schedule_alignment"
 
 
 def test_replacement_course_has_a_wider_but_bounded_schedule_window() -> None:
@@ -315,3 +315,23 @@ def test_replacement_course_has_a_wider_but_bounded_schedule_window() -> None:
     outcome = settle_duty([course], evidence)[0]
 
     assert outcome["execution_status"] == "executed"
+
+
+def test_terminal_candidate_cannot_bridge_multiple_course_cycles() -> None:
+    course = _course("bridged")
+    template = next(
+        item
+        for item in _evidence(course, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)])
+        if item["candidate_kind"] == "candidate"
+    )
+    bridged = {
+        **template,
+        "traversal_id": "bridged-cycles",
+        "departure_event_time": BASE,
+        "destination_event_time": course["scheduled_end_time"] + timedelta(minutes=46),
+    }
+
+    outcome = settle_duty([course], [bridged])[0]
+
+    assert outcome["execution_status"] == "uncertain"
+    assert outcome["execution_reason"] == "implausible_schedule_alignment"

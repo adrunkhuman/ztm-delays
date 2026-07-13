@@ -17,6 +17,8 @@ MAX_EARLY_DEPARTURE_SECONDS = 15 * 60
 MAX_LATE_DEPARTURE_SECONDS = 60 * 60
 REPLACEMENT_MAX_EARLY_DEPARTURE_SECONDS = 30 * 60
 REPLACEMENT_MAX_LATE_DEPARTURE_SECONDS = 90 * 60
+MAX_TRAVERSAL_DURATION_OVERRUN_SECONDS = 45 * 60
+REPLACEMENT_MAX_TRAVERSAL_DURATION_OVERRUN_SECONDS = 90 * 60
 
 
 def _distance_meters(lat: float, lon: float, stop_lat: float, stop_lon: float) -> float:
@@ -161,7 +163,12 @@ def _plausible_schedule_offset(course: dict[str, Any], candidate: dict[str, Any]
     replacement = str(course["line"]).upper().startswith("Z")
     max_early = REPLACEMENT_MAX_EARLY_DEPARTURE_SECONDS if replacement else MAX_EARLY_DEPARTURE_SECONDS
     max_late = REPLACEMENT_MAX_LATE_DEPARTURE_SECONDS if replacement else MAX_LATE_DEPARTURE_SECONDS
-    return -max_early <= delay <= max_late
+    scheduled_duration = (course["scheduled_end_time"] - course["scheduled_start_time"]).total_seconds()
+    actual_duration = (candidate["destination_event_time"] - candidate["departure_event_time"]).total_seconds()
+    max_overrun = (
+        REPLACEMENT_MAX_TRAVERSAL_DURATION_OVERRUN_SECONDS if replacement else MAX_TRAVERSAL_DURATION_OVERRUN_SECONDS
+    )
+    return -max_early <= delay <= max_late and actual_duration <= scheduled_duration + max_overrun
 
 
 def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -380,8 +387,8 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
             status, confidence, reason = "skipped", "medium", "adjacent_courses_terminal_progression"
             evidence_flags.append("adjacent_course_executions")
         elif raw_candidates and not candidates:
-            status, confidence, reason = "uncertain", "low", "implausible_schedule_offset"
-            evidence_flags.append("terminal_progression_outside_schedule_window")
+            status, confidence, reason = "uncertain", "low", "implausible_schedule_alignment"
+            evidence_flags.append("terminal_progression_outside_schedule_confidence")
         elif observations:
             status, confidence, reason = "uncertain", "low", "terminal_progression_incomplete"
             evidence_flags.append("line_observation_without_terminal_progression")
