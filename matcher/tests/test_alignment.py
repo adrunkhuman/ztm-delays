@@ -335,3 +335,73 @@ def test_terminal_candidate_cannot_bridge_multiple_course_cycles() -> None:
 
     assert outcome["execution_status"] == "uncertain"
     assert outcome["execution_reason"] == "implausible_schedule_alignment"
+
+
+def test_terminal_absence_reanchors_to_a_later_scheduled_course() -> None:
+    first = _course("first")
+    shifted = _course("shifted", 2)
+    missing = _course("missing", 3)
+    resumed = _course("resumed", 4)
+    template = next(
+        item
+        for item in _evidence(first, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)])
+        if item["candidate_kind"] == "candidate"
+    )
+    first_candidate = {
+        **template,
+        "trip_id": first["trip_id"],
+        "traversal_id": "first",
+        "departure_event_time": BASE,
+        "destination_event_time": BASE + timedelta(minutes=10),
+    }
+    resumed_candidate = {
+        **template,
+        "traversal_id": "resumed",
+        "origin_event_time": BASE + timedelta(minutes=58),
+        "departure_event_time": BASE + timedelta(minutes=60),
+        "destination_event_time": BASE + timedelta(minutes=70),
+    }
+    evidence = [
+        first_candidate,
+        {**resumed_candidate, "trip_id": shifted["trip_id"]},
+        {**resumed_candidate, "trip_id": resumed["trip_id"]},
+    ]
+
+    outcomes = settle_duty([first, shifted, missing, resumed], evidence)
+
+    assert [outcome["execution_status"] for outcome in outcomes] == ["executed", "missed", "missed", "executed"]
+    assert [outcome["execution_reason"] for outcome in outcomes[1:3]] == [
+        "later_course_reanchored",
+        "later_course_reanchored",
+    ]
+    assert all("resumed_traversal_owned_by_later_course" in outcome["execution_evidence"] for outcome in outcomes[1:3])
+
+
+def test_continuous_terminal_progression_can_accumulate_large_delay() -> None:
+    first, delayed = _course("first"), _course("delayed", 2)
+    template = next(
+        item
+        for item in _evidence(first, [_ping(0, 0.0), _ping(1, 0.01), _ping(2, 0.02)])
+        if item["candidate_kind"] == "candidate"
+    )
+    evidence = [
+        {
+            **template,
+            "trip_id": first["trip_id"],
+            "traversal_id": "first",
+            "departure_event_time": BASE,
+            "destination_event_time": BASE + timedelta(minutes=50),
+        },
+        {
+            **template,
+            "trip_id": delayed["trip_id"],
+            "traversal_id": "delayed",
+            "origin_event_time": BASE + timedelta(minutes=50),
+            "departure_event_time": BASE + timedelta(minutes=55),
+            "destination_event_time": BASE + timedelta(minutes=65),
+        },
+    ]
+
+    outcomes = settle_duty([first, delayed], evidence)
+
+    assert [outcome["execution_status"] for outcome in outcomes] == ["executed", "executed"]

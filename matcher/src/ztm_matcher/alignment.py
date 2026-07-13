@@ -13,6 +13,8 @@ MAX_PATH_STATES = 64
 DELAY_DIVERSE_STATES = 32
 DELAY_BUCKET_SECONDS = 300
 PATH_TIMING_TIE_SECONDS = 30
+REANCHOR_DELAY_INCREASE_SECONDS = 15 * 60
+REANCHOR_TERMINAL_ABSENCE_SECONDS = 15 * 60
 MAX_EARLY_DEPARTURE_SECONDS = 15 * 60
 MAX_LATE_DEPARTURE_SECONDS = 60 * 60
 REPLACEMENT_MAX_EARLY_DEPARTURE_SECONDS = 30 * 60
@@ -171,6 +173,18 @@ def _plausible_schedule_offset(course: dict[str, Any], candidate: dict[str, Any]
     return -max_early <= delay <= max_late and actual_duration <= scheduled_duration + max_overrun
 
 
+def _requires_later_course_reanchor(
+    previous_course: dict[str, Any], previous: dict[str, Any], course: dict[str, Any], candidate: dict[str, Any]
+) -> bool:
+    previous_delay = (previous["departure_event_time"] - previous_course["scheduled_start_time"]).total_seconds()
+    delay = (candidate["departure_event_time"] - course["scheduled_start_time"]).total_seconds()
+    terminal_absence = (candidate["origin_event_time"] - previous["destination_event_time"]).total_seconds()
+    return (
+        delay - previous_delay > REANCHOR_DELAY_INCREASE_SECONDS
+        and terminal_absence > REANCHOR_TERMINAL_ABSENCE_SECONDS
+    )
+
+
 def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Allocate a duty by comparing coherent, vehicle-specific paths."""
     by_trip: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -233,6 +247,14 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                     ):
                         continue
                     delay = (candidate["departure_event_time"] - course["scheduled_start_time"]).total_seconds()
+                    if (
+                        state["delay"] is not None
+                        and state["previous_destination"] is not None
+                        and delay - state["delay"] > REANCHOR_DELAY_INCREASE_SECONDS
+                        and (candidate["origin_event_time"] - state["previous_destination"]).total_seconds()
+                        > REANCHOR_TERMINAL_ABSENCE_SECONDS
+                    ):
+                        continue
                     timing_cost = state["timing_cost"] + abs(
                         delay if state["delay"] is None else delay - state["delay"]
                     )
@@ -292,6 +314,10 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                 (selected[row["trip_id"]] for row in reversed(ordered[:index]) if row["trip_id"] in selected),
                 None,
             )
+            preceding_course = next(
+                (row for row in reversed(ordered[:index]) if row["trip_id"] in selected),
+                None,
+            )
             following = next(
                 (selected[row["trip_id"]] for row in ordered[index + 1 :] if row["trip_id"] in selected),
                 None,
@@ -304,6 +330,11 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                 and _plausible_schedule_offset(course, item)
                 and str(item["traversal_id"]) not in used
                 and (preceding is None or item["departure_event_time"] > preceding["destination_event_time"])
+                and (
+                    preceding is None
+                    or preceding_course is None
+                    or not _requires_later_course_reanchor(preceding_course, preceding, course, item)
+                )
                 and (following is None or item["destination_event_time"] < following["departure_event_time"])
             ]
             if not candidates:
@@ -353,6 +384,22 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
         source = chosen or (
             candidates[0] if candidates else partials[0] if partials else observations[0] if observations else None
         )
+        before_course = next((row for row in reversed(ordered[:index]) if row["trip_id"] in selected), None)
+        after_course = next((row for row in ordered[index + 1 :] if row["trip_id"] in selected), None)
+        reanchored_gap = bool(
+            before_course
+            and after_course
+            and (before := selected[before_course["trip_id"]])["vehicle_number"]
+            == (after := selected[after_course["trip_id"]])["vehicle_number"]
+            and any(
+                candidate["vehicle_number"] == after["vehicle_number"]
+                and candidate["traversal_id"] == after["traversal_id"]
+                and _requires_later_course_reanchor(before_course, before, gap_course, candidate)
+                for gap_course in ordered[ordered.index(before_course) + 1 : ordered.index(after_course)]
+                for candidate in by_trip[gap_course["trip_id"]]
+                if candidate["candidate_kind"] == "candidate"
+            )
+        )
         if course["trip_id"] in ambiguous_trip_ids:
             status, confidence, reason = "vehicle_change_signal", "low", "multiple_vehicles_terminal_progression"
             evidence_flags.append("multiple_vehicles")
@@ -377,6 +424,9 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
         ):
             status, confidence, reason = "short_turned", "medium", "next_course_origin_before_destination"
             evidence_flags.append("next_course_origin_before_destination")
+        elif reanchored_gap:
+            status, confidence, reason = "missed", "medium", "later_course_reanchored"
+            evidence_flags.append("resumed_traversal_owned_by_later_course")
         elif (
             index > 0
             and index + 1 < len(ordered)
