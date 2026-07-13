@@ -47,58 +47,161 @@ def test_enabled_cutover_requires_an_isolated_shadow_and_input_dataset(
         shadow.CutoverConfig.from_env().validate(shadow.ShadowConfig.from_env())
 
 
-def test_cutover_publication_args_are_exact_current_and_prior_without_execution() -> None:
+def test_cutover_accepts_advisory_warnings_but_not_hard_failures() -> None:
     shadow = _load_shadow_module()
-
-    publication = shadow.matcher_cutover_publication_dbt_args("2026-07-09", "snapshot")
-
-    assert publication == {
-        "current": {
-            "selector": (
-                "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version "
-                "dim_schedule_version fct_trip fct_stop_arrival fct_expected_stop_event"
-            ),
-            "vars": {
-                "processing_date": "2026-07-09",
-                "gtfs_snapshot_id": "snapshot",
-                "use_python_reconstruction": True,
-                "publish_service_date": "2026-07-09",
+    warning_marker = {
+        "quality_gate": {
+            "status": "warn",
+            "issues": [{"level": "warn", "category": "delay", "message": "advisory difference"}],
+        }
+    }
+    assert shadow._validate_manual_gate_exception("2026-07-09", "run", warning_marker, None) is None
+    with pytest.raises(RuntimeError, match="passing shadow quality gate"):
+        shadow._validate_manual_gate_exception(
+            "2026-07-09",
+            "run",
+            {
+                "quality_gate": {
+                    "status": "fail",
+                    "issues": [{"level": "fail", "category": "retention", "message": "retention failed"}],
+                }
             },
+            None,
+        )
+
+
+def test_canonical_gate_requires_nonempty_artifacts_bounded_rss_and_zero_swap() -> None:
+    shadow = _load_shadow_module()
+    pending = {
+        "artifacts": {
+            spec.key: {
+                "rows": 1,
+                "modes": ["bus", "tram"] if any(field.name == "mode" for field in spec.fields) else [],
+            }
+            for spec in shadow.ARTIFACTS
         },
-        "prior": {
-            "selector": (
-                "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version "
-                "dim_schedule_version fct_trip fct_stop_arrival fct_expected_stop_event"
-            ),
-            "vars": {
-                "processing_date": "2026-07-09",
-                "gtfs_snapshot_id": "snapshot",
-                "use_python_reconstruction": True,
-                "publish_service_date": "2026-07-08",
-            },
+        "metrics": {
+            "peak_rss_bytes": 1024**3,
+            "swapping_observed": False,
+            "accepted_fact_executions": 1,
         },
     }
 
+    assert shadow._canonical_quality_gate(pending)["status"] == "pass"
 
-def test_cutover_refuses_non_passing_marker_before_bigquery_mutation(
+    empty = {
+        **pending,
+        "artifacts": pending["artifacts"] | {"trip": {"rows": 0}},
+    }
+    assert shadow._canonical_quality_gate(empty)["status"] == "fail"
+    swapping = {**pending, "metrics": {**pending["metrics"], "swapping_observed": True}}
+    assert shadow._canonical_quality_gate(swapping)["status"] == "fail"
+    oversized = {
+        **pending,
+        "metrics": {**pending["metrics"], "peak_rss_bytes": shadow.DEFAULT_GATE_PEAK_RSS_BYTES + 1},
+    }
+    assert shadow._canonical_quality_gate(oversized)["status"] == "fail"
+
+
+def test_stable_input_bootstrap_is_idempotent_and_partitioned() -> None:
+    shadow = _load_shadow_module()
+
+    class Client:
+        def __init__(self) -> None:
+            self.dataset: Any = None
+            self.tables: dict[str, Any] = {}
+
+        def create_dataset(self, dataset: Any, *, exists_ok: bool) -> None:
+            assert exists_ok
+            self.dataset = dataset
+
+        def get_dataset(self, dataset_id: str) -> Any:
+            assert dataset_id == self.dataset.dataset_id
+            return self.dataset
+
+        def create_table(self, table: Any, *, exists_ok: bool) -> None:
+            assert exists_ok
+            self.tables.setdefault(table.table_id, table)
+
+        def get_table(self, table_id: str) -> Any:
+            return self.tables[table_id]
+
+    client = Client()
+    shadow._ensure_stable_input_tables(client, "matcher_input")
+    shadow._ensure_stable_input_tables(client, "matcher_input")
+
+    assert client.dataset.location == shadow.BIGQUERY_LOCATION
+    assert set(client.tables) == {
+        f"{shadow.GCP_PROJECT}.matcher_input.{table}" for table in shadow.STABLE_INPUT_TABLES.values()
+    }
+    for spec in shadow.ARTIFACTS:
+        table = client.tables[f"{shadow.GCP_PROJECT}.matcher_input.{shadow.STABLE_INPUT_TABLES[spec.key]}"]
+        assert table.time_partitioning.field == spec.partition_field
+        assert table.time_partitioning.require_partition_filter is True
+
+
+def test_canonical_publication_blocks_failed_gate_and_disabled_promotion(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("MATCHER_CUTOVER_ENABLED", "true")
     monkeypatch.setenv("MATCHER_SHADOW_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_MATCHER_SHADOW_DATASET", "matcher_shadow")
-    monkeypatch.setenv("BIGQUERY_MATCHER_INPUT_DATASET", "matcher_input")
     monkeypatch.setenv("MATCHER_SHADOW_WORKSPACE_ROOT", str(tmp_path))
     shadow = _load_shadow_module()
+    pending = {
+        "processing_date": "2026-07-12",
+        "run_id": "run",
+        "artifacts": {
+            spec.key: {
+                "rows": 1,
+                "modes": ["bus", "tram"] if any(field.name == "mode" for field in spec.fields) else [],
+            }
+            for spec in shadow.ARTIFACTS
+        },
+        "metrics": {
+            "peak_rss_bytes": 1024**3,
+            "swapping_observed": False,
+            "accepted_fact_executions": 1,
+        },
+        "tables": {},
+    }
+    context = {
+        "status": "loaded_pending",
+        "processing_date": "2026-07-12",
+        "run_id": "run",
+    }
+    markers: list[dict[str, object]] = []
+    promotions: list[tuple[str, str]] = []
     monkeypatch.setattr(shadow.storage, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow, "_read_pending", lambda *_args: pending)
+    monkeypatch.setattr(shadow, "_pending_tables", lambda *_args: {})
     monkeypatch.setattr(
         shadow,
-        "_read_marker",
-        lambda *_args: {"processing_date": "2026-07-09", "run_id": "run", "quality_gate": {"status": "warn"}},
+        "_write_marker",
+        lambda _client, _config, _date, _run, marker: markers.append(marker) or "gs://commit.json",
     )
-    monkeypatch.setattr(shadow.bigquery, "Client", lambda **_kwargs: pytest.fail("unsafe cutover reached BigQuery"))
+    monkeypatch.setattr(
+        shadow,
+        "promote_validated_shadow_artifacts",
+        lambda processing_date, run_id: (
+            promotions.append((processing_date, run_id)) or {"enabled": False, "reason": "disabled"}
+        ),
+    )
 
-    with pytest.raises(RuntimeError, match="passing shadow quality gate"):
-        shadow.promote_validated_shadow_artifacts("2026-07-09", "run")
+    with pytest.raises(RuntimeError, match="disabled or incomplete"):
+        shadow.publish_matcher_canonical_artifacts("2026-07-12", "run", context)
+    assert promotions == [("2026-07-12", "run")]
+    passing_gate = markers[-1]["quality_gate"]
+    assert isinstance(passing_gate, dict)
+    assert passing_gate.get("status") == "pass"
+
+    pending["artifacts"]["trip"]["rows"] = 0
+    promotions.clear()
+    with pytest.raises(RuntimeError, match="quality gate failed"):
+        shadow.publish_matcher_canonical_artifacts("2026-07-12", "run", context)
+    assert promotions == []
+    failing_gate = markers[-1]["quality_gate"]
+    assert isinstance(failing_gate, dict)
+    assert failing_gate.get("status") == "fail"
 
 
 def test_cutover_accepts_only_exact_bounded_swap_exception() -> None:
@@ -156,7 +259,7 @@ def test_cutover_accepts_only_exact_bounded_swap_exception() -> None:
             },
             exception,
         )
-    with pytest.raises(RuntimeError, match="already passing"):
+    with pytest.raises(RuntimeError, match="without hard failures"):
         shadow._validate_manual_gate_exception("2026-07-10", "run", {"quality_gate": {"status": "pass"}}, exception)
 
 
@@ -233,6 +336,7 @@ def test_stage_failure_prevents_any_stable_mutation(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(shadow.storage, "Client", lambda **_kwargs: object())
     monkeypatch.setattr(shadow.bigquery, "Client", lambda **_kwargs: object())
     monkeypatch.setattr(shadow, "_read_marker", lambda *_args: marker)
+    monkeypatch.setattr(shadow, "_ensure_stable_input_tables", lambda *_args: None)
     monkeypatch.setattr(shadow, "_pending_tables", lambda *_args: tables)
     monkeypatch.setattr(shadow, "_require_exact_processing_partition", lambda *_args: 1)
     monkeypatch.setattr(shadow, "_stage_artifact", lambda *_args: (_ for _ in ()).throw(RuntimeError("stage failed")))
@@ -266,6 +370,7 @@ def test_promotion_records_accepted_swap_exception(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(shadow.storage, "Client", lambda **_kwargs: object())
     monkeypatch.setattr(shadow.bigquery, "Client", lambda **_kwargs: object())
     monkeypatch.setattr(shadow, "_read_marker", lambda *_args: marker)
+    monkeypatch.setattr(shadow, "_ensure_stable_input_tables", lambda *_args: None)
     monkeypatch.setattr(shadow, "_pending_tables", lambda *_args: tables)
     monkeypatch.setattr(shadow, "_require_exact_processing_partition", lambda *_args: 1)
     monkeypatch.setattr(shadow, "_stage_artifact", lambda *_args: None)

@@ -657,22 +657,6 @@ models:
         description: Observed service class inherited from fct_trip.
       - name: service_observation_flags
         description: Service-observation explanation flags inherited from fct_trip.
-      - name: matching_method
-        description: Matcher label used to assign the trip. Current value is settled_duty_chain.
-      - name: matched_duty_chain_id
-        description: Duty-chain identifier selected for this matched vehicle trip.
-      - name: matched_duty_chain_source
-        description: Duty-chain identity source selected for this matched vehicle trip.
-      - name: matched_duty_chain_source_id
-        description: Raw duty-chain source identifier selected for this matched vehicle trip.
-      - name: candidate_rank
-        description: Selected match candidate rank. Accepted settled rows currently have rank 1.
-      - name: candidate_count
-        description: Number of trip candidates seen for matched pings on this vehicle trip.
-      - name: line_match_candidate_count
-        description: Number of candidates whose scheduled line matched the GPS-reported line.
-      - name: matching_flags
-        description: Aggregated matcher caveats observed on pings assigned to this vehicle trip.
       - name: stop_id
         description: Physical stop/location identifier from the governing GTFS snapshot.
       - name: stop_group_id
@@ -713,6 +697,8 @@ models:
         description: Directly observed arrival timestamp when the GPS segment crossed the stop.
       - name: delay_seconds
         description: Difference in seconds between actual_arrival_time and scheduled_arrival_time. Null when no direct arrival was observed.
+      - name: uncertainty_evidence
+        description: Matcher evidence explaining an uncertain expected-stop state. Empty or null for settled states.
       - name: hour_bracket
         description: Warsaw-local hour floor of scheduled_arrival_time.
       - name: detection_method
@@ -734,7 +720,7 @@ models:
       - name: is_observed
         description: True when this scheduled stop has a direct observed arrival row.
       - name: is_match_uncertain
-        description: True when ping-level matcher caveats make stop classification less reliable. Direct detections still emit observed status.
+        description: True when the matcher expected-event state is uncertain or the canonical trip is broken or classified as a matching failure.
       - name: observation_status
         description: "Explicit scheduled-stop state: observed for direct detections, missed for unobserved required stops, skipped_optional for unobserved request stops, not_in_passenger_service for no-pickup/no-drop-off stop-time rows, and uncertain for unobserved stops when the trip assignment is too ambiguous to trust the stop state."
 
@@ -773,7 +759,7 @@ models:
         description: Largest gap reported by present hourly buckets. Missing hours are represented through missing_hours, not as 3600-second gaps.
 
   - name: agg_service_coverage
-    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the selected GTFS bus/tram schedule; observed service counts distinct regular/truncated/modified scheduled trip_id values from int_trip_summary after best-class dedupe ordered regular > truncated > modified, and excludes matching failures. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
+    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the selected GTFS bus/tram schedule; observed service counts distinct regular/truncated/modified scheduled trip_id values from fct_trip after best-class dedupe ordered regular > truncated > modified, and excludes matching failures. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
     columns:
       - name: service_date
         description: GTFS service date assigned to the scheduled trips. Overnight service can have service_hour on the next calendar date.
@@ -859,18 +845,14 @@ models:
         description: Largest gap reported by present hourly buckets. Missing hours are represented through missing_hours, not as 3600-second gaps.
       - name: pings_total
         description: Number of staged, deduplicated GPS pings for this date and mode.
-      - name: pings_matched
-        description: Number of GPS pings matched to a scheduled trip candidate in int_ping_trip.
-      - name: match_rate
-        description: pings_matched divided by pings_total. Zero when no staged pings exist.
       - name: trips_observed
-        description: int_trip_summary candidate rows for this status date and mode across all trip_quality values.
+        description: fct_trip rows for this status date and mode across all trip_quality values.
       - name: trips_complete
-        description: int_trip_summary candidate rows with trip_quality = complete.
+        description: fct_trip rows with trip_quality = complete.
       - name: trips_partial
-        description: int_trip_summary candidate rows with trip_quality = partial.
+        description: fct_trip rows with trip_quality = partial.
       - name: trips_broken
-        description: int_trip_summary candidate rows with trip_quality = broken.
+        description: fct_trip rows with trip_quality = broken.
       - name: broken_rate
         description: trips_broken divided by trips_observed. Zero when no trips were observed.
       - name: expected_trips
@@ -884,7 +866,7 @@ models:
       - name: observed_service_minutes
         description: Settled observed service minutes from agg_service_coverage.
       - name: stop_arrivals_count
-        description: Number of int_stop_arrivals rows for this status date and mode.
+        description: Number of fct_stop_arrival rows for this status date and mode.
       - name: latest_gtfs_snapshot_id
         description: Latest GTFS snapshot ID currently present in raw_gtfs_snapshots when the status mart was built.
       - name: latest_gtfs_snapshot_at
@@ -930,11 +912,7 @@ unit_tests:
         rows: |
           select date '2026-01-15' as gps_date, 1 as vehicle_type
           union all select date '2026-01-15', 1
-      - input: ref('int_ping_trip')
-        format: sql
-        rows: |
-          select date '2026-01-15' as gps_date, 1 as vehicle_type
-      - input: ref('int_trip_summary')
+      - input: ref('fct_trip')
         format: sql
         rows: |
           select date '2026-01-15' as gps_date, date '2026-01-14' as service_date, 1 as vehicle_type, 'bus' as mode, 'overnight-trip' as trip_id, 'partial' as trip_quality
@@ -963,11 +941,11 @@ unit_tests:
             100.0,
             100.0,
             false
-      - input: ref('int_stop_arrivals')
+      - input: ref('fct_stop_arrival')
         format: sql
         rows: |
-          select date '2026-01-15' as gps_date, 1 as vehicle_type
-          union all select date '2026-01-15', 1
+          select date '2026-01-15' as gps_date, date '2026-01-15' as service_date, 1 as vehicle_type
+          union all select date '2026-01-15', date '2026-01-15', 1
       - input: source('raw', 'raw_gtfs_snapshots')
         format: sql
         rows: |
@@ -992,8 +970,6 @@ unit_tests:
           0.0 as min_hourly_coverage_ratio,
           120 as max_gap_seconds,
           2 as pings_total,
-          1 as pings_matched,
-          0.5 as match_rate,
           2 as trips_observed,
           0 as trips_complete,
           1 as trips_partial,
@@ -1080,6 +1056,7 @@ unit_tests:
       vars:
         processing_date: '2026-01-15'
         aggregation_start_date: '2026-01-15'
+        max_gps_date: '2026-01-16'
     given:
       - input: ref('int_gtfs_trip_schedule')
         format: sql
@@ -1099,7 +1076,7 @@ unit_tests:
         rows: |
           select '187' as route_id, '187' as route_short_name, 3 as route_type, 'bus' as mode, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'M1', 'M1', 1, 'metro', 'snapshot-valid'
-      - input: ref('int_trip_summary')
+      - input: source('matcher_input', 'reconstruction_trip_facts')
         format: sql
         rows: |
           select
@@ -1144,7 +1121,7 @@ unit_tests:
           union all
           select
             'snapshot-valid',
-            date '2026-01-15',
+            date '2026-01-16',
             date '2026-01-14',
             'trip-overnight',
             1003,
@@ -1236,478 +1213,6 @@ unit_tests:
           1.0 as service_coverage_ratio,
           true as is_settled_hour
 
-  - name: fct_trip_suppresses_trips_beyond_processed_gps_date
-    model: fct_trip
-    overrides:
-      vars:
-        processing_date: '2026-03-29'
-        publish_service_date: '2026-03-29'
-    given:
-      - input: ref('int_trip_summary')
-        format: sql
-        rows: |
-          select
-            'snapshot-valid' as gtfs_snapshot_id,
-            date '2026-03-29' as gps_date,
-            date '2026-03-29' as service_date,
-            'day-trip' as trip_id,
-            1001 as vehicle_number,
-            '187' as line,
-            '187' as route_short_name,
-            'bus' as mode,
-            '1' as brigade,
-            1 as vehicle_type,
-            0 as direction_id,
-            'svc' as service_id,
-            'Central' as trip_headsign,
-            'shape-1' as shape_id,
-            'weekday' as day_type,
-            'thursday' as schedule_day_type,
-            'svc' as schedule_service_ids,
-            'schedule-version-1' as schedule_version_id,
-            '100101' as origin_stop_id,
-            'Origin' as origin_stop_name,
-            '200101' as destination_stop_id,
-            'Destination' as destination_stop_name,
-            timestamp('2026-03-29 22:00:00+02') as scheduled_start_time,
-            timestamp('2026-03-29 23:00:00+02') as scheduled_end_time,
-            timestamp('2026-03-29 22:01:00+02') as actual_start_time,
-            timestamp('2026-03-29 23:02:00+02') as actual_end_time,
-            60 as start_delay_seconds,
-            120 as end_delay_seconds,
-            10 as stops_expected,
-            9 as stops_detected,
-            0.9 as detected_stop_ratio,
-            0 as first_detected_stop_sequence,
-            9 as last_detected_stop_sequence,
-            1 as max_stop_sequence_gap,
-            60 as max_ping_gap_seconds,
-            10.0 as max_speed_mps,
-            true as is_first_stop_observed,
-            true as is_last_stop_observed,
-            false as has_non_monotonic_stop_progression,
-            false as has_impossible_speed_jump,
-            false as has_stale_stop_progression,
-            'complete' as trip_quality,
-            array<string>[] as quality_flags,
-            'regular' as service_observation_class,
-            array<string>[] as service_observation_flags
-          union all
-          select
-            'snapshot-valid',
-            date '2026-03-29',
-            date '2026-03-29',
-            'overnight-trip',
-            1002,
-            '187',
-            '187',
-            'bus',
-            '1',
-            1,
-            0,
-            'svc',
-            'Central',
-            'shape-2',
-            'weekday',
-            'thursday',
-            'svc',
-            'schedule-version-1',
-            '100101',
-            'Origin',
-            '200101',
-            'Destination',
-            timestamp('2026-03-29 23:50:00+02'),
-            timestamp('2026-03-30 00:30:00+02'),
-            timestamp('2026-03-29 23:51:00+02'),
-            timestamp('2026-03-30 00:35:00+02'),
-            60,
-            300,
-            10,
-            4,
-            0.4,
-            0,
-            3,
-            1,
-            60,
-            10.0,
-            true,
-            false,
-            false,
-            false,
-            false,
-            'partial',
-            array<string>[],
-            'truncated',
-            ['short_end']
-    expect:
-      format: sql
-      rows: |
-        select
-          'snapshot-valid' as gtfs_snapshot_id,
-          date '2026-03-29' as gps_date,
-          date '2026-03-29' as service_date,
-          'day-trip' as trip_id,
-          1001 as vehicle_number,
-          '187' as line,
-          '187' as route_short_name,
-          'bus' as mode,
-          '1' as brigade,
-          1 as vehicle_type,
-          0 as direction_id,
-          'svc' as service_id,
-          'Central' as trip_headsign,
-          'shape-1' as shape_id,
-          'weekday' as day_type,
-          'thursday' as schedule_day_type,
-          'svc' as schedule_service_ids,
-          'schedule-version-1' as schedule_version_id,
-          '100101' as origin_stop_id,
-          'Origin' as origin_stop_name,
-          '200101' as destination_stop_id,
-          'Destination' as destination_stop_name,
-          timestamp('2026-03-29 22:00:00+02') as scheduled_start_time,
-          timestamp('2026-03-29 23:00:00+02') as scheduled_end_time,
-          timestamp('2026-03-29 22:01:00+02') as actual_start_time,
-          timestamp('2026-03-29 23:02:00+02') as actual_end_time,
-          60 as start_delay_seconds,
-          120 as end_delay_seconds,
-          10 as stops_expected,
-          9 as stops_detected,
-          0.9 as detected_stop_ratio,
-          0 as first_detected_stop_sequence,
-          9 as last_detected_stop_sequence,
-          1 as max_stop_sequence_gap,
-          60 as max_ping_gap_seconds,
-          10.0 as max_speed_mps,
-          true as is_first_stop_observed,
-          true as is_last_stop_observed,
-          false as has_non_monotonic_stop_progression,
-          false as has_impossible_speed_jump,
-          false as has_stale_stop_progression,
-          'complete' as trip_quality,
-          array<string>[] as quality_flags,
-          'regular' as service_observation_class,
-          array<string>[] as service_observation_flags
-
-  - name: fct_trip_publishes_overnight_trip_on_prior_service_rebuild
-    model: fct_trip
-    overrides:
-      vars:
-        processing_date: '2026-03-30'
-        publish_service_date: '2026-03-29'
-    given:
-      - input: ref('int_trip_summary')
-        format: sql
-        rows: |
-          select
-            'snapshot-valid' as gtfs_snapshot_id,
-            date '2026-03-30' as gps_date,
-            date '2026-03-29' as service_date,
-            'overnight-trip' as trip_id,
-            1002 as vehicle_number,
-            '187' as line,
-            '187' as route_short_name,
-            'bus' as mode,
-            '1' as brigade,
-            1 as vehicle_type,
-            0 as direction_id,
-            'svc' as service_id,
-            'Central' as trip_headsign,
-            'shape-2' as shape_id,
-            'weekday' as day_type,
-            'thursday' as schedule_day_type,
-            'svc' as schedule_service_ids,
-            'schedule-version-1' as schedule_version_id,
-            '100101' as origin_stop_id,
-            'Origin' as origin_stop_name,
-            '200101' as destination_stop_id,
-            'Destination' as destination_stop_name,
-            timestamp('2026-03-29 23:50:00+02') as scheduled_start_time,
-            timestamp('2026-03-30 00:30:00+02') as scheduled_end_time,
-            timestamp('2026-03-29 23:51:00+02') as actual_start_time,
-            timestamp('2026-03-30 00:35:00+02') as actual_end_time,
-            60 as start_delay_seconds,
-            300 as end_delay_seconds,
-            10 as stops_expected,
-            9 as stops_detected,
-            0.9 as detected_stop_ratio,
-            0 as first_detected_stop_sequence,
-            9 as last_detected_stop_sequence,
-            1 as max_stop_sequence_gap,
-            60 as max_ping_gap_seconds,
-            10.0 as max_speed_mps,
-            true as is_first_stop_observed,
-            true as is_last_stop_observed,
-            false as has_non_monotonic_stop_progression,
-            false as has_impossible_speed_jump,
-            false as has_stale_stop_progression,
-            'complete' as trip_quality,
-            array<string>[] as quality_flags,
-            'regular' as service_observation_class,
-            array<string>[] as service_observation_flags
-    expect:
-      format: sql
-      rows: |
-        select
-          'snapshot-valid' as gtfs_snapshot_id,
-          date '2026-03-30' as gps_date,
-          date '2026-03-29' as service_date,
-          'overnight-trip' as trip_id,
-          1002 as vehicle_number,
-          '187' as line,
-          '187' as route_short_name,
-          'bus' as mode,
-          '1' as brigade,
-          1 as vehicle_type,
-          0 as direction_id,
-          'svc' as service_id,
-          'Central' as trip_headsign,
-          'shape-2' as shape_id,
-          'weekday' as day_type,
-          'thursday' as schedule_day_type,
-          'svc' as schedule_service_ids,
-          'schedule-version-1' as schedule_version_id,
-          '100101' as origin_stop_id,
-          'Origin' as origin_stop_name,
-          '200101' as destination_stop_id,
-          'Destination' as destination_stop_name,
-          timestamp('2026-03-29 23:50:00+02') as scheduled_start_time,
-          timestamp('2026-03-30 00:30:00+02') as scheduled_end_time,
-          timestamp('2026-03-29 23:51:00+02') as actual_start_time,
-          timestamp('2026-03-30 00:35:00+02') as actual_end_time,
-          60 as start_delay_seconds,
-          300 as end_delay_seconds,
-          10 as stops_expected,
-          9 as stops_detected,
-          0.9 as detected_stop_ratio,
-          0 as first_detected_stop_sequence,
-          9 as last_detected_stop_sequence,
-          1 as max_stop_sequence_gap,
-          60 as max_ping_gap_seconds,
-          10.0 as max_speed_mps,
-          true as is_first_stop_observed,
-          true as is_last_stop_observed,
-          false as has_non_monotonic_stop_progression,
-          false as has_impossible_speed_jump,
-          false as has_stale_stop_progression,
-          'complete' as trip_quality,
-          array<string>[] as quality_flags,
-          'regular' as service_observation_class,
-          array<string>[] as service_observation_flags
-
-  - name: fct_stop_arrival_adds_archive_labels_and_trip_quality
-    model: fct_stop_arrival
-    overrides:
-      vars:
-        processing_date: '2026-01-16'
-        publish_service_date: '2026-01-15'
-        gtfs_snapshot_id: 'snapshot-valid'
-    given:
-      - input: ref('int_stop_arrivals')
-        format: sql
-        rows: |
-          select
-            'snapshot-valid' as gtfs_snapshot_id,
-            '187' as line,
-            '1' as brigade,
-            1001 as vehicle_number,
-            1 as vehicle_type,
-            date '2026-01-15' as gps_date,
-            date '2026-01-15' as service_date,
-            'weekday' as day_type,
-            'trip-1' as trip_id,
-            'shape-1' as shape_id,
-            'svc' as service_id,
-            0 as direction_id,
-            '100101' as stop_id,
-            'Main 01' as stop_name,
-            3 as stop_sequence,
-            0 as pickup_type,
-            0 as drop_off_type,
-            'regular' as stop_service_class,
-            'passenger' as stop_execution_class,
-            'high' as classification_confidence,
-            'gtfs_passenger_stop' as classification_reason,
-            ['gtfs_passenger_eligible'] as classification_evidence,
-            true as are_passenger_boundaries_settled,
-            timestamp('2026-01-15 08:17:00+01') as scheduled_arrival_time,
-            timestamp('2026-01-15 08:17:20+01') as scheduled_departure_time,
-            timestamp('2026-01-15 08:19:30+01') as actual_arrival_time,
-            150 as arrival_delay_seconds,
-            'segment_within_75m' as detection_method,
-            75.0 as stop_match_radius_m,
-            12.3 as stop_distance_m,
-            18.4 as prev_ping_distance_m,
-            22.5 as next_ping_distance_m,
-            timestamp('2026-01-15 08:19:00+01') as segment_start_time,
-            timestamp('2026-01-15 08:20:00+01') as segment_end_time,
-            60 as segment_duration_seconds
-          union all
-          select
-            'snapshot-valid', '118', '2', 1904, 1, date '2026-01-15', date '2026-01-15', 'weekday',
-            'trip-non-monotonic', 'shape-2', 'svc', 0, '200101', 'Reverse 01', 5,
-            0, 0, 'regular', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true,
-            timestamp('2026-01-15 08:15:00+01'), timestamp('2026-01-15 08:15:20+01'),
-            timestamp('2026-01-15 08:09:00+01'), -360, 'segment_within_75m', 75.0, 9.0, 4.0, 5.0,
-            timestamp('2026-01-15 08:08:30+01'), timestamp('2026-01-15 08:09:30+01'), 60
-          union all
-          select
-            'snapshot-prior', '187', '9', 1001, 1, date '2026-01-15', date '2026-01-15', 'weekday',
-            'trip-1', 'shape-prior', 'svc-prior', 0, '100101', 'Prior 01', 1,
-            0, 0, 'regular', 'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true,
-            timestamp('2026-01-15 07:10:00+01'), timestamp('2026-01-15 07:10:20+01'),
-            timestamp('2026-01-15 07:11:00+01'), 60, 'segment_within_75m', 75.0, 8.0, 9.0, 10.0,
-            timestamp('2026-01-15 07:10:30+01'), timestamp('2026-01-15 07:11:30+01'), 60
-      - input: ref('fct_trip')
-        format: sql
-        rows: |
-          select
-            'snapshot-valid' as gtfs_snapshot_id,
-            date '2026-01-15' as gps_date,
-            date '2026-01-15' as service_date,
-            'trip-1' as trip_id,
-            1001 as vehicle_number,
-            '187' as line,
-            '187' as route_short_name,
-            'bus' as mode,
-            '1' as brigade,
-            1 as vehicle_type,
-            0 as direction_id,
-            'svc' as service_id,
-            'Central' as trip_headsign,
-            'shape-1' as shape_id,
-            'weekday' as day_type,
-            'thursday' as schedule_day_type,
-            'svc' as schedule_service_ids,
-            '187|0|thursday|2026-01-15' as schedule_version_id,
-            '100101' as origin_stop_id,
-            'Main 01' as origin_stop_name,
-            '200101' as destination_stop_id,
-            'End 01' as destination_stop_name,
-            timestamp('2026-01-15 08:00:00+01') as scheduled_start_time,
-            timestamp('2026-01-15 09:00:00+01') as scheduled_end_time,
-            timestamp('2026-01-15 08:01:00+01') as actual_start_time,
-            timestamp('2026-01-15 09:02:00+01') as actual_end_time,
-            60 as start_delay_seconds,
-            120 as end_delay_seconds,
-            20 as stops_expected,
-            19 as stops_detected,
-            0.95 as detected_stop_ratio,
-            1 as first_detected_stop_sequence,
-            20 as last_detected_stop_sequence,
-            1 as max_stop_sequence_gap,
-            120 as max_ping_gap_seconds,
-            10.0 as max_speed_mps,
-            true as is_first_stop_observed,
-            true as is_last_stop_observed,
-            false as has_non_monotonic_stop_progression,
-            false as has_impossible_speed_jump,
-            false as has_stale_stop_progression,
-            'complete' as trip_quality,
-            array<string>[] as quality_flags,
-            'regular' as service_observation_class,
-            array<string>[] as service_observation_flags
-          union all
-          select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-non-monotonic', 1904,
-            '118', '118', 'bus', '2', 1, 0, 'svc', 'Reverse', 'shape-2', 'weekday', 'thursday', 'svc',
-            '118|0|thursday|2026-01-15', '200101', 'Reverse 01', '200105', 'Reverse 05',
-            timestamp('2026-01-15 08:00:00+01'), timestamp('2026-01-15 08:30:00+01'),
-            timestamp('2026-01-15 08:20:00+01'), timestamp('2026-01-15 08:09:00+01'),
-            1200, -1260, 10, 5, 0.5, 5, 1, 4, 120, 10.0, false, false, true, false, false,
-            'broken', ['non_monotonic_stop_progression', 'likely_wrong_trip_assignment'],
-            'matching_failure', ['short_start', 'short_end', 'bad_assignment_evidence']
-          union all
-          select
-            'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
-            '187', '187', 'bus', '9', 1, 0, 'svc-prior', 'Prior', 'shape-prior', 'weekday', 'thursday',
-            'svc-prior', '187|0|thursday|2026-01-15', '100101', 'Prior 01', '100102', 'Prior 02',
-            timestamp('2026-01-15 07:00:00+01'), timestamp('2026-01-15 07:30:00+01'),
-            timestamp('2026-01-15 07:01:00+01'), timestamp('2026-01-15 07:31:00+01'),
-            60, 60, 2, 2, 1.0, 0, 1, 1, 60, 10.0, true, true, false, false, false,
-            'complete', array<string>[], 'regular', array<string>[]
-      - input: ref('stg_gtfs__stops')
-        format: sql
-        rows: |
-          select '100101' as stop_id, 'Main 01' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon, 'snapshot-valid' as gtfs_snapshot_id
-          union all select '100102', 'Main 02', 52.2, 21.2, 'snapshot-valid'
-          union all select '100103', 'Main 02', 52.3, 21.3, 'snapshot-valid'
-          union all select '200101', 'Reverse 01', 52.4, 21.4, 'snapshot-valid'
-          union all select '100101', 'Old Main', 52.0, 21.0, 'snapshot-old'
-          union all select '100101', 'Prior 01', 52.5, 21.5, 'snapshot-prior'
-      - input: ref('dim_date')
-        format: sql
-        rows: |
-          select date '2026-01-15' as service_date, 'weekday' as day_type, false as is_holiday, 'Thursday' as weekday_name, 5 as day_of_week, 3 as iso_week, 1 as month, 2026 as year
-    expect:
-      format: sql
-      rows: |
-        select
-          'snapshot-valid' as gtfs_snapshot_id,
-          date '2026-01-15' as gps_date,
-          date '2026-01-15' as source_gps_date,
-          date '2026-01-15' as service_date,
-          'trip-1' as trip_id,
-          1001 as vehicle_number,
-          '187' as line,
-          '187' as route_short_name,
-          'bus' as mode,
-          '1' as brigade,
-          1 as vehicle_type,
-          0 as direction_id,
-          'svc' as service_id,
-          'Central' as trip_headsign,
-          'shape-1' as shape_id,
-          'weekday' as day_type,
-          false as is_holiday,
-          'thursday' as schedule_day_type,
-          'svc' as schedule_service_ids,
-          '187|0|thursday|2026-01-15' as schedule_version_id,
-          'complete' as trip_quality,
-          array<string>[] as quality_flags,
-          'regular' as service_observation_class,
-          array<string>[] as service_observation_flags,
-          '100101' as stop_id,
-          '1001' as stop_group_id,
-          '01' as stop_post_code,
-          'Main 01' as stop_name,
-          52.1 as stop_lat,
-          21.1 as stop_lon,
-          'Main 02' as stop_group_name,
-          3 as stop_sequence,
-          0 as pickup_type,
-          0 as drop_off_type,
-          'regular' as stop_service_class,
-          'passenger' as stop_execution_class,
-          'high' as classification_confidence,
-          'gtfs_passenger_stop' as classification_reason,
-          ['gtfs_passenger_eligible'] as classification_evidence,
-          true as are_passenger_boundaries_settled,
-          timestamp('2026-01-15 08:17:00+01') as scheduled_arrival_time,
-          timestamp('2026-01-15 08:17:20+01') as scheduled_departure_time,
-          timestamp('2026-01-15 08:19:30+01') as actual_arrival_time,
-          150 as delay_seconds,
-          timestamp('2026-01-15 08:00:00+01') as hour_bracket,
-          'segment_within_75m' as detection_method,
-          75.0 as stop_match_radius_m,
-          12.3 as stop_distance_m,
-          18.4 as prev_ping_distance_m,
-          22.5 as next_ping_distance_m,
-          timestamp('2026-01-15 08:19:00+01') as segment_start_time,
-          timestamp('2026-01-15 08:20:00+01') as segment_end_time,
-          60 as segment_duration_seconds
-        union all
-        select
-          'snapshot-prior', date '2026-01-15', date '2026-01-15', date '2026-01-15',
-          'trip-1', 1001, '187', '187', 'bus', '9', 1, 0, 'svc-prior', 'Prior', 'shape-prior',
-          'weekday', false, 'thursday', 'svc-prior', '187|0|thursday|2026-01-15', 'complete',
-          array<string>[], 'regular', array<string>[], '100101', '1001', '01', 'Prior 01', 52.5, 21.5,
-          'Prior 01', 1, 0, 0, 'regular', 'passenger', 'high', 'gtfs_passenger_stop',
-          ['gtfs_passenger_eligible'], true, timestamp('2026-01-15 07:10:00+01'),
-          timestamp('2026-01-15 07:10:20+01'), timestamp('2026-01-15 07:11:00+01'), 60,
-          timestamp('2026-01-15 07:00:00+01'), 'segment_within_75m', 75.0, 8.0, 9.0, 10.0,
-          timestamp('2026-01-15 07:10:30+01'), timestamp('2026-01-15 07:11:30+01'), 60
-
   - name: fct_expected_stop_event_emits_observed_missed_and_uncertain_rows
     model: fct_expected_stop_event
     overrides:
@@ -1715,7 +1220,6 @@ unit_tests:
         processing_date: '2026-01-16'
         publish_service_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
-        use_python_reconstruction: true
     given: &fct_expected_stop_event_given
       - input: ref('fct_trip')
         format: sql
@@ -1763,39 +1267,49 @@ unit_tests:
             'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, '187', '187', 'bus', '9',
             1, 0, 'svc-prior', 'Prior', 'shape-prior', 'weekday', 'thursday', 'svc-prior', 'schedule-version-prior',
             'complete', array<string>[], 'regular', array<string>[]
-      - input: ref('int_ping_trip')
+      - input: source('matcher_input', 'reconstruction_expected_stop_events')
         format: sql
         rows: |
           select
             'snapshot-valid' as gtfs_snapshot_id,
             date '2026-01-15' as gps_date,
+            date '2026-01-15' as source_gps_date,
             date '2026-01-15' as service_date,
             'trip-1' as trip_id,
             1001 as vehicle_number,
-            'settled_duty_chain' as matching_method,
-            'chain-1' as matched_duty_chain_id,
-            'block_id' as matched_duty_chain_source,
-            'block-1' as matched_duty_chain_source_id,
-            1 as candidate_rank,
-            1 as candidate_count,
-            1 as line_match_candidate_count,
-            array<string>[] as matching_flags
+            0 as stop_sequence,
+            'observed' as observation_status,
+            timestamp('2026-01-15 08:20:05+01') as actual_arrival_time,
+            5 as delay_seconds,
+            array<string>[] as uncertainty_evidence
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-2', 1002, 'settled_duty_chain',
-            'chain-2', 'block_id', 'block-2', 1, 2, 1, ['uncertain_assignment']
+            'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001, 1,
+            'missed', cast(null as timestamp), cast(null as int64), array<string>[]
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, 'settled_duty_chain',
-            'chain-3', 'block_id', 'block-3', 1, 1, 1, array<string>[]
+            'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 3,
+            'observed', timestamp('2026-01-15 08:28:25+01'), 5, array<string>[]
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-4', 1004, 'settled_duty_chain',
-            'chain-4', 'block_id', 'block-4', 1, 1, 1, array<string>[]
+            'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-2', 1002, 0,
+            'observed', timestamp('2026-01-15 08:30:20+01'), 20, array<string>[]
           union all
           select
-            'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 'settled_duty_chain',
-            'chain-prior', 'block_id', 'block-prior', 1, 1, 1, array<string>[]
+            'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-2', 1002, 1,
+            'missed', cast(null as timestamp), cast(null as int64), array<string>[]
+          union all
+          select
+            'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, 0,
+            'uncertain', timestamp('2026-01-15 08:35:20+01'), 20, ['alignment_ambiguous_or_medium']
+          union all
+          select
+            'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-4', 1004, 0,
+            'uncertain', cast(null as timestamp), cast(null as int64), ['unreliable_trip_assignment']
+          union all
+          select
+            'snapshot-prior', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 0,
+            'observed', timestamp('2026-01-15 07:30:30+01'), 30, array<string>[]
       - input: source('matcher_input', 'reconstruction_stop_semantics')
         format: sql
         rows: &fct_expected_stop_semantics_rows |
@@ -1834,9 +1348,6 @@ unit_tests:
           union all select 'trip-4', '100108', 0, 31200, 31200, 0, 0, 'regular', 'snapshot-valid'
           union all select 'trip-1', '100101', 0, 27000, 27000, 0, 0, 'regular', 'snapshot-prior'
           ) as base
-      - input: ref('int_gtfs_trip_stop_semantics')
-        format: sql
-        rows: *fct_expected_stop_semantics_rows
       - input: ref('stg_gtfs__stops')
         format: sql
         rows: |
@@ -1921,14 +1432,6 @@ unit_tests:
           array<string>[] as quality_flags,
           'regular' as service_observation_class,
           array<string>[] as service_observation_flags,
-          'settled_duty_chain' as matching_method,
-          'chain-1' as matched_duty_chain_id,
-          'block_id' as matched_duty_chain_source,
-          'block-1' as matched_duty_chain_source_id,
-          1 as candidate_rank,
-          1 as candidate_count,
-          1 as line_match_candidate_count,
-          array<string>[] as matching_flags,
           '100101' as stop_id,
           '1001' as stop_group_id,
           '01' as stop_post_code,
@@ -1948,11 +1451,12 @@ unit_tests:
           true as are_passenger_boundaries_settled,
           0 as first_passenger_stop_sequence,
           3 as last_passenger_stop_sequence,
-          timestamp('2026-01-15 08:20:00+01') as scheduled_arrival_time,
-          timestamp('2026-01-15 08:20:00+01') as scheduled_departure_time,
-          timestamp('2026-01-15 08:20:05+01') as actual_arrival_time,
-          5 as delay_seconds,
-          timestamp('2026-01-15 08:00:00+01') as hour_bracket,
+           timestamp('2026-01-15 08:20:00+01') as scheduled_arrival_time,
+           timestamp('2026-01-15 08:20:00+01') as scheduled_departure_time,
+           timestamp('2026-01-15 08:20:05+01') as actual_arrival_time,
+           5 as delay_seconds,
+           array<string>[] as uncertainty_evidence,
+           timestamp('2026-01-15 08:00:00+01') as hour_bracket,
           'segment_within_75m' as detection_method,
           75.0 as stop_match_radius_m,
           10.0 as stop_distance_m,
@@ -1968,102 +1472,83 @@ unit_tests:
         select
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
-          1, 1, 1, array<string>[], '100102', '1001', '02', 'Main 02', 52.2, 21.2, 'Main 01', 1, 0, 0, 'regular',
-          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 3,
-          timestamp('2026-01-15 08:25:00+01'), timestamp('2026-01-15 08:25:00+01'), cast(null as timestamp),
-          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
+          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], '100102', '1001', '02', 'Main 02', 52.2, 21.2, 'Main 01', 1, 0, 0, 'regular',
+           'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 3,
+           timestamp('2026-01-15 08:25:00+01'), timestamp('2026-01-15 08:25:00+01'), cast(null as timestamp),
+           cast(null as int64), array<string>[], timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
           false, false, 'missed'
         union all
         select
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
-          1, 1, 1, array<string>[], '100105', '1001', '05', 'Depot', 52.5, 21.5, 'Main 01', 2, 1, 1, 'not_in_passenger_service',
-          'technical_suffix', 'high', 'explicit_non_passenger_suffix', ['explicit_non_passenger_service'], false, true, 0, 3,
-          timestamp('2026-01-15 08:26:40+01'), timestamp('2026-01-15 08:26:40+01'), cast(null as timestamp),
-          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
+          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], '100105', '1001', '05', 'Depot', 52.5, 21.5, 'Main 01', 2, 1, 1, 'not_in_passenger_service',
+           'technical_suffix', 'high', 'explicit_non_passenger_suffix', ['explicit_non_passenger_service'], false, true, 0, 3,
+           timestamp('2026-01-15 08:26:40+01'), timestamp('2026-01-15 08:26:40+01'), cast(null as timestamp),
+           cast(null as int64), cast(null as array<string>), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
           false, false, 'not_in_passenger_service'
         union all
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-1', 'block_id', 'block-1',
-          1, 1, 1, array<string>[], '100106', '1001', '06', 'Request Stop', 52.6, 21.6, 'Main 01', 3, 3, 3, 'request',
-          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 3,
-          timestamp('2026-01-15 08:28:20+01'), timestamp('2026-01-15 08:28:20+01'),
-          timestamp('2026-01-15 08:28:25+01'), 5, timestamp('2026-01-15 08:00:00+01'),
+          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], '100106', '1001', '06', 'Request Stop', 52.6, 21.6, 'Main 01', 3, 3, 3, 'request',
+           'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 3,
+           timestamp('2026-01-15 08:28:20+01'), timestamp('2026-01-15 08:28:20+01'),
+           timestamp('2026-01-15 08:28:25+01'), 5, array<string>[], timestamp('2026-01-15 08:00:00+01'),
           'segment_within_250m', 250.0, 100.0, 120.0, 130.0, timestamp('2026-01-15 08:28:00+01'),
           timestamp('2026-01-15 08:28:30+01'), 30, true, false, 'observed'
         union all
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-2', 1002,
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
-          1, 2, 1, ['uncertain_assignment'], '100103', '1001', '03', 'Main 03', 52.3, 21.3, 'Main 01', 0, 0, 0, 'regular',
-          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1,
-          timestamp('2026-01-15 08:30:00+01'), timestamp('2026-01-15 08:30:00+01'),
-          timestamp('2026-01-15 08:30:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
+          'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], '100103', '1001', '03', 'Main 03', 52.3, 21.3, 'Main 01', 0, 0, 0, 'regular',
+           'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1,
+           timestamp('2026-01-15 08:30:00+01'), timestamp('2026-01-15 08:30:00+01'),
+           timestamp('2026-01-15 08:30:20+01'), 20, array<string>[], timestamp('2026-01-15 08:00:00+01'),
           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:30:00+01'),
-          timestamp('2026-01-15 08:30:30+01'), 30, true, true, 'observed'
+          timestamp('2026-01-15 08:30:30+01'), 30, true, false, 'observed'
         union all
         select
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-2', 1002,
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], 'settled_duty_chain', 'chain-2', 'block_id', 'block-2',
-          1, 2, 1, ['uncertain_assignment'], '100107', '1001', '07', 'Main 07', 52.7, 21.7, 'Main 01', 1, 0, 0, 'regular',
-          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1,
-          timestamp('2026-01-15 08:31:40+01'), timestamp('2026-01-15 08:31:40+01'), cast(null as timestamp),
-          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
+          'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], '100107', '1001', '07', 'Main 07', 52.7, 21.7, 'Main 01', 1, 0, 0, 'regular',
+           'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1,
+           timestamp('2026-01-15 08:31:40+01'), timestamp('2026-01-15 08:31:40+01'), cast(null as timestamp),
+           cast(null as int64), array<string>[], timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
-          false, true, 'uncertain'
+          false, false, 'missed'
         union all
         select
           'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-3', 1003,
           '187', '187', 'bus', '3', 1, 0, 'svc', 'Central', 'shape-3', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'partial', ['stale_stop_progression'], 'modified', ['stale_progress'], 'settled_duty_chain', 'chain-3', 'block_id', 'block-3',
-          1, 1, 1, array<string>[], '100104', '1001', '04', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
-          'unknown', 'unknown', 'unresolved_passenger_boundary', ['missing_boundary_evidence'], true, false, 0, 0,
-          timestamp('2026-01-15 08:35:00+01'), timestamp('2026-01-15 08:35:00+01'),
-          timestamp('2026-01-15 08:35:20+01'), 20, timestamp('2026-01-15 08:00:00+01'),
-          'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:35:00+01'),
-          timestamp('2026-01-15 08:35:30+01'), 30, true, false, 'uncertain'
+          'schedule-version-1', 'partial', ['stale_stop_progression'], 'modified', ['stale_progress'], '100104', '1001', '04', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
+           'unknown', 'unknown', 'unresolved_passenger_boundary', ['missing_boundary_evidence'], true, false, 0, 0,
+           timestamp('2026-01-15 08:35:00+01'), timestamp('2026-01-15 08:35:00+01'),
+           timestamp('2026-01-15 08:35:20+01'), 20, ['alignment_ambiguous_or_medium'], timestamp('2026-01-15 08:00:00+01'),
+           'segment_within_75m', 75.0, 11.0, 16.0, 21.0, timestamp('2026-01-15 08:35:00+01'),
+          timestamp('2026-01-15 08:35:30+01'), 30, false, true, 'uncertain'
         union all
         select
           'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-4', 1004,
           '187', '187', 'bus', '4', 1, 0, 'svc', 'Central', 'shape-4', 'weekday', false, 'thursday', 'svc',
-          'schedule-version-1', 'broken', ['likely_wrong_trip_assignment'], 'matching_failure', ['bad_assignment_evidence'], 'settled_duty_chain', 'chain-4', 'block_id', 'block-4',
-          1, 1, 1, array<string>[], '100108', '1001', '08', 'Main 08', 52.8, 21.8, 'Main 01', 0, 0, 0, 'regular',
-          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
-          timestamp('2026-01-15 08:40:00+01'), timestamp('2026-01-15 08:40:00+01'), cast(null as timestamp),
-          cast(null as int64), timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
+          'schedule-version-1', 'broken', ['likely_wrong_trip_assignment'], 'matching_failure', ['bad_assignment_evidence'], '100108', '1001', '08', 'Main 08', 52.8, 21.8, 'Main 01', 0, 0, 0, 'regular',
+           'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
+           timestamp('2026-01-15 08:40:00+01'), timestamp('2026-01-15 08:40:00+01'), cast(null as timestamp),
+           cast(null as int64), ['unreliable_trip_assignment'], timestamp('2026-01-15 08:00:00+01'), cast(null as string), cast(null as float64), cast(null as float64),
           cast(null as float64), cast(null as float64), cast(null as timestamp), cast(null as timestamp), cast(null as int64),
-          false, false, 'uncertain'
+          false, true, 'uncertain'
         union all
         select
           'snapshot-prior', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '9', 1, 0, 'svc-prior', 'Prior', 'shape-prior', 'weekday', false, 'thursday',
           'svc-prior', 'schedule-version-prior', 'complete', array<string>[], 'regular', array<string>[],
-          'settled_duty_chain', 'chain-prior', 'block_id', 'block-prior', 1, 1, 1, array<string>[],
           '100101', '1001', '01', 'Prior 01', 52.9, 21.9, 'Prior 01', 0, 0, 0, 'regular',
-          'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
-          timestamp('2026-01-15 07:30:00+01'), timestamp('2026-01-15 07:30:00+01'),
-          timestamp('2026-01-15 07:30:30+01'), 30, timestamp('2026-01-15 07:00:00+01'),
+           'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
+           timestamp('2026-01-15 07:30:00+01'), timestamp('2026-01-15 07:30:00+01'),
+           timestamp('2026-01-15 07:30:30+01'), 30, array<string>[], timestamp('2026-01-15 07:00:00+01'),
           'segment_within_75m', 75.0, 8.0, 9.0, 10.0, timestamp('2026-01-15 07:30:00+01'),
           timestamp('2026-01-15 07:31:00+01'), 60, true, false, 'observed'
-
-  - name: fct_expected_stop_event_preserves_default_reconstruction_contract
-    model: fct_expected_stop_event
-    overrides:
-      vars:
-        processing_date: '2026-01-16'
-        publish_service_date: '2026-01-15'
-        gtfs_snapshot_id: 'snapshot-valid'
-        use_python_reconstruction: false
-    given: *fct_expected_stop_event_given
-    expect: *fct_expected_stop_event_expect
 
   - name: dim_line_current_uses_selected_snapshot_and_collects_headsigns
     model: dim_line_current

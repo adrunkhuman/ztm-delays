@@ -36,12 +36,6 @@ where service_date between date('{{ var("aggregation_start_date", var("processin
       or max_gap_seconds < 0
       or pings_total is null
       or pings_total < 0
-      or pings_matched is null
-      or pings_matched < 0
-      or pings_matched > pings_total
-      or match_rate is null
-      or match_rate < 0
-      or match_rate > 1
       or trips_observed is null
       or trips_observed < 0
       or trips_complete is null

@@ -1,5 +1,6 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
 {% set aggregation_start_date = var("aggregation_start_date", processing_date) %}
+{% set max_gps_date = var("max_gps_date", processing_date) %}
 {% set gtfs_snapshot_id = var("gtfs_snapshot_id") %}
 {% set start_date = modules.datetime.datetime.strptime(aggregation_start_date, "%Y-%m-%d").date() %}
 {% set end_date = modules.datetime.datetime.strptime(processing_date, "%Y-%m-%d").date() %}
@@ -97,39 +98,43 @@ expected_by_hour as (
 
 observed_trips as (
     select
-        service_date,
-        date(scheduled_start_time, 'Europe/Warsaw') as scheduled_start_date,
-        gtfs_snapshot_id,
-        line,
-        route_short_name,
-        mode,
-        direction_id,
-        trip_headsign,
-        schedule_day_type,
-        schedule_service_ids,
-        schedule_version_id,
-        trip_id,
-        scheduled_start_time,
-        actual_start_time,
-        actual_end_time,
-        service_observation_class,
-        case trip_quality
+        schedule.service_date,
+        date(schedule.scheduled_start_time, 'Europe/Warsaw') as scheduled_start_date,
+        schedule.gtfs_snapshot_id,
+        schedule.line,
+        schedule.route_short_name,
+        schedule.mode,
+        schedule.direction_id,
+        schedule.trip_headsign,
+        schedule.schedule_day_type,
+        schedule.schedule_service_ids,
+        schedule.schedule_version_id,
+        schedule.trip_id,
+        schedule.scheduled_start_time,
+        matcher.actual_start_time,
+        matcher.actual_end_time,
+        matcher.service_observation_class,
+        case matcher.trip_quality
             when 'complete' then 2
             when 'partial' then 1
         end as trip_quality_rank,
-        case service_observation_class
+        case matcher.service_observation_class
             when 'regular' then 3
             when 'truncated' then 2
             when 'modified' then 1
             else 0
         end as service_observation_rank
-    from {{ ref('int_trip_summary') }}
-    where gps_date between date('{{ aggregation_start_date }}')
+    from {{ source('matcher_input', 'reconstruction_trip_facts') }} as matcher
+    inner join scheduled_trips as schedule
+        on matcher.gtfs_snapshot_id = schedule.gtfs_snapshot_id
+        and matcher.service_date = schedule.service_date
+        and matcher.trip_id = schedule.trip_id
+    where matcher.gps_date between date('{{ aggregation_start_date }}')
+        and date('{{ max_gps_date }}')
+      and date(schedule.scheduled_start_time, 'Europe/Warsaw') between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
-      and date(scheduled_start_time, 'Europe/Warsaw') between date('{{ aggregation_start_date }}')
-        and date('{{ processing_date }}')
-      and gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
-      and service_observation_class in ('regular', 'truncated', 'modified')
+      and matcher.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+      and matcher.service_observation_class in ('regular', 'truncated', 'modified')
 ),
 
 observed_trip_best_quality as (

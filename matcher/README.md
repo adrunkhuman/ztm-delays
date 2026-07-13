@@ -117,9 +117,8 @@ calculate each accepted ownership interval's max ping gap and speed; it never
 loads a GPS day into Python. Trip quality is then streamed one trip record at a
 time. Duplicate accepted trip or direct-arrival grains reject the run.
 
-The parity source for quality and service-observation policy is
-`dbt/models/intermediate/int_trip_summary.sql`. The Python port retains its
-thresholds: complete coverage `.80`, broken coverage `.30`,
+The matcher owns quality and service-observation policy. Its thresholds are:
+complete coverage `.80`, broken coverage `.30`,
 ping gap `900` seconds, zero-based-safe terminal tolerance `2`, stale lag
 `120` seconds, sequence gap `4`, speed `50 m/s`, and extreme delay `3600`
 seconds. It emits the same trip-quality, quality-flag, service-observation

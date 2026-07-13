@@ -56,21 +56,6 @@ staged_pings as (
     group by service_date, vehicle_type, mode
 ),
 
-matched_pings as (
-    select
-        gps_date as service_date,
-        vehicle_type,
-        case vehicle_type
-            when 1 then 'bus'
-            when 2 then 'tram'
-        end as mode,
-        count(*) as pings_matched
-    from {{ ref('int_ping_trip') }}
-    where gps_date between date('{{ aggregation_start_date }}')
-        and date('{{ processing_date }}')
-    group by service_date, vehicle_type, mode
-),
-
 trips as (
     select
         gps_date as service_date,
@@ -80,8 +65,10 @@ trips as (
         countif(trip_quality = 'complete') as trips_complete,
         countif(trip_quality = 'partial') as trips_partial,
         countif(trip_quality = 'broken') as trips_broken
-    from {{ ref('int_trip_summary') }}
-    where gps_date between date('{{ aggregation_start_date }}')
+    from {{ ref('fct_trip') }}
+    where service_date between date_sub(date('{{ aggregation_start_date }}'), interval 1 day)
+        and date('{{ processing_date }}')
+      and gps_date between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
     group by service_date, vehicle_type, mode
 ),
@@ -111,8 +98,10 @@ stop_arrivals as (
             when 2 then 'tram'
         end as mode,
         count(*) as stop_arrivals_count
-    from {{ ref('int_stop_arrivals') }}
-    where gps_date between date('{{ aggregation_start_date }}')
+    from {{ ref('fct_stop_arrival') }}
+    where service_date between date_sub(date('{{ aggregation_start_date }}'), interval 1 day)
+        and date('{{ processing_date }}')
+      and gps_date between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
     group by service_date, vehicle_type, mode
 ),
@@ -143,8 +132,6 @@ select
     status_spine.min_hourly_coverage_ratio,
     status_spine.max_gap_seconds,
     coalesce(staged_pings.pings_total, 0) as pings_total,
-    coalesce(matched_pings.pings_matched, 0) as pings_matched,
-    coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 0.0) as match_rate,
     coalesce(trips.trips_observed, 0) as trips_observed,
     coalesce(trips.trips_complete, 0) as trips_complete,
     coalesce(trips.trips_partial, 0) as trips_partial,
@@ -162,26 +149,20 @@ select
     coalesce(service_coverage.schedule_versions_active, 0) as schedule_versions_active,
     least(
         coalesce(status_spine.completeness_ratio, 1.0),
-        coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 1.0),
         coalesce(safe_divide(service_coverage.observed_trips, service_coverage.expected_trips), 1.0)
     ) as health_ratio,
     case
-        when status_spine.completeness_ratio is null
-            and matched_pings.pings_matched is null
-            and service_coverage.observed_trips is null then 'no data'
+        when status_spine.completeness_ratio is null and service_coverage.observed_trips is null then 'no data'
         when least(
             coalesce(status_spine.completeness_ratio, 1.0),
-            coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 1.0),
             coalesce(safe_divide(service_coverage.observed_trips, service_coverage.expected_trips), 1.0)
         ) >= 0.9 then 'good'
         when least(
             coalesce(status_spine.completeness_ratio, 1.0),
-            coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 1.0),
             coalesce(safe_divide(service_coverage.observed_trips, service_coverage.expected_trips), 1.0)
         ) >= 0.7 then 'usable'
         when least(
             coalesce(status_spine.completeness_ratio, 1.0),
-            coalesce(safe_divide(matched_pings.pings_matched, staged_pings.pings_total), 1.0),
             coalesce(safe_divide(service_coverage.observed_trips, service_coverage.expected_trips), 1.0)
         ) > 0 then 'patchy'
         else 'missing'
@@ -193,9 +174,6 @@ from status_spine
 left join staged_pings
     on status_spine.service_date = staged_pings.service_date
     and status_spine.mode = staged_pings.mode
-left join matched_pings
-    on status_spine.service_date = matched_pings.service_date
-    and status_spine.mode = matched_pings.mode
 left join trips
     on status_spine.service_date = trips.service_date
     and status_spine.mode = trips.mode

@@ -1,7 +1,7 @@
-"""Isolated, opt-in matcher reconstruction runs for comparison only.
+"""Bounded matcher execution, artifact validation, and canonical promotion.
 
-This module intentionally has no dependency on canonical dbt publication.  A
-successful marker is the only signal that a shadow run is complete.
+Historical ``shadow`` names remain in external configuration and diagnostic
+table identities, but the nightly DAG uses this module as its sole producer.
 """
 
 from __future__ import annotations
@@ -409,11 +409,12 @@ class ArtifactValidation:
     bytes: int
     service_dates: tuple[str, ...]
     repeated_nonempty: tuple[tuple[str, int], ...] = ()
+    modes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class CutoverConfig:
-    """Manual-only configuration for promoting a validated shadow run."""
+    """Configuration for publishing validated matcher artifacts."""
 
     enabled: bool
     input_dataset: str
@@ -811,6 +812,17 @@ def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snap
                 )
             )
         )
+        modes = (
+            tuple(
+                str(row[0])
+                for row in connection.execute(
+                    "select mode from read_parquet(?) group by 1 order by 1",
+                    [str(path)],
+                ).fetchall()
+            )
+            if any(field.name == "mode" for field in spec.fields)
+            else ()
+        )
     finally:
         connection.close()
         shutil.rmtree(temp_directory, ignore_errors=True)
@@ -828,6 +840,7 @@ def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snap
         path.stat().st_size,
         tuple(sorted(service_dates)),
         repeated_nonempty,
+        modes,
     )
 
 
@@ -1629,6 +1642,7 @@ def run_matcher_shadow_load(
                     "bytes": item.bytes,
                     "sha256": item.sha256,
                     "service_dates": item.service_dates,
+                    "modes": item.modes,
                 }
                 for key, item in artifacts.items()
             },
@@ -1723,30 +1737,6 @@ def _json_value(value: object) -> object:
     if isinstance(value, dict):
         return {str(key): _json_value(item) for key, item in value.items()}
     return value
-
-
-def matcher_cutover_publication_dbt_args(processing_date: str, gtfs_snapshot_id: str) -> dict[str, dict[str, object]]:
-    """Return publication args without forcing retained rows to one GTFS snapshot."""
-    current = date.fromisoformat(processing_date)
-    selector = (
-        "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version "
-        "dim_schedule_version fct_trip fct_stop_arrival fct_expected_stop_event"
-    )
-    base_vars = {
-        "processing_date": current.isoformat(),
-        "gtfs_snapshot_id": gtfs_snapshot_id,
-        "use_python_reconstruction": True,
-    }
-    return {
-        "current": {
-            "selector": selector,
-            "vars": base_vars | {"publish_service_date": current.isoformat()},
-        },
-        "prior": {
-            "selector": selector,
-            "vars": base_vars | {"publish_service_date": (current - timedelta(days=1)).isoformat()},
-        },
-    }
 
 
 def _promotion_table_id(
@@ -2059,9 +2049,15 @@ def _validate_manual_gate_exception(
 ) -> dict[str, object] | None:
     """Allow only an audited swap exception; correctness and retention failures remain blocking."""
     gate = marker.get("quality_gate")
-    if isinstance(gate, dict) and gate.get("status") == "pass":
+    gate_issues = gate.get("issues") if isinstance(gate, dict) else None
+    gate_failures = (
+        [issue for issue in gate_issues if isinstance(issue, dict) and issue.get("level") == "fail"]
+        if isinstance(gate_issues, list)
+        else []
+    )
+    if isinstance(gate, dict) and gate.get("status") in {"pass", "warn"} and not gate_failures:
         if exception is not None:
-            raise RuntimeError("Matcher cutover received an exception for an already passing gate")
+            raise RuntimeError("Matcher cutover received an exception for a gate without hard failures")
         return None
     if exception is None:
         raise RuntimeError("Matcher cutover requires a passing shadow quality gate")
@@ -2085,12 +2081,7 @@ def _validate_manual_gate_exception(
         raise RuntimeError("Matcher cutover gate exception approval timestamp must include a timezone")
     if not isinstance(max_swap, int) or not 0 < max_swap <= MAX_MANUAL_SWAP_EXCEPTION_BYTES:
         raise RuntimeError("Matcher cutover swap exception exceeds the manual exception bound")
-    issues = gate.get("issues") if isinstance(gate, dict) else None
-    failures = (
-        [issue for issue in issues if isinstance(issue, dict) and issue.get("level") == "fail"]
-        if isinstance(issues, list)
-        else []
-    )
+    failures = gate_failures
     if (
         len(failures) != 1
         or failures[0].get("category") != "resource"
@@ -2119,11 +2110,7 @@ def promote_validated_shadow_artifacts(
     *,
     accepted_gate_exception: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Promote one validated shadow run; no DAG task calls this manual-only function.
-
-    External copies of each previous stable input partition are a precondition.
-    This function records counts but neither creates those copies nor performs rollback.
-    """
+    """Atomically promote one validated matcher run into stable inputs."""
     shadow = ShadowConfig.from_env()
     shadow.validate()
     cutover = CutoverConfig.from_env()
@@ -2147,6 +2134,7 @@ def promote_validated_shadow_artifacts(
     # Complete every source/stage check before inspecting or changing stable inputs.
     # A stage failure therefore cannot delete either retained stable partition.
     bq_client = bigquery.Client(project=GCP_PROJECT)
+    _ensure_stable_input_tables(bq_client, cutover.input_dataset)
     promoted: dict[str, dict[str, object]] = {}
     for spec in ARTIFACTS:
         artifact = artifacts.get(spec.key)
@@ -2271,6 +2259,139 @@ def promote_validated_shadow_artifacts(
         },
     )
     return {"enabled": True, "status": "promoted", "marker_uri": marker_uri, "stable_inputs": promoted}
+
+
+def _bigquery_schema(spec: ArtifactSpec) -> list[Any]:
+    return [
+        bigquery.SchemaField(
+            field.name,
+            field.bigquery_type,
+            mode="REPEATED" if field.repeated else "NULLABLE",
+        )
+        for field in spec.fields
+    ]
+
+
+def _ensure_stable_input_tables(client: Any, dataset: str) -> None:
+    """Idempotently create the derived matcher-input dataset and stable tables."""
+    dataset_id = f"{GCP_PROJECT}.{dataset}"
+    dataset_resource = bigquery.Dataset(dataset_id)
+    dataset_resource.location = BIGQUERY_LOCATION
+    client.create_dataset(dataset_resource, exists_ok=True)
+    existing_dataset = client.get_dataset(dataset_id)
+    location = getattr(existing_dataset, "location", BIGQUERY_LOCATION)
+    if location != BIGQUERY_LOCATION:
+        raise RuntimeError(f"Matcher input dataset must use {BIGQUERY_LOCATION}: {dataset_id}")
+
+    for spec in ARTIFACTS:
+        table_id = f"{dataset_id}.{STABLE_INPUT_TABLES[spec.key]}"
+        table = bigquery.Table(table_id, schema=_bigquery_schema(spec))
+        table.time_partitioning = bigquery.TimePartitioning(
+            type_=bigquery.TimePartitioningType.DAY,
+            field=spec.partition_field,
+            require_partition_filter=True,
+        )
+        table.labels = {
+            "managed_by": "python_matcher",
+            "matcher_schema_version": ARTIFACT_SCHEMA_VERSIONS[Path(spec.filename).stem],
+        }
+        client.create_table(table, exists_ok=True)
+        _verify_table_contract(client, table_id, spec)
+
+
+def _canonical_quality_gate(pending: dict[str, object]) -> dict[str, object]:
+    """Evaluate production invariants without comparing against the retired matcher."""
+    issues: list[dict[str, object]] = []
+    artifacts = pending.get("artifacts")
+    metrics = pending.get("metrics")
+    if not isinstance(artifacts, dict) or not isinstance(metrics, dict):
+        raise TypeError("Matcher canonical pending metadata is incomplete")
+    for spec in ARTIFACTS:
+        artifact = artifacts.get(spec.key)
+        rows = artifact.get("rows") if isinstance(artifact, dict) else None
+        if not isinstance(rows, int) or rows <= 0:
+            issues.append(_gate_issue("fail", "artifact", f"{spec.key} artifact is empty", rows=rows))
+        if any(field.name == "mode" for field in spec.fields):
+            modes = artifact.get("modes") if isinstance(artifact, dict) else None
+            if not isinstance(modes, (list, tuple)) or set(modes) != {"bus", "tram"}:
+                issues.append(
+                    _gate_issue("fail", "artifact", f"{spec.key} artifact is missing a transport mode", modes=modes)
+                )
+
+    trip_artifact = artifacts.get("trip")
+    trip_rows = trip_artifact.get("rows") if isinstance(trip_artifact, dict) else None
+    accepted_fact_executions = metrics.get("accepted_fact_executions")
+    if not isinstance(accepted_fact_executions, int) or trip_rows != accepted_fact_executions:
+        issues.append(
+            _gate_issue(
+                "fail",
+                "artifact",
+                "trip facts do not match eligible accepted executions",
+                trip_rows=trip_rows,
+                accepted_fact_executions=accepted_fact_executions,
+            )
+        )
+
+    thresholds = _gate_thresholds()
+    peak_rss = metrics.get("peak_rss_bytes")
+    swapping = metrics.get("swapping_observed")
+    if not isinstance(peak_rss, int) or peak_rss > int(thresholds["peak_rss_bytes_max"]):
+        issues.append(
+            _gate_issue(
+                "fail",
+                "resource",
+                "peak RSS is missing or exceeds configured bound",
+                peak_rss_bytes=peak_rss,
+                peak_rss_bytes_max=thresholds["peak_rss_bytes_max"],
+            )
+        )
+    if swapping is not False:
+        issues.append(
+            _gate_issue("fail", "resource", "swapping was observed or not measured", swapping_observed=swapping)
+        )
+    return {
+        "status": "fail" if issues else "pass",
+        "manual_review_required": False,
+        "comparison_contract_version": "canonical-invariants-v1",
+        "structural_violations": [],
+        "resource_bounds": {
+            "peak_rss_bytes": peak_rss,
+            "peak_rss_bytes_max": thresholds["peak_rss_bytes_max"],
+            "swapping_observed": swapping,
+            "swapping_observed_must_be": False,
+        },
+        "issues": issues,
+    }
+
+
+def publish_matcher_canonical_artifacts(
+    processing_date: str, run_id: str, pending_context: dict[str, object]
+) -> dict[str, object]:
+    """Commit hard-invariant evidence and publish this run as canonical input."""
+    if pending_context.get("status") != "loaded_pending":
+        raise RuntimeError("Matcher canonical publication requires a successful load")
+    if pending_context.get("processing_date") != processing_date or pending_context.get("run_id") != run_id:
+        raise RuntimeError("Matcher canonical pending context does not match this DAG run")
+    config = ShadowConfig.from_env()
+    config.validate()
+    storage_client = storage.Client(project=GCP_PROJECT)
+    pending = _read_pending(storage_client, config, processing_date, run_id)
+    if pending.get("processing_date") != processing_date or pending.get("run_id") != run_id:
+        raise RuntimeError("Matcher canonical pending metadata does not match this DAG run")
+    _pending_tables(config, run_id, pending)
+    quality_gate = _canonical_quality_gate(pending)
+    marker = pending | {
+        "comparison_contract_version": "canonical-invariants-v1",
+        "quality_gate": quality_gate,
+        "diagnostics": _marker_diagnostics(cast("dict[str, object]", pending["metrics"])),
+    }
+    marker_uri = _write_marker(storage_client, config, processing_date, run_id, marker)
+    if quality_gate["status"] != "pass":
+        raise RuntimeError(f"Matcher canonical quality gate failed: {quality_gate['issues']}")
+    promoted = promote_validated_shadow_artifacts(processing_date, run_id)
+    if promoted.get("enabled") is not True or promoted.get("status") != "promoted":
+        raise RuntimeError("Matcher canonical promotion is disabled or incomplete")
+    return promoted | {"commit_marker_uri": marker_uri, "quality_gate": quality_gate}
 
 
 def run_matcher_shadow_load_task(
