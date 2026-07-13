@@ -2204,7 +2204,8 @@ def promote_validated_shadow_artifacts(
     except Exception:
         LOGGER.exception(
             "Matcher cutover transaction committed but post-commit validation failed; marker remains absent. "
-            "Restore only the captured pre-promotion partitions if rollback is required: %s",
+            "Restore the externally captured pre-promotion partition copies if rollback is required; "
+            "this function records counts only: %s",
             pre_counts,
         )
         raise
@@ -2222,8 +2223,8 @@ def promote_validated_shadow_artifacts(
             "accepted_gate_exception": accepted_exception,
             "rollback_boundary": (
                 "The four-table transaction is committed before post-validation. If post-validation fails, "
-                "the marker is absent but the transaction is not rolled back; restore only the captured "
-                "pre-promotion partitions."
+                "the marker is absent but the transaction is not rolled back; restore the externally "
+                "captured pre-promotion partition copies."
             ),
         },
     )
