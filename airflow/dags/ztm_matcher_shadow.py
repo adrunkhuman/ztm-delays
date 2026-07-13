@@ -71,6 +71,7 @@ DEFAULT_GATE_DELAY_PERCENTILE_RATIO_MAX = 2.0
 DEFAULT_GATE_DELAY_TAIL_DELTA_MAX = 0.15
 DEFAULT_GATE_MATERIAL_LINE_ROWS = 20
 DEFAULT_GATE_PEAK_RSS_BYTES = 2 * 1024**3
+MAX_MANUAL_SWAP_EXCEPTION_BYTES = 64 * 1024**2
 DEFAULT_MAX_PROMOTION_BYTES = 5 * 1024**3
 COMPARISON_DATE_COUNT = 2
 STABLE_INPUT_TABLES = {
@@ -2008,7 +2009,59 @@ def _write_promotion_marker(
     return f"gs://{GCS_BUCKET}/{name}"
 
 
-def promote_validated_shadow_artifacts(processing_date: str, run_id: str) -> dict[str, object]:
+def _validate_manual_gate_exception(
+    processing_date: str,
+    run_id: str,
+    marker: dict[str, object],
+    exception: dict[str, object] | None,
+) -> dict[str, object] | None:
+    gate = marker.get("quality_gate")
+    if isinstance(gate, dict) and gate.get("status") == "pass":
+        if exception is not None:
+            raise RuntimeError("Matcher cutover received an exception for an already passing gate")
+        return None
+    if exception is None:
+        raise RuntimeError("Matcher cutover requires a passing shadow quality gate")
+    if exception.get("processing_date") != processing_date or exception.get("run_id") != run_id:
+        raise RuntimeError("Matcher cutover gate exception does not match this processing date and run")
+    reason = exception.get("reason")
+    max_swap = exception.get("max_current_swap_bytes")
+    if not isinstance(reason, str) or not reason.strip():
+        raise RuntimeError("Matcher cutover gate exception requires an operator reason")
+    if not isinstance(max_swap, int) or not 0 < max_swap <= MAX_MANUAL_SWAP_EXCEPTION_BYTES:
+        raise RuntimeError("Matcher cutover swap exception exceeds the manual exception bound")
+    issues = gate.get("issues") if isinstance(gate, dict) else None
+    failures = (
+        [issue for issue in issues if isinstance(issue, dict) and issue.get("level") == "fail"]
+        if isinstance(issues, list)
+        else []
+    )
+    if (
+        len(failures) != 1
+        or failures[0].get("category") != "resource"
+        or failures[0].get("message") != "swapping was observed"
+    ):
+        raise RuntimeError("Matcher cutover gate exception applies only to a sole swap failure")
+    metrics = marker.get("metrics")
+    observed_swap = metrics.get("current_swap_bytes") if isinstance(metrics, dict) else None
+    if not isinstance(observed_swap, int) or observed_swap < 0 or observed_swap > max_swap:
+        raise RuntimeError("Matcher cutover observed swap exceeds the accepted exception")
+    return {
+        "processing_date": processing_date,
+        "run_id": run_id,
+        "reason": reason.strip(),
+        "max_current_swap_bytes": max_swap,
+        "observed_current_swap_bytes": observed_swap,
+        "accepted_failure": failures[0],
+    }
+
+
+def promote_validated_shadow_artifacts(
+    processing_date: str,
+    run_id: str,
+    *,
+    accepted_gate_exception: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Promote one validated shadow run; no DAG task calls this manual-only function.
 
     The rollback boundary is a table copy of each previous stable input partition,
@@ -2028,9 +2081,7 @@ def promote_validated_shadow_artifacts(processing_date: str, run_id: str) -> dic
         raise RuntimeError("Matcher cutover requires a committed shadow marker")
     if marker.get("processing_date") != processing_date or marker.get("run_id") != run_id:
         raise RuntimeError("Matcher cutover marker does not match this processing date and run")
-    gate = marker.get("quality_gate")
-    if not isinstance(gate, dict) or gate.get("status") != "pass":
-        raise RuntimeError("Matcher cutover requires a passing shadow quality gate")
+    accepted_exception = _validate_manual_gate_exception(processing_date, run_id, marker, accepted_gate_exception)
     shadow_tables = _pending_tables(shadow, run_id, marker)
     artifacts = marker.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -2153,6 +2204,7 @@ def promote_validated_shadow_artifacts(processing_date: str, run_id: str) -> dic
             "stable_inputs": promoted,
             "transaction_job_id": transaction_job_id,
             "pre_promotion_partition_counts": pre_counts,
+            "accepted_gate_exception": accepted_exception,
             "rollback_boundary": (
                 "The four-table transaction is committed before post-validation. If post-validation fails, "
                 "the marker is absent but the transaction is not rolled back; restore only the captured "

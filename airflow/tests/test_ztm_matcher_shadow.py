@@ -101,6 +101,40 @@ def test_cutover_refuses_non_passing_marker_before_bigquery_mutation(
         shadow.promote_validated_shadow_artifacts("2026-07-09", "run")
 
 
+def test_cutover_accepts_only_exact_bounded_swap_exception() -> None:
+    shadow = _load_shadow_module()
+    marker = {
+        "quality_gate": {
+            "status": "fail",
+            "issues": [{"level": "fail", "category": "resource", "message": "swapping was observed"}],
+        },
+        "metrics": {"current_swap_bytes": 27_627_520},
+    }
+    exception = {
+        "processing_date": "2026-07-10",
+        "run_id": "run",
+        "reason": "Reviewed cold-page swap with RSS below the production bound",
+        "max_current_swap_bytes": 32 * 1024**2,
+    }
+
+    accepted = shadow._validate_manual_gate_exception("2026-07-10", "run", marker, exception)
+
+    assert accepted == {
+        **exception,
+        "observed_current_swap_bytes": 27_627_520,
+        "accepted_failure": {"level": "fail", "category": "resource", "message": "swapping was observed"},
+    }
+    with pytest.raises(RuntimeError, match="does not match"):
+        shadow._validate_manual_gate_exception("2026-07-10", "other-run", marker, exception)
+    with pytest.raises(RuntimeError, match="manual exception bound"):
+        shadow._validate_manual_gate_exception(
+            "2026-07-10",
+            "run",
+            marker,
+            {**exception, "max_current_swap_bytes": shadow.MAX_MANUAL_SWAP_EXCEPTION_BYTES + 1},
+        )
+
+
 def test_promotion_identities_are_deterministic_and_bound_to_content_hash() -> None:
     shadow = _load_shadow_module()
     spec = shadow.ARTIFACTS[0]
