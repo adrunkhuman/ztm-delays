@@ -408,6 +408,7 @@ class ArtifactValidation:
     sha256: str
     bytes: int
     service_dates: tuple[str, ...]
+    repeated_nonempty: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -798,6 +799,18 @@ def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snap
                 [str(path)],
             ).fetchall()
         )
+        repeated_nonempty = tuple(
+            (field.name, count)
+            for field in spec.fields
+            if field.repeated
+            and (
+                count := _query_count(
+                    connection,
+                    f"select count(*) from read_parquet(?) where array_length({field.name}) > 0",
+                    [str(path)],
+                )
+            )
+        )
     finally:
         connection.close()
         shutil.rmtree(temp_directory, ignore_errors=True)
@@ -808,7 +821,14 @@ def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snap
         raise RuntimeError(f"Lineage mismatch in {path.name}: {fields} must equal the request")
     if duplicate_grains:
         raise RuntimeError(f"Duplicate {spec.key} grain in {path.name}")
-    return ArtifactValidation(path, rows, _sha256(path), path.stat().st_size, tuple(sorted(service_dates)))
+    return ArtifactValidation(
+        path,
+        rows,
+        _sha256(path),
+        path.stat().st_size,
+        tuple(sorted(service_dates)),
+        repeated_nonempty,
+    )
 
 
 def _validate_outputs(
@@ -872,6 +892,8 @@ def _validate_outputs(
 
 
 def _load_config(spec: ArtifactSpec) -> Any:
+    parquet_options = bigquery.ParquetOptions()
+    parquet_options.enable_list_inference = True
     return bigquery.LoadJobConfig(
         schema=[
             bigquery.SchemaField(field.name, field.bigquery_type, mode="REPEATED" if field.repeated else "NULLABLE")
@@ -880,6 +902,7 @@ def _load_config(spec: ArtifactSpec) -> Any:
         source_format=bigquery.SourceFormat.PARQUET,
         create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
         write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        parquet_options=parquet_options,
     )
 
 
@@ -897,7 +920,26 @@ def _load_artifact(
         except Conflict:
             job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
     _verify_load_job(job, job_id, table_id, spec)
+    _verify_loaded_repeated_fields(client, table_id, artifact)
     return table
+
+
+def _verify_loaded_repeated_fields(client: Any, table_id: str, artifact: ArtifactValidation) -> None:
+    """Reject a load that silently discards non-empty Parquet LIST values."""
+    if not artifact.repeated_nonempty:
+        return
+    expressions = ", ".join(f"countif(array_length({name}) > 0) as {name}" for name, _ in artifact.repeated_nonempty)
+    rows = list(client.query(f"select {expressions} from `{table_id}`", location=BIGQUERY_LOCATION).result())
+    if len(rows) != 1:
+        raise RuntimeError(f"Shadow repeated-field validation returned no row: {table_id}")
+    loaded = rows[0]
+    mismatches = {
+        name: {"parquet": expected, "bigquery": int(loaded[name])}
+        for name, expected in artifact.repeated_nonempty
+        if int(loaded[name]) != expected
+    }
+    if mismatches:
+        raise RuntimeError(f"Shadow load lost repeated-field evidence in {table_id}: {mismatches}")
 
 
 def _table_identity(dataset: str, run_id: str, spec: ArtifactSpec, artifact_sha256: str) -> dict[str, str]:

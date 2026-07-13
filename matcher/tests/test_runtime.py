@@ -227,6 +227,64 @@ def test_normalize_applies_diagnostic_line_and_vehicle_filters(tmp_path: Path) -
     assert pq.read_table(output).to_pylist()[0]["vehicle_number"] == "3"
 
 
+def test_normalize_keeps_same_vehicle_number_separate_across_types(tmp_path: Path) -> None:
+    gps = tmp_path / "gps"
+    _gps(
+        gps,
+        [
+            _row(VehicleNumber="4244", vehicle_type=1, Lines="122", Lat=52.1, Lon=20.9),
+            _row(VehicleNumber="4244", vehicle_type=2, Lines="31", Lat=52.3, Lon=21.1),
+        ],
+    )
+    output = tmp_path / "normalized.parquet"
+
+    with duckdb.connect() as connection:
+        rows = normalize(connection, [next(gps.rglob("*.parquet"))], date(2026, 1, 15), output)
+
+    normalized = pq.read_table(output).to_pylist()
+    assert rows == 2
+    assert [(row["vehicle_type"], row["vehicle_number"], row["line"]) for row in normalized] == [
+        (1, "4244", "122"),
+        (2, "4244", "31"),
+    ]
+
+
+def test_vehicle_streams_partition_same_number_by_type(tmp_path: Path) -> None:
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        tmp_path / "snapshot.zip",
+        tmp_path / "output",
+        tmp_path / "output" / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        run.normalized_path = run._work() / "normalized_gps.parquet"
+        rows = [
+            {
+                "line": line,
+                "brigade": "1",
+                "lat": 52.2,
+                "lon": 21.0,
+                "gps_time": datetime(2026, 1, 15, 1, 0, tzinfo=UTC),
+                "vehicle_number": "4244",
+                "vehicle_type": vehicle_type,
+                "ingested_at": datetime(2026, 1, 15, 1, 0, tzinfo=UTC),
+                "gps_date": date(2026, 1, 15),
+            }
+            for vehicle_type, line in ((1, "122"), (2, "31"))
+        ]
+        pq.write_table(pa.Table.from_pylist(rows, schema=NORMALIZED_GPS_SCHEMA), run.normalized_path)
+
+        streams = list(run.iter_vehicle_streams())
+
+    assert [(stream.vehicle_type, stream.vehicle_number, stream.pings.num_rows) for stream in streams] == [
+        (1, "4244", 1),
+        (2, "4244", 1),
+    ]
+
+
 def _write_stop_alignment_fixture(run: ReconstructionRun, vehicle_numbers: tuple[str, ...]) -> None:
     run.prepare_schedule()
     work = run._work()
@@ -585,7 +643,10 @@ def test_stop_alignment_worker_scans_normalized_gps_once_per_chunk(
     assert counts["vehicle_groups"] == 3
     assert len(normalized_queries) == 1
     assert "count(" not in normalized_queries[0].lower()
-    assert "vehicle_number in (select unnest(?))" in normalized_queries[0].lower()
+    assert (
+        "concat(cast(vehicle_type as varchar), ':', vehicle_number) in (select unnest(?))"
+        in normalized_queries[0].lower()
+    )
 
 
 def test_stop_alignment_enforces_vehicle_row_limit_while_grouping(tmp_path: Path) -> None:
@@ -604,7 +665,7 @@ def test_stop_alignment_enforces_vehicle_row_limit_while_grouping(tmp_path: Path
 
     with ReconstructionRun(config) as run:
         _write_stop_alignment_fixture(run, ("1",))
-        with pytest.raises(MatcherError, match="vehicle 1 exceeds max_vehicle_rows"):
+        with pytest.raises(MatcherError, match=r"vehicle \(1, '1'\) exceeds max_vehicle_rows"):
             run.align_stops()
 
 
@@ -639,6 +700,45 @@ def test_fact_construction_publishes_high_confidence_direct_adapters(tmp_path: P
     assert all(row["is_zone1_public_ranking_trip"] for row in arrivals.to_pylist())
     assert [row["observation_status"] for row in expected.to_pylist()] == ["observed"]
     assert all(row["source_gps_date"] == date(2026, 1, 15) for row in expected.to_pylist())
+
+
+def test_fact_speed_metrics_ignore_same_number_from_other_vehicle_type(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("4244",))
+        run.align_stops()
+        normalized = pq.read_table(run.normalized_path).to_pylist()
+        start = datetime(2026, 1, 15, 1, 0, tzinfo=UTC)
+        normalized.append(
+            {
+                "line": "31",
+                "brigade": "1",
+                "lat": 51.0,
+                "lon": 19.5,
+                "gps_time": start,
+                "vehicle_number": "4244",
+                "vehicle_type": 2,
+                "ingested_at": start,
+                "gps_date": date(2026, 1, 15),
+            }
+        )
+        pq.write_table(pa.Table.from_pylist(normalized, schema=NORMALIZED_GPS_SCHEMA), run.normalized_path)
+
+        run.build_facts()
+        trip = pq.read_table(run._work() / "reconstruction_trip_facts.parquet").to_pylist()[0]
+
+    assert trip["trip_quality"] == "complete"
+    assert not trip["has_impossible_speed_jump"]
 
 
 def test_schedule_trip_universe_classifies_zone_depot_technical_and_short_turns(tmp_path: Path) -> None:

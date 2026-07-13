@@ -42,7 +42,7 @@ deduplicated as (
         gps_date
     from source
     qualify row_number() over (
-        partition by vehicle_number, gps_time
+        partition by vehicle_type, vehicle_number, gps_time
         order by ingested_at desc
     ) = 1
 )

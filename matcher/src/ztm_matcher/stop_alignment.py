@@ -16,6 +16,7 @@ MAX_SEGMENT_GAP_SECONDS = 180
 MAX_ALIGNMENT_STATES = 64
 MAX_CANDIDATES_PER_STOP = 64
 SEGMENT_CANDIDATE_CHUNK_SIZE = 4096
+PRE_OWNERSHIP_SEGMENT_SECONDS = 120
 AMBIGUITY_COST = 0.25
 MAX_CONSECUTIVE_DELAY_CHANGE_SECONDS = 15 * 60
 WARSAW = ZoneInfo("Europe/Warsaw")
@@ -183,16 +184,29 @@ def crossing_candidates(
     execution: dict[str, Any], stops: list[dict[str, Any]], pings: list[dict[str, Any]]
 ) -> list[list[CrossingCandidate]]:
     """Generate direct candidates inside the settled ownership and source bounds."""
-    lower = max(
-        execution["ownership_interval_start_time"],
-        execution["source_ping_start_time"] or execution["ownership_interval_start_time"],
-    )
+    source_start = execution["source_ping_start_time"] or execution["ownership_interval_start_time"]
+    lower = max(execution["ownership_interval_start_time"], source_start)
     upper = min(
         execution["ownership_interval_end_time"],
         execution["source_ping_end_time"] or execution["ownership_interval_end_time"],
     )
     bounded = [ping for ping in pings if lower <= ping["gps_time"] <= upper]
+    predecessor = next(
+        (
+            ping
+            for ping in reversed(pings)
+            if source_start <= ping["gps_time"] < lower
+            and (lower - ping["gps_time"]).total_seconds() <= PRE_OWNERSHIP_SEGMENT_SECONDS
+        ),
+        None,
+    )
+    if predecessor and bounded:
+        bounded.insert(0, predecessor)
     result: list[list[CrossingCandidate]] = [[] for _ in stops]
+    first_passenger_stop_index = next(
+        (index for index, stop in enumerate(stops) if stop.get("is_passenger_stop")),
+        0,
+    )
     eligible_stops: list[tuple[int, dict[str, Any], datetime, float]] = []
     for stop_index, stop in enumerate(stops):
         if stop.get("stop_lat") is None or stop.get("stop_lon") is None:
@@ -217,6 +231,8 @@ def crossing_candidates(
         for matrix_stop_index, (stop_index, _, scheduled, radius) in enumerate(eligible_stops):
             for matrix_segment_index in np.flatnonzero(within_radius[matrix_stop_index]):
                 segment_index, start, end = chunk[int(matrix_segment_index)]
+                if start["gps_time"] < lower and stop_index != first_passenger_stop_index:
+                    continue
                 distance = float(distances[matrix_stop_index, matrix_segment_index])
                 start_distance = float(start_distances[matrix_stop_index, matrix_segment_index])
                 end_distance = float(end_distances[matrix_stop_index, matrix_segment_index])

@@ -147,7 +147,12 @@ def extract_evidence(course: dict[str, Any], pings: list[dict[str, Any]]) -> lis
                 **observation,
                 "candidate_kind": kind,
                 "traversal_id": "|".join(
-                    (str(observation["vehicle_number"]), origin_episode["start"].isoformat(), end.isoformat())
+                    (
+                        str(observation["vehicle_type"]),
+                        str(observation["vehicle_number"]),
+                        origin_episode["start"].isoformat(),
+                        end.isoformat(),
+                    )
                 ),
                 "origin_event_time": origin_episode["start"],
                 "departure_event_time": departure["start"],

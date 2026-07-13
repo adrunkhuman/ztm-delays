@@ -48,7 +48,7 @@ from ztm_matcher.schemas import (
     TRIP_UNIVERSE_SCHEMA_VERSION,
 )
 from ztm_matcher.semantics import duties, iter_stop_semantics
-from ztm_matcher.stop_alignment import align_stop_crossings
+from ztm_matcher.stop_alignment import PRE_OWNERSHIP_SEGMENT_SECONDS, align_stop_crossings
 
 SEMANTICS_BATCH_ROWS = 10_000
 STOP_ALIGNMENT_ROW_GROUP_ROWS = 25_000
@@ -80,14 +80,18 @@ STOP_ALIGNMENT_EXECUTION_KEY = (
     "duty_chain_id",
     "trip_order",
     "trip_id",
+    "vehicle_type",
     "vehicle_number",
 )
+
+VehicleKey = tuple[int, str]
 
 
 @dataclass(frozen=True)
 class VehicleStream:
     """One bounded, deterministically ordered vehicle GPS group."""
 
+    vehicle_type: int
     vehicle_number: str
     pings: pa.Table
 
@@ -97,7 +101,7 @@ class StopAlignmentWorker:
     """Pickle-safe description of a deterministic contiguous vehicle chunk."""
 
     index: int
-    vehicle_numbers: tuple[str, ...]
+    vehicle_keys: tuple[VehicleKey, ...]
     normalized_path: Path
     inputs_path: Path
     shard_dir: Path
@@ -226,17 +230,17 @@ def _trip_universe_base_rows(
     return base_rows
 
 
-def _balanced_vehicle_chunks(vehicle_numbers: list[str], worker_count: int) -> list[tuple[str, ...]]:
+def _balanced_vehicle_chunks(vehicle_keys: list[VehicleKey], worker_count: int) -> list[tuple[VehicleKey, ...]]:
     """Split sorted vehicles into contiguous chunks that differ by at most one vehicle."""
-    active_workers = min(worker_count, len(vehicle_numbers))
+    active_workers = min(worker_count, len(vehicle_keys))
     if active_workers == 0:
         return []
-    quotient, remainder = divmod(len(vehicle_numbers), active_workers)
+    quotient, remainder = divmod(len(vehicle_keys), active_workers)
     chunks = []
     start = 0
     for index in range(active_workers):
         stop = start + quotient + (index < remainder)
-        chunks.append(tuple(vehicle_numbers[start:stop]))
+        chunks.append(tuple(vehicle_keys[start:stop]))
         start = stop
     return chunks
 
@@ -263,15 +267,29 @@ def _write_stop_alignment(
     """Align one course and append its rows to bounded worker-local buffers."""
     if execution is None:
         return
-    lower = max(
-        execution["ownership_interval_start_time"],
-        execution["source_ping_start_time"] or execution["ownership_interval_start_time"],
-    )
+    source_start = execution["source_ping_start_time"] or execution["ownership_interval_start_time"]
+    lower = max(execution["ownership_interval_start_time"], source_start)
     upper = min(
         execution["ownership_interval_end_time"],
         execution["source_ping_end_time"] or execution["ownership_interval_end_time"],
     )
-    result = align_stop_crossings(execution, semantics, [ping for ping in pings if lower <= ping["gps_time"] <= upper])
+    matching = [
+        ping
+        for ping in pings
+        if ping["line"] == execution["line"]
+        and ping["brigade"] == execution["brigade"]
+        and source_start <= ping["gps_time"] <= upper
+    ]
+    bounded = [ping for ping in matching if lower <= ping["gps_time"]]
+    predecessor = next(
+        (
+            ping
+            for ping in reversed(matching)
+            if ping["gps_time"] < lower and (lower - ping["gps_time"]).total_seconds() <= PRE_OWNERSHIP_SEGMENT_SECONDS
+        ),
+        None,
+    )
+    result = align_stop_crossings(execution, semantics, ([predecessor] if predecessor else []) + bounded)
     operational_rows.extend(result.operational_crossings)
     passenger_rows.extend(result.passenger_arrivals)
     counts["operational_stop_crossings"] += len(result.operational_crossings)
@@ -333,23 +351,27 @@ def _cleanup_stop_alignment_worker(
         raise cleanup_error
 
 
+def _row_vehicle_key(row: dict[str, Any]) -> VehicleKey:
+    return int(row["vehicle_type"]), str(row["vehicle_number"])
+
+
 def _pings_for_stop_alignment_vehicle(
-    rows: OrderedArrowRows, vehicle_number: str, max_vehicle_rows: int
+    rows: OrderedArrowRows, vehicle_key: VehicleKey, max_vehicle_rows: int
 ) -> list[dict[str, Any]]:
     """Consume one vehicle's bounded GPS group from the ordered chunk reader."""
-    if rows.current is not None and str(rows.current["vehicle_number"]) < vehicle_number:
+    if rows.current is not None and _row_vehicle_key(rows.current) < vehicle_key:
         raise RuntimeError("normalized GPS rows are not ordered by worker vehicle")
     pings: list[dict[str, Any]] = []
-    while rows.current is not None and str(rows.current["vehicle_number"]) == vehicle_number:
+    while rows.current is not None and _row_vehicle_key(rows.current) == vehicle_key:
         if len(pings) >= max_vehicle_rows:
-            raise fail("resource_limit", f"vehicle {vehicle_number} exceeds max_vehicle_rows", 14)
+            raise fail("resource_limit", f"vehicle {vehicle_key} exceeds max_vehicle_rows", 14)
         pings.append(rows.pop())
     return pings
 
 
 def _write_stop_alignment_vehicle(
     rows: OrderedArrowRows,
-    vehicle_number: str,
+    vehicle_key: VehicleKey,
     pings: list[dict[str, Any]],
     operational_rows: list[dict[str, Any]],
     passenger_rows: list[dict[str, Any]],
@@ -358,12 +380,12 @@ def _write_stop_alignment_vehicle(
     passenger_writer: pq.ParquetWriter,
 ) -> None:
     """Consume and align one vehicle's executions without retaining the chunk's inputs."""
-    if rows.current is not None and str(rows.current["vehicle_number"]) < vehicle_number:
+    if rows.current is not None and _row_vehicle_key(rows.current) < vehicle_key:
         raise RuntimeError("stop alignment inputs are not ordered by worker vehicle")
     execution_key: tuple[object, ...] | None = None
     execution: dict[str, Any] | None = None
     semantics: list[dict[str, Any]] = []
-    while rows.current is not None and str(rows.current["vehicle_number"]) == vehicle_number:
+    while rows.current is not None and _row_vehicle_key(rows.current) == vehicle_key:
         row = rows.pop()
         row_key = tuple(row[name] for name in STOP_ALIGNMENT_EXECUTION_KEY)
         if execution_key is not None and row_key != execution_key:
@@ -419,29 +441,29 @@ def _run_stop_alignment_worker(worker: StopAlignmentWorker) -> dict[str, int]:
             normalized_connection.execute(
                 f"""
                 select * from read_parquet('{normalized_sql}')
-                where vehicle_number in (select unnest(?))
-                order by vehicle_number, gps_time, ingested_at, line, brigade
+                where concat(cast(vehicle_type as varchar), ':', vehicle_number) in (select unnest(?))
+                order by vehicle_type, vehicle_number, gps_time, ingested_at, line, brigade
                 """,
-                [list(worker.vehicle_numbers)],
+                [[f"{vehicle_type}:{vehicle_number}" for vehicle_type, vehicle_number in worker.vehicle_keys]],
             ).to_arrow_reader(SEMANTICS_BATCH_ROWS)
         )
         input_rows = OrderedArrowRows(
             inputs_connection.execute(
                 f"""
                 select * from read_parquet('{inputs_sql}')
-                where vehicle_number in (select unnest(?))
-                order by vehicle_number, ownership_interval_start_time, service_date, duty_chain_id,
+                where concat(cast(vehicle_type as varchar), ':', vehicle_number) in (select unnest(?))
+                order by vehicle_type, vehicle_number, ownership_interval_start_time, service_date, duty_chain_id,
                     trip_order, trip_id, semantic_stop_sequence
                 """,
-                [list(worker.vehicle_numbers)],
+                [[f"{vehicle_type}:{vehicle_number}" for vehicle_type, vehicle_number in worker.vehicle_keys]],
             ).to_arrow_reader(SEMANTICS_BATCH_ROWS)
         )
-        for vehicle_number in worker.vehicle_numbers:
-            pings = _pings_for_stop_alignment_vehicle(normalized_rows, vehicle_number, worker.max_vehicle_rows)
+        for vehicle_key in worker.vehicle_keys:
+            pings = _pings_for_stop_alignment_vehicle(normalized_rows, vehicle_key, worker.max_vehicle_rows)
             counts["vehicle_groups"] += 1
             _write_stop_alignment_vehicle(
                 input_rows,
-                vehicle_number,
+                vehicle_key,
                 pings,
                 operational_rows,
                 passenger_rows,
@@ -788,7 +810,8 @@ class ReconstructionRun:
         }
         vehicle_stats = connection.execute(
             "select count(*), coalesce(max(group_rows), 0) from "
-            "(select vehicle_number, count(*) group_rows from normalized_gps group by vehicle_number)"
+            "(select vehicle_type, vehicle_number, count(*) group_rows from normalized_gps "
+            "group by vehicle_type, vehicle_number)"
         ).fetchone()
         artifact_bytes = sum(path.stat().st_size for path in work.iterdir() if path.is_file())
         process = _process_measurements()
@@ -942,19 +965,23 @@ class ReconstructionRun:
                       and executions.confidence = 'high'
                       and executions.ownership_interval_start_time is not null
                       and executions.ownership_interval_end_time is not null
-                    order by executions.vehicle_number, executions.ownership_interval_start_time,
+                    order by executions.vehicle_type, executions.vehicle_number,
+                        executions.ownership_interval_start_time,
                         executions.service_date, executions.duty_chain_id, executions.trip_order,
                         executions.trip_id, semantics.stop_sequence
                 ) to '{inputs_sql}' (format parquet, compression zstd, row_group_size {STOP_ALIGNMENT_ROW_GROUP_ROWS})
                 """
             )
-            vehicle_numbers = [
-                str(row[0])
+            vehicle_keys = [
+                (int(row[0]), str(row[1]))
                 for row in self._connection()
-                .execute(f"select distinct vehicle_number from read_parquet('{inputs_sql}') order by vehicle_number")
+                .execute(
+                    f"select distinct vehicle_type, vehicle_number from read_parquet('{inputs_sql}') "
+                    "order by vehicle_type, vehicle_number"
+                )
                 .fetchall()
             ]
-            chunks = _balanced_vehicle_chunks(vehicle_numbers, self.config.alignment_workers)
+            chunks = _balanced_vehicle_chunks(vehicle_keys, self.config.alignment_workers)
             workers = [
                 StopAlignmentWorker(
                     index,
@@ -1065,7 +1092,7 @@ class ReconstructionRun:
                 f"""
             select * from read_parquet('{str(path).replace("'", "''")}')
             where service_date = ? and gtfs_snapshot_id = ? and duty_chain_id = ?
-            order by trip_id, vehicle_number, candidate_kind, origin_event_time, traversal_id
+            order by trip_id, vehicle_type, vehicle_number, candidate_kind, origin_event_time, traversal_id
             """,
                 [service_date, snapshot_id, duty_id],
             )
@@ -1080,20 +1107,26 @@ class ReconstructionRun:
             raise fail("invalid_output", "normalized GPS must be prepared before iteration", 15)
         quoted = str(path).replace("'", "''")
         connection = self._connection()
-        for (vehicle,) in connection.execute(
-            f"select distinct vehicle_number from read_parquet('{quoted}') order by vehicle_number"
+        for vehicle_type, vehicle_number in connection.execute(
+            f"select distinct vehicle_type, vehicle_number from read_parquet('{quoted}') "
+            "order by vehicle_type, vehicle_number"
         ).fetchall():
             count = connection.execute(
-                f"select count(*) from read_parquet('{quoted}') where vehicle_number = ?", [vehicle]
+                f"select count(*) from read_parquet('{quoted}') where vehicle_type = ? and vehicle_number = ?",
+                [vehicle_type, vehicle_number],
             ).fetchone()
             if count and int(count[0]) > self.config.max_vehicle_rows:
-                raise fail("resource_limit", f"vehicle {vehicle} exceeds max_vehicle_rows", 14)
+                raise fail(
+                    "resource_limit",
+                    f"vehicle {(int(vehicle_type), str(vehicle_number))} exceeds max_vehicle_rows",
+                    14,
+                )
             table = connection.execute(
-                f"select * from read_parquet('{quoted}') where vehicle_number = ? "
+                f"select * from read_parquet('{quoted}') where vehicle_type = ? and vehicle_number = ? "
                 "order by gps_time, ingested_at, line, brigade",
-                [vehicle],
+                [vehicle_type, vehicle_number],
             ).to_arrow_table()
-            yield VehicleStream(str(vehicle), table)
+            yield VehicleStream(int(vehicle_type), str(vehicle_number), table)
 
     def _publish(self) -> None:
         work = self._work()

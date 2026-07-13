@@ -728,7 +728,11 @@ def test_load_job_id_binds_artifact_hash_and_conflict_checks_existing_job(
     def load_job_config(**kwargs: Any) -> types.SimpleNamespace:
         return types.SimpleNamespace(**kwargs)
 
+    class ParquetOptions:
+        enable_list_inference = False
+
     monkeypatch.setattr(shadow.bigquery, "LoadJobConfig", load_job_config, raising=False)
+    monkeypatch.setattr(shadow.bigquery, "ParquetOptions", ParquetOptions, raising=False)
     shadow.bigquery.WriteDisposition = types.SimpleNamespace(WRITE_TRUNCATE="WRITE_TRUNCATE")
     artifact = shadow.ArtifactValidation(tmp_path / "trip.parquet", 1, "a" * 64, 7, ("2026-07-09",))
     artifact.path.write_bytes(b"parquet")
@@ -737,6 +741,9 @@ def test_load_job_id_binds_artifact_hash_and_conflict_checks_existing_job(
     expected_job = shadow._load_job_id("run-id", spec, artifact.sha256)
     assert expected_job != shadow._load_job_id("run-id", spec, "b" * 64)
     client = FakeLoadClient(FakeLoadJob(expected_job, expected_table), conflict=True)
+
+    config = shadow._load_config(spec)
+    assert config.parquet_options.enable_list_inference is True
 
     result = shadow._load_artifact(client, "shadow", "run-id", spec, artifact)
 
@@ -1386,6 +1393,40 @@ class FakeLoadClient:
 
     def get_job(self, _job_id: str, **_kwargs: Any) -> FakeLoadJob:
         return self.existing_job
+
+
+def test_loaded_repeated_fields_must_match_parquet_counts(tmp_path: Path) -> None:
+    shadow = _load_shadow_module()
+    artifact = shadow.ArtifactValidation(
+        tmp_path / "trip.parquet",
+        2,
+        "a" * 64,
+        7,
+        ("2026-07-09",),
+        (("quality_flags", 2), ("service_observation_flags", 1)),
+    )
+
+    class QueryJob:
+        def __init__(self, row: dict[str, int]) -> None:
+            self.row = row
+
+        def result(self) -> list[dict[str, int]]:
+            return [self.row]
+
+    class Client:
+        def __init__(self, row: dict[str, int]) -> None:
+            self.row = row
+
+        def query(self, _query: str, **_kwargs: Any) -> QueryJob:
+            return QueryJob(self.row)
+
+    shadow._verify_loaded_repeated_fields(
+        Client({"quality_flags": 2, "service_observation_flags": 1}), "ztm-data.shadow.trip", artifact
+    )
+    with pytest.raises(RuntimeError, match="lost repeated-field evidence"):
+        shadow._verify_loaded_repeated_fields(
+            Client({"quality_flags": 0, "service_observation_flags": 0}), "ztm-data.shadow.trip", artifact
+        )
 
 
 class FakeMarkerBlob:
