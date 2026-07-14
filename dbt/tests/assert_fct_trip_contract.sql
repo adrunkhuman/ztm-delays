@@ -25,10 +25,6 @@ with grouped_trips as (
             or destination_stop_name is null
             or scheduled_start_time is null
             or scheduled_end_time is null
-            or actual_start_time is null
-            or actual_end_time is null
-            or start_delay_seconds is null
-            or end_delay_seconds is null
             or has_stale_stop_progression is null
             or trip_quality is null
             or quality_flags is null
@@ -36,11 +32,29 @@ with grouped_trips as (
             or service_observation_flags is null
         ) as required_field_violations,
         countif(
+            service_observation_class != 'matching_failure'
+            and (
+                actual_start_time is null
+                or actual_end_time is null
+                or start_delay_seconds is null
+                or end_delay_seconds is null
+            )
+        ) as observed_timing_violations,
+        countif(
+            service_observation_class = 'matching_failure'
+            and (
+                (actual_start_time is null) != (actual_end_time is null)
+                or (actual_start_time is null) != (start_delay_seconds is null)
+                or (actual_end_time is null) != (end_delay_seconds is null)
+            )
+        ) as matching_failure_timing_consistency_violations,
+        countif(
             mode not in ('bus', 'tram', 'metro', 'rail')
             or vehicle_type not in (1, 2)
             or direction_id not in (0, 1)
             or trip_quality not in ('complete', 'partial', 'broken')
             or service_observation_class not in ('regular', 'truncated', 'modified', 'matching_failure')
+            or (service_observation_class = 'matching_failure' and trip_quality != 'broken')
         ) as enum_violations,
         countif(exists(
             select 1
@@ -55,7 +69,8 @@ with grouped_trips as (
                 'large_stop_sequence_gap',
                 'extreme_delay',
                 'stale_stop_progression',
-                'likely_wrong_trip_assignment'
+                'likely_wrong_trip_assignment',
+                'unsettled_passenger_boundaries'
             )
         )) as quality_flag_violations,
         countif(exists(
@@ -66,7 +81,8 @@ with grouped_trips as (
                 'short_end',
                 'large_internal_gap',
                 'stale_progress',
-                'bad_assignment_evidence'
+                'bad_assignment_evidence',
+                'unsettled_passenger_boundaries'
             )
         )) as service_observation_flag_violations
     from {{ ref('fct_trip') }}
@@ -77,6 +93,8 @@ with grouped_trips as (
 contract_counts as (
     select
         sum(required_field_violations) as required_field_violations,
+        sum(observed_timing_violations) as observed_timing_violations,
+        sum(matching_failure_timing_consistency_violations) as matching_failure_timing_consistency_violations,
         sum(enum_violations) as enum_violations,
         sum(quality_flag_violations) as quality_flag_violations,
         sum(service_observation_flag_violations) as service_observation_flag_violations,
@@ -88,6 +106,8 @@ select issue_type, violation_count
 from contract_counts
 cross join unnest([
     struct('required_fields_not_null' as issue_type, required_field_violations as violation_count),
+    struct('observed_timing_fields_not_null' as issue_type, observed_timing_violations as violation_count),
+    struct('matching_failure_timing_fields_consistent' as issue_type, matching_failure_timing_consistency_violations as violation_count),
     struct('enum_accepted_values' as issue_type, enum_violations as violation_count),
     struct('quality_flags_accepted_values' as issue_type, quality_flag_violations as violation_count),
     struct('service_observation_flags_accepted_values' as issue_type, service_observation_flag_violations as violation_count),
