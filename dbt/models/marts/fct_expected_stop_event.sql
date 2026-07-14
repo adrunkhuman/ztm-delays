@@ -13,7 +13,14 @@
     )
 }}
 
-with trip_facts as (
+with replacement_trip_ids as (
+    select distinct service_date, trip_id
+    from {{ ref('fct_trip') }}
+    where service_date = date('{{ publish_service_date }}')
+      and gps_date = date('{{ var("processing_date") }}')
+),
+
+trip_facts as (
     select
         gtfs_snapshot_id,
         gps_date,
@@ -257,8 +264,9 @@ expected_events as (
         and trip_facts.trip_id = matcher_expected_events.trip_id
         and trip_facts.vehicle_number = matcher_expected_events.vehicle_number
         and scheduled_stops.stop_sequence = matcher_expected_events.stop_sequence
-)
+),
 
+published as (
 select
     gtfs_snapshot_id,
     gps_date,
@@ -331,3 +339,20 @@ select
         else 'missed'
     end as observation_status
 from expected_events
+)
+
+select *
+from published
+{% if is_incremental() and publish_service_date != var("processing_date") %}
+union all
+select existing.*
+from {{ this }} as existing
+where existing.service_date = date('{{ publish_service_date }}')
+  and existing.gps_date < date('{{ var("processing_date") }}')
+  and not exists (
+      select 1
+      from replacement_trip_ids
+      where replacement_trip_ids.service_date = existing.service_date
+        and replacement_trip_ids.trip_id = existing.trip_id
+  )
+{% endif %}

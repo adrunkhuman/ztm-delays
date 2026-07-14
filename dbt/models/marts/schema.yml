@@ -1239,7 +1239,44 @@ unit_tests:
         processing_date: '2026-01-16'
         publish_service_date: '2026-01-15'
         gtfs_snapshot_id: 'snapshot-valid'
+      macros:
+        is_incremental: true
     given: &fct_expected_stop_event_given
+      - input: this
+        format: sql
+        rows: |
+          select
+            'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as gps_date, date '2026-01-15' as source_gps_date,
+            date '2026-01-15' as service_date, 'trip-retained' as trip_id, 1005 as vehicle_number,
+            '187' as line, '187' as route_short_name, 'bus' as mode, '5' as brigade, 1 as vehicle_type, 0 as direction_id,
+            'svc' as service_id, 'Central' as trip_headsign, 'shape-5' as shape_id, 'weekday' as day_type,
+            false as is_holiday, 'thursday' as schedule_day_type, 'svc' as schedule_service_ids,
+            'schedule-version-1' as schedule_version_id, 'complete' as trip_quality, array<string>[] as quality_flags,
+            'regular' as service_observation_class, array<string>[] as service_observation_flags, '100101' as stop_id,
+            '1001' as stop_group_id, '01' as stop_post_code, 'Main 01' as stop_name, 52.1 as stop_lat, 21.1 as stop_lon,
+            'Main 01' as stop_group_name, 0 as stop_sequence, 0 as pickup_type, 0 as drop_off_type,
+            'regular' as stop_service_class, 'passenger' as stop_execution_class, 'high' as classification_confidence,
+            'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence,
+            true as is_passenger_stop, true as are_passenger_boundaries_settled, 0 as first_passenger_stop_sequence,
+            0 as last_passenger_stop_sequence, timestamp('2026-01-15 12:00:00+01') as scheduled_arrival_time,
+            timestamp('2026-01-15 12:00:00+01') as scheduled_departure_time,
+            timestamp('2026-01-15 12:00:05+01') as actual_arrival_time, 5 as delay_seconds,
+            array<string>[] as uncertainty_evidence, timestamp('2026-01-15 12:00:00+01') as hour_bracket,
+            'segment_within_75m' as detection_method, 75.0 as stop_match_radius_m, 10.0 as stop_distance_m,
+            15.0 as prev_ping_distance_m, 20.0 as next_ping_distance_m,
+            timestamp('2026-01-15 11:59:50+01') as segment_start_time,
+            timestamp('2026-01-15 12:00:20+01') as segment_end_time, 30 as segment_duration_seconds,
+            true as is_observed, false as is_match_uncertain, 'observed' as observation_status
+          union all
+          select
+            'snapshot-old', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
+            '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
+            'schedule-version-1', 'partial', ['short_end'], 'truncated', ['short_end'], '100101', '1001', '01',
+            'Main 01', 52.1, 21.1, 'Main 01', 0, 0, 0, 'regular', 'passenger', 'high', 'gtfs_passenger_stop',
+            ['gtfs_passenger_eligible'], true, true, 0, 0, timestamp('2026-01-15 08:20:00+01'),
+            timestamp('2026-01-15 08:20:00+01'), timestamp('2026-01-15 08:25:00+01'), 300, array<string>[],
+            timestamp('2026-01-15 08:00:00+01'), 'segment_within_75m', 75.0, 10.0, 15.0, 20.0,
+            timestamp('2026-01-15 08:24:50+01'), timestamp('2026-01-15 08:25:20+01'), 30, true, false, 'observed'
       - input: ref('fct_trip')
         format: sql
         rows: |
@@ -1569,6 +1606,16 @@ unit_tests:
            timestamp('2026-01-15 07:30:30+01'), 30, array<string>[], timestamp('2026-01-15 07:00:00+01'),
           'segment_within_75m', 75.0, 8.0, 9.0, 10.0, timestamp('2026-01-15 07:30:00+01'),
           timestamp('2026-01-15 07:31:00+01'), 60, true, false, 'observed'
+        union all
+        select
+          'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-retained', 1005,
+          '187', '187', 'bus', '5', 1, 0, 'svc', 'Central', 'shape-5', 'weekday', false, 'thursday', 'svc',
+          'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], '100101', '1001', '01',
+          'Main 01', 52.1, 21.1, 'Main 01', 0, 0, 0, 'regular', 'passenger', 'high', 'gtfs_passenger_stop',
+          ['gtfs_passenger_eligible'], true, true, 0, 0, timestamp('2026-01-15 12:00:00+01'),
+          timestamp('2026-01-15 12:00:00+01'), timestamp('2026-01-15 12:00:05+01'), 5, array<string>[],
+          timestamp('2026-01-15 12:00:00+01'), 'segment_within_75m', 75.0, 10.0, 15.0, 20.0,
+          timestamp('2026-01-15 11:59:50+01'), timestamp('2026-01-15 12:00:20+01'), 30, true, false, 'observed'
 
   - name: dim_line_current_uses_selected_snapshot_and_collects_headsigns
     model: dim_line_current
