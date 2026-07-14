@@ -1,7 +1,7 @@
 """Run configuration."""
 
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from ztm_matcher.errors import fail
@@ -26,6 +26,16 @@ class RunConfig:
     diagnostic_line: str | None = None
     diagnostic_vehicle_number: str | None = None
     diagnostic_trip_id: str | None = None
+    include_prior_gps: bool = True
+
+    @property
+    def input_dates(self) -> tuple[date, ...]:
+        """Return the explicit Warsaw GPS partitions consumed by this run."""
+        return (
+            (self.processing_date - timedelta(days=1), self.processing_date)
+            if self.include_prior_gps
+            else (self.processing_date,)
+        )
 
     def as_manifest(self) -> dict[str, object]:
         """Return JSON-safe config values."""

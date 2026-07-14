@@ -29,6 +29,7 @@ from ztm_airflow_common import (
     GCS_BUCKET,
     RAW_GPS_PREFIX,
     RAW_GTFS_PREFIX,
+    matcher_input_inventory_digest,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ DEFAULT_MAX_MARKER_BYTES = 20 * 1024**2
 DEFAULT_MAX_RSS_BYTES = 2 * 1024**3
 DEFAULT_MAX_PUBLICATION_BYTES = 5 * 1024**3
 PUBLICATION_JOB_VERSION = "v2"
+IMMUTABLE_RUN_IDENTITY_VERSION = "matcher-run-identity-v1"
+HISTORICAL_RUN_ID_PREFIX = "matcher-historical-correction__"
 STABLE_INPUT_TABLES = {
     "trip": "reconstruction_trip_facts",
     "stop_arrival": "reconstruction_stop_arrivals",
@@ -457,8 +460,20 @@ def _load_job_id(run_id: str, spec: ArtifactSpec, artifact_sha256: str) -> str:
     return f"matcher_load_{spec.table_suffix}_{run_digest}_{artifact_digest}"
 
 
-def _gps_prefixes(processing_date: str) -> list[str]:
-    return [f"{RAW_GPS_PREFIX}/vehicle_type={mode}/date={processing_date}/" for mode in VEHICLE_TYPES]
+def _gps_input_dates(processing_date: str, include_prior_gps: bool) -> tuple[str, ...]:
+    """Return the explicit Warsaw GPS dates for one reconstruction run."""
+    current = date.fromisoformat(processing_date)
+    return tuple(
+        item.isoformat() for item in ((current - timedelta(days=1), current) if include_prior_gps else (current,))
+    )
+
+
+def _gps_prefixes(processing_date: str, include_prior_gps: bool) -> list[str]:
+    return [
+        f"{RAW_GPS_PREFIX}/vehicle_type={mode}/date={input_date}/"
+        for input_date in _gps_input_dates(processing_date, include_prior_gps)
+        for mode in VEHICLE_TYPES
+    ]
 
 
 def _strict_posix_name(name: str) -> PurePosixPath:
@@ -501,28 +516,33 @@ def _contained_destination(root: Path, relative: PurePosixPath) -> Path:
     return destination
 
 
-def _list_gps_objects(bucket: Any, processing_date: str) -> list[GcsObject]:
-    objects = []
-    for prefix in _gps_prefixes(processing_date):
+def _list_gps_objects(bucket: Any, processing_date: str, include_prior_gps: bool) -> list[GcsObject]:
+    objects: dict[str, GcsObject] = {}
+    for prefix in _gps_prefixes(processing_date, include_prior_gps):
         for blob in bucket.list_blobs(prefix=prefix):
             name = str(blob.name)
             if not (name.endswith(".parquet") and "/part-" in name):
                 continue
             _gcs_relative_name(name, prefix)
-            objects.append(
-                GcsObject(
-                    name,
-                    str(getattr(blob, "generation", "")) or None,
-                    int(blob.size) if getattr(blob, "size", None) is not None else None,
-                    getattr(blob, "md5_hash", None),
-                    getattr(blob, "crc32c", None),
-                )
+            item = GcsObject(
+                name,
+                str(getattr(blob, "generation", "")) or None,
+                int(blob.size) if getattr(blob, "size", None) is not None else None,
+                getattr(blob, "md5_hash", None),
+                getattr(blob, "crc32c", None),
             )
+            if name in objects and objects[name] != item:
+                raise RuntimeError(f"Matcher GPS inventory has conflicting object metadata: {name}")
+            objects[name] = item
     if not objects:
-        raise RuntimeError(f"No bus/tram GPS part objects found for {processing_date}")
-    if any(item.generation is None or item.size is None or not (item.md5_hash or item.crc32c) for item in objects):
+        raise RuntimeError(
+            f"No bus/tram GPS part objects found for {_gps_input_dates(processing_date, include_prior_gps)}"
+        )
+    if any(
+        item.generation is None or item.size is None or not (item.md5_hash or item.crc32c) for item in objects.values()
+    ):
         raise RuntimeError("Matcher GPS inventory requires object generation, size, and hash metadata")
-    return sorted(objects, key=lambda item: item.name)
+    return sorted(objects.values(), key=lambda item: item.name)
 
 
 def _snapshot_gcs_path(client: Any, snapshot_id: str) -> str:
@@ -563,11 +583,18 @@ def _enforce_input_bounds(config: MatcherConfig, objects: list[GcsObject], gtfs_
 
 
 def _download_inputs(
-    client: Any, config: MatcherConfig, processing_date: str, snapshot_uri: str, workspace: Path
+    client: Any,
+    config: MatcherConfig,
+    processing_date: str,
+    include_prior_gps: bool,
+    snapshot_id: str,
+    snapshot_uri: str,
+    workspace: Path,
+    expected_input_inventory_digest: str | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object], Path, Path]:
     gps_root = workspace / "gps"
     gps_bucket = client.bucket(GCS_BUCKET)
-    objects = _list_gps_objects(gps_bucket, processing_date)
+    objects = _list_gps_objects(gps_bucket, processing_date, include_prior_gps)
     gtfs_bucket_name, gtfs_name = _gcs_uri_parts(snapshot_uri)
     gtfs_bucket = client.bucket(gtfs_bucket_name)
     gtfs_blob = gtfs_bucket.get_blob(gtfs_name)
@@ -588,6 +615,16 @@ def _download_inputs(
         or not (gtfs_inventory["md5_hash"] or gtfs_inventory["crc32c"])
     ):
         raise RuntimeError("Pinned GTFS ZIP inventory requires object generation, size, and hash metadata")
+    actual_inventory_digest = matcher_input_inventory_digest(
+        processing_date=processing_date,
+        snapshot_id=snapshot_id,
+        snapshot_gcs_path=snapshot_uri,
+        include_prior_gps=include_prior_gps,
+        input_dates=_gps_input_dates(processing_date, include_prior_gps),
+        gtfs_object=gtfs_inventory,
+        gps_objects=[asdict(item) for item in objects],
+    )
+    _require_expected_inventory_digest(expected_input_inventory_digest, actual_inventory_digest)
     _enforce_input_bounds(config, objects, int(gtfs_inventory["size"]), workspace)
     inventory = []
     for item in objects:
@@ -598,18 +635,25 @@ def _download_inputs(
 
     gtfs_path = workspace / "gtfs" / "snapshot.zip"
     gtfs_path.parent.mkdir(parents=True, exist_ok=True)
-    gtfs_blob.download_to_filename(gtfs_path)
+    gtfs_bucket.blob(gtfs_name, generation=gtfs_inventory["generation"]).download_to_filename(gtfs_path)
     return inventory, gtfs_inventory, gps_root, gtfs_path
 
 
 def _matcher_argv(
-    config: MatcherConfig, processing_date: str, snapshot_id: str, gps_root: Path, gtfs_zip: Path, output: Path
+    config: MatcherConfig,
+    processing_date: str,
+    snapshot_id: str,
+    include_prior_gps: bool,
+    gps_root: Path,
+    gtfs_zip: Path,
+    output: Path,
 ) -> list[str]:
     return [
         *config.command,
         "prepare",
         "--processing-date",
         processing_date,
+        "--include-prior-gps" if include_prior_gps else "--no-include-prior-gps",
         "--snapshot-id",
         snapshot_id,
         "--gps-root",
@@ -876,7 +920,7 @@ def _inspect_artifact(path: Path, spec: ArtifactSpec, processing_date: str, snap
 
 
 def _validate_outputs(
-    output: Path, processing_date: str, snapshot_id: str
+    output: Path, processing_date: str, snapshot_id: str, include_prior_gps: bool
 ) -> tuple[dict[str, ArtifactValidation], dict[str, object]]:
     manifest_path = output / "manifest.json"
     if not manifest_path.is_file():
@@ -884,6 +928,9 @@ def _validate_outputs(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("processing_date") != processing_date or manifest.get("snapshot_id") != snapshot_id:
         raise RuntimeError("Matcher manifest processing date or snapshot does not match the request")
+    config = manifest.get("config")
+    if not isinstance(config, dict) or config.get("include_prior_gps") is not include_prior_gps:
+        raise RuntimeError("Matcher manifest input-date policy does not match the request")
     schema_versions = manifest.get("schema_versions")
     outputs = manifest.get("outputs")
     if not isinstance(schema_versions, dict) or not isinstance(outputs, dict):
@@ -895,7 +942,6 @@ def _validate_outputs(
         if schema_versions[key] != ARTIFACT_SCHEMA_VERSIONS[key]:
             raise RuntimeError(f"Matcher manifest schema version mismatch for {key}")
 
-    expected_dates = {processing_date, (date.fromisoformat(processing_date) - timedelta(days=1)).isoformat()}
     metrics = _read_metrics(output)
     validated = {}
     for spec in ARTIFACTS:
@@ -906,8 +952,6 @@ def _validate_outputs(
             raise RuntimeError(f"Matcher manifest hash mismatch for {spec.key}")
         if expected_identity.get("bytes") != artifact.bytes:
             raise RuntimeError(f"Matcher manifest byte count mismatch for {spec.key}")
-        if not expected_dates.issubset(artifact.service_dates):
-            raise RuntimeError(f"Matcher {spec.key} lacks current/prior service-date evidence")
         expected_rows = metrics.get(Path(spec.filename).stem)
         if spec.key != "stop_semantics" and (not isinstance(expected_rows, int) or expected_rows != artifact.rows):
             raise RuntimeError(f"Matcher metrics row count mismatch for {spec.key}")
@@ -928,10 +972,8 @@ def _validate_outputs(
     universe_identity = outputs["trip_universe"]
     if not isinstance(universe_identity, dict) or universe_identity.get("sha256") != universe_validation.sha256:
         raise RuntimeError("Matcher trip universe is missing or differs from manifest")
-    if universe_identity.get("bytes") != universe_validation.bytes or not expected_dates.issubset(
-        universe_validation.service_dates
-    ):
-        raise RuntimeError("Matcher trip universe lacks expected current/prior evidence")
+    if universe_identity.get("bytes") != universe_validation.bytes:
+        raise RuntimeError("Matcher trip universe differs from its manifest")
     validated["trip_universe"] = universe_validation
     return validated, manifest
 
@@ -1115,6 +1157,7 @@ def _write_validated_marker(
 ) -> str:
     name = _validated_name(config, processing_date, run_id)
     blob = client.bucket(GCS_BUCKET).blob(name)
+    identity = _validated_marker_identity(marker)
     payload = _json_bytes(marker)
     if len(payload) > config.max_marker_bytes:
         raise RuntimeError(
@@ -1124,9 +1167,19 @@ def _write_validated_marker(
         blob.upload_from_string(payload, content_type="application/json", if_generation_match=0)
     except PreconditionFailed as exc:
         existing = _read_bounded_blob(blob, config, "existing validated marker", missing_ok=True)
-        if existing is None or not _marker_is_identical(existing, payload):
+        if existing is None:
             raise RuntimeError(
-                f"Matcher validated marker already exists with different content: gs://{GCS_BUCKET}/{name}"
+                f"Matcher validated marker already exists with different immutable run content: gs://{GCS_BUCKET}/{name}"
+            ) from exc
+        try:
+            existing_marker = json.loads(existing)
+        except (TypeError, ValueError, UnicodeDecodeError) as error:
+            raise RuntimeError(
+                f"Matcher validated marker already exists with different immutable run content: gs://{GCS_BUCKET}/{name}"
+            ) from error
+        if not isinstance(existing_marker, dict) or _validated_marker_identity(existing_marker) != identity:
+            raise RuntimeError(
+                f"Matcher validated marker already exists with different immutable run content: gs://{GCS_BUCKET}/{name}"
             ) from exc
     return f"gs://{GCS_BUCKET}/{name}"
 
@@ -1142,6 +1195,107 @@ def _marker_diagnostics(metrics: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _immutable_gcs_inventory(value: object, label: str) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise TypeError(f"Matcher immutable identity has no {label} inventory")
+    inventory = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise TypeError(f"Matcher immutable identity has invalid {label} inventory")
+        name, generation, size = item.get("name"), item.get("generation"), item.get("size")
+        md5_hash, crc32c = item.get("md5_hash"), item.get("crc32c")
+        if (
+            not isinstance(name, str)
+            or not isinstance(generation, str)
+            or not isinstance(size, int)
+            or not isinstance(md5_hash, str | type(None))
+            or not isinstance(crc32c, str | type(None))
+            or not (md5_hash or crc32c)
+        ):
+            raise TypeError(f"Matcher immutable identity has invalid {label} object metadata")
+        inventory.append(
+            {
+                "name": name,
+                "generation": generation,
+                "size": size,
+                "md5_hash": md5_hash,
+                "crc32c": crc32c,
+            }
+        )
+    return sorted(inventory, key=lambda item: str(item["name"]))
+
+
+def _immutable_matcher_run_identity(pending: dict[str, object]) -> dict[str, object]:
+    """Return the durable content identity, deliberately excluding runtime diagnostics."""
+    processing_date, run_id, snapshot_id, snapshot_gcs_path = (
+        pending.get("processing_date"),
+        pending.get("run_id"),
+        pending.get("snapshot_id"),
+        pending.get("snapshot_gcs_path"),
+    )
+    include_prior_gps, gps_input_dates = pending.get("include_prior_gps"), pending.get("gps_input_dates")
+    if not all(isinstance(value, str) and value for value in (processing_date, run_id, snapshot_id, snapshot_gcs_path)):
+        raise TypeError("Matcher immutable identity is missing run, processing, or snapshot identifiers")
+    if not isinstance(include_prior_gps, bool) or not isinstance(gps_input_dates, (list, tuple)):
+        raise TypeError("Matcher immutable identity has invalid GPS input-date policy")
+    expected_gps_dates = list(_gps_input_dates(processing_date, include_prior_gps))
+    if list(gps_input_dates) != expected_gps_dates:
+        raise RuntimeError("Matcher immutable identity GPS input-date policy does not match processing date")
+
+    artifacts, tables = pending.get("artifacts"), pending.get("tables")
+    if not isinstance(artifacts, dict) or not isinstance(tables, dict):
+        raise TypeError("Matcher immutable identity has no artifact/table inventory")
+    artifact_identity: dict[str, dict[str, object]] = {}
+    artifact_schema_versions = {spec.key: ARTIFACT_SCHEMA_VERSIONS[Path(spec.filename).stem] for spec in ARTIFACTS} | {
+        "trip_universe": ARTIFACT_SCHEMA_VERSIONS["trip_universe"]
+    }
+    specs = {spec.key: spec for spec in ARTIFACTS}
+    for key, schema_version in sorted(artifact_schema_versions.items()):
+        artifact = artifacts.get(key)
+        if not isinstance(artifact, dict):
+            raise TypeError(f"Matcher immutable identity is missing {key} artifact metadata")
+        sha256, rows = artifact.get("sha256"), artifact.get("rows")
+        if not isinstance(sha256, str) or not isinstance(rows, int) or artifact.get("schema_version") != schema_version:
+            raise TypeError(f"Matcher immutable identity has invalid {key} artifact metadata")
+        identity: dict[str, object] = {
+            "sha256": _validated_sha256(sha256),
+            "rows": rows,
+            "schema_version": schema_version,
+        }
+        if specs.get(key) is not None:
+            table = tables.get(key)
+            if not isinstance(table, dict) or not all(
+                isinstance(table.get(name), str) for name in ("table_id", "job_id")
+            ):
+                raise TypeError(f"Matcher immutable identity has invalid {key} table identity")
+            identity["table"] = {"table_id": table["table_id"], "job_id": table["job_id"]}
+            if not str(table["table_id"]).endswith(_validated_sha256(sha256)):
+                raise RuntimeError(f"Matcher immutable identity table is not bound to {key} artifact content")
+        artifact_identity[key] = identity
+
+    gtfs_inventory = pending.get("gtfs_inventory")
+    if not isinstance(gtfs_inventory, dict):
+        raise TypeError("Matcher immutable identity has no GTFS inventory")
+    return {
+        "identity_contract_version": IMMUTABLE_RUN_IDENTITY_VERSION,
+        "run_id": run_id,
+        "processing_date": processing_date,
+        "snapshot_id": snapshot_id,
+        "snapshot_gcs_path": snapshot_gcs_path,
+        "gps_input_policy": {"include_prior_gps": include_prior_gps, "gps_input_dates": expected_gps_dates},
+        "gps_inventory": _immutable_gcs_inventory(pending.get("gps_inventory"), "GPS"),
+        "gtfs_inventory": _immutable_gcs_inventory([gtfs_inventory], "GTFS")[0],
+        "artifacts": artifact_identity,
+    }
+
+
+def _validated_marker_identity(marker: dict[str, object]) -> dict[str, object]:
+    identity = _immutable_matcher_run_identity(marker)
+    if marker.get("immutable_run_identity") != identity:
+        raise RuntimeError("Matcher validated marker immutable run identity does not match its content")
+    return identity
+
+
 def _reject_conflicting_marker(
     client: Any, config: MatcherConfig, processing_date: str, run_id: str, pending: dict[str, object]
 ) -> None:
@@ -1149,12 +1303,41 @@ def _reject_conflicting_marker(
     marker = _read_validated_marker(client, config, processing_date, run_id)
     if marker is None:
         return
-    expected = json.loads(_json_bytes(pending))
-    if any(marker.get(key) != value for key, value in expected.items()):
+    if _validated_marker_identity(marker) != _immutable_matcher_run_identity(pending):
         name = _validated_name(config, processing_date, run_id)
         raise RuntimeError(
             f"Matcher validated marker already exists with different immutable run content: gs://{GCS_BUCKET}/{name}"
         )
+
+
+def _reject_legacy_validated_marker(client: Any, config: MatcherConfig, processing_date: str, run_id: str) -> None:
+    marker = _read_validated_marker(client, config, processing_date, run_id)
+    if marker is None:
+        return
+    include_prior_gps = marker.get("include_prior_gps")
+    gps_input_dates = marker.get("gps_input_dates")
+    if (
+        not isinstance(marker.get("immutable_run_identity"), dict)
+        or not isinstance(include_prior_gps, bool)
+        or not isinstance(gps_input_dates, list)
+        or gps_input_dates != list(_gps_input_dates(processing_date, include_prior_gps))
+    ):
+        raise RuntimeError(
+            "Legacy single-date matcher validated marker cannot identify two-date inputs; "
+            "trigger controlled recovery with a new Airflow run ID"
+        )
+
+
+def _require_expected_inventory_digest(expected: str | None, actual: str) -> None:
+    if expected is not None and actual != expected:
+        raise RuntimeError("Matcher input inventory digest differs from approved historical plan")
+
+
+def _require_historical_inventory_digest(run_id: str, expected: str | None) -> None:
+    if run_id.startswith(HISTORICAL_RUN_ID_PREFIX) and (
+        not isinstance(expected, str) or SHA256_PATTERN.fullmatch(expected) is None
+    ):
+        raise RuntimeError("Historical matcher runs require a valid expected_input_inventory_digest")
 
 
 def _pending_tables(config: MatcherConfig, run_id: str, pending: dict[str, object]) -> dict[str, dict[str, str]]:
@@ -1179,10 +1362,19 @@ def _pending_tables(config: MatcherConfig, run_id: str, pending: dict[str, objec
     return validated
 
 
-def run_matcher_load(processing_date: str, snapshot_id: str, run_id: str, *, try_number: int = 1) -> dict[str, object]:
+def run_matcher_load(
+    processing_date: str,
+    snapshot_id: str,
+    run_id: str,
+    *,
+    include_prior_gps: bool,
+    expected_input_inventory_digest: str | None = None,
+    try_number: int = 1,
+) -> dict[str, object]:
     """Run, validate, and load matcher artifacts before publication."""
     config = MatcherConfig.from_env()
     config.validate()
+    _require_historical_inventory_digest(run_id, expected_input_inventory_digest)
     if not config.enabled:
         return {"enabled": False, "reason": "MATCHER_ENABLED is false"}
 
@@ -1196,17 +1388,41 @@ def run_matcher_load(processing_date: str, snapshot_id: str, run_id: str, *, try
         workspace.mkdir(parents=True, exist_ok=False)
         bq_client = bigquery.Client(project=GCP_PROJECT)
         storage_client = storage.Client(project=GCP_PROJECT)
+        _reject_legacy_validated_marker(storage_client, config, processing_date, run_id)
         snapshot_uri = _snapshot_gcs_path(bq_client, snapshot_id)
         gps_inventory, gtfs_inventory, gps_root, gtfs_zip = _download_inputs(
-            storage_client, config, processing_date, snapshot_uri, workspace
+            storage_client,
+            config,
+            processing_date,
+            include_prior_gps,
+            snapshot_id,
+            snapshot_uri,
+            workspace,
+            expected_input_inventory_digest,
         )
-        _invoke_matcher(_matcher_argv(config, processing_date, snapshot_id, gps_root, gtfs_zip, output), config)
-        artifacts, manifest = _validate_outputs(output, processing_date, snapshot_id)
+        actual_inventory_digest = matcher_input_inventory_digest(
+            processing_date=processing_date,
+            snapshot_id=snapshot_id,
+            snapshot_gcs_path=snapshot_uri,
+            include_prior_gps=include_prior_gps,
+            input_dates=_gps_input_dates(processing_date, include_prior_gps),
+            gtfs_object=gtfs_inventory,
+            gps_objects=gps_inventory,
+        )
+        # Defend against a future downloader refactor that bypasses its pre-download check.
+        _require_expected_inventory_digest(expected_input_inventory_digest, actual_inventory_digest)
+        _invoke_matcher(
+            _matcher_argv(config, processing_date, snapshot_id, include_prior_gps, gps_root, gtfs_zip, output), config
+        )
+        artifacts, manifest = _validate_outputs(output, processing_date, snapshot_id, include_prior_gps)
         pending = {
             "run_id": run_id,
             "processing_date": processing_date,
             "snapshot_id": snapshot_id,
             "snapshot_gcs_path": snapshot_uri,
+            "include_prior_gps": include_prior_gps,
+            "gps_input_dates": _gps_input_dates(processing_date, include_prior_gps),
+            "input_inventory_digest": actual_inventory_digest,
             "gps_inventory": gps_inventory,
             "gtfs_inventory": gtfs_inventory,
             "artifacts": {
@@ -1214,6 +1430,13 @@ def run_matcher_load(processing_date: str, snapshot_id: str, run_id: str, *, try
                     "rows": item.rows,
                     "bytes": item.bytes,
                     "sha256": item.sha256,
+                    "schema_version": (
+                        ARTIFACT_SCHEMA_VERSIONS["trip_universe"]
+                        if key == "trip_universe"
+                        else ARTIFACT_SCHEMA_VERSIONS[
+                            Path(next(spec.filename for spec in ARTIFACTS if spec.key == key)).stem
+                        ]
+                    ),
                     "service_dates": item.service_dates,
                     "modes": item.modes,
                 }
@@ -1225,6 +1448,7 @@ def run_matcher_load(processing_date: str, snapshot_id: str, run_id: str, *, try
             },
             "metrics": manifest.get("metrics", _read_metrics(output)),
         }
+        pending["immutable_run_identity"] = _immutable_matcher_run_identity(pending)
         _reject_conflicting_marker(storage_client, config, processing_date, run_id, pending)
         for spec in ARTIFACTS:
             _load_artifact(bq_client, config.staging_dataset or "", run_id, spec, artifacts[spec.key])
@@ -1461,6 +1685,84 @@ def _require_stable_processing_partition(
     return counts["total_rows"]
 
 
+def _stable_partition_difference_counts(
+    client: Any,
+    stable_table: str,
+    staged_table: str,
+    processing_date: str,
+    spec: ArtifactSpec,
+    max_bytes: int,
+) -> dict[str, int]:
+    """Compare multisets via canonical JSON so repeated fields remain part of row equality."""
+    columns = _column_list(spec)
+    query = f"""
+        with staged as (
+            select row_json, count(*) as row_count
+            from (
+                select to_json_string(struct({columns})) as row_json
+                from `{staged_table}`
+                where {spec.partition_field} = @processing_date
+            )
+            group by row_json
+        ), stable as (
+            select row_json, count(*) as row_count
+            from (
+                select to_json_string(struct({columns})) as row_json
+                from `{stable_table}`
+                where {spec.partition_field} = @processing_date
+            )
+            group by row_json
+        )
+        select
+            coalesce((
+                select sum(row_count)
+                from (select row_json, row_count from staged except distinct select row_json, row_count from stable)
+            ), 0) as staged_only_rows,
+            coalesce((
+                select sum(row_count)
+                from (select row_json, row_count from stable except distinct select row_json, row_count from staged)
+            ), 0) as stable_only_rows
+    """
+    # Do not assign a reusable job ID or use query cache: this must observe current stable contents.
+    config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("processing_date", "DATE", date.fromisoformat(processing_date))
+        ],
+        maximum_bytes_billed=max_bytes,
+        use_query_cache=False,
+    )
+    job = client.query(query, job_config=config, location=BIGQUERY_LOCATION, job_retry=None)
+    rows = list(job.result())
+    if len(rows) != 1:
+        raise RuntimeError("Matcher publication content validation did not return one row")
+    row = rows[0]
+    values = {
+        key: row.get(key) if isinstance(row, dict) else getattr(row, key, None)
+        for key in ("staged_only_rows", "stable_only_rows")
+    }
+    if not all(isinstance(value, int) for value in values.values()):
+        raise TypeError("Matcher publication content validation returned invalid row differences")
+    return cast("dict[str, int]", values)
+
+
+def _require_stable_partition_equals_stage(
+    client: Any,
+    stable_table: str,
+    staged_table: str,
+    processing_date: str,
+    spec: ArtifactSpec,
+    max_bytes: int,
+) -> None:
+    differences = _stable_partition_difference_counts(
+        client, stable_table, staged_table, processing_date, spec, max_bytes
+    )
+    if differences["staged_only_rows"] or differences["stable_only_rows"]:
+        raise RuntimeError(
+            f"Matcher publication stable {spec.partition_field} partition is not content-identical to staged {spec.key}: "
+            f"{differences}"
+        )
+
+
 def _schema_signature(fields: list[Any]) -> tuple[tuple[str, str, str], ...]:
     return tuple((str(field.name), str(field.field_type).upper(), str(field.mode).upper()) for field in fields)
 
@@ -1553,11 +1855,49 @@ def _published_name(config: MatcherConfig, processing_date: str, run_id: str) ->
     return f"{config.marker_prefix}/processing_date={processing_date}/run_id={_run_id(run_id)}/published.json"
 
 
+def _published_marker_identity_payload(marker: dict[str, object]) -> dict[str, object]:
+    stable_inputs = marker.get("stable_inputs")
+    if not isinstance(stable_inputs, dict):
+        raise TypeError("Matcher publication marker has no stable input identity")
+    tables: dict[str, dict[str, object]] = {}
+    for spec in ARTIFACTS:
+        item = stable_inputs.get(spec.key)
+        if not isinstance(item, dict):
+            raise TypeError(f"Matcher publication marker has no {spec.key} stable identity")
+        required = {name: item.get(name) for name in ("stable_table", "staged_table", "sha256", "rows")}
+        if not isinstance(required["stable_table"], str) or not isinstance(required["staged_table"], str):
+            raise TypeError(f"Matcher publication marker has invalid {spec.key} table identity")
+        if not isinstance(required["rows"], int):
+            raise TypeError(f"Matcher publication marker has invalid {spec.key} row identity")
+        tables[spec.key] = required
+    identity = {
+        "identity_contract_version": "matcher-publication-identity-v1",
+        "processing_date": marker.get("processing_date"),
+        "run_id": marker.get("run_id"),
+        "transaction_job_id": marker.get("transaction_job_id"),
+        "stable_inputs": tables,
+    }
+    if not all(
+        isinstance(identity[name], str) and identity[name]
+        for name in ("processing_date", "run_id", "transaction_job_id")
+    ):
+        raise TypeError("Matcher publication marker has invalid publication identity")
+    return identity
+
+
+def _published_marker_identity(marker: dict[str, object]) -> dict[str, object]:
+    identity = _published_marker_identity_payload(marker)
+    if marker.get("publication_identity") != identity:
+        raise RuntimeError("Matcher publication marker identity does not match its stable content")
+    return identity
+
+
 def _write_published_marker(
     client: Any, config: MatcherConfig, processing_date: str, run_id: str, marker: dict[str, object]
 ) -> str:
     name = _published_name(config, processing_date, run_id)
     blob = client.bucket(GCS_BUCKET).blob(name)
+    identity = _published_marker_identity(marker)
     payload = _json_bytes(marker)
     if len(payload) > config.max_marker_bytes:
         raise RuntimeError(
@@ -1567,7 +1907,17 @@ def _write_published_marker(
         blob.upload_from_string(payload, content_type="application/json", if_generation_match=0)
     except PreconditionFailed as exc:
         existing = _read_bounded_blob(blob, config, "existing publication marker", missing_ok=True)
-        if existing is None or not _marker_is_identical(existing, payload):
+        if existing is None:
+            raise RuntimeError(
+                f"Matcher publication marker already exists with different content: gs://{GCS_BUCKET}/{name}"
+            ) from exc
+        try:
+            existing_marker = json.loads(existing)
+        except (TypeError, ValueError, UnicodeDecodeError) as error:
+            raise RuntimeError(
+                f"Matcher publication marker already exists with different content: gs://{GCS_BUCKET}/{name}"
+            ) from error
+        if not isinstance(existing_marker, dict) or _published_marker_identity(existing_marker) != identity:
             raise RuntimeError(
                 f"Matcher publication marker already exists with different content: gs://{GCS_BUCKET}/{name}"
             ) from exc
@@ -1591,6 +1941,7 @@ def publish_staged_artifacts(
         raise RuntimeError("Matcher publication requires a validated marker")
     if marker.get("processing_date") != processing_date or marker.get("run_id") != run_id:
         raise RuntimeError("Matcher publication marker does not match this processing date and run")
+    _validated_marker_identity(marker)
     run_tables = _pending_tables(config, run_id, marker)
     artifacts = marker.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -1687,6 +2038,14 @@ def publish_staged_artifacts(
                 _publication_job_id("postvalidate", processing_date, run_id, spec, str(published[spec.key]["sha256"])),
                 config.max_publication_bytes,
             )
+            _require_stable_partition_equals_stage(
+                bq_client,
+                str(published[spec.key]["stable_table"]),
+                str(published[spec.key]["staged_table"]),
+                processing_date,
+                spec,
+                config.max_publication_bytes,
+            )
             published[spec.key]["rows"] = stable_rows
             published[spec.key]["job_ids"] = cast("dict[str, str]", published[spec.key]["job_ids"]) | {
                 "precount": _publication_job_id(
@@ -1720,6 +2079,20 @@ def publish_staged_artifacts(
                 "the marker is absent but the transaction is not rolled back; restore the externally "
                 "captured pre-publication partition copies."
             ),
+        }
+        | {
+            "publication_identity": {
+                "identity_contract_version": "matcher-publication-identity-v1",
+                "processing_date": processing_date,
+                "run_id": run_id,
+                "transaction_job_id": transaction_job_id,
+                "stable_inputs": {
+                    spec.key: {
+                        name: published[spec.key][name] for name in ("stable_table", "staged_table", "sha256", "rows")
+                    }
+                    for spec in ARTIFACTS
+                },
+            }
         },
     )
     return {"enabled": True, "status": "published", "marker_uri": marker_uri, "stable_inputs": published}
@@ -1842,15 +2215,25 @@ def publish_matcher_artifacts(
     if pending.get("processing_date") != processing_date or pending.get("run_id") != run_id:
         raise RuntimeError("Matcher pending metadata does not match this DAG run")
     _pending_tables(config, run_id, pending)
-    validation = _validate_publication_invariants(pending, config)
-    if validation["status"] != "pass":
-        raise RuntimeError(f"Matcher publication invariants failed: {validation['issues']}")
-    marker = pending | {
-        "validation_contract_version": "matcher-invariants-v1",
-        "validation": validation,
-        "diagnostics": _marker_diagnostics(cast("dict[str, object]", pending["metrics"])),
-    }
-    marker_uri = _write_validated_marker(storage_client, config, processing_date, run_id, marker)
+    existing_marker = _read_validated_marker(storage_client, config, processing_date, run_id)
+    if existing_marker is not None:
+        if _validated_marker_identity(existing_marker) != _immutable_matcher_run_identity(pending):
+            raise RuntimeError("Matcher validated marker already exists with different immutable run content")
+        validation = existing_marker.get("validation")
+        if not isinstance(validation, dict) or validation.get("status") != "pass":
+            raise RuntimeError("Matcher validated marker does not record a passing validation")
+        marker_uri = f"gs://{GCS_BUCKET}/{_validated_name(config, processing_date, run_id)}"
+    else:
+        validation = _validate_publication_invariants(pending, config)
+        if validation["status"] != "pass":
+            raise RuntimeError(f"Matcher publication invariants failed: {validation['issues']}")
+        marker = pending | {
+            "immutable_run_identity": _immutable_matcher_run_identity(pending),
+            "validation_contract_version": "matcher-invariants-v1",
+            "validation": validation,
+            "diagnostics": _marker_diagnostics(cast("dict[str, object]", pending["metrics"])),
+        }
+        marker_uri = _write_validated_marker(storage_client, config, processing_date, run_id, marker)
     published = publish_staged_artifacts(processing_date, run_id)
     if published.get("enabled") is not True or published.get("status") != "published":
         raise RuntimeError("Matcher publication is incomplete")

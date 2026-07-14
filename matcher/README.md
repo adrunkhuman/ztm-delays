@@ -28,9 +28,11 @@ Diagnostic outputs are investigation artifacts, not complete daily publication
 partitions. Omitting all selectors preserves the production full-day behavior.
 
 GPS partitions are `vehicle_type={bus,tram}/date=YYYY-MM-DD/hour=HH/*.parquet`.
-The runtime validates `raw-gps-v1`, reports missing hours, applies the dbt
-Warsaw-day/numeric-coordinate/dedup contract, and retains same-coordinate
-pings. GTFS requires six UTF-8 (BOM accepted) files: `trips`, `stop_times`,
+Normal processing date `D` reads both `D-1` and `D` so one matcher run can
+reconstruct a trip across local midnight. `--no-include-prior-gps` explicitly
+uses only `D` at an outage boundary. The runtime validates `raw-gps-v1`,
+records missing hours by actual input date, applies the dbt Warsaw-day/
+numeric-coordinate/dedup contract, and retains same-coordinate pings. GTFS requires six UTF-8 (BOM accepted) files: `trips`, `stop_times`,
 `stops`, `shapes`, `routes`, and `calendar_dates`; only exception type `1` is
 active. Prior and current service dates are both required, and GTFS times may
 exceed 24:00.
@@ -129,10 +131,9 @@ conservatively `broken`/`matching_failure` with
 arrival or expected-event adapter rows. Full stop semantics remain available for
 a canonical expected-event adapter to publish unknown passenger status later.
 
-Scheduled timestamps intentionally use Python's Warsaw wall-clock policy as
-the authoritative internal semantics. This differs from legacy dbt elapsed-UTC
-behavior on DST transition dates: spring-forward gaps normalize and fall-back
-times use the first occurrence.
+Scheduled timestamps use the shared Warsaw wall-clock policy: spring-forward
+gaps normalize and fall-back times use the first occurrence. dbt uses the same
+service-date plus GTFS-seconds conversion for scheduled-event calculations.
 
 Expected events contain one row for every settled passenger stop occurrence of
 an accepted trip. A high-confidence direct crossing is `observed`; a medium or
@@ -140,8 +141,10 @@ ambiguous direct crossing is `uncertain`; if trip assignment failed, absent
 regular and request stops are also `uncertain`; otherwise absent request stops
 are `skipped_optional` and regular stops are `missed`. Technical stops are
 excluded. The runtime does not emit `interpolated` events. Prior service
-dates remain intact through `processing_date`, `gps_date`, and, for direct
-arrival facts, `source_gps_date`.
+dates remain intact through `processing_date`, actual normalized-ping `gps_date`,
+and, for direct arrival facts, `source_gps_date`. Published fact artifacts keep
+the shipped `gps_date = processing_date` partition contract; `source_gps_date`
+is the stop-level raw-date lineage.
 
 `trip-universe-v1` is a compact schedule-derived artifact. It preserves raw and
 effective stop zones (`1+2` normalizes to `1`; absent zones remain unknown and

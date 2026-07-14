@@ -9,8 +9,8 @@ with line_timetables as (
             trip_timetable_signature,
             '\n'
             order by
-                timestamp_add(timestamp(service_date, 'Europe/Warsaw'), interval trip_start_seconds second),
-                timestamp_add(timestamp(service_date, 'Europe/Warsaw'), interval trip_end_seconds second),
+                {{ warsaw_scheduled_timestamp('service_date', 'trip_start_seconds') }},
+                {{ warsaw_scheduled_timestamp('service_date', 'trip_end_seconds') }},
                 trip_timetable_signature
         ) as line_timetable_signature,
         count(*) as scheduled_trip_count

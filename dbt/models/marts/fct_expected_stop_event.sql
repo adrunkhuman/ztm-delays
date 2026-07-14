@@ -56,14 +56,14 @@ matcher_expected_events as (
         uncertainty_evidence
     from {{ source('matcher_input', 'reconstruction_expected_stop_events') }}
     where service_date = date('{{ publish_service_date }}')
-      and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
-      and gps_date <= date('{{ var("processing_date") }}')
+      and gps_date = date('{{ var("processing_date") }}')
+      and processing_date = date('{{ var("processing_date") }}')
 ),
 
 stop_semantics as (
     select *
     from {{ source('matcher_input', 'reconstruction_stop_semantics') }}
-    where processing_date between date('{{ publish_service_date }}') and date('{{ var("processing_date") }}')
+    where processing_date = date('{{ var("processing_date") }}')
 ),
 
 scheduled_stops as (
@@ -89,14 +89,10 @@ scheduled_stops as (
         stop_times.are_passenger_boundaries_settled,
         stop_times.first_passenger_stop_sequence,
         stop_times.last_passenger_stop_sequence,
-        timestamp_add(
-            timestamp(trip_spine.service_date, 'Europe/Warsaw'),
-            interval stop_times.arrival_time_seconds second
-        ) as scheduled_arrival_time,
-        timestamp_add(
-            timestamp(trip_spine.service_date, 'Europe/Warsaw'),
-            interval stop_times.departure_time_seconds second
-        ) as scheduled_departure_time
+        {{ warsaw_scheduled_timestamp('trip_spine.service_date', 'stop_times.arrival_time_seconds') }}
+            as scheduled_arrival_time,
+        {{ warsaw_scheduled_timestamp('trip_spine.service_date', 'stop_times.departure_time_seconds') }}
+            as scheduled_departure_time
     from (
         select distinct gtfs_snapshot_id, gps_date, service_date, trip_id
         from trip_facts

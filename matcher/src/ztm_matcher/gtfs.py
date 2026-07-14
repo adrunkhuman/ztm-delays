@@ -12,11 +12,10 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from ztm_matcher.errors import fail
+from ztm_matcher.time import WARSAW, warsaw_scheduled_time
 
-WARSAW = ZoneInfo("Europe/Warsaw")
 REQUIRED = {
     "trips.txt": {
         "trip_id",
@@ -312,7 +311,7 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
 
 
 def select(snapshot: Snapshot, processing_date: date) -> list[dict[str, Any]]:
-    """Retain prior/current active trips whose UTC interval overlaps the Warsaw day."""
+    """Retain prior/current active trips whose wall-clock schedule overlaps the Warsaw day."""
     dates = (processing_date - timedelta(days=1), processing_date)
     for service_date in dates:
         if not any(active_date == service_date for _, active_date in snapshot.active):
@@ -329,8 +328,10 @@ def select(snapshot: Snapshot, processing_date: date) -> list[dict[str, Any]]:
         for service_date in dates:
             if (trip.service_id, service_date) not in snapshot.active:
                 continue
-            midnight = datetime.combine(service_date, time.min, WARSAW).astimezone(UTC)
-            if midnight + timedelta(seconds=end) >= day_start and midnight + timedelta(seconds=start) < day_end:
+            scheduled_start = warsaw_scheduled_time(service_date, start)
+            scheduled_end = warsaw_scheduled_time(service_date, end)
+            assert scheduled_start is not None and scheduled_end is not None
+            if scheduled_end >= day_start and scheduled_start < day_end:
                 route = snapshot.routes.get(trip.line, {})
                 selected.append(
                     {
@@ -351,8 +352,8 @@ def select(snapshot: Snapshot, processing_date: date) -> list[dict[str, Any]]:
                         "trip_start_seconds": start,
                         "trip_end_seconds": end,
                         "stop_count": len(times),
-                        "scheduled_start_time": midnight + timedelta(seconds=start),
-                        "scheduled_end_time": midnight + timedelta(seconds=end),
+                        "scheduled_start_time": scheduled_start,
+                        "scheduled_end_time": scheduled_end,
                     }
                 )
     return sorted(

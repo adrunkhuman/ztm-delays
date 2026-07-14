@@ -23,6 +23,12 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--temp-limit", default="20GB")
     prepare.add_argument("--max-vehicle-rows", type=int, default=1_000_000)
     prepare.add_argument(
+        "--include-prior-gps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include the prior Warsaw GPS date for cross-midnight reconstruction.",
+    )
+    prepare.add_argument(
         "--alignment-workers",
         type=int,
         default=1,
@@ -49,15 +55,16 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.gtfs_zip),
             output,
             Path(args.metrics_json) if args.metrics_json else output / "metrics.json",
-            args.threads,
-            args.memory_limit,
-            args.temp_limit,
-            args.max_vehicle_rows,
-            False,
-            args.alignment_workers,
-            args.diagnostic_line,
-            args.diagnostic_vehicle_number,
-            args.diagnostic_trip_id,
+            threads=args.threads,
+            memory_limit=args.memory_limit,
+            temp_limit=args.temp_limit,
+            max_vehicle_rows=args.max_vehicle_rows,
+            allow_missing_hours=False,
+            alignment_workers=args.alignment_workers,
+            diagnostic_line=args.diagnostic_line,
+            diagnostic_vehicle_number=args.diagnostic_vehicle_number,
+            diagnostic_trip_id=args.diagnostic_trip_id,
+            include_prior_gps=args.include_prior_gps,
         )
         with ReconstructionRun(config) as run:
             result = run.prepare()

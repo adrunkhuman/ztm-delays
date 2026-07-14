@@ -90,14 +90,10 @@ trip_bounds as (
         destination_stop.stop_name as destination_stop_name,
         trip_terminal_stops.first_stop_sequence,
         trip_terminal_stops.last_stop_sequence,
-        timestamp_add(
-            timestamp(service_day_trips.service_date, 'Europe/Warsaw'),
-            interval service_day_trips.trip_start_seconds second
-        ) as scheduled_start_time,
-        timestamp_add(
-            timestamp(service_day_trips.service_date, 'Europe/Warsaw'),
-            interval service_day_trips.trip_end_seconds second
-        ) as scheduled_end_time
+        {{ warsaw_scheduled_timestamp('service_day_trips.service_date', 'service_day_trips.trip_start_seconds') }}
+            as scheduled_start_time,
+        {{ warsaw_scheduled_timestamp('service_day_trips.service_date', 'service_day_trips.trip_end_seconds') }}
+            as scheduled_end_time
     from service_day_trips
     left join trip_terminal_stops
         on service_day_trips.gtfs_snapshot_id = trip_terminal_stops.gtfs_snapshot_id

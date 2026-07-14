@@ -227,6 +227,17 @@ def _configured_expected_gtfs_snapshot_id() -> str | None:
     return expected_gtfs_snapshot_id
 
 
+def _configured_expected_input_inventory_digest() -> str | None:
+    dag_run = get_current_context().get("dag_run")
+    conf = getattr(dag_run, "conf", {}) or {}
+    digest = conf.get("expected_input_inventory_digest")
+    if digest is None:
+        return None
+    if not isinstance(digest, str) or not digest.strip():
+        raise AirflowException("expected_input_inventory_digest must be a non-empty string when provided")
+    return digest
+
+
 def _guard_excluded_historical_processing_date(processing_date: str) -> None:
     reason = historical_daily_exclusion_reason(date.fromisoformat(processing_date))
     if reason:
@@ -255,6 +266,16 @@ def _guard_prior_publication(processing_date: str, skip_prior_publication: bool)
             f"skip_prior_publication is only allowed when the prior service date is excluded: {prior_service_date.isoformat()}"
         )
     return skip_prior_publication
+
+
+def _matcher_input_policy(processing_date: str, skip_prior_publication: bool) -> dict[str, object]:
+    """Make the matcher GPS-date boundary explicit rather than inferring it at runtime."""
+    current = date.fromisoformat(processing_date)
+    include_prior_gps = not skip_prior_publication
+    input_dates = [current.isoformat()]
+    if include_prior_gps:
+        input_dates.insert(0, (current - timedelta(days=1)).isoformat())
+    return {"include_prior_gps": include_prior_gps, "input_dates": input_dates}
 
 
 def _bigquery_dbt_job_cost_summary(started_at: datetime) -> dict[str, object]:
@@ -426,15 +447,34 @@ with DAG(
 
     with TaskGroup("matcher", group_display_name="Python matcher", prefix_group_id=False) as matcher_group:
 
+        @task
+        def matcher_input_policy(processing_date: str, skip_prior_publication: bool) -> dict[str, object]:
+            """Return the date policy passed unchanged through matcher download and runtime."""
+            return _matcher_input_policy(processing_date, skip_prior_publication)
+
         @task(execution_timeout=timedelta(minutes=60))
-        def matcher_load(processing_date: str, snapshot_id: object) -> dict[str, object]:
+        def matcher_load(processing_date: str, snapshot_id: object, input_policy: object) -> dict[str, object]:
             """Run the bounded matcher and load validated content-addressed artifacts."""
+            if not isinstance(input_policy, dict):
+                raise TypeError("Matcher input policy is invalid")
+            policy = cast("dict[str, object]", input_policy)
+            include_prior_gps = policy.get("include_prior_gps")
+            if not isinstance(include_prior_gps, bool):
+                raise TypeError("Matcher input policy is invalid")
             context = get_current_context()
+            expected_input_inventory_digest = _configured_expected_input_inventory_digest()
             dag_run = context.get("dag_run")
             task_instance = context.get("ti")
             run_id = str(getattr(dag_run, "run_id", "manual-matcher"))
             try_number = int(getattr(task_instance, "try_number", 1) or 1)
-            result = run_matcher_load(processing_date, str(snapshot_id), run_id, try_number=try_number)
+            result = run_matcher_load(
+                processing_date,
+                str(snapshot_id),
+                run_id,
+                include_prior_gps=include_prior_gps,
+                expected_input_inventory_digest=expected_input_inventory_digest,
+                try_number=try_number,
+            )
             if not result.get("enabled"):
                 raise RuntimeError("Matcher requires MATCHER_ENABLED=true")
             return result
@@ -451,7 +491,8 @@ with DAG(
                 cast("dict[str, object]", pending_context),
             )
 
-        matcher_load = matcher_load(PROCESSING_DATE, selected_gtfs_snapshot)
+        matcher_input = matcher_input_policy(PROCESSING_DATE, prior_publication_guard)
+        matcher_load = matcher_load(PROCESSING_DATE, selected_gtfs_snapshot, matcher_input)
         matcher_publish = matcher_publish(PROCESSING_DATE, matcher_load)
 
     dbt_run_matcher_fact_dependencies = _dbt_task(

@@ -175,7 +175,8 @@ def test_publication_invariants_reject_missing_mode_and_resource_evidence(tmp_pa
 def test_marker_writes_are_create_only_and_idempotent(tmp_path: Path) -> None:
     matcher = _load_matcher()
     config = _config(matcher, tmp_path)
-    marker = {"run_id": "run", "validation_contract_version": "matcher-invariants-v1"}
+    marker = _pending(matcher)
+    marker["immutable_run_identity"] = matcher._immutable_matcher_run_identity(marker)
     bucket = _MarkerBucket(None)
 
     uri = matcher._write_validated_marker(_Storage(bucket), config, "2026-07-09", "run", marker)
@@ -184,10 +185,42 @@ def test_marker_writes_are_create_only_and_idempotent(tmp_path: Path) -> None:
     assert bucket.item.if_generation_match == 0
     same = _MarkerBucket(bucket.item.payload)
     assert matcher._write_validated_marker(_Storage(same), config, "2026-07-09", "run", marker) == uri
-    with pytest.raises(RuntimeError, match="different content"):
+    conflicting = _pending(matcher)
+    conflicting["snapshot_id"] = "other-snapshot"
+    conflicting["immutable_run_identity"] = matcher._immutable_matcher_run_identity(conflicting)
+    with pytest.raises(RuntimeError, match="different immutable"):
         matcher._write_validated_marker(
-            _Storage(_MarkerBucket(b'{"run_id":"other"}')), config, "2026-07-09", "run", marker
+            _Storage(_MarkerBucket(matcher._json_bytes(conflicting))), config, "2026-07-09", "run", marker
         )
+
+
+def test_validated_marker_reuses_identity_but_rejects_changed_artifact_or_input(tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    marker = _pending(matcher)
+    marker["metrics"] = {"wall_seconds": 5, "cpu_seconds": 4, "peak_rss_bytes": 10}
+    marker["diagnostics"] = {"stop_alignment_missing_stops": 2}
+    marker["immutable_run_identity"] = matcher._immutable_matcher_run_identity(marker)
+    bucket = _MarkerBucket(matcher._json_bytes(marker))
+
+    rerun = _pending(matcher)
+    rerun["metrics"] = {"wall_seconds": 50, "cpu_seconds": 40, "peak_rss_bytes": 20}
+    rerun["diagnostics"] = {"stop_alignment_missing_stops": 99}
+    rerun["immutable_run_identity"] = matcher._immutable_matcher_run_identity(rerun)
+    matcher._write_validated_marker(_Storage(bucket), config, "2026-07-09", "run", rerun)
+    assert __import__("json").loads(bucket.item.download_as_bytes())["diagnostics"] == marker["diagnostics"]
+
+    changed_artifact = _pending(matcher)
+    changed_artifact["artifacts"]["trip"]["rows"] = 2
+    changed_artifact["immutable_run_identity"] = matcher._immutable_matcher_run_identity(changed_artifact)
+    with pytest.raises(RuntimeError, match="different immutable"):
+        matcher._write_validated_marker(_Storage(bucket), config, "2026-07-09", "run", changed_artifact)
+
+    changed_input = _pending(matcher)
+    changed_input["gps_inventory"][0]["generation"] = "2"
+    changed_input["immutable_run_identity"] = matcher._immutable_matcher_run_identity(changed_input)
+    with pytest.raises(RuntimeError, match="different immutable"):
+        matcher._write_validated_marker(_Storage(bucket), config, "2026-07-09", "run", changed_input)
 
 
 def test_marker_reads_are_bounded(tmp_path: Path) -> None:
@@ -251,6 +284,41 @@ def test_post_validation_rejects_wrong_processing_lineage(monkeypatch: pytest.Mo
         )
 
 
+def test_stable_partition_content_comparison_uses_fresh_bounded_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    matcher = _load_matcher()
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(matcher.bigquery, "QueryJobConfig", lambda **kwargs: kwargs)
+
+    class Client:
+        def query(self, query: str, **kwargs: Any) -> Any:
+            calls.append({"query": query, **kwargs})
+            return types.SimpleNamespace(result=lambda: [{"staged_only_rows": 0, "stable_only_rows": 0}])
+
+    matcher._require_stable_partition_equals_stage(
+        Client(), "project.input.stable", "project.input.stage", "2026-07-09", matcher.ARTIFACTS[0], 100
+    )
+
+    assert "to_json_string(struct(" in calls[0]["query"]
+    assert "except distinct" in calls[0]["query"]
+    assert "job_id" not in calls[0]
+    assert calls[0]["job_config"]["use_query_cache"] is False
+
+
+def test_stable_partition_content_comparison_rejects_one_sided_difference(monkeypatch: pytest.MonkeyPatch) -> None:
+    matcher = _load_matcher()
+    monkeypatch.setattr(matcher.bigquery, "QueryJobConfig", lambda **kwargs: kwargs)
+    client = types.SimpleNamespace(
+        query=lambda *_args, **_kwargs: types.SimpleNamespace(
+            result=lambda: [{"staged_only_rows": 0, "stable_only_rows": 1}]
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="not content-identical"):
+        matcher._require_stable_partition_equals_stage(
+            client, "project.input.stable", "project.input.stage", "2026-07-09", matcher.ARTIFACTS[0], 100
+        )
+
+
 def test_stable_bootstrap_is_idempotent_and_partitioned() -> None:
     matcher = _load_matcher()
 
@@ -284,6 +352,7 @@ def test_stage_failure_prevents_transaction(monkeypatch: pytest.MonkeyPatch, tmp
     matcher = _load_matcher()
     config = _config(matcher, tmp_path)
     marker = _pending(matcher)
+    marker["immutable_run_identity"] = matcher._immutable_matcher_run_identity(marker)
     calls: list[str] = []
     monkeypatch.setattr(matcher.MatcherConfig, "from_env", lambda: config)
     monkeypatch.setattr(matcher.storage, "Client", lambda **_kwargs: object())
@@ -311,7 +380,7 @@ def test_matcher_command_is_parsed_and_builds_prepare_argv(monkeypatch: pytest.M
 
     assert config.command == ("uv", "run", "--locked", "--project", "/opt/airflow/matcher", "ztm-matcher")
     assert matcher._matcher_argv(
-        config, "2026-07-09", "snapshot", tmp_path / "gps", tmp_path / "gtfs.zip", tmp_path / "out"
+        config, "2026-07-09", "snapshot", True, tmp_path / "gps", tmp_path / "gtfs.zip", tmp_path / "out"
     )[-8:] == ["--threads", "2", "--alignment-workers", "1", "--memory-limit", "384MB", "--temp-limit", "20GB"]
 
 
@@ -378,10 +447,10 @@ def test_gps_inventory_requires_verified_object_metadata() -> None:
     class Bucket:
         def list_blobs(self, *, prefix: str) -> list[Blob]:
             assert prefix
-            return [Blob()] if "vehicle_type=bus" in prefix else []
+            return [Blob()] if "vehicle_type=bus/date=2026-07-09" in prefix else []
 
     with pytest.raises(RuntimeError, match="hash metadata"):
-        matcher._list_gps_objects(Bucket(), "2026-07-09")
+        matcher._list_gps_objects(Bucket(), "2026-07-09", True)
 
 
 def test_pending_table_identity_rejects_different_artifact(tmp_path: Path) -> None:
@@ -409,7 +478,7 @@ def test_validated_marker_and_pending_metadata_are_bounded(tmp_path: Path) -> No
 def test_published_marker_is_create_only_and_idempotent(tmp_path: Path) -> None:
     matcher = _load_matcher()
     config = _config(matcher, tmp_path)
-    marker = {"run_id": "run", "stable_inputs": {}}
+    marker = _published_marker(matcher)
     bucket = _MarkerBucket(None)
 
     uri = matcher._write_published_marker(_Storage(bucket), config, "2026-07-09", "run", marker)
@@ -424,12 +493,31 @@ def test_published_marker_is_create_only_and_idempotent(tmp_path: Path) -> None:
     )
 
 
+def test_published_marker_retry_preserves_create_once_payload(tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    marker = _published_marker(matcher) | {"pre_publication_partition_counts": {"trip": {"total_rows": 3}}}
+    bucket = _MarkerBucket(None)
+    matcher._write_published_marker(_Storage(bucket), config, "2026-07-09", "run", marker)
+
+    retry = _published_marker(matcher) | {"pre_publication_partition_counts": {"trip": {"total_rows": 99}}}
+    matcher._write_published_marker(_Storage(_MarkerBucket(bucket.item.payload)), config, "2026-07-09", "run", retry)
+    changed = _published_marker(matcher)
+    changed["stable_inputs"]["trip"]["rows"] = 2
+    changed["publication_identity"] = matcher._published_marker_identity_payload(changed)
+    with pytest.raises(RuntimeError, match="different content"):
+        matcher._write_published_marker(
+            _Storage(_MarkerBucket(bucket.item.payload)), config, "2026-07-09", "run", changed
+        )
+
+
 def test_manifest_requires_complete_artifacts_and_binds_hashes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     matcher = _load_matcher()
     artifact = matcher.ArtifactValidation(tmp_path / "artifact.parquet", 2, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
     manifest = {
         "processing_date": "2026-07-09",
         "snapshot_id": "snapshot",
+        "config": {"include_prior_gps": True},
         "schema_versions": {
             **{
                 Path(spec.filename).stem: matcher.ARTIFACT_SCHEMA_VERSIONS[Path(spec.filename).stem]
@@ -452,13 +540,13 @@ def test_manifest_requires_complete_artifacts_and_binds_hashes(monkeypatch: pyte
         matcher, "_read_metrics", lambda *_args: {Path(spec.filename).stem: artifact.rows for spec in matcher.ARTIFACTS}
     )
 
-    validated, _ = matcher._validate_outputs(tmp_path, "2026-07-09", "snapshot")
+    validated, _ = matcher._validate_outputs(tmp_path, "2026-07-09", "snapshot", True)
 
     assert set(validated) == {spec.key for spec in matcher.ARTIFACTS} | {"trip_universe"}
     del manifest["outputs"]["stop_semantics"]
     (tmp_path / "manifest.json").write_text(__import__("json").dumps(manifest), encoding="utf-8")
     with pytest.raises(RuntimeError, match="missing required"):
-        matcher._validate_outputs(tmp_path, "2026-07-09", "snapshot")
+        matcher._validate_outputs(tmp_path, "2026-07-09", "snapshot", True)
 
 
 def test_loaded_repeated_fields_must_match_artifact_evidence(tmp_path: Path) -> None:
@@ -573,7 +661,7 @@ def test_run_load_writes_pending_after_all_artifacts(monkeypatch: pytest.MonkeyP
     events: list[str] = []
     _stub_run_load(monkeypatch, matcher, config, artifact, events)
 
-    context = matcher.run_matcher_load("2026-07-09", "snapshot", "run")
+    context = matcher.run_matcher_load("2026-07-09", "snapshot", "run", include_prior_gps=True)
 
     assert context["status"] == "loaded_pending"
     assert events == ["matcher", "load", "load", "load", "load", "pending"]
@@ -592,7 +680,7 @@ def test_run_load_does_not_write_pending_after_artifact_failure(
     )
 
     with pytest.raises(RuntimeError, match="artifact failure"):
-        matcher.run_matcher_load("2026-07-09", "snapshot", "run")
+        matcher.run_matcher_load("2026-07-09", "snapshot", "run", include_prior_gps=True)
     assert events == ["matcher"]
 
 
@@ -602,11 +690,129 @@ def test_run_load_rejects_conflicting_validated_marker(monkeypatch: pytest.Monke
     artifact = matcher.ArtifactValidation(tmp_path / "artifact.parquet", 1, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
     events: list[str] = []
     _stub_run_load(monkeypatch, matcher, config, artifact, events)
-    monkeypatch.setattr(matcher, "_read_validated_marker", lambda *_args: {"run_id": "other"})
+    conflicting = _pending(matcher)
+    conflicting["snapshot_id"] = "other-snapshot"
+    conflicting["immutable_run_identity"] = matcher._immutable_matcher_run_identity(conflicting)
+    monkeypatch.setattr(matcher, "_read_validated_marker", lambda *_args: conflicting)
 
     with pytest.raises(RuntimeError, match="different immutable"):
-        matcher.run_matcher_load("2026-07-09", "snapshot", "run")
+        matcher.run_matcher_load("2026-07-09", "snapshot", "run", include_prior_gps=True)
     assert events == ["matcher"]
+
+
+@pytest.mark.parametrize("mutation", ["addition", "replacement"])
+def test_approved_inventory_mismatch_blocks_before_matcher_invocation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mutation: str
+) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    artifact = matcher.ArtifactValidation(tmp_path / "artifact.parquet", 1, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
+    events: list[str] = []
+    _stub_run_load(monkeypatch, matcher, config, artifact, events)
+    planned = _pending(matcher)
+    actual = _pending(matcher)
+    if mutation == "addition":
+        actual["gps_inventory"].append({**actual["gps_inventory"][0], "name": "raw/gps/extra.parquet"})
+    else:
+        actual["gps_inventory"][0]["generation"] = "2"
+    monkeypatch.setattr(
+        matcher,
+        "_download_inputs",
+        lambda *_args: (actual["gps_inventory"], actual["gtfs_inventory"], Path("gps"), Path("gtfs.zip")),
+    )
+    expected = matcher.matcher_input_inventory_digest(
+        processing_date="2026-07-09",
+        snapshot_id="snapshot",
+        snapshot_gcs_path="gs://bucket/raw/gtfs/snapshot.zip",
+        include_prior_gps=True,
+        input_dates=["2026-07-08", "2026-07-09"],
+        gtfs_object=planned["gtfs_inventory"],
+        gps_objects=planned["gps_inventory"],
+    )
+
+    with pytest.raises(RuntimeError, match="differs from approved"):
+        matcher.run_matcher_load(
+            "2026-07-09", "snapshot", "run", include_prior_gps=True, expected_input_inventory_digest=expected
+        )
+    assert events == []
+
+
+def test_legacy_validated_marker_requires_new_run_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    artifact = matcher.ArtifactValidation(tmp_path / "artifact.parquet", 1, "a" * 64, 7, ("2026-07-08", "2026-07-09"))
+    events: list[str] = []
+    _stub_run_load(monkeypatch, matcher, config, artifact, events)
+    monkeypatch.setattr(
+        matcher, "_read_validated_marker", lambda *_args: {"run_id": "run", "processing_date": "2026-07-09"}
+    )
+
+    with pytest.raises(RuntimeError, match="new Airflow run ID"):
+        matcher.run_matcher_load("2026-07-09", "snapshot", "run", include_prior_gps=True)
+    assert events == []
+
+
+def test_historical_run_without_digest_cannot_execute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    monkeypatch.setattr(matcher.MatcherConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        matcher.bigquery, "Client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not run"))
+    )
+
+    with pytest.raises(RuntimeError, match="require a valid expected_input_inventory_digest"):
+        matcher.run_matcher_load(
+            "2026-07-09", "snapshot", "matcher-historical-correction__v4-plan__2026-07-09", include_prior_gps=True
+        )
+
+
+def test_download_rejects_digest_mismatch_before_any_file_transfer(tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    downloads: list[Path] = []
+
+    class Blob:
+        generation = "1"
+        size = 1
+        md5_hash = "hash"
+        crc32c = None
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def download_to_filename(self, destination: Path) -> None:
+            downloads.append(destination)
+
+    class GpsBucket:
+        def list_blobs(self, *, prefix: str) -> list[Blob]:
+            return [Blob(f"{prefix}hour=01/part-a.parquet")]
+
+        def blob(self, name: str, *, generation: str) -> Blob:
+            return Blob(name)
+
+    class GtfsBucket:
+        def get_blob(self, name: str) -> Blob:
+            return Blob(name)
+
+        def blob(self, name: str, *, generation: str) -> Blob:
+            return Blob(name)
+
+    class StorageClient:
+        def bucket(self, name: str) -> Any:
+            return GpsBucket() if name == matcher.GCS_BUCKET else GtfsBucket()
+
+    with pytest.raises(RuntimeError, match="differs from approved"):
+        matcher._download_inputs(
+            StorageClient(),
+            config,
+            "2026-07-09",
+            True,
+            "snapshot",
+            "gs://gtfs/raw/gtfs/snapshot.zip",
+            tmp_path,
+            "0" * 64,
+        )
+    assert downloads == []
 
 
 def test_download_checks_inventory_bounds_before_writing_files(tmp_path: Path) -> None:
@@ -639,7 +845,9 @@ def test_download_checks_inventory_bounds_before_writing_files(tmp_path: Path) -
             return GpsBucket() if name == matcher.GCS_BUCKET else GtfsBucket()
 
     with pytest.raises(RuntimeError, match="object count"):
-        matcher._download_inputs(StorageClient(), config, "2026-07-09", "gs://gtfs/raw/gtfs/snapshot.zip", tmp_path)
+        matcher._download_inputs(
+            StorageClient(), config, "2026-07-09", True, "snapshot", "gs://gtfs/raw/gtfs/snapshot.zip", tmp_path
+        )
     assert downloads == []
 
 
@@ -660,7 +868,7 @@ def test_run_load_cleans_workspace_after_failure(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(matcher, "_invoke_matcher", lambda *_args: (_ for _ in ()).throw(RuntimeError("invoke failed")))
 
     with pytest.raises(RuntimeError, match="invoke failed"):
-        matcher.run_matcher_load("2026-07-09", "snapshot", "run")
+        matcher.run_matcher_load("2026-07-09", "snapshot", "run", include_prior_gps=True)
     assert not (tmp_path / matcher._run_id("run")).exists()
 
 
@@ -671,6 +879,7 @@ def test_publication_writes_published_marker_after_post_validation(
     config = _config(matcher, tmp_path)
     marker = _pending(matcher)
     marker["validation"] = {"status": "pass"}
+    marker["immutable_run_identity"] = matcher._immutable_matcher_run_identity(marker)
     queries: list[str] = []
     written: list[dict[str, object]] = []
     monkeypatch.setattr(matcher.MatcherConfig, "from_env", lambda: config)
@@ -690,6 +899,7 @@ def test_publication_writes_published_marker_after_post_validation(
         matcher, "_stable_partition_counts", lambda *_args: {"total_rows": 1, "wrong_processing_date_rows": 0}
     )
     monkeypatch.setattr(matcher, "_require_stable_processing_partition", lambda *_args: 1)
+    monkeypatch.setattr(matcher, "_require_stable_partition_equals_stage", lambda *_args: None)
     monkeypatch.setattr(matcher, "_query_job", lambda _client, query, *_args: queries.append(query))
     monkeypatch.setattr(
         matcher,
@@ -702,6 +912,55 @@ def test_publication_writes_published_marker_after_post_validation(
     assert result["status"] == "published"
     assert len(queries) == 1
     assert written[0]["transaction_job_id"].startswith("matcher_publish_v2_replace_all")
+
+
+def test_reused_transaction_cannot_certify_newer_partition_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    marker = _pending(matcher)
+    marker["validation"] = {"status": "pass"}
+    marker["immutable_run_identity"] = matcher._immutable_matcher_run_identity(marker)
+    writes: list[dict[str, object]] = []
+    transaction_jobs: list[str] = []
+    monkeypatch.setattr(matcher.MatcherConfig, "from_env", lambda: config)
+    monkeypatch.setattr(matcher.storage, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(matcher.bigquery, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(matcher, "_read_validated_marker", lambda *_args: marker)
+    monkeypatch.setattr(matcher, "_ensure_stable_input_tables", lambda *_args: None)
+    monkeypatch.setattr(
+        matcher,
+        "_pending_tables",
+        lambda *_args: {key: {"table_id": value["table_id"]} for key, value in marker["tables"].items()},
+    )
+    monkeypatch.setattr(matcher, "_require_exact_processing_partition", lambda *_args: 1)
+    monkeypatch.setattr(matcher, "_stage_artifact", lambda *_args: None)
+    monkeypatch.setattr(matcher, "_verify_table_contract", lambda *_args: None)
+    monkeypatch.setattr(
+        matcher, "_stable_partition_counts", lambda *_args: {"total_rows": 1, "wrong_processing_date_rows": 0}
+    )
+    monkeypatch.setattr(matcher, "_require_stable_processing_partition", lambda *_args: 1)
+    monkeypatch.setattr(
+        matcher,
+        "_query_job",
+        lambda _client, _query, job_id, *_args: transaction_jobs.append(job_id) or types.SimpleNamespace(reused=True),
+    )
+    monkeypatch.setattr(
+        matcher,
+        "_require_stable_partition_equals_stage",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("newer partition replacement")),
+    )
+    monkeypatch.setattr(
+        matcher,
+        "_write_published_marker",
+        lambda *_args: writes.append({}) or "gs://published",
+    )
+
+    with pytest.raises(RuntimeError, match="newer partition replacement"):
+        matcher.publish_staged_artifacts("2026-07-09", "run")
+    assert transaction_jobs[0].startswith("matcher_publish_v2_replace_all")
+    assert writes == []
 
 
 def test_inspection_rejects_artifact_outside_requested_lineage(tmp_path: Path) -> None:
@@ -857,7 +1116,12 @@ def _stub_run_load(
 ) -> None:
     monkeypatch.setattr(matcher.MatcherConfig, "from_env", lambda: config)
     monkeypatch.setattr(matcher, "_snapshot_gcs_path", lambda *_args: "gs://bucket/raw/gtfs/snapshot.zip")
-    monkeypatch.setattr(matcher, "_download_inputs", lambda *_args: ([], {}, Path("gps"), Path("gtfs.zip")))
+    pending = _pending(matcher)
+    monkeypatch.setattr(
+        matcher,
+        "_download_inputs",
+        lambda *_args: (pending["gps_inventory"], pending["gtfs_inventory"], Path("gps"), Path("gtfs.zip")),
+    )
     monkeypatch.setattr(matcher, "_invoke_matcher", lambda *_args: events.append("matcher"))
     monkeypatch.setattr(
         matcher,
@@ -895,23 +1159,71 @@ def _config(matcher: types.ModuleType, workspace: Path, **overrides: Any) -> Any
 
 
 def _pending(matcher: types.ModuleType) -> dict[str, Any]:
+    artifact_schema_versions = {
+        spec.key: matcher.ARTIFACT_SCHEMA_VERSIONS[Path(spec.filename).stem] for spec in matcher.ARTIFACTS
+    } | {"trip_universe": matcher.ARTIFACT_SCHEMA_VERSIONS["trip_universe"]}
     artifacts = {
-        spec.key: {
+        key: {
             "rows": 1,
             "sha256": "a" * 64,
-            "modes": ["bus", "tram"] if any(field.name == "mode" for field in spec.fields) else [],
+            "schema_version": schema_version,
+            "modes": (
+                ["bus", "tram"]
+                if (spec := next((item for item in matcher.ARTIFACTS if item.key == key), None))
+                and any(field.name == "mode" for field in spec.fields)
+                else []
+            ),
         }
-        for spec in matcher.ARTIFACTS
+        for key, schema_version in artifact_schema_versions.items()
     }
     return {
         "processing_date": "2026-07-09",
         "run_id": "run",
+        "snapshot_id": "snapshot",
+        "snapshot_gcs_path": "gs://bucket/raw/gtfs/snapshot.zip",
+        "include_prior_gps": True,
+        "gps_input_dates": ["2026-07-08", "2026-07-09"],
+        "gps_inventory": [
+            {
+                "name": "raw/gps/vehicle_type=bus/date=2026-07-09/hour=01/part-a.parquet",
+                "generation": "1",
+                "size": 1,
+                "md5_hash": "hash",
+                "crc32c": None,
+            }
+        ],
+        "gtfs_inventory": {
+            "name": "raw/gtfs/snapshot.zip",
+            "generation": "1",
+            "size": 1,
+            "md5_hash": "hash",
+            "crc32c": None,
+        },
         "artifacts": artifacts,
         "tables": {
             spec.key: matcher._table_identity("matcher_stage", "run", spec, "a" * 64) for spec in matcher.ARTIFACTS
         },
         "metrics": {"peak_rss_bytes": 1, "swapping_observed": False, "accepted_fact_executions": 1},
     }
+
+
+def _published_marker(matcher: types.ModuleType) -> dict[str, Any]:
+    marker: dict[str, Any] = {
+        "processing_date": "2026-07-09",
+        "run_id": "run",
+        "transaction_job_id": "transaction",
+        "stable_inputs": {
+            spec.key: {
+                "stable_table": f"project.matcher_input.{matcher.STABLE_INPUT_TABLES[spec.key]}",
+                "staged_table": f"project.matcher_input.stage_{spec.key}",
+                "sha256": "a" * 64,
+                "rows": 1,
+            }
+            for spec in matcher.ARTIFACTS
+        },
+    }
+    marker["publication_identity"] = matcher._published_marker_identity_payload(marker)
+    return marker
 
 
 def _load_matcher() -> types.ModuleType:

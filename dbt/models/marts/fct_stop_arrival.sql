@@ -51,9 +51,9 @@ arrivals_raw as (
         and arrivals.trip_id = trip_facts.trip_id
         and arrivals.vehicle_number = trip_facts.vehicle_number
     where arrivals.service_date = date('{{ publish_service_date }}')
-      and arrivals.gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
+      and arrivals.gps_date = date('{{ var("processing_date") }}')
+      and arrivals.processing_date = date('{{ var("processing_date") }}')
       and arrivals.source_gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
-      and arrivals.gps_date <= date('{{ var("processing_date") }}')
       and arrivals.source_gps_date <= date('{{ var("processing_date") }}')
 ),
 
@@ -78,7 +78,7 @@ arrivals as (
 stop_semantics as (
     select *
     from {{ source('matcher_input', 'reconstruction_stop_semantics') }}
-    where processing_date between date('{{ publish_service_date }}') and date('{{ var("processing_date") }}')
+    where processing_date = date('{{ var("processing_date") }}')
 ),
 
 stops as (

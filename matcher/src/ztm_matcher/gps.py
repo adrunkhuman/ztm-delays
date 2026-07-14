@@ -12,39 +12,46 @@ from ztm_matcher.errors import MatcherError, fail
 from ztm_matcher.schemas import NORMALIZED_GPS_SCHEMA, RAW_GPS_SCHEMA
 
 
-def discover(root: Path, processing_date: date) -> tuple[list[Path], dict[str, list[int]]]:
-    """Discover deterministic bus/tram date/hour partitions and report missing hours."""
+def discover(root: Path, input_dates: tuple[date, ...]) -> tuple[list[Path], dict[str, dict[str, list[int]]]]:
+    """Discover deterministic GPS partitions for explicit Warsaw input dates."""
     if not root.is_dir():
         raise fail("missing_input", f"GPS root does not exist: {root}", 10)
+    if not input_dates:
+        raise fail("invalid_configuration", "GPS input dates must not be empty", 2)
     files: list[Path] = []
-    missing: dict[str, list[int]] = {}
-    for mode in ("bus", "tram"):
-        base = root / f"vehicle_type={mode}" / f"date={processing_date}"
-        hours: dict[int, list[Path]] = defaultdict(list)
-        for path in base.glob("hour=*/*.parquet") if base.is_dir() else ():
-            try:
-                hour = int(path.parent.name.removeprefix("hour="))
-            except ValueError:
-                continue
-            if 0 <= hour < 24:
-                hours[hour].append(path)
-        missing[mode] = [hour for hour in range(24) if hour not in hours]
-        files.extend(path for hour in sorted(hours) for path in sorted(hours[hour]))
+    missing: dict[str, dict[str, list[int]]] = {}
+    for input_date in dict.fromkeys(input_dates):
+        date_files: list[Path] = []
+        missing[str(input_date)] = {}
+        for mode in ("bus", "tram"):
+            base = root / f"vehicle_type={mode}" / f"date={input_date}"
+            hours: dict[int, list[Path]] = defaultdict(list)
+            for path in base.glob("hour=*/*.parquet") if base.is_dir() else ():
+                try:
+                    hour = int(path.parent.name.removeprefix("hour="))
+                except ValueError:
+                    continue
+                if 0 <= hour < 24:
+                    hours[hour].append(path)
+            missing[str(input_date)][mode] = [hour for hour in range(24) if hour not in hours]
+            date_files.extend(path for hour in sorted(hours) for path in sorted(hours[hour]))
+        files.extend(date_files)
     if not files:
-        raise fail("missing_input", f"no GPS Parquet files for Warsaw date {processing_date}", 10)
-    return files, missing
+        dates = ", ".join(str(item) for item in input_dates)
+        raise fail("missing_input", f"no GPS Parquet files for Warsaw dates {dates}", 10)
+    return list(dict.fromkeys(files)), missing
 
 
 def normalize(
     connection: duckdb.DuckDBPyConnection,
     files: list[Path],
-    day: date,
+    input_dates: tuple[date, ...],
     output: Path,
     *,
     lines: set[str] | None = None,
     vehicle_number: str | None = None,
 ) -> int:
-    """Port stg_gps__pings with Warsaw bounds, newest ingestion dedup, and ordering."""
+    """Port stg_gps__pings for explicit Warsaw dates, preserving actual GPS dates."""
     for path in files:
         try:
             if pq.read_schema(path) != RAW_GPS_SCHEMA:
@@ -63,6 +70,7 @@ def normalize(
             quoted_vehicle = vehicle_number.replace("'", "''")
             diagnostic_filters.append(f"cast(\"VehicleNumber\" as varchar) = '{quoted_vehicle}'")
         diagnostic_sql = "".join(f"\n                and {condition}" for condition in diagnostic_filters)
+        dates_sql = ", ".join(f"date '{item}'" for item in dict.fromkeys(input_dates))
         connection.execute(
             f"""
             create or replace temp view normalized_gps as
@@ -73,8 +81,7 @@ def normalize(
                 cast("VehicleNumber" as varchar) vehicle_number, cast(vehicle_type as bigint) vehicle_type,
                 ingested_at, cast(timezone('Europe/Warsaw', "Time") as date) gps_date
               from raw_gps
-                  where "Time" >= (date '{day}'::timestamp at time zone 'Europe/Warsaw')
-                    and "Time" < ((date '{day}' + interval 1 day)::timestamp at time zone 'Europe/Warsaw')
+                  where cast(timezone('Europe/Warsaw', "Time") as date) in ({dates_sql})
                 and regexp_full_match(cast("Brigade" as varchar), '^[0-9]+$')
                 and regexp_full_match(cast("VehicleNumber" as varchar), '^[0-9]+$')
                 and cast("Lat" as double) between 51.0 and 53.5 and cast("Lon" as double) between 19.5 and 22.5
