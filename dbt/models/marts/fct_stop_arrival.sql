@@ -74,6 +74,12 @@ arrivals as (
     ) = 1
 ),
 
+stop_semantics as (
+    select *
+    from {{ source('matcher_input', 'reconstruction_stop_semantics') }}
+    where processing_date between date('{{ publish_service_date }}') and date('{{ var("processing_date") }}')
+),
+
 stops as (
     select
         stop_id,
@@ -173,7 +179,7 @@ inner join trip_facts
     and arrivals.service_date = trip_facts.service_date
     and arrivals.trip_id = trip_facts.trip_id
     and arrivals.vehicle_number = trip_facts.vehicle_number
-inner join {{ source('matcher_input', 'reconstruction_stop_semantics') }} as stop_semantics
+inner join stop_semantics
     on trip_facts.gtfs_snapshot_id = stop_semantics.gtfs_snapshot_id
     and trip_facts.gps_date = stop_semantics.processing_date
     and trip_facts.service_date = stop_semantics.service_date
