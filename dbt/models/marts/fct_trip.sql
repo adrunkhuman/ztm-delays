@@ -38,6 +38,12 @@ matcher_trips as (
     ) = 1
 ),
 
+stop_semantics as (
+    select *
+    from {{ source('matcher_input', 'reconstruction_stop_semantics') }}
+    where processing_date between date('{{ publish_service_date }}') and date('{{ var("processing_date") }}')
+),
+
 passenger_extents as (
     select
         matcher.gtfs_snapshot_id,
@@ -54,7 +60,7 @@ passenger_extents as (
         array_agg(stops.stop_name order by if(semantics.is_passenger_stop, 0, 1), semantics.stop_sequence desc)[offset(0)]
             as destination_stop_name
     from matcher_trips as matcher
-    inner join {{ source('matcher_input', 'reconstruction_stop_semantics') }} as semantics
+    inner join stop_semantics as semantics
         on matcher.gtfs_snapshot_id = semantics.gtfs_snapshot_id
         and matcher.gps_date = semantics.processing_date
         and matcher.service_date = semantics.service_date

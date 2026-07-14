@@ -59,6 +59,12 @@ matcher_expected_events as (
       and gps_date <= date('{{ var("processing_date") }}')
 ),
 
+stop_semantics as (
+    select *
+    from {{ source('matcher_input', 'reconstruction_stop_semantics') }}
+    where processing_date between date('{{ publish_service_date }}') and date('{{ var("processing_date") }}')
+),
+
 scheduled_stops as (
     select
         stop_times.gtfs_snapshot_id,
@@ -94,7 +100,7 @@ scheduled_stops as (
         select distinct gtfs_snapshot_id, gps_date, service_date, trip_id
         from trip_facts
     ) as trip_spine
-    inner join {{ source('matcher_input', 'reconstruction_stop_semantics') }} as stop_times
+    inner join stop_semantics as stop_times
         on trip_spine.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and trip_spine.gps_date = stop_times.processing_date
         and trip_spine.service_date = stop_times.service_date
