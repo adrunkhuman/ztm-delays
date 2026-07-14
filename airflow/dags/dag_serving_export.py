@@ -12,7 +12,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from airflow.sdk import DAG, get_current_context, task
+from airflow.sdk import DAG, PartitionedAssetTimetable, get_current_context, task
 from google.api_core.exceptions import Conflict, NotFound
 from google.cloud import bigquery, storage
 from ztm_airflow_common import (
@@ -1327,7 +1327,7 @@ with DAG(
     dag_display_name="Serving DuckDB export",
     description="Export mart tables to an atomically swapped DuckDB serving file after GPS warehouse completion.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
-    schedule=[GPS_MODELS_DATE_ASSET],
+    schedule=PartitionedAssetTimetable(assets=GPS_MODELS_DATE_ASSET),
     catchup=False,
     max_active_runs=1,
     on_failure_callback=airflow_failure_alert,
