@@ -149,3 +149,16 @@ enriched as (
 
 select *
 from enriched
+{% if is_incremental() and publish_service_date != var("processing_date") %}
+union all
+select existing.*
+from {{ this }} as existing
+where existing.service_date = date('{{ publish_service_date }}')
+  and existing.gps_date < date('{{ var("processing_date") }}')
+  and not exists (
+      select 1
+      from enriched
+      where enriched.service_date = existing.service_date
+        and enriched.trip_id = existing.trip_id
+  )
+{% endif %}
