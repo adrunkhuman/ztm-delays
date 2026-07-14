@@ -4,6 +4,7 @@
     config(
         materialized='incremental',
         incremental_strategy='insert_overwrite',
+        on_schema_change='sync_all_columns',
         partition_by={"field": "service_date", "data_type": "date"},
         partitions=["date('" ~ publish_service_date ~ "')"],
         cluster_by=["line", "trip_id"],
