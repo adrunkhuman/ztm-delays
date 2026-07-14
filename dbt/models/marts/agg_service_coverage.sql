@@ -155,7 +155,6 @@ observed_by_hour as (
     select
         service_date,
         scheduled_start_date,
-        gtfs_snapshot_id,
         line,
         route_short_name,
         mode,
@@ -176,7 +175,6 @@ observed_by_hour as (
     group by
         service_date,
         scheduled_start_date,
-        gtfs_snapshot_id,
         line,
         route_short_name,
         mode,
