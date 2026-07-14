@@ -236,7 +236,7 @@ select
     ordered_arrival_time_seconds,
     trip_timetable_signature
 from trip_schedules
-where timestamp_add(timestamp(service_date, 'Europe/Warsaw'), interval trip_end_seconds second)
+where {{ warsaw_scheduled_timestamp('service_date', 'trip_end_seconds') }}
     >= timestamp(processing_date, 'Europe/Warsaw')
-  and timestamp_add(timestamp(service_date, 'Europe/Warsaw'), interval trip_start_seconds second)
+  and {{ warsaw_scheduled_timestamp('service_date', 'trip_start_seconds') }}
     < timestamp(date_add(processing_date, interval 1 day), 'Europe/Warsaw')

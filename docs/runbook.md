@@ -62,9 +62,10 @@ snapshot. Wait for each date to finish and pass its checks before triggering the
 not an ordering guarantee.
 
 For each GPS processing date, rerun the matcher publication, then publish facts for the current service date and
-the prior service date. Publishing the prior date incorporates after-midnight observations without relabeling prior-day
-rows to the current processing date's snapshot. After detail exists, rebuild completeness, coverage, aggregate, and
-pipeline-status marts over the collected-history window.
+the prior service date. Boundary plans explicitly use current-only input and omit the excluded prior partition.
+Normal prior publication incorporates after-midnight observations without relabeling prior-day rows to the current
+processing date's snapshot. After detail exists, rebuild completeness, coverage, aggregate, and pipeline-status marts
+over the collected-history window.
 
 After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each processing batch and that
 `schedule_version_id` resolves to a version covering the row's GPS processing date. Stop-arrival facts carry both
@@ -122,14 +123,17 @@ Before publication, it verifies non-empty artifacts, exact schemas and snapshot 
 counts, complete mode coverage, RSS no greater than the configured limit, and zero swap.
 
 After validation, the DAG idempotently creates the stable matcher-input dataset and tables when absent, then atomically
-replaces all four processing-date partitions. It publishes current and prior service-date dbt facts only after publication,
-followed by coverage, pipeline-status, and serving marts. A validation failure leaves the previous stable partitions and
-canonical facts unchanged.
+replaces the three fact partitions at `gps_date = processing_date` plus the stop-semantics `processing_date` partition. It
+publishes current and prior service-date dbt facts only after publication, followed by coverage, pipeline-status, and
+serving marts. A validation failure leaves the previous stable partitions and canonical facts unchanged.
 
 Retries and recovery rerun the same processing date from immutable GPS and pinned GTFS inputs. They must not select a
-newer snapshot implicitly. `matcher_historical_correction.py` creates read-only plans for separately approved retained-history
-work; it verifies the mapped snapshot and GCS inventories and emits date-specific preflight and trigger commands, but it
-does not download, load, publish, or mutate warehouse data itself.
+newer snapshot implicitly. Historical plans pass an inventory digest for the exact snapshot and GPS object metadata;
+the matcher re-lists inputs and rejects additions or replacements before invocation. A legacy single-date validated
+marker cannot prove this identity: use a new Airflow run ID for controlled recovery rather than retrying that run.
+`matcher_historical_correction.py` creates read-only plans for separately approved retained-history work; it verifies
+the mapped snapshot and GCS inventories and emits date-specific preflight and trigger commands, but it does not
+download, load, publish, or mutate warehouse data itself.
 
 ## Deployment Sync
 

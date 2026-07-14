@@ -24,6 +24,7 @@ from ztm_airflow_common import (
     HISTORICAL_DAILY_EXCLUSION_REASONS,
     RAW_GPS_PREFIX,
     historical_daily_exclusion_reason,
+    matcher_input_inventory_digest,
 )
 
 if TYPE_CHECKING:
@@ -60,10 +61,17 @@ def _gcs_identity(blob: object) -> dict[str, object]:
         getattr(blob, "generation", None),
         getattr(blob, "size", None),
     )
-    checksum = getattr(blob, "md5_hash", None) or getattr(blob, "crc32c", None)
-    if not name or generation is None or size is None or checksum is None:
+    md5_hash, crc32c = getattr(blob, "md5_hash", None), getattr(blob, "crc32c", None)
+    if not name or generation is None or size is None or not (md5_hash or crc32c):
         raise RuntimeError("Historical correction inventory requires GCS generation, byte size, and hash")
-    return {"name": name, "generation": str(generation), "bytes": int(size), "hash": str(checksum)}
+    return {
+        "name": name,
+        "generation": str(generation),
+        "size": int(size),
+        "md5_hash": str(md5_hash) if md5_hash else None,
+        "crc32c": str(crc32c) if crc32c else None,
+        "bytes": int(size),
+    }
 
 
 def _snapshot_rows(client: Any, start: date, end: date, maximum_bytes_billed: int) -> dict[str, dict[str, str]]:
@@ -102,27 +110,43 @@ def _snapshot_inventory(client: Any, uri: str) -> dict[str, object]:
     return _gcs_identity(blob) | {"gcs_path": uri}
 
 
-def _gps_inventory(client: Any, processing_date: str) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+def _gps_inventory(
+    client: Any, input_dates: tuple[str, ...]
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Inventory every actual GPS input date, preserving date-level lineage."""
     bucket = client.bucket(GCS_BUCKET)
     objects: list[dict[str, Any]] = []
     by_mode: dict[str, dict[str, Any]] = {}
+    by_input_date: dict[str, dict[str, Any]] = {}
+    for input_date in input_dates:
+        by_input_date[input_date] = {}
+        for mode in ("bus", "tram"):
+            prefix = f"{RAW_GPS_PREFIX}/vehicle_type={mode}/date={input_date}/"
+            mode_objects = [
+                cast("dict[str, Any]", _gcs_identity(blob) | {"mode": mode, "gps_date": input_date})
+                for blob in bucket.list_blobs(prefix=prefix)
+                if str(getattr(blob, "name", "")).endswith(".parquet") and "/part-" in str(getattr(blob, "name", ""))
+            ]
+            if not mode_objects:
+                raise RuntimeError(f"GPS input inventory is missing {mode} objects for {input_date}")
+            mode_objects.sort(key=lambda item: str(item["name"]))
+            objects.extend(mode_objects)
+            by_input_date[input_date][mode] = {
+                "objects": mode_objects,
+                "count": len(mode_objects),
+                "bytes": sum(int(item["bytes"]) for item in mode_objects),
+            }
     for mode in ("bus", "tram"):
-        prefix = f"{RAW_GPS_PREFIX}/vehicle_type={mode}/date={processing_date}/"
-        mode_objects = [
-            cast("dict[str, Any]", _gcs_identity(blob) | {"mode": mode})
-            for blob in bucket.list_blobs(prefix=prefix)
-            if str(getattr(blob, "name", "")).endswith(".parquet") and "/part-" in str(getattr(blob, "name", ""))
-        ]
-        if not mode_objects:
-            raise RuntimeError(f"GPS input inventory is missing {mode} objects for {processing_date}")
-        mode_objects.sort(key=lambda item: str(item["name"]))
-        objects.extend(mode_objects)
+        mode_objects = [item for item in objects if item["mode"] == mode]
         by_mode[mode] = {
             "objects": mode_objects,
             "count": len(mode_objects),
             "bytes": sum(int(item["bytes"]) for item in mode_objects),
         }
-    return sorted(objects, key=lambda item: str(item["name"])), by_mode
+    names = [str(item["name"]) for item in objects]
+    if len(names) != len(set(names)):
+        raise RuntimeError("GPS input inventory contains duplicate object paths")
+    return sorted(objects, key=lambda item: str(item["name"])), by_mode, by_input_date
 
 
 def _preflight_command(processing_date: str, gtfs_snapshot_id: str, maximum_bytes_billed: int) -> str:
@@ -162,9 +186,18 @@ def _historical_run_id(plan_id: str, processing_date: str) -> str:
 
 
 def _execution_command(
-    plan_id: str, processing_date: str, gtfs_snapshot_id: str, *, skip_prior_publication: bool
+    plan_id: str,
+    processing_date: str,
+    gtfs_snapshot_id: str,
+    expected_input_inventory_digest: str,
+    *,
+    skip_prior_publication: bool,
 ) -> str:
-    conf: dict[str, object] = {"processing_date": processing_date, "expected_gtfs_snapshot_id": gtfs_snapshot_id}
+    conf: dict[str, object] = {
+        "processing_date": processing_date,
+        "expected_gtfs_snapshot_id": gtfs_snapshot_id,
+        "expected_input_inventory_digest": expected_input_inventory_digest,
+    }
     if skip_prior_publication:
         conf["skip_prior_publication"] = True
     return " ".join(
@@ -312,8 +345,28 @@ def build_historical_correction_plan(
     for processing_day in planned_dates:
         processing_date = processing_day.isoformat()
         mapping = mappings[processing_date]
-        gps_objects, gps_inventory_by_mode = _gps_inventory(storage_client, processing_date)
+        boundary = _prior_publication_boundary(processing_day)
+        include_prior_gps = boundary is None
+        input_dates = tuple(
+            item.isoformat()
+            for item in (
+                (processing_day - timedelta(days=1), processing_day) if include_prior_gps else (processing_day,)
+            )
+        )
+        gps_objects, gps_inventory_by_mode, gps_inventory_by_input_date = _gps_inventory(storage_client, input_dates)
         snapshot = _snapshot_inventory(storage_client, mapping["gcs_path"])
+        inventory_digest = matcher_input_inventory_digest(
+            processing_date=processing_date,
+            snapshot_id=mapping["gtfs_snapshot_id"],
+            snapshot_gcs_path=mapping["gcs_path"],
+            include_prior_gps=include_prior_gps,
+            input_dates=input_dates,
+            gtfs_object=snapshot,
+            gps_objects=gps_objects,
+        )
+        affected_partitions = {"current_service_date": processing_date}
+        if include_prior_gps:
+            affected_partitions["prior_service_date"] = (processing_day - timedelta(days=1)).isoformat()
         days.append(
             {
                 "processing_date": processing_date,
@@ -321,11 +374,13 @@ def build_historical_correction_plan(
                 "gtfs_snapshot": snapshot,
                 "gps_inventory": gps_objects,
                 "gps_inventory_by_mode": gps_inventory_by_mode,
-                "prior_publication_boundary": _prior_publication_boundary(processing_day),
-                "affected_partitions": {
-                    "current_service_date": processing_date,
-                    "prior_service_date": (processing_day - timedelta(days=1)).isoformat(),
-                },
+                "gps_inventory_by_input_date": gps_inventory_by_input_date,
+                "include_prior_gps": include_prior_gps,
+                "input_dates": list(input_dates),
+                "expected_input_inventory_digest": inventory_digest,
+                "publication_mode": "current_only" if not include_prior_gps else "current_and_prior",
+                "prior_publication_boundary": boundary,
+                "affected_partitions": affected_partitions,
             }
         )
     gps_bytes = sum(int(gps_object["bytes"]) for planned_day in days for gps_object in planned_day["gps_inventory"])
@@ -344,6 +399,7 @@ def build_historical_correction_plan(
                     plan_id,
                     str(planned_day["processing_date"]),
                     str(planned_day["gtfs_snapshot_id"]),
+                    str(planned_day["expected_input_inventory_digest"]),
                     skip_prior_publication=planned_day["prior_publication_boundary"] is not None,
                 ),
                 _wait_command(
@@ -355,7 +411,7 @@ def build_historical_correction_plan(
             ]
         )
     return {
-        "plan_version": "matcher-historical-correction-v3",
+        "plan_version": "matcher-historical-correction-v5",
         "plan_id": plan_id,
         "read_only": True,
         "date_range": {

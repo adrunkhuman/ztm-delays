@@ -753,13 +753,13 @@ class ReconstructionRun:
         started = time.perf_counter()
         cpu_started = time.process_time()
         work, connection = self._work(), self._connection()
-        files, missing = discover(self.config.gps_root, self.config.processing_date)
+        files, missing = discover(self.config.gps_root, self.config.input_dates)
         schedule_rows = self.prepare_schedule()
         self.normalized_path = work / "normalized_gps.parquet"
         normalized_rows = normalize(
             connection,
             files,
-            self.config.processing_date,
+            self.config.input_dates,
             self.normalized_path,
             lines=self.diagnostic_lines,
             vehicle_number=self.config.diagnostic_vehicle_number,
@@ -791,7 +791,11 @@ class ReconstructionRun:
                 "reconstruction_stop_arrivals": STOP_ARRIVAL_FACT_SCHEMA_VERSION,
                 "reconstruction_expected_stop_events": EXPECTED_STOP_EVENT_SCHEMA_VERSION,
             },
-            "inputs": {"gps": [_identity(file) for file in files], "gtfs_zip": _identity(self.config.gtfs_zip)},
+            "inputs": {
+                "gps": [_identity(file) for file in files],
+                "gps_input_dates": [str(item) for item in self.config.input_dates],
+                "gtfs_zip": _identity(self.config.gtfs_zip),
+            },
             "outputs": {
                 "normalized_gps": _identity(self.normalized_path, relative=True),
                 "duty_schedule": _identity(work / "duty_schedule.parquet", relative=True),

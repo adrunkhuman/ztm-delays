@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -126,6 +127,47 @@ def gtfs_gcs_uri(snapshot_id: str) -> str:
 def historical_daily_exclusion_reason(processing_date: date) -> str | None:
     """Return the machine-readable reason a known bad historical date is excluded."""
     return HISTORICAL_DAILY_EXCLUSION_REASONS.get(processing_date)
+
+
+def matcher_input_inventory_digest(  # noqa: PLR0913
+    *,
+    processing_date: str,
+    snapshot_id: str,
+    snapshot_gcs_path: str,
+    include_prior_gps: bool,
+    input_dates: list[str] | tuple[str, ...],
+    gtfs_object: Mapping[str, object],
+    gps_objects: list[Mapping[str, object]],
+) -> str:
+    """Hash the complete immutable matcher input inventory in one canonical form."""
+
+    def object_identity(value: Mapping[str, object]) -> dict[str, object]:
+        name, generation, size = value.get("name"), value.get("generation"), value.get("size")
+        md5_hash, crc32c = value.get("md5_hash"), value.get("crc32c")
+        if not isinstance(name, str) or not isinstance(generation, str) or not isinstance(size, int):
+            raise TypeError("Matcher input inventory object lacks name, generation, or size")
+        if (
+            not isinstance(md5_hash, str | type(None))
+            or not isinstance(crc32c, str | type(None))
+            or not (md5_hash or crc32c)
+        ):
+            raise TypeError("Matcher input inventory object lacks hash metadata")
+        return {"name": name, "generation": generation, "size": size, "md5_hash": md5_hash, "crc32c": crc32c}
+
+    if not all(isinstance(value, str) and value for value in (processing_date, snapshot_id, snapshot_gcs_path)):
+        raise TypeError("Matcher input inventory lacks processing or snapshot identity")
+    if not isinstance(include_prior_gps, bool) or not all(isinstance(item, str) and item for item in input_dates):
+        raise TypeError("Matcher input inventory has invalid GPS date policy")
+    payload = {
+        "processing_date": processing_date,
+        "snapshot_id": snapshot_id,
+        "snapshot_gcs_path": snapshot_gcs_path,
+        "include_prior_gps": include_prior_gps,
+        "input_dates": list(input_dates),
+        "gtfs_object": object_identity(gtfs_object),
+        "gps_objects": sorted((object_identity(item) for item in gps_objects), key=lambda item: str(item["name"])),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def dbt_vars(**values: str) -> str:

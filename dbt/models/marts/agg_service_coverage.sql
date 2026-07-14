@@ -34,10 +34,8 @@ with raw_scheduled_trips as (
         schedule.schedule_day_type,
         schedule.schedule_service_ids,
         schedule.trip_id,
-        timestamp_add(timestamp(schedule.service_date, 'Europe/Warsaw'), interval schedule.trip_start_seconds second)
-            as scheduled_start_time,
-        timestamp_add(timestamp(schedule.service_date, 'Europe/Warsaw'), interval schedule.trip_end_seconds second)
-            as scheduled_end_time
+        {{ warsaw_scheduled_timestamp('schedule.service_date', 'schedule.trip_start_seconds') }} as scheduled_start_time,
+        {{ warsaw_scheduled_timestamp('schedule.service_date', 'schedule.trip_end_seconds') }} as scheduled_end_time
     from {{ ref('int_gtfs_trip_schedule') }} as schedule
     left join {{ ref('stg_gtfs__routes') }} as routes
         on schedule.line = routes.route_id

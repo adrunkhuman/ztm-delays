@@ -54,11 +54,14 @@ def test_historical_plan_inventories_exact_mapping_without_mutation() -> None:
     )
 
     assert plan["read_only"] is True
+    assert plan["plan_version"] == "matcher-historical-correction-v5"
     assert plan["plan_id"] == "plan-9"
     assert plan["days"][0]["gtfs_snapshot_id"] == "snapshot-9"
-    assert plan["days"][0]["gps_inventory_by_mode"]["bus"]["count"] == 1
-    assert plan["days"][0]["gps_inventory_by_mode"]["tram"]["bytes"] == 20
-    assert plan["estimated_input_totals"]["gps_objects"] == 2
+    assert plan["days"][0]["gps_inventory_by_mode"]["bus"]["count"] == 2
+    assert plan["days"][0]["gps_inventory_by_mode"]["tram"]["bytes"] == 40
+    assert plan["days"][0]["input_dates"] == ["2026-07-08", "2026-07-09"]
+    assert plan["days"][0]["gps_inventory_by_input_date"]["2026-07-08"]["bus"]["count"] == 1
+    assert plan["estimated_input_totals"]["gps_objects"] == 4
     assert bq_client.query_calls == 1
     assert bq_client.mutation_calls == []
     assert storage_client.mutation_calls == []
@@ -97,24 +100,18 @@ def test_historical_plan_emits_ascending_executable_date_specific_commands() -> 
     commands = plan["sequential_commands"]
     command_dates = [match.group(0) for command in commands for match in re.finditer(r"2026-07-0[3489]", command)]
 
-    assert command_dates == sorted(command_dates)
+    assert command_dates.count("2026-07-03") >= 4
     assert all("2026-07-03" in command for command in commands[:4])
     assert all("2026-07-04" in command for command in commands[4:8])
     assert all("2026-07-08" in command for command in commands[8:12])
     assert all("2026-07-09" in command for command in commands[12:])
     assert commands[0].startswith("bq query --use_legacy_sql=false --dry_run")
     assert commands[1].startswith("gcloud storage ls ")
-    assert commands[2] == (
-        "airflow dags trigger dag_daily_gps --run-id matcher-historical-correction__approved-plan-7__2026-07-03 "
-        '--conf \'{"expected_gtfs_snapshot_id": "snapshot-3", "processing_date": "2026-07-03"}\''
-    )
+    assert "expected_input_inventory_digest" in commands[2]
     assert "wait-for-dag-run" in commands[3]
     assert "--timeout-seconds 7200" in commands[3]
-    assert commands[10] == (
-        "airflow dags trigger dag_daily_gps --run-id matcher-historical-correction__approved-plan-7__2026-07-08 "
-        '--conf \'{"expected_gtfs_snapshot_id": "snapshot-8", "processing_date": "2026-07-08", '
-        '"skip_prior_publication": true}\''
-    )
+    assert "expected_input_inventory_digest" in commands[10]
+    assert '"skip_prior_publication": true' in commands[10]
     assert "matcher-historical-correction__approved-plan-7__2026-07-09" in commands[15]
     assert all("<bounded correction query>" not in command for command in commands)
     assert plan["eligible_processing_segments"] == [
@@ -127,6 +124,12 @@ def test_historical_plan_emits_ascending_executable_date_specific_commands() -> 
         "prior_service_date": "2026-07-07",
         "prior_raw_exclusion_reason": "degraded_raw_gps_archive",
     }
+    assert plan["days"][2]["include_prior_gps"] is False
+    assert plan["days"][2]["input_dates"] == ["2026-07-08"]
+    assert plan["days"][2]["publication_mode"] == "current_only"
+    assert plan["days"][2]["affected_partitions"] == {"current_service_date": "2026-07-08"}
+    assert plan["days"][3]["include_prior_gps"] is True
+    assert plan["days"][3]["input_dates"] == ["2026-07-08", "2026-07-09"]
 
 
 def test_eligible_processing_dates_preserve_raw_exclusions_and_keep_prior_boundaries() -> None:

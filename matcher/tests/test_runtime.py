@@ -17,7 +17,7 @@ import ztm_matcher.runtime as runtime
 from ztm_matcher import ReconstructionRun, RunConfig
 from ztm_matcher.cli import main
 from ztm_matcher.errors import MatcherError
-from ztm_matcher.gps import normalize
+from ztm_matcher.gps import discover, normalize
 from ztm_matcher.gtfs import Snapshot, load, select
 from ztm_matcher.runtime import STOP_ALIGNMENT_ROW_GROUP_ROWS, _flush_stop_alignment_rows
 from ztm_matcher.schemas import (
@@ -36,6 +36,12 @@ from ztm_matcher.semantics import duties, iter_stop_semantics
 
 def _gps(root: Path, rows: list[dict[str, object]]) -> None:
     path = root / "vehicle_type=bus" / "date=2026-01-15" / "hour=01"
+    path.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=RAW_GPS_SCHEMA), path / "part.parquet")
+
+
+def _gps_for_date(root: Path, gps_date: date, rows: list[dict[str, object]]) -> None:
+    path = root / "vehicle_type=bus" / f"date={gps_date}" / "hour=23"
     path.mkdir(parents=True)
     pq.write_table(pa.Table.from_pylist(rows, schema=RAW_GPS_SCHEMA), path / "part.parquet")
 
@@ -75,6 +81,49 @@ def _gtfs(path: Path, block: str = "block-1", prior: bool = True) -> None:
             ["service_id", "date", "exception_type"],
             ["old", "20260114", "1" if prior else "2"],
             ["new", "20260115", "1"],
+        ],
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, rows in tables.items():
+            stream = io.StringIO()
+            csv.writer(stream).writerows(rows)
+            archive.writestr(name, stream.getvalue())
+
+
+def _cross_midnight_gtfs(path: Path) -> None:
+    tables = {
+        "trips.txt": [
+            [
+                "trip_id",
+                "route_id",
+                "service_id",
+                "trip_headsign",
+                "direction_id",
+                "block_id",
+                "block_short_name",
+                "shape_id",
+            ],
+            ["cross-midnight", "n50", "prior", "Night", "0", "block-night", "0050", "s"],
+            ["current", "n50", "current", "Current", "0", "block-current", "0050", "s"],
+        ],
+        "stop_times.txt": [
+            ["trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time", "pickup_type", "drop_off_type"],
+            ["cross-midnight", "100001", "1", "23:50:00", "23:50:00", "0", "0"],
+            ["cross-midnight", "100002", "2", "24:20:00", "24:20:00", "0", "0"],
+            ["current", "100001", "1", "01:00:00", "01:00:00", "0", "0"],
+            ["current", "100002", "2", "01:10:00", "01:10:00", "0", "0"],
+        ],
+        "stops.txt": [
+            ["stop_id", "stop_name", "stop_code", "stop_lat", "stop_lon", "zone_id", "stop_name_stem", "town_name"],
+            ["100001", "A", "1", "52.2", "21.0", "1", "A", "Warszawa"],
+            ["100002", "B", "2", "52.2", "21.01", "1", "B", "Warszawa"],
+        ],
+        "shapes.txt": [["shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"], ["s", "52.2", "21", "1"]],
+        "routes.txt": [["route_id", "route_short_name", "route_type"], ["n50", "N50", "3"]],
+        "calendar_dates.txt": [
+            ["service_id", "date", "exception_type"],
+            ["prior", "20260114", "1"],
+            ["current", "20260115", "1"],
         ],
     }
     with zipfile.ZipFile(path, "w") as archive:
@@ -215,7 +264,7 @@ def test_normalize_applies_diagnostic_line_and_vehicle_filters(tmp_path: Path) -
         rows = normalize(
             connection,
             [source],
-            date(2026, 1, 15),
+            (date(2026, 1, 15),),
             output,
             lines={"Z26"},
             vehicle_number="3",
@@ -238,7 +287,7 @@ def test_normalize_keeps_same_vehicle_number_separate_across_types(tmp_path: Pat
     output = tmp_path / "normalized.parquet"
 
     with duckdb.connect() as connection:
-        rows = normalize(connection, [next(gps.rglob("*.parquet"))], date(2026, 1, 15), output)
+        rows = normalize(connection, [next(gps.rglob("*.parquet"))], (date(2026, 1, 15),), output)
 
     normalized = pq.read_table(output).to_pylist()
     assert rows == 2
@@ -394,7 +443,8 @@ def test_prepares_normalized_gps_schedule_semantics_manifest_and_groups(tmp_path
     assert result["metrics"]["normalized_rows"] == 2
     assert [group.vehicle_number for group in groups] == ["1", "2"]
     manifest = json.loads((output / "manifest.json").read_text())
-    assert manifest["missing_hours"]["tram"] == list(range(24))
+    assert manifest["missing_hours"]["2026-01-14"]["tram"] == list(range(24))
+    assert manifest["missing_hours"]["2026-01-15"]["tram"] == list(range(24))
     assert (output / "duty_schedule.parquet").is_file()
     assert (output / "duty_execution.parquet").is_file()
     assert (output / "operational_stop_crossings.parquet").is_file()
@@ -449,6 +499,76 @@ def test_prepare_diagnostic_trip_filters_schedule_and_gps(tmp_path: Path) -> Non
     assert result["metrics"]["normalized_rows"] == 1
     assert result["manifest"]["config"]["diagnostic_trip_id"] == "today"
     assert {row["trip_id"] for row in pq.read_table(output / "duty_schedule.parquet").to_pylist()} == {"today"}
+
+
+def test_cross_midnight_run_uses_both_input_dates_and_preserves_source_dates(tmp_path: Path) -> None:
+    root, zip_path, output = tmp_path / "gps", tmp_path / "snapshot.zip", tmp_path / "output"
+    _cross_midnight_gtfs(zip_path)
+    start = datetime(2026, 1, 14, 22, 50, tzinfo=UTC)
+    pings = []
+    for minute in range(0, 31, 2):
+        gps_time = start + timedelta(minutes=minute)
+        longitude = 21.0 if minute == 0 else 21.01 if minute == 30 else 21.005
+        pings.append(
+            _row(
+                Lines="n50",
+                Brigade="0050",
+                VehicleNumber="50",
+                Lat=52.2,
+                Lon=longitude,
+                Time=gps_time,
+                ingested_at=gps_time,
+            )
+        )
+    _gps_for_date(root, date(2026, 1, 14), pings[:5])
+    _gps_for_date(root, date(2026, 1, 15), pings[5:])
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        root,
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+
+    with ReconstructionRun(config) as run:
+        result = run.prepare()
+
+    trips = pq.read_table(output / "reconstruction_trip_facts.parquet").to_pylist()
+    arrivals = pq.read_table(output / "reconstruction_stop_arrivals.parquet").to_pylist()
+    expected = pq.read_table(output / "reconstruction_expected_stop_events.parquet").to_pylist()
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert result["metrics"]["input_rows"] == len(pings)
+    assert manifest["inputs"]["gps_input_dates"] == ["2026-01-14", "2026-01-15"]
+    assert len({item["path"] for item in manifest["inputs"]["gps"]}) == 2
+    assert [(row["service_date"], row["processing_date"], row["trip_quality"]) for row in trips] == [
+        (date(2026, 1, 14), date(2026, 1, 15), "complete")
+    ]
+    assert {row["gps_date"] for row in trips + arrivals + expected} == {date(2026, 1, 15)}
+    assert [row["source_gps_date"] for row in arrivals] == [date(2026, 1, 14), date(2026, 1, 15)]
+    assert [row["source_gps_date"] for row in expected] == [date(2026, 1, 14), date(2026, 1, 15)]
+
+
+def test_current_only_input_policy_excludes_prior_gps_partition(tmp_path: Path) -> None:
+    root = tmp_path / "gps"
+    _gps_for_date(root, date(2026, 1, 14), [_row()])
+    _gps_for_date(root, date(2026, 1, 15), [_row(Time=datetime(2026, 1, 14, 23, tzinfo=UTC))])
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        root,
+        tmp_path / "snapshot.zip",
+        tmp_path / "output",
+        tmp_path / "metrics.json",
+        include_prior_gps=False,
+    )
+
+    files, missing = discover(root, config.input_dates)
+
+    assert config.input_dates == (date(2026, 1, 15),)
+    assert [str(path) for path in files] == [str(root / "vehicle_type=bus/date=2026-01-15/hour=23/part.parquet")]
+    assert set(missing) == {"2026-01-15"}
 
 
 def test_prepare_schedule_accepts_comma_separated_diagnostic_lines(tmp_path: Path) -> None:
@@ -1493,7 +1613,8 @@ def test_missing_hours_are_recorded_without_blocking_reconstruction(tmp_path: Pa
     )
     with ReconstructionRun(config) as run:
         result = run.prepare()
-    assert result["manifest"]["missing_hours"]["tram"] == list(range(24))
+    assert result["manifest"]["missing_hours"]["2026-01-14"]["tram"] == list(range(24))
+    assert result["manifest"]["missing_hours"]["2026-01-15"]["tram"] == list(range(24))
 
 
 def test_rejects_nonpositive_stop_alignment_workers(tmp_path: Path) -> None:

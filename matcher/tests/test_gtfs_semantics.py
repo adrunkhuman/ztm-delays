@@ -3,10 +3,10 @@ from __future__ import annotations
 import csv
 import io
 import zipfile
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from ztm_matcher.gtfs import StopTime, load, select
+from ztm_matcher.gtfs import Snapshot, StopTime, Trip, load, select
 from ztm_matcher.semantics import _depot, _is_depot_segment, duties, stop_semantics
 
 
@@ -114,6 +114,43 @@ def test_same_trip_ids_remain_distinct_across_service_dates(tmp_path: Path) -> N
     keys = {(row["service_date"], row["trip_id"], row["stop_sequence"]) for row in rows}
     assert len(keys) == len(rows)
     assert {row["service_date"] for row in rows} == {date(2026, 1, 14), date(2026, 1, 15)}
+
+
+def test_select_uses_shared_warsaw_wall_clock_policy_across_dst() -> None:
+    trip = Trip("dst", "r", "svc", "DST", 0, "block", "1", "1", "s")
+    stop_times = {
+        "dst": [
+            StopTime("a", 1, 2 * 3600 + 30 * 60, 2 * 3600 + 30 * 60, 0, 0, "regular"),
+            StopTime("b", 2, 25 * 3600, 25 * 3600, 0, 0, "regular"),
+        ]
+    }
+    for processing_date, expected_start, expected_end in (
+        (
+            date(2026, 3, 29),
+            datetime(2026, 3, 29, 1, 30, tzinfo=UTC),
+            datetime(2026, 3, 29, 23, 0, tzinfo=UTC),
+        ),
+        (
+            date(2026, 10, 25),
+            datetime(2026, 10, 25, 0, 30, tzinfo=UTC),
+            datetime(2026, 10, 26, 0, 0, tzinfo=UTC),
+        ),
+    ):
+        snapshot = Snapshot(
+            "synthetic",
+            "hash",
+            [trip],
+            stop_times,
+            {},
+            {"r": {"route_short_name": "1", "route_type": 3}},
+            {("svc", processing_date - timedelta(days=1)), ("svc", processing_date)},
+        )
+
+        selected = select(snapshot, processing_date)
+
+        current = next(row for row in selected if row["service_date"] == processing_date)
+        assert current["scheduled_start_time"] == expected_start
+        assert current["scheduled_end_time"] == expected_end
 
 
 def test_depot_name_parity_is_case_insensitive() -> None:

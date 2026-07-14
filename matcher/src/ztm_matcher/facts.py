@@ -255,7 +255,7 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
             from regular_arrivals group by all
         ), ping_segments as (
             select accepted.gtfs_snapshot_id, accepted.processing_date, accepted.service_date, accepted.trip_id,
-                accepted.vehicle_number, gps.gps_date,
+                accepted.vehicle_number,
                 date_diff('second', lag(gps.gps_time) over trip_window, gps.gps_time)::bigint ping_gap_seconds,
                 12742000 * asin(sqrt(
                     pow(sin(radians(gps.lat - lag(gps.lat) over trip_window) / 2), 2)
@@ -272,7 +272,7 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
             )
         ), ping_metrics as (
             select gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number,
-                max(gps_date) gps_date, coalesce(max(ping_gap_seconds), 0)::bigint max_ping_gap_seconds,
+                coalesce(max(ping_gap_seconds), 0)::bigint max_ping_gap_seconds,
                 coalesce(max(speed_mps), 0.0)::double max_speed_mps
             from ping_segments where ping_gap_seconds is not null group by all
         ), regular_stop_metrics as (
@@ -297,7 +297,7 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
             group by all
         )
         select accepted.gtfs_snapshot_id, accepted.processing_date,
-            coalesce(ping_metrics.gps_date, accepted.processing_date) gps_date,
+            accepted.processing_date as gps_date,
             accepted.service_date, accepted.trip_id, accepted.vehicle_number, accepted.line, accepted.brigade,
             accepted.mode, accepted.is_zone1_public_ranking_trip, accepted.are_passenger_boundaries_settled,
             regular_stop_metrics.scheduled_start_time, regular_stop_metrics.scheduled_end_time,

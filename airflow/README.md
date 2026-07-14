@@ -63,19 +63,19 @@ Runtime env defaults match the current VPS:
 
 ## Python Matcher
 
-`dag_daily_gps` runs the Python matcher as its only reconstruction path. It starts after snapshot selection and GPS staging validation, downloads immutable GPS/GTFS inputs, invokes the bounded matcher, validates the outputs, and loads content-addressed run tables.
+`dag_daily_gps` runs the Python matcher as its only reconstruction path. It starts after snapshot selection and GPS staging validation, downloads immutable GPS/GTFS inputs, invokes the bounded matcher, validates the outputs, and loads content-addressed run tables. Normal processing date `D` explicitly downloads input dates `D-1` and `D` so cross-midnight trips are reconstructed once; `skip_prior_publication=true` explicitly passes a current-only matcher policy at the known archive boundaries.
 
 Production requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, the matcher source mount, and writable workspace and `uv` environment paths.
 
 Before publication, Airflow verifies artifact schemas, hashes, snapshot lineage, row grains, processing dates, non-empty outputs, bus/tram coverage, accepted-execution counts, peak RSS, and zero swap. It then replaces the four stable `ztm_matcher_input` partitions in one BigQuery transaction. The stable dataset and tables are created idempotently on first publication.
 
-The three fact artifacts are partitioned by `gps_date`; stop semantics is partitioned by `processing_date`. dbt publishes `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` for current and prior service dates, then rebuilds coverage, status, and serving marts.
+The three fact artifacts remain partitioned by `gps_date`, which is always the matcher processing date. `source_gps_date` carries the actual raw GPS date for each direct stop observation, while dbt selects the one processing-date artifact that already contains both sides of a normal overnight trip. Stop semantics remains partitioned by `processing_date`. dbt then publishes `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` for current and prior service dates before rebuilding coverage, status, and serving marts.
 
 Minimal recovery is to fix the matcher/configuration and rerun the processing date. Raw GPS and GTFS remain immutable, stable input replacement is atomic, fact publication uses partition overwrite, and serving export keeps its previous artifact until a new export succeeds.
 
 `matcher_historical_correction.py plan` produces bounded, read-only plans for explicitly approved historical corrections.
-The retained service range starts on `2026-06-27`; raw processing dates `2026-06-26` and `2026-07-05` through `2026-07-07` are excluded. The valid boundary runs on `2026-06-27` and `2026-07-08` set `skip_prior_publication=true`, so they reconstruct current-date data without replacing the excluded prior partition.
-Plans require a validated `--plan-id`; use a new ID for a retry. They emit plan-ID-scoped deterministic Airflow 3 run IDs, the expected GTFS snapshot in each trigger configuration, and a bounded `wait-for-dag-run` command after every trigger.
+The retained service range starts on `2026-06-27`; raw processing dates `2026-06-26` and `2026-07-05` through `2026-07-07` are excluded. The valid boundary runs on `2026-06-27` and `2026-07-08` set `skip_prior_publication=true`, so they use only current-date GPS and do not replace the excluded prior partition.
+Plans require a validated `--plan-id`; use a new ID for a retry. They emit plan-ID-scoped deterministic Airflow 3 run IDs, the expected GTFS snapshot and immutable input-inventory digest in each trigger configuration, and a bounded `wait-for-dag-run` command after every trigger. A legacy single-date validated marker is not retryable under the two-date input policy; start controlled recovery with a new Airflow run ID.
 
 ## Serving Export
 

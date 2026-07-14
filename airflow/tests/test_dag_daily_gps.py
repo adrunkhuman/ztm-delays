@@ -160,6 +160,25 @@ def test_selected_gtfs_snapshot_task_reads_optional_expected_snapshot_conf(monke
     assert dag.selected_gtfs_snapshot_id.function("2026-07-08") == "2026-07-08:snapshot-1"
 
 
+def test_expected_input_inventory_digest_conf_is_optional_but_nonempty(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    monkeypatch.setattr(dag, "get_current_context", lambda: {"dag_run": types.SimpleNamespace(conf={})})
+    assert dag._configured_expected_input_inventory_digest() is None
+    monkeypatch.setattr(
+        dag,
+        "get_current_context",
+        lambda: {"dag_run": types.SimpleNamespace(conf={"expected_input_inventory_digest": "digest"})},
+    )
+    assert dag._configured_expected_input_inventory_digest() == "digest"
+    monkeypatch.setattr(
+        dag,
+        "get_current_context",
+        lambda: {"dag_run": types.SimpleNamespace(conf={"expected_input_inventory_digest": " "})},
+    )
+    with pytest.raises(dag.AirflowException, match="non-empty"):
+        dag._configured_expected_input_inventory_digest()
+
+
 def test_guard_excluded_historical_processing_date_blocks_only_excluded_dates() -> None:
     dag = _load_dag_module()
 
@@ -180,6 +199,19 @@ def test_guard_prior_publication_requires_skip_only_for_excluded_prior_date() ->
     assert dag._guard_prior_publication("2026-07-09", False) is False
     with pytest.raises(dag.AirflowException, match="only allowed"):
         dag._guard_prior_publication("2026-07-09", True)
+
+
+def test_matcher_input_policy_explicitly_excludes_prior_gps_at_outage_boundary() -> None:
+    dag = _load_dag_module()
+
+    assert dag._matcher_input_policy("2026-07-09", False) == {
+        "include_prior_gps": True,
+        "input_dates": ["2026-07-08", "2026-07-09"],
+    }
+    assert dag._matcher_input_policy("2026-07-08", True) == {
+        "include_prior_gps": False,
+        "input_dates": ["2026-07-08"],
+    }
 
 
 def test_bigquery_dbt_job_cost_summary_queries_jobs_by_user(monkeypatch: pytest.MonkeyPatch) -> None:

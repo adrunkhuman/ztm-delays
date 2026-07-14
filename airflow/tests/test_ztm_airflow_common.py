@@ -169,6 +169,39 @@ def test_historical_daily_exclusion_policy_has_only_known_bad_dates() -> None:
     } == common.HISTORICAL_DAILY_EXCLUSION_REASONS
 
 
+def test_matcher_input_inventory_digest_is_sensitive_to_each_object() -> None:
+    common = _load_common_module()
+    kwargs = {
+        "processing_date": "2026-07-09",
+        "snapshot_id": "snapshot",
+        "snapshot_gcs_path": "gs://bucket/raw/gtfs/snapshot.zip",
+        "include_prior_gps": True,
+        "input_dates": ["2026-07-08", "2026-07-09"],
+        "gtfs_object": {
+            "name": "raw/gtfs/snapshot.zip",
+            "generation": "1",
+            "size": 1,
+            "md5_hash": "gtfs",
+            "crc32c": None,
+        },
+        "gps_objects": [{"name": "raw/gps/a.parquet", "generation": "1", "size": 1, "md5_hash": "gps", "crc32c": None}],
+    }
+    digest = common.matcher_input_inventory_digest(**kwargs)
+
+    assert digest != common.matcher_input_inventory_digest(
+        **(
+            kwargs
+            | {
+                "gps_objects": kwargs["gps_objects"]
+                + [{"name": "raw/gps/b.parquet", "generation": "1", "size": 1, "md5_hash": "gps", "crc32c": None}]
+            }
+        )
+    )
+    assert digest != common.matcher_input_inventory_digest(
+        **(kwargs | {"gps_objects": [{**kwargs["gps_objects"][0], "generation": "2"}]})
+    )
+
+
 def test_airflow_failure_alert_rejects_non_https_webhook(monkeypatch: Any) -> None:
     common = _load_common_module()
 

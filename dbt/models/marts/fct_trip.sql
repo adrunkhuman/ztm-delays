@@ -16,8 +16,8 @@ with matcher_trip_candidates as (
     select *
     from {{ source('matcher_input', 'reconstruction_trip_facts') }}
     where service_date = date('{{ publish_service_date }}')
-      and gps_date between date('{{ publish_service_date }}') and date_add(date('{{ publish_service_date }}'), interval 1 day)
-      and gps_date <= date('{{ var("processing_date") }}')
+      and gps_date = date('{{ var("processing_date") }}')
+      and processing_date = date('{{ var("processing_date") }}')
 ),
 
 matcher_trips as (
@@ -41,7 +41,7 @@ matcher_trips as (
 stop_semantics as (
     select *
     from {{ source('matcher_input', 'reconstruction_stop_semantics') }}
-    where processing_date between date('{{ publish_service_date }}') and date('{{ var("processing_date") }}')
+    where processing_date = date('{{ var("processing_date") }}')
 ),
 
 passenger_extents as (

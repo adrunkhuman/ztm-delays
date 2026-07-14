@@ -7,7 +7,7 @@ sources:
     schema: "{{ env_var('BIGQUERY_MATCHER_INPUT_DATASET', 'ztm_matcher_input') }}"
     tables:
       - name: reconstruction_trip_facts
-        description: Python matcher reconstruction-trip-facts-v2 rows, partitioned by gps_date. Each retained artifact partition contains one gps_date equal to its processing_date; service_date may be prior or current.
+        description: Python matcher reconstruction-trip-facts-v2 rows, partitioned by gps_date. Every retained row has gps_date equal to processing_date; service_date may be prior or current.
         columns:
           - {name: gtfs_snapshot_id, data_type: string}
           - {name: processing_date, data_type: date}
@@ -45,7 +45,7 @@ sources:
           - {name: service_observation_flags, data_type: array<string>}
           - {name: is_zone1_public_ranking_trip, data_type: boolean}
       - name: reconstruction_stop_arrivals
-        description: Python matcher reconstruction-stop-arrivals-v2 rows, partitioned by gps_date. Each retained artifact partition contains one gps_date equal to its processing_date; source_gps_date preserves stop-level source lineage.
+        description: Python matcher reconstruction-stop-arrivals-v2 rows, partitioned by gps_date. Every retained row has gps_date equal to processing_date; source_gps_date preserves the actual Warsaw source date for each matched segment.
         columns:
           - {name: gtfs_snapshot_id, data_type: string}
           - {name: processing_date, data_type: date}
@@ -83,7 +83,7 @@ sources:
           - {name: service_observation_flags, data_type: array<string>}
           - {name: is_zone1_public_ranking_trip, data_type: boolean}
       - name: reconstruction_expected_stop_events
-        description: Python matcher reconstruction-expected-stop-events-v2 rows, partitioned by gps_date. These are passenger-only, boundary-settled occurrences used for the Python trip adapter's settled endpoints.
+        description: Python matcher reconstruction-expected-stop-events-v2 rows, partitioned by gps_date. Every retained row has gps_date equal to processing_date. These are passenger-only, boundary-settled occurrences used for the Python trip adapter's settled endpoints.
         columns:
           - {name: gtfs_snapshot_id, data_type: string}
           - {name: processing_date, data_type: date}
@@ -193,11 +193,11 @@ unit_tests:
         format: sql
         rows: |
           select
-            'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as gps_date,
+            'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as processing_date, date '2026-01-16' as gps_date,
             date '2026-01-15' as service_date, 'trip-1' as trip_id, '1001' as vehicle_number,
             '100101' as stop_id, 0 as stop_sequence
           union all
-          select 'snapshot-1', date '2026-01-16', date '2026-01-15', 'trip-1', '1001', '100102', 1
+          select 'snapshot-1', date '2026-01-16', date '2026-01-16', date '2026-01-15', 'trip-1', '1001', '100102', 1
       - input: source('matcher_input', 'reconstruction_stop_semantics')
         format: sql
         rows: |
@@ -243,7 +243,7 @@ unit_tests:
         format: sql
         rows: |
           select
-            'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as gps_date,
+            'snapshot-1' as gtfs_snapshot_id, date '2026-01-16' as processing_date, date '2026-01-16' as gps_date,
             date '2026-01-15' as source_gps_date, date '2026-01-15' as service_date,
             'trip-1' as trip_id, '1001' as vehicle_number, '100101' as stop_id, 0 as stop_sequence,
             timestamp('2026-01-15 23:50:00+01') as scheduled_arrival_time,
@@ -256,14 +256,14 @@ unit_tests:
             'complete' as trip_quality
           union all
           select
-            'snapshot-other', date '2026-01-16', date '2026-01-16', date '2026-01-15',
+            'snapshot-other', date '2026-01-16', date '2026-01-16', date '2026-01-16', date '2026-01-15',
             'trip-1', '1001', '100101', 0, timestamp('2026-01-15 23:50:00+01'),
             timestamp('2026-01-15 23:50:20+01'), timestamp('2026-01-15 23:55:00+01'), 300,
             'segment_within_75m', 75.0, 12.0, 15.0, 18.0,
            timestamp('2026-01-15 23:54:30+01'), timestamp('2026-01-15 23:55:30+01'), 60, 'complete'
           union all
           select
-            'snapshot-1', date '2026-01-15', date '2026-01-15', date '2026-01-15',
+            'snapshot-1', date '2026-01-15', date '2026-01-15', date '2026-01-15', date '2026-01-15',
             'trip-1', '1001', '100101', 0, timestamp('2026-01-15 23:50:00+01'),
             timestamp('2026-01-15 23:50:20+01'), timestamp('2026-01-15 23:55:00+01'), 300,
             'segment_within_75m', 75.0, 12.0, 15.0, 18.0,

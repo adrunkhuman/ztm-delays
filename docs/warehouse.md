@@ -51,13 +51,13 @@ Use these names carefully:
 
 | Field | Meaning |
 | --- | --- |
-| `gps_date` | Warsaw-local date of raw GPS processing. |
+| `gps_date` | Matcher artifact partition date, always equal to the matcher processing date. |
 | `service_date` | GTFS service date. Overnight trips can differ from `gps_date`. |
 | `processing_date` | Airflow/dbt run date, normally the GPS date being rebuilt. |
 | `scheduled_start_date` | Date of scheduled trip start, used by coverage marts. |
 | `publish_service_date` | Fact partition being published by the DAG. |
 
-Nightly GPS runs publish current and prior service-date facts. The prior publish lets after-midnight GPS complete previous-service-date trips.
+Normal nightly GPS runs download and match both source GPS dates `D-1` and `D` in one processing-date `D` artifact. They then publish current and prior service-date facts from that one artifact; `source_gps_date` retains which side of midnight produced each direct observation.
 
 Current service-date facts exclude trips ending after the processed GPS date. Those overnight trips publish on the next run, when the same service date is rebuilt as prior service.
 
@@ -70,7 +70,8 @@ Current service-date facts exclude trips ending after the processed GPS date. Th
 | `int_gtfs_trip_schedule` | Scheduled trips under the selected snapshot, scoped to processing/service-date overlap. |
 | `int_gtfs_duty_chain` | Ordered scheduled duty segments by snapshot, service date, and duty identity. |
 | `int_schedule_version` | Timetable-version ranges by `line`, `direction_id`, and `schedule_day_type`. |
-| `ztm_matcher_input.reconstruction_*` | Stable processing-date partitions produced by the bounded Python matcher. |
+| `ztm_matcher_input.reconstruction_trip_facts`, `reconstruction_stop_arrivals`, `reconstruction_expected_stop_events` | Stable `gps_date` partitions where `gps_date = processing_date`; direct stop lineage uses `source_gps_date`. |
+| `ztm_matcher_input.reconstruction_stop_semantics` | Stable `processing_date` partition produced by the bounded Python matcher. |
 | `fct_trip` | Serving fact for observed trips, partitioned by `service_date`. |
 | `fct_stop_arrival` | Serving detail fact for detected stop arrivals, partitioned by `service_date`. |
 | `fct_expected_stop_event` | Serving trip-detail fact with every scheduled stop for each matched vehicle trip and explicit observation status. |
@@ -87,7 +88,7 @@ passenger arrival or delay.
 
 ## Matcher Publication
 
-`dag_daily_gps` runs the bounded Python matcher from immutable processing-date GPS and a pinned GTFS ZIP. It validates schemas, lineage, grains, non-empty artifacts, RSS, and swap before atomically replacing four stable `ztm_matcher_input` partitions. Current and prior canonical facts then enrich those inputs with warehouse dimensions. Run-scoped content-addressed tables and immutable markers remain diagnostic evidence, not an alternate fact source.
+`dag_daily_gps` runs the bounded Python matcher from immutable GPS input dates and a pinned GTFS ZIP. Normal runs use `D-1` plus `D`; outage-boundary runs explicitly use `D` only. It validates schemas, lineage, grains, non-empty artifacts, RSS, and swap before atomically replacing the three stable fact artifacts by `gps_date = processing_date` and stop semantics by `processing_date`. Current and prior canonical facts select that one matcher artifact; they do not merge separate outputs downstream. `source_gps_date` retains direct stop-observation lineage. Run-scoped content-addressed tables and immutable markers remain diagnostic evidence, not an alternate fact source.
 
 ## Dimensions
 

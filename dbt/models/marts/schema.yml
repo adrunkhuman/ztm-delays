@@ -1245,7 +1245,7 @@ unit_tests:
         rows: |
           select
             'snapshot-valid' as gtfs_snapshot_id,
-            date '2026-01-15' as gps_date,
+            date '2026-01-16' as gps_date,
             date '2026-01-15' as service_date,
             'trip-1' as trip_id,
             1001 as vehicle_number,
@@ -1268,22 +1268,22 @@ unit_tests:
             array<string>[] as service_observation_flags
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-2', 1002, '187', '187', 'bus', '2',
+            'snapshot-valid', date '2026-01-16', date '2026-01-15', 'trip-2', 1002, '187', '187', 'bus', '2',
             1, 0, 'svc', 'Central', 'shape-2', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'partial', array<string>[],
             'regular', array<string>[]
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, '187', '187', 'bus', '3',
+            'snapshot-valid', date '2026-01-16', date '2026-01-15', 'trip-3', 1003, '187', '187', 'bus', '3',
             1, 0, 'svc', 'Central', 'shape-3', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'partial', ['stale_stop_progression'],
             'modified', ['stale_progress']
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', 'trip-4', 1004, '187', '187', 'bus', '4',
+            'snapshot-valid', date '2026-01-16', date '2026-01-15', 'trip-4', 1004, '187', '187', 'bus', '4',
             1, 0, 'svc', 'Central', 'shape-4', 'weekday', 'thursday', 'svc', 'schedule-version-1', 'broken', ['likely_wrong_trip_assignment'],
             'matching_failure', ['bad_assignment_evidence']
           union all
           select
-            'snapshot-prior', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, '187', '187', 'bus', '9',
+            'snapshot-prior', date '2026-01-16', date '2026-01-15', 'trip-1', 1001, '187', '187', 'bus', '9',
             1, 0, 'svc-prior', 'Prior', 'shape-prior', 'weekday', 'thursday', 'svc-prior', 'schedule-version-prior',
             'complete', array<string>[], 'regular', array<string>[]
       - input: source('matcher_input', 'reconstruction_expected_stop_events')
@@ -1291,7 +1291,8 @@ unit_tests:
         rows: |
           select
             'snapshot-valid' as gtfs_snapshot_id,
-            date '2026-01-15' as gps_date,
+            date '2026-01-16' as processing_date,
+            date '2026-01-16' as gps_date,
             date '2026-01-15' as source_gps_date,
             date '2026-01-15' as service_date,
             'trip-1' as trip_id,
@@ -1303,31 +1304,31 @@ unit_tests:
             array<string>[] as uncertainty_evidence
           union all
           select
-            'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001, 1,
+            'snapshot-valid', date '2026-01-16', date '2026-01-16', cast(null as date), date '2026-01-15', 'trip-1', 1001, 1,
             'missed', cast(null as timestamp), cast(null as int64), array<string>[]
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 3,
+            'snapshot-valid', date '2026-01-16', date '2026-01-16', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 3,
             'observed', timestamp('2026-01-15 08:28:25+01'), 5, array<string>[]
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-2', 1002, 0,
+            'snapshot-valid', date '2026-01-16', date '2026-01-16', date '2026-01-15', date '2026-01-15', 'trip-2', 1002, 0,
             'observed', timestamp('2026-01-15 08:30:20+01'), 20, array<string>[]
           union all
           select
-            'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-2', 1002, 1,
+            'snapshot-valid', date '2026-01-16', date '2026-01-16', cast(null as date), date '2026-01-15', 'trip-2', 1002, 1,
             'missed', cast(null as timestamp), cast(null as int64), array<string>[]
           union all
           select
-            'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, 0,
+            'snapshot-valid', date '2026-01-16', date '2026-01-16', date '2026-01-15', date '2026-01-15', 'trip-3', 1003, 0,
             'uncertain', timestamp('2026-01-15 08:35:20+01'), 20, ['alignment_ambiguous_or_medium']
           union all
           select
-            'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-4', 1004, 0,
+            'snapshot-valid', date '2026-01-16', date '2026-01-16', cast(null as date), date '2026-01-15', 'trip-4', 1004, 0,
             'uncertain', cast(null as timestamp), cast(null as int64), ['unreliable_trip_assignment']
           union all
           select
-            'snapshot-prior', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 0,
+            'snapshot-prior', date '2026-01-16', date '2026-01-16', date '2026-01-15', date '2026-01-15', 'trip-1', 1001, 0,
             'observed', timestamp('2026-01-15 07:30:30+01'), 30, array<string>[]
       - input: source('matcher_input', 'reconstruction_stop_semantics')
         format: sql
@@ -1335,7 +1336,7 @@ unit_tests:
           select
             base.*,
             date '2026-01-15' as service_date,
-            date '2026-01-15' as processing_date,
+            date '2026-01-16' as processing_date,
             case
               when trip_id = 'trip-3' then 'unknown'
               when stop_service_class = 'not_in_passenger_service' then 'technical_suffix'
@@ -1428,7 +1429,7 @@ unit_tests:
       rows: |
         select
           'snapshot-valid' as gtfs_snapshot_id,
-          date '2026-01-15' as gps_date,
+          date '2026-01-16' as gps_date,
           date '2026-01-15' as source_gps_date,
           date '2026-01-15' as service_date,
           'trip-1' as trip_id,
@@ -1489,7 +1490,7 @@ unit_tests:
           'observed' as observation_status
         union all
         select
-          'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
+          'snapshot-valid', date '2026-01-16', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], '100102', '1001', '02', 'Main 02', 52.2, 21.2, 'Main 01', 1, 0, 0, 'regular',
            'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 3,
@@ -1499,7 +1500,7 @@ unit_tests:
           false, false, 'missed'
         union all
         select
-          'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-1', 1001,
+          'snapshot-valid', date '2026-01-16', cast(null as date), date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], '100105', '1001', '05', 'Depot', 52.5, 21.5, 'Main 01', 2, 1, 1, 'not_in_passenger_service',
            'technical_suffix', 'high', 'explicit_non_passenger_suffix', ['explicit_non_passenger_service'], false, true, 0, 3,
@@ -1509,7 +1510,7 @@ unit_tests:
           false, false, 'not_in_passenger_service'
         union all
         select
-          'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
+          'snapshot-valid', date '2026-01-16', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '1', 1, 0, 'svc', 'Central', 'shape-1', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'complete', array<string>[], 'regular', array<string>[], '100106', '1001', '06', 'Request Stop', 52.6, 21.6, 'Main 01', 3, 3, 3, 'request',
            'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 3,
@@ -1519,7 +1520,7 @@ unit_tests:
           timestamp('2026-01-15 08:28:30+01'), 30, true, false, 'observed'
         union all
         select
-          'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-2', 1002,
+          'snapshot-valid', date '2026-01-16', date '2026-01-15', date '2026-01-15', 'trip-2', 1002,
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], '100103', '1001', '03', 'Main 03', 52.3, 21.3, 'Main 01', 0, 0, 0, 'regular',
            'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1,
@@ -1529,7 +1530,7 @@ unit_tests:
           timestamp('2026-01-15 08:30:30+01'), 30, true, false, 'observed'
         union all
         select
-          'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-2', 1002,
+          'snapshot-valid', date '2026-01-16', cast(null as date), date '2026-01-15', 'trip-2', 1002,
           '187', '187', 'bus', '2', 1, 0, 'svc', 'Central', 'shape-2', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', array<string>[], 'regular', array<string>[], '100107', '1001', '07', 'Main 07', 52.7, 21.7, 'Main 01', 1, 0, 0, 'regular',
            'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 1,
@@ -1539,7 +1540,7 @@ unit_tests:
           false, false, 'missed'
         union all
         select
-          'snapshot-valid', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-3', 1003,
+          'snapshot-valid', date '2026-01-16', date '2026-01-15', date '2026-01-15', 'trip-3', 1003,
           '187', '187', 'bus', '3', 1, 0, 'svc', 'Central', 'shape-3', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'partial', ['stale_stop_progression'], 'modified', ['stale_progress'], '100104', '1001', '04', 'Main 04', 52.4, 21.4, 'Main 01', 0, 0, 0, 'regular',
            'unknown', 'unknown', 'unresolved_passenger_boundary', ['missing_boundary_evidence'], true, false, 0, 0,
@@ -1549,7 +1550,7 @@ unit_tests:
           timestamp('2026-01-15 08:35:30+01'), 30, false, true, 'uncertain'
         union all
         select
-          'snapshot-valid', date '2026-01-15', cast(null as date), date '2026-01-15', 'trip-4', 1004,
+          'snapshot-valid', date '2026-01-16', cast(null as date), date '2026-01-15', 'trip-4', 1004,
           '187', '187', 'bus', '4', 1, 0, 'svc', 'Central', 'shape-4', 'weekday', false, 'thursday', 'svc',
           'schedule-version-1', 'broken', ['likely_wrong_trip_assignment'], 'matching_failure', ['bad_assignment_evidence'], '100108', '1001', '08', 'Main 08', 52.8, 21.8, 'Main 01', 0, 0, 0, 'regular',
            'passenger', 'high', 'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true, 0, 0,
@@ -1559,7 +1560,7 @@ unit_tests:
           false, true, 'uncertain'
         union all
         select
-          'snapshot-prior', date '2026-01-15', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
+          'snapshot-prior', date '2026-01-16', date '2026-01-15', date '2026-01-15', 'trip-1', 1001,
           '187', '187', 'bus', '9', 1, 0, 'svc-prior', 'Prior', 'shape-prior', 'weekday', false, 'thursday',
           'svc-prior', 'schedule-version-prior', 'complete', array<string>[], 'regular', array<string>[],
           '100101', '1001', '01', 'Prior 01', 52.9, 21.9, 'Prior 01', 0, 0, 0, 'regular',

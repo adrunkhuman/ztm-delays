@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import numpy as np
+
+from ztm_matcher.time import warsaw_scheduled_time
 
 REGULAR_RADIUS_METERS = 75.0
 EXPANDED_RADIUS_METERS = 250.0
@@ -19,7 +20,6 @@ SEGMENT_CANDIDATE_CHUNK_SIZE = 4096
 PRE_OWNERSHIP_SEGMENT_SECONDS = 120
 AMBIGUITY_COST = 0.25
 MAX_CONSECUTIVE_DELAY_CHANGE_SECONDS = 15 * 60
-WARSAW = ZoneInfo("Europe/Warsaw")
 
 
 @dataclass(frozen=True)
@@ -79,13 +79,7 @@ def _segment_distance_m(start: dict[str, Any], end: dict[str, Any], stop: dict[s
 
 
 def _scheduled_time(service_date: date, seconds: int | None) -> datetime | None:
-    if seconds is None:
-        return None
-    # Python's Warsaw wall-clock policy is authoritative. It intentionally differs
-    # from legacy dbt elapsed-UTC behavior on DST transition dates: the UTC round-trip
-    # normalizes spring-forward gaps; fold=0 chooses the first fall-back occurrence.
-    local = (datetime.combine(service_date, time()) + timedelta(seconds=int(seconds))).replace(tzinfo=WARSAW, fold=0)
-    return local.astimezone(UTC).astimezone(WARSAW).astimezone(UTC)
+    return warsaw_scheduled_time(service_date, seconds)
 
 
 def _radius(stop: dict[str, Any]) -> float:
