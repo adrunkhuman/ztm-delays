@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import types
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +25,15 @@ def test_historical_plan_requires_explicit_bounded_non_degraded_dates() -> None:
     planner = _load_planner()
 
     with pytest.raises(ValueError, match="explicit"):
-        planner.build_historical_correction_plan()
-    with pytest.raises(ValueError, match="degraded"):
-        planner.build_historical_correction_plan("2026-07-05", "2026-07-05")
+        planner.build_historical_correction_plan(plan_id="plan-1")
+    with pytest.raises(ValueError, match="no eligible"):
+        planner.build_historical_correction_plan("2026-07-05", "2026-07-05", plan_id="plan-1")
     with pytest.raises(ValueError, match="allowed bounded"):
-        planner.build_historical_correction_plan("2026-06-24", "2026-06-25")
+        planner.build_historical_correction_plan("2026-06-26", "2026-06-27", plan_id="plan-1")
+    with pytest.raises(ValueError, match="plan_id"):
+        planner.build_historical_correction_plan("2026-07-09", "2026-07-09", plan_id="bad plan")
+    with pytest.raises(SystemExit):
+        planner.main(["plan", "--start-date", "2026-07-09", "--end-date", "2026-07-09"])
 
 
 def test_historical_plan_inventories_exact_mapping_without_mutation() -> None:
@@ -44,10 +50,11 @@ def test_historical_plan_inventories_exact_mapping_without_mutation() -> None:
     storage_client = FakeStorageClient()
 
     plan = planner.build_historical_correction_plan(
-        "2026-07-09", "2026-07-09", bq_client=bq_client, storage_client=storage_client
+        "2026-07-09", "2026-07-09", plan_id="plan-9", bq_client=bq_client, storage_client=storage_client
     )
 
     assert plan["read_only"] is True
+    assert plan["plan_id"] == "plan-9"
     assert plan["days"][0]["gtfs_snapshot_id"] == "snapshot-9"
     assert plan["days"][0]["gps_inventory_by_mode"]["bus"]["count"] == 1
     assert plan["days"][0]["gps_inventory_by_mode"]["tram"]["bytes"] == 20
@@ -56,6 +63,147 @@ def test_historical_plan_inventories_exact_mapping_without_mutation() -> None:
     assert bq_client.mutation_calls == []
     assert storage_client.mutation_calls == []
     assert "--dry_run" in plan["sequential_commands"][0]
+    assert "on mapping.gtfs_snapshot_id = snapshots.snapshot_id" in bq_client.queries[0]
+    assert "using (gtfs_snapshot_id)" not in bq_client.queries[0]
+
+
+def test_historical_plan_emits_ascending_executable_date_specific_commands() -> None:
+    planner = _load_planner()
+    planner.bigquery.QueryJobConfig = _query_config
+    planner.bigquery.ScalarQueryParameter = _query_parameter
+    plan = planner.build_historical_correction_plan(
+        "2026-07-03",
+        "2026-07-09",
+        bq_client=FakeBigQueryClient(
+            [
+                types.SimpleNamespace(
+                    processing_date="2026-07-03", gtfs_snapshot_id="snapshot-3", gcs_path="gs://gtfs/snapshot.zip"
+                ),
+                types.SimpleNamespace(
+                    processing_date="2026-07-04", gtfs_snapshot_id="snapshot-4", gcs_path="gs://gtfs/snapshot.zip"
+                ),
+                types.SimpleNamespace(
+                    processing_date="2026-07-08", gtfs_snapshot_id="snapshot-8", gcs_path="gs://gtfs/snapshot.zip"
+                ),
+                types.SimpleNamespace(
+                    processing_date="2026-07-09", gtfs_snapshot_id="snapshot-9", gcs_path="gs://gtfs/snapshot.zip"
+                ),
+            ]
+        ),
+        plan_id="approved-plan-7",
+        storage_client=FakeStorageClient(),
+    )
+
+    commands = plan["sequential_commands"]
+    command_dates = [match.group(0) for command in commands for match in re.finditer(r"2026-07-0[3489]", command)]
+
+    assert command_dates == sorted(command_dates)
+    assert all("2026-07-03" in command for command in commands[:4])
+    assert all("2026-07-04" in command for command in commands[4:8])
+    assert all("2026-07-08" in command for command in commands[8:12])
+    assert all("2026-07-09" in command for command in commands[12:])
+    assert commands[0].startswith("bq query --use_legacy_sql=false --dry_run")
+    assert commands[1].startswith("gcloud storage ls ")
+    assert commands[2] == (
+        "airflow dags trigger dag_daily_gps --run-id matcher-historical-correction__approved-plan-7__2026-07-03 "
+        '--conf \'{"expected_gtfs_snapshot_id": "snapshot-3", "processing_date": "2026-07-03"}\''
+    )
+    assert "wait-for-dag-run" in commands[3]
+    assert "--timeout-seconds 7200" in commands[3]
+    assert commands[10] == (
+        "airflow dags trigger dag_daily_gps --run-id matcher-historical-correction__approved-plan-7__2026-07-08 "
+        '--conf \'{"expected_gtfs_snapshot_id": "snapshot-8", "processing_date": "2026-07-08", '
+        '"skip_prior_publication": true}\''
+    )
+    assert "matcher-historical-correction__approved-plan-7__2026-07-09" in commands[15]
+    assert all("<bounded correction query>" not in command for command in commands)
+    assert plan["eligible_processing_segments"] == [
+        {"start_date": "2026-07-03", "end_date": "2026-07-04", "days": 2},
+        {"start_date": "2026-07-08", "end_date": "2026-07-09", "days": 2},
+    ]
+    assert plan["days"][2]["prior_publication_boundary"] == {
+        "processing_date": "2026-07-08",
+        "reason": "prior_service_date_excluded",
+        "prior_service_date": "2026-07-07",
+        "prior_raw_exclusion_reason": "degraded_raw_gps_archive",
+    }
+
+
+def test_eligible_processing_dates_preserve_raw_exclusions_and_keep_prior_boundaries() -> None:
+    planner = _load_planner()
+
+    june_dates, june_skips = planner._eligible_processing_dates(date(2026, 6, 27), date(2026, 6, 28))
+    july_dates, july_skips = planner._eligible_processing_dates(date(2026, 7, 5), date(2026, 7, 9))
+
+    assert june_dates == [date(2026, 6, 27), date(2026, 6, 28)]
+    assert june_skips == []
+    assert planner._prior_publication_boundary(date(2026, 6, 27)) == {
+        "processing_date": "2026-06-27",
+        "reason": "prior_service_date_excluded",
+        "prior_service_date": "2026-06-26",
+        "prior_raw_exclusion_reason": "incomplete_raw_gps_archive",
+    }
+    assert july_dates == [date(2026, 7, 8), date(2026, 7, 9)]
+    assert [item["processing_date"] for item in july_skips] == ["2026-07-05", "2026-07-06", "2026-07-07"]
+    assert [item["reason"] for item in july_skips] == [
+        "raw_processing_date_excluded",
+        "raw_processing_date_excluded",
+        "raw_processing_date_excluded",
+    ]
+
+
+def test_wait_for_dag_run_returns_on_success_and_exits_on_failure_or_timeout() -> None:
+    planner = _load_planner()
+    states = iter(["queued", "running", "success"])
+
+    planner.wait_for_dag_run(
+        "dag_daily_gps",
+        "run-1",
+        timeout_seconds=10,
+        poll_interval_seconds=1,
+        get_state=lambda _dag_id, _run_id: next(states),
+        sleep_for=lambda _seconds: None,
+    )
+    with pytest.raises(RuntimeError, match="DAG run failed"):
+        planner.wait_for_dag_run(
+            "dag_daily_gps",
+            "run-2",
+            timeout_seconds=10,
+            poll_interval_seconds=1,
+            get_state=lambda _dag_id, _run_id: "failed",
+        )
+    clock_values = iter([0.0, 1.0])
+    with pytest.raises(TimeoutError, match="Timed out"):
+        planner.wait_for_dag_run(
+            "dag_daily_gps",
+            "run-3",
+            timeout_seconds=1,
+            poll_interval_seconds=1,
+            get_state=lambda _dag_id, _run_id: "running",
+            clock=lambda: next(clock_values),
+        )
+
+
+def test_historical_plan_allows_july_12() -> None:
+    planner = _load_planner()
+    planner.bigquery.QueryJobConfig = _query_config
+    planner.bigquery.ScalarQueryParameter = _query_parameter
+
+    plan = planner.build_historical_correction_plan(
+        "2026-07-12",
+        "2026-07-12",
+        plan_id="plan-12",
+        bq_client=FakeBigQueryClient(
+            [
+                types.SimpleNamespace(
+                    processing_date="2026-07-12", gtfs_snapshot_id="snapshot-12", gcs_path="gs://gtfs/snapshot.zip"
+                )
+            ]
+        ),
+        storage_client=FakeStorageClient(),
+    )
+
+    assert plan["date_range"]["start_date"] == "2026-07-12"
 
 
 def test_historical_plan_refuses_missing_mapping_or_input() -> None:
@@ -64,7 +212,11 @@ def test_historical_plan_refuses_missing_mapping_or_input() -> None:
     planner.bigquery.ScalarQueryParameter = _query_parameter
     with pytest.raises(RuntimeError, match="exact GTFS snapshot mapping"):
         planner.build_historical_correction_plan(
-            "2026-07-09", "2026-07-09", bq_client=FakeBigQueryClient([]), storage_client=FakeStorageClient()
+            "2026-07-09",
+            "2026-07-09",
+            plan_id="plan-9",
+            bq_client=FakeBigQueryClient([]),
+            storage_client=FakeStorageClient(),
         )
     bq_client = FakeBigQueryClient(
         [
@@ -75,12 +227,17 @@ def test_historical_plan_refuses_missing_mapping_or_input() -> None:
     )
     with pytest.raises(RuntimeError, match="missing bus objects"):
         planner.build_historical_correction_plan(
-            "2026-07-09", "2026-07-09", bq_client=bq_client, storage_client=FakeStorageClient(no_gps=True)
+            "2026-07-09",
+            "2026-07-09",
+            plan_id="plan-9",
+            bq_client=bq_client,
+            storage_client=FakeStorageClient(no_gps=True),
         )
     with pytest.raises(RuntimeError, match="missing tram objects"):
         planner.build_historical_correction_plan(
             "2026-07-09",
             "2026-07-09",
+            plan_id="plan-9",
             bq_client=bq_client,
             storage_client=FakeStorageClient(missing_mode="tram"),
         )
@@ -102,10 +259,12 @@ class FakeBigQueryClient:
     def __init__(self, rows: list[object]) -> None:
         self.rows = rows
         self.query_calls = 0
+        self.queries: list[str] = []
         self.mutation_calls: list[str] = []
 
-    def query(self, _query: str, **_kwargs: Any) -> types.SimpleNamespace:
+    def query(self, query: str, **_kwargs: Any) -> types.SimpleNamespace:
         self.query_calls += 1
+        self.queries.append(query)
         return types.SimpleNamespace(result=lambda: self.rows)
 
     def __getattr__(self, name: str) -> object:

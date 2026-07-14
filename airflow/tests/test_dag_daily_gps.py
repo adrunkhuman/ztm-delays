@@ -138,6 +138,50 @@ def test_selected_gtfs_snapshot_id_rejects_missing_snapshot(monkeypatch: pytest.
         dag._selected_gtfs_snapshot_id("2026-07-08")
 
 
+def test_selected_gtfs_snapshot_id_validates_optional_manual_expectation(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient(snapshot_rows=[FakeRow(gtfs_snapshot_id="snapshot-1")])
+    monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
+
+    assert dag._selected_expected_gtfs_snapshot_id("2026-07-08", "snapshot-1") == "snapshot-1"
+    with pytest.raises(dag.AirflowException, match="does not match manual expectation"):
+        dag._selected_expected_gtfs_snapshot_id("2026-07-08", "snapshot-other")
+
+
+def test_selected_gtfs_snapshot_task_reads_optional_expected_snapshot_conf(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    monkeypatch.setattr(
+        dag,
+        "get_current_context",
+        lambda: {"dag_run": types.SimpleNamespace(conf={"expected_gtfs_snapshot_id": "snapshot-1"})},
+    )
+    monkeypatch.setattr(dag, "_selected_expected_gtfs_snapshot_id", lambda date, expected: f"{date}:{expected}")
+
+    assert dag.selected_gtfs_snapshot_id.function("2026-07-08") == "2026-07-08:snapshot-1"
+
+
+def test_guard_excluded_historical_processing_date_blocks_only_excluded_dates() -> None:
+    dag = _load_dag_module()
+
+    with pytest.raises(dag.AirflowException, match="exclusion_reason=incomplete_raw_gps_archive"):
+        dag._guard_excluded_historical_processing_date("2026-06-26")
+    with pytest.raises(dag.AirflowException, match="exclusion_reason=degraded_raw_gps_archive"):
+        dag._guard_excluded_historical_processing_date("2026-07-05")
+
+    assert dag._guard_excluded_historical_processing_date("2026-07-12") is None
+
+
+def test_guard_prior_publication_requires_skip_only_for_excluded_prior_date() -> None:
+    dag = _load_dag_module()
+
+    with pytest.raises(dag.AirflowException, match="skip_prior_publication=true is required"):
+        dag._guard_prior_publication("2026-06-27", False)
+    assert dag._guard_prior_publication("2026-06-27", True) is True
+    assert dag._guard_prior_publication("2026-07-09", False) is False
+    with pytest.raises(dag.AirflowException, match="only allowed"):
+        dag._guard_prior_publication("2026-07-09", True)
+
+
 def test_bigquery_dbt_job_cost_summary_queries_jobs_by_user(monkeypatch: pytest.MonkeyPatch) -> None:
     dag = _load_dag_module()
     started_at = dag.datetime(2026, 7, 5, 4, 0, tzinfo=dag.UTC)
@@ -256,6 +300,8 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         assert group.kwargs["prefix_group_id"] is False
     assert dag.selected_gtfs_snapshot_id.kwargs == {}
     assert dag.selected_prior_gtfs_snapshot_id.kwargs == {}
+    assert dag.guard_excluded_historical_processing_date.kwargs == {}
+    assert dag.guard_prior_publication.kwargs == {}
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PROCESSING_DATE
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PRIOR_SERVICE_DATE
     assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
@@ -266,13 +312,13 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         "stg_gtfs__stops",
         "stg_gtfs__routes",
         "stg_gtfs__calendar_dates",
-        "int_gtfs_processing_snapshot",
         "int_gtfs_trip_schedule_history",
         "int_gtfs_trip_schedule",
         "int_gtfs_duty_chain",
         "dim_schedule_version",
     ]:
         assert selector in fact_dependency_command
+    assert "int_gtfs_processing_snapshot" not in fact_dependency_command
     assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
     assert "--exclude test_type:unit" in dag.dbt_test_fct_expected_stop_event_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PROCESSING_DATE in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
@@ -301,6 +347,10 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
 
     expected_edges = [
         (dag.dbt_run_stg_gps_pings, dag.dbt_test_stg_gps_pings),
+        (dag.historical_date_guard, dag.prior_publication_guard),
+        (dag.prior_publication_guard, dag.selected_gtfs_snapshot),
+        (dag.prior_publication_guard, dag.selected_prior_gtfs_snapshot),
+        (dag.selected_gtfs_snapshot, dag.dbt_run_stg_gps_pings),
         (dag.selected_gtfs_snapshot, dag.matcher_load),
         (dag.dbt_test_stg_gps_pings, dag.matcher_load),
         (dag.matcher_load, dag.matcher_publish),
@@ -392,7 +442,7 @@ def test_dag_uses_bounded_mart_windows() -> None:
 def test_gps_models_asset_reports_current_and_prior_changed_partitions() -> None:
     dag = _load_dag_module()
 
-    metadata = list(dag.emit_gps_models_date_asset.function("2026-07-08"))
+    metadata = list(dag.emit_gps_models_date_asset.function("2026-07-08", False))
 
     assert len(metadata) == 1
     assert metadata[0].asset == dag.GPS_MODELS_DATE_ASSET
@@ -400,6 +450,39 @@ def test_gps_models_asset_reports_current_and_prior_changed_partitions() -> None
         "processing_date": "2026-07-08",
         "changed_partition_dates": ["2026-07-07", "2026-07-08"],
     }
+
+
+def test_gps_models_asset_omits_excluded_prior_changed_partition() -> None:
+    dag = _load_dag_module()
+
+    metadata = list(dag.emit_gps_models_date_asset.function("2026-07-08", True))
+
+    assert metadata[0].extra == {
+        "processing_date": "2026-07-08",
+        "changed_partition_dates": ["2026-07-08"],
+    }
+
+
+def test_prior_publication_dbt_tasks_noop_when_requested() -> None:
+    dag = _load_dag_module()
+
+    for task in [
+        dag.dbt_run_fct_trip_prior,
+        dag.dbt_test_fct_trip_prior,
+        dag.dbt_run_fct_stop_arrival_prior,
+        dag.dbt_test_fct_stop_arrival_prior,
+        dag.dbt_run_fct_expected_stop_event_prior,
+        dag.dbt_test_fct_expected_stop_event_prior,
+        dag.dbt_run_prior_coverage_schedule,
+        dag.dbt_run_completeness_and_coverage_prior,
+        dag.dbt_test_completeness_and_coverage_prior,
+        dag.dbt_run_pipeline_status_prior,
+        dag.dbt_test_pipeline_status_prior,
+        dag.dbt_run_serving_marts_prior,
+        dag.dbt_test_serving_marts_prior,
+    ]:
+        assert "skip_prior_publication" in task.kwargs["bash_command"]
+        assert "Skipping prior publication task" in task.kwargs["bash_command"]
 
 
 @dataclass

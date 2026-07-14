@@ -51,14 +51,14 @@ Runtime env defaults match the current VPS:
 | `dag_gtfs_load` | GTFS snapshot load | `gtfs_snapshot` asset | Load GTFS raw tables, run GTFS staging, rebuild dimensions and schedule-version models. | GPS processing or broad manual schedule audits. |
 | `dag_gps_raw_load` | GPS raw ingest | Hourly cron | Load available poller Parquet parts into raw BigQuery, emit `raw_gps_date`. | Completeness judgment or warehouse modeling. |
 | `dag_daily_gps` | GPS nightly warehouse | Nightly cron | Rebuild one GPS processing date, publish current/prior facts, run bounded marts/status, emit `gps_models_date`. | Hourly raw ingestion or full-history audit tests. |
-| `dag_serving_export` | Serving DuckDB export | Manual | Export the fixed frontend source allowlist, build DuckDB, write `.meta.json`, atomically publish the serving artifact. | Warehouse rebuilds or live poller streaming. |
+| `dag_serving_export` | Serving DuckDB export | `gps_models_date` asset or manual recovery | Export the fixed frontend source allowlist, build DuckDB, write `.meta.json`, atomically publish the serving artifact. | Warehouse rebuilds or live poller streaming. |
 
 ## Normal Runs
 
 - `dag_gtfs_poll` and `dag_gps_raw_load` are frequent ingestion DAGs.
 - `dag_gtfs_load` runs only when a changed GTFS snapshot is emitted.
-- `dag_daily_gps` runs once per night, uses the latest dimension-built GTFS snapshot available at rebuild time, republishes the current and prior service dates, and accepts a manual `processing_date` for targeted recovery.
-- `dag_serving_export` is manual; use a fresh `export_id` for every run.
+- `dag_daily_gps` runs once per night, uses the persisted governing snapshot for its processing date, republishes the current and prior service dates, and accepts a manual `processing_date` for targeted recovery.
+- `dag_serving_export` runs from the partitioned GPS-model asset; manual recovery runs use a fresh `export_id`.
 - Default dbt tests stay bounded. Full-history schedule/version and broad aggregate audits are manual jobs.
 
 ## Python Matcher
@@ -73,7 +73,9 @@ The three fact artifacts are partitioned by `gps_date`; stop semantics is partit
 
 Minimal recovery is to fix the matcher/configuration and rerun the processing date. Raw GPS and GTFS remain immutable, stable input replacement is atomic, fact publication uses partition overwrite, and serving export keeps its previous artifact until a new export succeeds.
 
-`matcher_historical_correction.py` produces bounded, read-only plans for explicitly approved historical corrections.
+`matcher_historical_correction.py plan` produces bounded, read-only plans for explicitly approved historical corrections.
+The retained service range starts on `2026-06-27`; raw processing dates `2026-06-26` and `2026-07-05` through `2026-07-07` are excluded. The valid boundary runs on `2026-06-27` and `2026-07-08` set `skip_prior_publication=true`, so they reconstruct current-date data without replacing the excluded prior partition.
+Plans require a validated `--plan-id`; use a new ID for a retry. They emit plan-ID-scoped deterministic Airflow 3 run IDs, the expected GTFS snapshot in each trigger configuration, and a bounded `wait-for-dag-run` command after every trigger.
 
 ## Serving Export
 

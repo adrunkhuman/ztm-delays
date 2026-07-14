@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 RUNTIME_ENV_VARS = (
     "GCP_PROJECT",
@@ -133,6 +135,38 @@ def test_transient_retry_default_contract() -> None:
     assert common.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS["retries"] == 2
     assert common.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS["retry_delay"].total_seconds() == 300
     assert common.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS["on_failure_callback"] is common.airflow_failure_alert
+
+
+@pytest.mark.parametrize(
+    ("processing_date", "reason"),
+    [
+        (date(2026, 6, 25), None),
+        (date(2026, 6, 26), "incomplete_raw_gps_archive"),
+        (date(2026, 6, 27), None),
+        (date(2026, 7, 4), None),
+        (date(2026, 7, 5), "degraded_raw_gps_archive"),
+        (date(2026, 7, 6), "degraded_raw_gps_archive"),
+        (date(2026, 7, 7), "degraded_raw_gps_archive"),
+        (date(2026, 7, 8), None),
+        (date(2026, 7, 12), None),
+    ],
+)
+def test_historical_daily_exclusion_policy_boundaries(processing_date: date, reason: str | None) -> None:
+    common = _load_common_module()
+
+    assert common.historical_daily_exclusion_reason(processing_date) == reason
+
+
+def test_historical_daily_exclusion_policy_has_only_known_bad_dates() -> None:
+    common = _load_common_module()
+
+    assert date(2026, 6, 27) == common.HISTORICAL_DAILY_ELIGIBLE_START_DATE
+    assert {
+        date(2026, 6, 26): "incomplete_raw_gps_archive",
+        date(2026, 7, 5): "degraded_raw_gps_archive",
+        date(2026, 7, 6): "degraded_raw_gps_archive",
+        date(2026, 7, 7): "degraded_raw_gps_archive",
+    } == common.HISTORICAL_DAILY_EXCLUSION_REASONS
 
 
 def test_airflow_failure_alert_rejects_non_https_webhook(monkeypatch: Any) -> None:

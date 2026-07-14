@@ -300,7 +300,7 @@ models:
         tests: [not_null]
 
   - name: dim_schedule_date
-    description: Schedule-date dimension for the selected GTFS snapshot. Nightly GPS rebuilds use the latest dimension-built snapshot available at rebuild time and publish both the processing date and prior service date, so late schedule corrections for yesterday are replaced by the next nightly run.
+    description: Schedule-date dimension for the governing GTFS snapshot persisted for a GPS processing date. Nightly runs publish both the processing date and prior service date while preserving snapshot lineage.
     columns:
       - name: service_date
         description: Warsaw-local service date whose schedule classification is derived from the selected GTFS snapshot.
@@ -354,7 +354,7 @@ models:
         tests: [not_null]
 
   - name: dim_schedule_version
-    description: Schedule version dimension. One row per consecutive unchanged timetable fingerprint for line, direction_id, and schedule_day_type, derived from selected GTFS snapshots observed in GPS processing windows. Versions are only known from collected GTFS snapshots onward because the mkuran feed is a rolling 31-day window. Nightly GPS rebuilds use the latest dimension-built snapshot and republish the prior service date to absorb late schedule corrections. Use this model for timetable baselines only; display labels come from baked fact columns.
+    description: Schedule version dimension. One row per consecutive unchanged timetable fingerprint for line, direction_id, and schedule_day_type, derived from governing GTFS snapshots observed in GPS processing windows. Versions are only known from collected GTFS snapshots onward because the mkuran feed is a rolling 31-day window. Nightly GPS rebuilds use the processing-date mapping and republish the prior service date for after-midnight evidence. Use this model for timetable baselines only; display labels come from baked fact columns.
     columns:
       - name: schedule_version_id
         description: Stable identifier for one consecutive timetable version period. Includes valid_from_date so a timetable that returns after a change becomes a new version period.
@@ -759,7 +759,7 @@ models:
         description: Largest gap reported by present hourly buckets. Missing hours are represented through missing_hours, not as 3600-second gaps.
 
   - name: agg_service_coverage
-    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the selected GTFS bus/tram schedule; observed service counts distinct regular/truncated/modified scheduled trip_id values from fct_trip after best-class dedupe ordered regular > truncated > modified, and excludes matching failures. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
+    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the selected GTFS bus/tram schedule; observed service counts distinct regular/truncated/modified scheduled trip_id values from fct_trip after selected-snapshot and best-class dedupe, and excludes matching failures. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
     columns:
       - name: service_date
         description: GTFS service date assigned to the scheduled trips. Overnight service can have service_hour on the next calendar date.
@@ -790,7 +790,7 @@ models:
       - name: expected_trip_count
         description: Number of scheduled trips whose scheduled start time falls in service_hour.
       - name: observed_trip_count
-        description: Number of distinct scheduled trip_id values observed as regular, truncated, or modified after best-class candidate selection in the service hour. Matching failures are excluded.
+        description: Number of distinct scheduled trip_id values observed as regular, truncated, or modified after selected-snapshot and best-class candidate selection in the service hour. Matching failures are excluded.
       - name: complete_trip_count
         description: Number of distinct observed trip_id values whose best available quality is complete in the service hour.
       - name: partial_trip_count
@@ -987,7 +987,6 @@ unit_tests:
           1 as schedule_versions_active,
           0.5 as health_ratio,
           'patchy' as health_label,
-          1 as status_rank_desc,
           cast(null as timestamp) as last_export_at,
           current_timestamp() as status_generated_at
 
@@ -1050,7 +1049,7 @@ unit_tests:
           0.0 as min_hourly_coverage_ratio,
           0 as max_gap_seconds
 
-  - name: agg_service_coverage_dedupes_and_filters_unobservable_service
+  - name: agg_service_coverage_dedupes_snapshot_candidates_and_filters_unobservable_service
     model: agg_service_coverage
     overrides:
       vars:
@@ -1158,6 +1157,26 @@ unit_tests:
             timestamp('2026-01-16 00:01:00+01'),
             'broken',
             'matching_failure'
+          union all
+          select
+            'snapshot-stale',
+            date '2026-01-15',
+            date '2026-01-15',
+            'trip-1',
+            1005,
+            '187',
+            '187',
+            'bus',
+            0,
+            'Central',
+            'weekday',
+            'svc',
+            'schedule-version-1',
+            timestamp('2026-01-15 23:30:00+01'),
+            timestamp('2026-01-15 23:30:30+01'),
+            timestamp('2026-01-16 03:30:30+01'),
+            'complete',
+            'regular'
     expect:
       format: sql
       rows: |

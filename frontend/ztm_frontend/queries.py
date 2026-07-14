@@ -480,7 +480,7 @@ def get_status(db_path: Path) -> dict[str, Any]:
         """
         select *
         from mart_pipeline_status
-        where status_rank_desc <= 8
+        qualify row_number() over (partition by mode order by service_date desc) <= 8
         order by service_date desc, mode
         """,
     )

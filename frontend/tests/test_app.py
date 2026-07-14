@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import duckdb
 
 from ztm_frontend.app import create_app
+from ztm_frontend.queries import get_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
 
 
 def test_status_page_renders_current_pipeline_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recent_day_count = 8
     db_path = tmp_path / "ztm.duckdb"
     with duckdb.connect(str(db_path)) as connection:
         connection.execute(
@@ -27,14 +29,14 @@ def test_status_page_renders_current_pipeline_contract(tmp_path: Path, monkeypat
                 100::ubigint as duckdb_file_size_bytes;
 
             create table mart_pipeline_status as select
-                date '2026-07-13' as service_date,
+                date '2026-07-13' - range::integer as service_date,
                 'bus' as mode,
-                1 as status_rank_desc,
                 1.0 as service_coverage_ratio,
                 1.0 as completeness_ratio,
                 10 as trips_complete,
                 2 as trips_partial,
-                1 as trips_broken;
+                1 as trips_broken
+            from range(9);
 
             create table mart_pipeline_status_recent_summary as select
                 'bus' as mode,
@@ -53,8 +55,12 @@ def test_status_page_renders_current_pipeline_contract(tmp_path: Path, monkeypat
         )
     monkeypatch.setenv("ZTM_DUCKDB_PATH", str(db_path))
 
+    status = get_status(db_path)
+
     response = create_app().test_client().get("/status")
 
+    assert len(status["pipeline_status"]["bus"]) == recent_day_count
+    assert str(status["pipeline_status"]["bus"][-1]["service_date"]) == "2026-07-06"
     assert response.status_code == HTTPStatus.OK
     assert b"observed minutes" in response.data
     assert b"Bus partial" in response.data

@@ -46,6 +46,7 @@ arrivals_raw as (
     from {{ source('matcher_input', 'reconstruction_stop_arrivals') }} as arrivals
     inner join trip_facts
         on arrivals.gtfs_snapshot_id = trip_facts.gtfs_snapshot_id
+        and arrivals.gps_date = trip_facts.gps_date
         and arrivals.service_date = trip_facts.service_date
         and arrivals.trip_id = trip_facts.trip_id
         and arrivals.vehicle_number = trip_facts.vehicle_number
@@ -176,6 +177,7 @@ select
 from arrivals
 inner join trip_facts
     on arrivals.gtfs_snapshot_id = trip_facts.gtfs_snapshot_id
+    and arrivals.gps_date = trip_facts.gps_date
     and arrivals.service_date = trip_facts.service_date
     and arrivals.trip_id = trip_facts.trip_id
     and arrivals.vehicle_number = trip_facts.vehicle_number

@@ -52,9 +52,14 @@ recovery manually, run the audit selector explicitly rather than relying on defa
 
 ## Date-Range Backfill
 
-Loop over dates in order. For every GPS processing date, ensure at least one GTFS snapshot has been loaded and its
-schedule dimensions have been built. Nightly rebuilds use the latest built snapshot available at rebuild time, not a
-same-day cutoff rule.
+Generate a read-only plan with `matcher_historical_correction.py`, review its exact snapshot and GCS inventories, then
+run only the emitted dates in order. The retained eligible range starts on `2026-06-27`. Dates `2026-07-05` through
+`2026-07-07` are excluded because of the confirmed GPS outage; `2026-06-26` is also excluded because collection began
+mid-day. July 12 remains eligible because lower Sunday tram volume is expected service, not an outage.
+
+Each run uses the persisted governing snapshot from `int_gtfs_processing_snapshot`. Do not substitute the newest loaded
+snapshot. Wait for each date to finish and pass its checks before triggering the next date; queued historical runs are
+not an ordering guarantee.
 
 For each GPS processing date, rerun the matcher publication, then publish facts for the current service date and
 the prior service date. Publishing the prior date incorporates after-midnight observations without relabeling prior-day
@@ -123,7 +128,8 @@ canonical facts unchanged.
 
 Retries and recovery rerun the same processing date from immutable GPS and pinned GTFS inputs. They must not select a
 newer snapshot implicitly. `matcher_historical_correction.py` creates read-only plans for separately approved retained-history
-work; it does not download, load, publish, or mutate warehouse data.
+work; it verifies the mapped snapshot and GCS inventories and emits date-specific preflight and trigger commands, but it
+does not download, load, publish, or mutate warehouse data itself.
 
 ## Deployment Sync
 

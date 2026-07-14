@@ -232,7 +232,7 @@ unit_tests:
           'complete' as trip_quality, array<string>[] as quality_flags, 'regular' as service_observation_class,
           array<string>[] as service_observation_flags
 
-  - name: fct_stop_arrival_python_adapter_enriches_selected_passenger_stop
+  - name: fct_stop_arrival_python_adapter_preserves_selected_gps_run_lineage
     model: fct_stop_arrival
     overrides:
       vars:
@@ -260,10 +260,18 @@ unit_tests:
             'trip-1', '1001', '100101', 0, timestamp('2026-01-15 23:50:00+01'),
             timestamp('2026-01-15 23:50:20+01'), timestamp('2026-01-15 23:55:00+01'), 300,
             'segment_within_75m', 75.0, 12.0, 15.0, 18.0,
+           timestamp('2026-01-15 23:54:30+01'), timestamp('2026-01-15 23:55:30+01'), 60, 'complete'
+          union all
+          select
+            'snapshot-1', date '2026-01-15', date '2026-01-15', date '2026-01-15',
+            'trip-1', '1001', '100101', 0, timestamp('2026-01-15 23:50:00+01'),
+            timestamp('2026-01-15 23:50:20+01'), timestamp('2026-01-15 23:55:00+01'), 300,
+            'segment_within_75m', 75.0, 12.0, 15.0, 18.0,
             timestamp('2026-01-15 23:54:30+01'), timestamp('2026-01-15 23:55:30+01'), 60, 'complete'
       - input: ref('fct_trip')
         rows:
           - {gtfs_snapshot_id: snapshot-1, gps_date: '2026-01-16', service_date: '2026-01-15', trip_id: trip-1, vehicle_number: '1001', line: '187', route_short_name: '187', mode: bus, brigade: '7', vehicle_type: 1, direction_id: 1, service_id: svc-1, trip_headsign: Central, shape_id: shape-1, day_type: weekday, schedule_day_type: friday, schedule_service_ids: svc-1, schedule_version_id: version-1, trip_quality: complete, quality_flags: [], service_observation_class: regular, service_observation_flags: [], has_non_monotonic_stop_progression: false}
+          - {gtfs_snapshot_id: snapshot-1, gps_date: '2026-01-15', service_date: '2026-01-15', trip_id: trip-1, vehicle_number: '1001', line: '187-old', route_short_name: '187-old', mode: bus, brigade: '7', vehicle_type: 1, direction_id: 1, service_id: svc-1-old, trip_headsign: Central old, shape_id: shape-1-old, day_type: weekday, schedule_day_type: friday, schedule_service_ids: svc-1-old, schedule_version_id: version-1-old, trip_quality: complete, quality_flags: [], service_observation_class: regular, service_observation_flags: [], has_non_monotonic_stop_progression: false}
       - input: source('matcher_input', 'reconstruction_stop_semantics')
         format: sql
         rows: |
@@ -276,6 +284,11 @@ unit_tests:
             'gtfs_passenger_stop' as classification_reason,
             ['gtfs_passenger_eligible'] as classification_evidence, true as is_passenger_stop,
             true as are_passenger_boundaries_settled
+          union all
+          select
+            'snapshot-1', date '2026-01-15', date '2026-01-15', 'trip-1', '100101',
+            '1001', 52.1, 21.1, 0, 0, 0, 'regular', 'passenger', 'high',
+            'gtfs_passenger_stop', ['gtfs_passenger_eligible'], true, true
       - input: ref('stg_gtfs__stops')
         rows:
           - {gtfs_snapshot_id: snapshot-1, stop_id: '100101', stop_name: Main, stop_lat: 52.1, stop_lon: 21.1}

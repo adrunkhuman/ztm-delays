@@ -38,7 +38,10 @@ Raw GTFS snapshots use `RAW_GTFS_PREFIX`, defaulting to `raw/gtfs`. Snapshot IDs
 
 ## Snapshot Semantics
 
-Nightly GPS rebuilds use the latest dimension-built GTFS snapshot available at rebuild time. They publish both the current processing date and the prior service date, so a late GTFS correction for yesterday is replaced by the next nightly run.
+Nightly GPS rebuilds use the governing GTFS snapshot persisted for the processing date in
+`int_gtfs_processing_snapshot`. They publish both the current processing date and the prior service date, so the next
+nightly run can replace prior-service-date facts with its after-midnight evidence while retaining processing-date and
+snapshot lineage.
 
 GTFS staging spans all loaded snapshots. Downstream models must choose and carry `gtfs_snapshot_id` explicitly.
 
@@ -164,7 +167,9 @@ No `agg_service_coverage` row means no scheduled bus/tram service for that slice
 
 ## Serving Export
 
-`dag_serving_export` is a manual publication step. It exports a fixed allowlist from `ztm_marts` to GCS Parquet, downloads it in the Airflow worker, builds derived DuckDB serving tables, validates guardrails, and atomically swaps the stable DuckDB file.
+`dag_serving_export` is asset-triggered after successful GPS model publication and can also be run manually for recovery.
+It exports a fixed allowlist from `ztm_marts` to GCS Parquet, downloads it in the Airflow worker, builds derived DuckDB
+serving tables, validates guardrails, and atomically swaps the stable DuckDB file.
 
 The DuckDB artifact is not a mirror of `ztm_marts`. It contains only current frontend source tables, derived serving tables, `export_metadata`, and `export_table_stats`.
 
