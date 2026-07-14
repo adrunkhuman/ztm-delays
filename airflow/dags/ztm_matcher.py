@@ -54,6 +54,7 @@ DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024**3
 DEFAULT_MAX_MARKER_BYTES = 20 * 1024**2
 DEFAULT_MAX_RSS_BYTES = 2 * 1024**3
 DEFAULT_MAX_PUBLICATION_BYTES = 5 * 1024**3
+PUBLICATION_JOB_VERSION = "v2"
 STABLE_INPUT_TABLES = {
     "trip": "reconstruction_trip_facts",
     "stop_arrival": "reconstruction_stop_arrivals",
@@ -1278,14 +1279,20 @@ def _publication_job_id(
     """Return a retry-safe job ID that cannot collide across normalized run IDs."""
     digest = _validated_sha256(artifact_sha256)[:24]
     run_digest = hashlib.sha256(_run_id(run_id).encode("utf-8")).hexdigest()[:16]
-    return f"matcher_publish_{action}_{spec.table_suffix}_{processing_date.replace('-', '')}_{run_digest}_{digest}"
+    return (
+        f"matcher_publish_{PUBLICATION_JOB_VERSION}_{action}_{spec.table_suffix}_"
+        f"{processing_date.replace('-', '')}_{run_digest}_{digest}"
+    )
 
 
 def _publication_transaction_job_id(processing_date: str, run_id: str, artifacts: dict[str, dict[str, object]]) -> str:
     digests = ":".join(_validated_sha256(str(artifacts[key]["sha256"])) for key in sorted(STABLE_INPUT_TABLES))
     content_digest = hashlib.sha256(digests.encode("ascii")).hexdigest()[:24]
     run_digest = hashlib.sha256(_run_id(run_id).encode("utf-8")).hexdigest()[:16]
-    return f"matcher_publish_replace_all_{processing_date.replace('-', '')}_{run_digest}_{content_digest}"
+    return (
+        f"matcher_publish_{PUBLICATION_JOB_VERSION}_replace_all_"
+        f"{processing_date.replace('-', '')}_{run_digest}_{content_digest}"
+    )
 
 
 def _query_job(
@@ -1302,7 +1309,13 @@ def _query_job(
         maximum_bytes_billed=max_bytes,
     )
     try:
-        job = client.query(query, job_config=config, job_id=job_id, location=BIGQUERY_LOCATION)
+        job = client.query(
+            query,
+            job_config=config,
+            job_id=job_id,
+            location=BIGQUERY_LOCATION,
+            job_retry=None,
+        )
     except Conflict:
         job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
     job.result()
@@ -1461,7 +1474,7 @@ def _expected_schema(spec: ArtifactSpec) -> tuple[tuple[str, str, str], ...]:
 def _stage_labels(spec: ArtifactSpec, artifact_sha256: str) -> dict[str, str]:
     return {
         "matcher_schema_version": ARTIFACT_SCHEMA_VERSIONS[Path(spec.filename).stem],
-        "matcher_artifact_sha256": _validated_sha256(artifact_sha256),
+        "matcher_artifact_sha256": _validated_sha256(artifact_sha256)[:63],
     }
 
 
@@ -1517,7 +1530,7 @@ def _stage_artifact(
     """Create a stage only through its deterministic query job, then validate it."""
     columns = _column_list(spec)
     labels = _stage_labels(spec, artifact_sha256)
-    label_sql = ", ".join(f"{key}='{value}'" for key, value in labels.items())
+    label_sql = ", ".join(f'("{key}", "{value}")' for key, value in labels.items())
     _query_job(
         client,
         f"""

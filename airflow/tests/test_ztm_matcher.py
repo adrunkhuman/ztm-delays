@@ -557,10 +557,13 @@ def test_stage_retry_rejects_tampered_stage_contract(monkeypatch: pytest.MonkeyP
                 time_partitioning=types.SimpleNamespace(field="gps_date"),
             )
 
+    client = Client()
     with pytest.raises(RuntimeError, match="labels"):
         matcher._stage_artifact(
-            Client(), "project.stage.run", "project.input.stage", "2026-07-09", "run", spec, "a" * 64, 100
+            client, "project.stage.run", "project.input.stage", "2026-07-09", "run", spec, "a" * 64, 100
         )
+    assert 'options (labels=[("matcher_schema_version", "reconstruction-trip-facts-v2")' in client.query_text
+    assert f'("matcher_artifact_sha256", "{"a" * 63}")])' in client.query_text
 
 
 def test_run_load_writes_pending_after_all_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -698,7 +701,7 @@ def test_publication_writes_published_marker_after_post_validation(
 
     assert result["status"] == "published"
     assert len(queries) == 1
-    assert written[0]["transaction_job_id"].startswith("matcher_publish_replace_all")
+    assert written[0]["transaction_job_id"].startswith("matcher_publish_v2_replace_all")
 
 
 def test_inspection_rejects_artifact_outside_requested_lineage(tmp_path: Path) -> None:
