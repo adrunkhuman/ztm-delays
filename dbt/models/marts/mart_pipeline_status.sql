@@ -168,7 +168,6 @@ select
         ) > 0 then 'patchy'
         else 'missing'
     end as health_label,
-    row_number() over (partition by status_spine.mode order by status_spine.service_date desc) as status_rank_desc,
     cast(null as timestamp) as last_export_at,
     current_timestamp() as status_generated_at
 from status_spine

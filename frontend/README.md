@@ -2,7 +2,7 @@
 
 Server-rendered Flask frontend for the ZTM DuckDB serving artifact.
 
-This is an alpha archive prototype backed by the DuckDB serving artifact. Some archive facts are still provisional current-pipeline outputs rather than settled nightly matcher results.
+This is an archive prototype backed by the DuckDB serving artifact produced from the nightly Python reconstruction path.
 
 ## Runtime Contract
 
@@ -11,13 +11,13 @@ The app reads one DuckDB file in read-only mode. It does not build or refresh th
 Required data:
 
 - `ztm.duckdb`: serving database produced by the pipeline export job.
-- The database must contain `export_metadata`, `fct_trip`, `fct_stop_arrival`, `agg_line_daily`, stop/line dimensions, and status marts.
+- The database must contain `export_metadata`, `mart_trip_daily`, `fct_expected_stop_event`, entity timeline and window marts, stop/line dimensions, and status marts documented in `docs/serving_contract.md`.
 
 Important quirks:
 
 - DuckDB timestamps from BigQuery are treated as UTC and displayed in `Europe/Warsaw`.
 - Widgets are backed by exported DuckDB rows or derived frontend-serving tables; some presentation transforms still reshape those rows for compact charts.
-- Current facts are alpha/current-pipeline facts, not settled nightly matcher output.
+- Historical quality remains date-dependent and is exposed through the status and quality fields in the serving contract.
 
 ## Environment Variables
 

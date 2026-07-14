@@ -33,6 +33,7 @@ from ztm_airflow_common import (
     airflow_failure_alert,
     dbt_command,
     dbt_vars,
+    historical_daily_exclusion_reason,
 )
 from ztm_matcher import publish_matcher_artifacts, run_matcher_load
 
@@ -51,7 +52,7 @@ INT_GTFS_PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_
 DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
 MATCHER_FACT_DEPENDENCY_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__routes stg_gtfs__calendar_dates"
-    " int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_gtfs_trip_schedule int_gtfs_duty_chain"
+    " int_gtfs_trip_schedule_history int_gtfs_trip_schedule int_gtfs_duty_chain"
     " int_schedule_version dim_schedule_version"
 )
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
@@ -205,6 +206,57 @@ def _selected_gtfs_snapshot_id(processing_date: str) -> str:
     return str(rows[0].gtfs_snapshot_id)
 
 
+def _selected_expected_gtfs_snapshot_id(processing_date: str, expected_gtfs_snapshot_id: str | None = None) -> str:
+    selected_gtfs_snapshot_id = _selected_gtfs_snapshot_id(processing_date)
+    if expected_gtfs_snapshot_id and selected_gtfs_snapshot_id != expected_gtfs_snapshot_id:
+        raise AirflowException(
+            "Governing GTFS snapshot does not match manual expectation for "
+            f"{processing_date}: expected={expected_gtfs_snapshot_id} actual={selected_gtfs_snapshot_id}"
+        )
+    return selected_gtfs_snapshot_id
+
+
+def _configured_expected_gtfs_snapshot_id() -> str | None:
+    dag_run = get_current_context().get("dag_run")
+    conf = getattr(dag_run, "conf", {}) or {}
+    expected_gtfs_snapshot_id = conf.get("expected_gtfs_snapshot_id")
+    if expected_gtfs_snapshot_id is None:
+        return None
+    if not isinstance(expected_gtfs_snapshot_id, str) or not expected_gtfs_snapshot_id:
+        raise AirflowException("expected_gtfs_snapshot_id must be a non-empty string when provided")
+    return expected_gtfs_snapshot_id
+
+
+def _guard_excluded_historical_processing_date(processing_date: str) -> None:
+    reason = historical_daily_exclusion_reason(date.fromisoformat(processing_date))
+    if reason:
+        raise AirflowException(f"Canonical daily GPS run is excluded for {processing_date}; exclusion_reason={reason}")
+
+
+def _configured_skip_prior_publication() -> bool:
+    dag_run = get_current_context().get("dag_run")
+    conf = getattr(dag_run, "conf", {}) or {}
+    skip_prior_publication = conf.get("skip_prior_publication", False)
+    if not isinstance(skip_prior_publication, bool):
+        raise AirflowException("skip_prior_publication must be a boolean when provided")
+    return skip_prior_publication
+
+
+def _guard_prior_publication(processing_date: str, skip_prior_publication: bool) -> bool:
+    prior_service_date = date.fromisoformat(processing_date) - timedelta(days=1)
+    prior_reason = historical_daily_exclusion_reason(prior_service_date)
+    if prior_reason and not skip_prior_publication:
+        raise AirflowException(
+            f"Prior publication is excluded for {prior_service_date.isoformat()}; "
+            "skip_prior_publication=true is required"
+        )
+    if skip_prior_publication and not prior_reason:
+        raise AirflowException(
+            f"skip_prior_publication is only allowed when the prior service date is excluded: {prior_service_date.isoformat()}"
+        )
+    return skip_prior_publication
+
+
 def _bigquery_dbt_job_cost_summary(started_at: datetime) -> dict[str, object]:
     client = bigquery.Client(project=GCP_PROJECT)
     query = f"""
@@ -246,6 +298,20 @@ def _dbt_task(task_id: str, command: str, selector: str, vars_json: str, extra_a
     return BashOperator(task_id=task_id, bash_command=dbt_command(command, selector, vars_json, extra_args))
 
 
+def _prior_publication_dbt_task(
+    task_id: str, command: str, selector: str, vars_json: str, extra_args: str = ""
+) -> BashOperator:
+    dbt_task_command = dbt_command(command, selector, vars_json, extra_args)
+    bash_command = (
+        "{% if dag_run.conf.get('skip_prior_publication') is true %}\n"
+        f"echo 'Skipping prior publication task: {task_id}'\n"
+        "{% else %}\n"
+        f"{dbt_task_command}\n"
+        "{% endif %}"
+    )
+    return BashOperator(task_id=task_id, bash_command=bash_command)
+
+
 def _dbt_run_test_pair(
     task_name: str,
     run_selector: str,
@@ -256,6 +322,22 @@ def _dbt_run_test_pair(
     run_task = _dbt_task(f"dbt_run_{task_name}", "run", run_selector, vars_json)
     audit_excluded_args = f"{test_extra_args} --exclude tag:audit".strip()
     test_task = _dbt_task(f"dbt_test_{task_name}", "test", test_selector, vars_json, audit_excluded_args)
+    run_task >> test_task
+    return run_task, test_task
+
+
+def _prior_publication_dbt_run_test_pair(
+    task_name: str,
+    run_selector: str,
+    test_selector: str,
+    vars_json: str,
+    test_extra_args: str = "",
+) -> tuple[BashOperator, BashOperator]:
+    run_task = _prior_publication_dbt_task(f"dbt_run_{task_name}", "run", run_selector, vars_json)
+    audit_excluded_args = f"{test_extra_args} --exclude tag:audit".strip()
+    test_task = _prior_publication_dbt_task(
+        f"dbt_test_{task_name}", "test", test_selector, vars_json, audit_excluded_args
+    )
     run_task >> test_task
     return run_task, test_task
 
@@ -301,20 +383,37 @@ with DAG(
     on_failure_callback=airflow_failure_alert,
     tags=["ztm", "gps", "warehouse"],
 ) as dag:
+
+    @task
+    def guard_excluded_historical_processing_date(processing_date: str) -> None:
+        """Prevent known-bad historical inputs from replacing canonical partitions."""
+        _guard_excluded_historical_processing_date(processing_date)
+
+    historical_date_guard = guard_excluded_historical_processing_date(PROCESSING_DATE)
+
+    @task
+    def guard_prior_publication(processing_date: str) -> bool:
+        """Require an explicit prior-publication skip for excluded prior service dates."""
+        return _guard_prior_publication(processing_date, _configured_skip_prior_publication())
+
+    prior_publication_guard = guard_prior_publication(PROCESSING_DATE)
+
     with TaskGroup("snapshot_lookup", group_display_name="Snapshot lookup", prefix_group_id=False) as snapshot_group:
 
         @task
         def selected_gtfs_snapshot_id(processing_date: str) -> str:
-            """Return the latest dimension-built GTFS snapshot available at rebuild time."""
-            return _selected_gtfs_snapshot_id(processing_date)
+            """Return the governing GTFS snapshot persisted for the processing date."""
+            return _selected_expected_gtfs_snapshot_id(processing_date, _configured_expected_gtfs_snapshot_id())
 
         @task
-        def selected_prior_gtfs_snapshot_id(processing_date: str) -> str:
+        def selected_prior_gtfs_snapshot_id(processing_date: str, skip_prior_publication: bool) -> str:
             """Return the governing GTFS snapshot for prior-date coverage."""
+            if skip_prior_publication:
+                return ""
             return _selected_gtfs_snapshot_id(processing_date)
 
         selected_gtfs_snapshot = selected_gtfs_snapshot_id(PROCESSING_DATE)
-        selected_prior_gtfs_snapshot = selected_prior_gtfs_snapshot_id(PRIOR_SERVICE_DATE)
+        selected_prior_gtfs_snapshot = selected_prior_gtfs_snapshot_id(PRIOR_SERVICE_DATE, prior_publication_guard)
 
     with TaskGroup("staging", group_display_name="Staging", prefix_group_id=False) as staging_group:
         dbt_run_stg_gps_pings, dbt_test_stg_gps_pings = _dbt_run_test_pair(
@@ -385,25 +484,27 @@ with DAG(
         )
 
     with TaskGroup("prior_facts", group_display_name="Prior facts", prefix_group_id=False) as prior_facts_group:
-        dbt_run_fct_trip_prior, dbt_test_fct_trip_prior = _dbt_run_test_pair(
+        dbt_run_fct_trip_prior, dbt_test_fct_trip_prior = _prior_publication_dbt_run_test_pair(
             "fct_trip_prior",
             TRIP_FACT_MODEL,
             TRIP_FACT_MODEL,
             FACT_PRIOR_DBT_VARS,
         )
-        dbt_run_fct_stop_arrival_prior, dbt_test_fct_stop_arrival_prior = _dbt_run_test_pair(
+        dbt_run_fct_stop_arrival_prior, dbt_test_fct_stop_arrival_prior = _prior_publication_dbt_run_test_pair(
             "fct_stop_arrival_prior",
             STOP_ARRIVAL_FACT_MODEL,
             STOP_ARRIVAL_FACT_MODEL,
             FACT_PRIOR_DBT_VARS,
             "--indirect-selection cautious",
         )
-        dbt_run_fct_expected_stop_event_prior, dbt_test_fct_expected_stop_event_prior = _dbt_run_test_pair(
-            "fct_expected_stop_event_prior",
-            EXPECTED_STOP_EVENT_FACT_MODEL,
-            EXPECTED_STOP_EVENT_FACT_MODEL,
-            FACT_PRIOR_DBT_VARS,
-            "--indirect-selection cautious",
+        dbt_run_fct_expected_stop_event_prior, dbt_test_fct_expected_stop_event_prior = (
+            _prior_publication_dbt_run_test_pair(
+                "fct_expected_stop_event_prior",
+                EXPECTED_STOP_EVENT_FACT_MODEL,
+                EXPECTED_STOP_EVENT_FACT_MODEL,
+                FACT_PRIOR_DBT_VARS,
+                "--indirect-selection cautious",
+            )
         )
 
     with TaskGroup(
@@ -424,17 +525,19 @@ with DAG(
             f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
             CURRENT_COMPLETENESS_COVERAGE_DBT_VARS,
         )
-        dbt_run_prior_coverage_schedule = _dbt_task(
+        dbt_run_prior_coverage_schedule = _prior_publication_dbt_task(
             "dbt_run_prior_coverage_schedule",
             "run",
             COVERAGE_SCHEDULE_MODELS,
             PRIOR_SCHEDULE_DBT_VARS,
         )
-        dbt_run_completeness_and_coverage_prior, dbt_test_completeness_and_coverage_prior = _dbt_run_test_pair(
-            "completeness_and_coverage_prior",
-            f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
-            f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
-            PRIOR_COMPLETENESS_COVERAGE_DBT_VARS,
+        dbt_run_completeness_and_coverage_prior, dbt_test_completeness_and_coverage_prior = (
+            _prior_publication_dbt_run_test_pair(
+                "completeness_and_coverage_prior",
+                f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
+                f"{DAY_COMPLETENESS_MODEL} {SERVICE_COVERAGE_MODEL}",
+                PRIOR_COMPLETENESS_COVERAGE_DBT_VARS,
+            )
         )
         dbt_restore_current_coverage_schedule = BashOperator(
             task_id="dbt_restore_current_coverage_schedule",
@@ -449,7 +552,7 @@ with DAG(
             PIPELINE_STATUS_MODEL,
             CURRENT_COMPLETENESS_COVERAGE_DBT_VARS,
         )
-        dbt_run_pipeline_status_prior, dbt_test_pipeline_status_prior = _dbt_run_test_pair(
+        dbt_run_pipeline_status_prior, dbt_test_pipeline_status_prior = _prior_publication_dbt_run_test_pair(
             "pipeline_status_prior",
             PIPELINE_STATUS_MODEL,
             PIPELINE_STATUS_MODEL,
@@ -464,7 +567,7 @@ with DAG(
             MART_DBT_VARS,
             "--indirect-selection cautious --exclude test_type:generic",
         )
-        dbt_run_serving_marts_prior, dbt_test_serving_marts_prior = _dbt_run_test_pair(
+        dbt_run_serving_marts_prior, dbt_test_serving_marts_prior = _prior_publication_dbt_run_test_pair(
             "serving_marts_prior",
             PRIOR_SERVING_MODELS,
             PRIOR_SERVING_MODELS,
@@ -516,16 +619,16 @@ with DAG(
             return summary | {"started_at": started_at.isoformat()}
 
         @task(outlets=[GPS_MODELS_DATE_ASSET])
-        def emit_gps_models_date_asset(processing_date: str) -> Iterator[Metadata]:
+        def emit_gps_models_date_asset(processing_date: str, skip_prior_publication: bool) -> Iterator[Metadata]:
             """Emit the completed GPS warehouse partition."""
+            changed_partition_dates = [processing_date]
+            if not skip_prior_publication:
+                changed_partition_dates.insert(0, (date.fromisoformat(processing_date) - timedelta(days=1)).isoformat())
             yield Metadata(
                 GPS_MODELS_DATE_ASSET,
                 {
                     "processing_date": processing_date,
-                    "changed_partition_dates": [
-                        (date.fromisoformat(processing_date) - timedelta(days=1)).isoformat(),
-                        processing_date,
-                    ],
+                    "changed_partition_dates": changed_partition_dates,
                 },
             )
 
@@ -534,6 +637,10 @@ with DAG(
             """Fail the DAG run when the single-sink graph propagates an upstream failure."""
             raise RuntimeError("dag_daily_gps failed because one or more upstream tasks failed")
 
+    historical_date_guard >> prior_publication_guard
+    prior_publication_guard >> selected_gtfs_snapshot
+    prior_publication_guard >> selected_prior_gtfs_snapshot
+    selected_gtfs_snapshot >> dbt_run_stg_gps_pings
     selected_gtfs_snapshot >> matcher_load
     selected_gtfs_snapshot >> dbt_run_matcher_fact_dependencies
     selected_prior_gtfs_snapshot >> dbt_run_prior_coverage_schedule
@@ -565,7 +672,7 @@ with DAG(
     dbt_restore_current_coverage_schedule >> dbt_run_serving_universe >> dbt_test_serving_universe
     dbt_test_serving_universe >> dbt_run_serving_marts_prior >> dbt_test_serving_marts_prior
     dbt_test_serving_marts_prior >> dbt_run_serving_marts >> dbt_test_serving_marts
-    gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE)
+    gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE, prior_publication_guard)
     if LOG_BIGQUERY_DBT_JOB_COSTS:
         cost_summary = log_bigquery_dbt_job_costs()
         dbt_test_serving_marts >> cost_summary

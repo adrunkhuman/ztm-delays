@@ -140,8 +140,13 @@ observed_trip_best_quality as (
         select
             *,
             row_number() over (
-                partition by service_date, gtfs_snapshot_id, schedule_version_id, trip_id
-                order by service_observation_rank desc, trip_quality_rank desc, actual_start_time, actual_end_time
+                partition by service_date, schedule_version_id, trip_id
+                order by
+                    gtfs_snapshot_id = '{{ gtfs_snapshot_id }}' desc,
+                    service_observation_rank desc,
+                    trip_quality_rank desc,
+                    actual_start_time,
+                    actual_end_time
             ) as candidate_rank
         from observed_trips
     )

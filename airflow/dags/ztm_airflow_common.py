@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import shlex
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -35,6 +35,13 @@ RAW_GTFS_PREFIX = _env("RAW_GTFS_PREFIX", "raw/gtfs")
 AIRFLOW_TRANSIENT_RETRIES = 2
 AIRFLOW_TRANSIENT_RETRY_DELAY = timedelta(minutes=5)
 AIRFLOW_FAILURE_WEBHOOK_TIMEOUT_SECONDS = 10.0
+HISTORICAL_DAILY_ELIGIBLE_START_DATE = date(2026, 6, 27)
+HISTORICAL_DAILY_EXCLUSION_REASONS = {
+    date(2026, 6, 26): "incomplete_raw_gps_archive",
+    date(2026, 7, 5): "degraded_raw_gps_archive",
+    date(2026, 7, 6): "degraded_raw_gps_archive",
+    date(2026, 7, 7): "degraded_raw_gps_archive",
+}
 
 SERVING_EXPORT_DIR = _env("SERVING_EXPORT_DIR", "/opt/airflow/serving")
 SERVING_EXPORT_GCS_PREFIX = _env("SERVING_EXPORT_GCS_PREFIX", "serving/duckdb/staging")
@@ -114,6 +121,11 @@ def gtfs_gcs_path(snapshot_id: str) -> str:
 def gtfs_gcs_uri(snapshot_id: str) -> str:
     """Build the canonical GCS URI for a GTFS snapshot ZIP."""
     return f"gs://{GCS_BUCKET}/{gtfs_gcs_path(snapshot_id)}"
+
+
+def historical_daily_exclusion_reason(processing_date: date) -> str | None:
+    """Return the machine-readable reason a known bad historical date is excluded."""
+    return HISTORICAL_DAILY_EXCLUSION_REASONS.get(processing_date)
 
 
 def dbt_vars(**values: str) -> str:
