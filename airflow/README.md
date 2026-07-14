@@ -31,7 +31,7 @@ Runtime env defaults match the current VPS:
 | `MATCHER_MAX_GPS_BYTES` | `21474836480` (20 GiB) |
 | `MATCHER_MIN_FREE_DISK_BYTES` | `5368709120` (5 GiB) |
 | `MATCHER_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
-| `MATCHER_MAX_RSS_BYTES` | `2147483648` (2 GiB) |
+| `MATCHER_MAX_RSS_BYTES` | `3221225472` (3 GiB) |
 | `MATCHER_MAX_PUBLICATION_BYTES` | `5368709120` (5 GiB) |
 
 - Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.

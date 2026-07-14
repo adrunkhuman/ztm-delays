@@ -25,6 +25,7 @@ def test_config_uses_only_matcher_environment_contract(monkeypatch: pytest.Monke
     assert config.marker_prefix == "matcher/runs"
     assert config.max_publication_bytes == matcher.DEFAULT_MAX_PUBLICATION_BYTES
     assert config.max_rss_bytes == matcher.DEFAULT_MAX_RSS_BYTES
+    assert config.max_rss_bytes == 3 * 1024**3
 
 
 @pytest.mark.parametrize("dataset", ["", "project.dataset", "bad-dataset"])
