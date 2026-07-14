@@ -1177,6 +1177,11 @@ unit_tests:
             timestamp('2026-01-16 03:30:30+01'),
             'complete',
             'regular'
+          union all
+          select
+            'snapshot-next-day', date '2026-01-16', date '2026-01-15', 'trip-2', 1006, '187', '187', 'bus', 0,
+            'Central', 'weekday', 'svc', 'schedule-version-1', timestamp('2026-01-15 23:35:00+01'),
+            timestamp('2026-01-15 23:36:00+01'), timestamp('2026-01-16 00:01:00+01'), 'complete', 'regular'
     expect:
       format: sql
       rows: |
@@ -1195,15 +1200,15 @@ unit_tests:
           timestamp('2026-01-15 23:00:00+01') as service_hour,
           timestamp('2026-01-16 00:00:00+01') as service_hour_end,
           2 as expected_trip_count,
-          1 as observed_trip_count,
-          1 as complete_trip_count,
+          2 as observed_trip_count,
+          2 as complete_trip_count,
           0 as partial_trip_count,
-          1 as regular_trip_count,
+          2 as regular_trip_count,
           0 as truncated_trip_count,
           0 as modified_trip_count,
           120.0 as expected_service_minutes,
-          80.0 as observed_service_minutes,
-          0.5 as service_coverage_ratio,
+          105.0 as observed_service_minutes,
+          1.0 as service_coverage_ratio,
           true as is_settled_hour
         union all
         select
