@@ -12,7 +12,14 @@
     )
 }}
 
-with trip_facts as (
+with replacement_trip_ids as (
+    select distinct service_date, trip_id
+    from {{ ref('fct_trip') }}
+    where service_date = date('{{ publish_service_date }}')
+      and gps_date = date('{{ var("processing_date") }}')
+),
+
+trip_facts as (
     select
         gtfs_snapshot_id,
         gps_date,
@@ -118,8 +125,9 @@ calendar_dates as (
         is_holiday
     from {{ ref('dim_date') }}
     where service_date = date('{{ publish_service_date }}')
-)
+),
 
+enriched as (
 select
     trip_facts.gtfs_snapshot_id,
     trip_facts.gps_date,
@@ -195,3 +203,20 @@ inner join stop_group_names
     and stop_semantics.stop_group_id = stop_group_names.stop_group_id
 inner join calendar_dates
     on arrivals.service_date = calendar_dates.service_date
+)
+
+select *
+from enriched
+{% if is_incremental() and publish_service_date != var("processing_date") %}
+union all
+select existing.*
+from {{ this }} as existing
+where existing.service_date = date('{{ publish_service_date }}')
+  and existing.gps_date < date('{{ var("processing_date") }}')
+  and not exists (
+      select 1
+      from replacement_trip_ids
+      where replacement_trip_ids.service_date = existing.service_date
+        and replacement_trip_ids.trip_id = existing.trip_id
+  )
+{% endif %}
