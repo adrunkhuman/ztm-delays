@@ -150,7 +150,7 @@ enriched as (
 select *
 from enriched
 {% if is_incremental() and publish_service_date != var("processing_date") %}
-union all
+union all by name
 select existing.*
 from {{ this }} as existing
 where existing.service_date = date('{{ publish_service_date }}')
