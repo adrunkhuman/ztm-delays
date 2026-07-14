@@ -874,7 +874,8 @@ def test_dag_is_asset_scheduled_and_exposes_single_export_task() -> None:
     dag = _load_dag_module()
 
     assert dag.dag.kwargs["dag_display_name"] == "Serving DuckDB export"
-    assert dag.dag.kwargs["schedule"] == [dag.GPS_MODELS_DATE_ASSET]
+    assert isinstance(dag.dag.kwargs["schedule"], FakePartitionedAssetTimetable)
+    assert dag.dag.kwargs["schedule"].assets is dag.GPS_MODELS_DATE_ASSET
     assert dag.dag.kwargs["max_active_runs"] == 1
     assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
     assert dag.export_serving_duckdb.kwargs == {"retries": 0, "on_failure_callback": dag.airflow_failure_alert}
@@ -908,6 +909,7 @@ def _install_airflow_stubs() -> None:
     airflow_sdk_module.task = FakeTaskDecorator()
     airflow_sdk_module.get_current_context = lambda: {"dag_run": FakeDagRun({})}
     airflow_sdk_module.Asset = FakeAsset
+    airflow_sdk_module.PartitionedAssetTimetable = FakePartitionedAssetTimetable
 
     sys.modules["airflow"] = airflow_module
     sys.modules["airflow.sdk"] = airflow_sdk_module
@@ -958,6 +960,11 @@ class FakeAsset:
     def __init__(self, uri: str, *, name: str | None = None) -> None:
         self.uri = uri
         self.name = name
+
+
+class FakePartitionedAssetTimetable:
+    def __init__(self, *, assets: FakeAsset) -> None:
+        self.assets = assets
 
 
 class FakeDAG:
