@@ -249,7 +249,7 @@ unit_tests:
             timestamp('2026-01-15 23:50:00+01') as scheduled_arrival_time,
             timestamp('2026-01-15 23:50:20+01') as scheduled_departure_time,
             timestamp('2026-01-15 23:51:00+01') as actual_arrival_time, 60 as delay_seconds,
-            'python_segment' as detection_method, 75.0 as stop_match_radius_m, 12.0 as stop_distance_m,
+            'segment_within_75m' as detection_method, 75.0 as stop_match_radius_m, 12.0 as stop_distance_m,
             15.0 as prev_ping_distance_m, 18.0 as next_ping_distance_m,
             timestamp('2026-01-15 23:50:30+01') as segment_start_time,
             timestamp('2026-01-15 23:51:30+01') as segment_end_time, 60 as segment_duration_seconds,
@@ -259,7 +259,7 @@ unit_tests:
             'snapshot-other', date '2026-01-16', date '2026-01-16', date '2026-01-15',
             'trip-1', '1001', '100101', 0, timestamp('2026-01-15 23:50:00+01'),
             timestamp('2026-01-15 23:50:20+01'), timestamp('2026-01-15 23:55:00+01'), 300,
-            'wrong_snapshot', 75.0, 12.0, 15.0, 18.0,
+            'segment_within_75m', 75.0, 12.0, 15.0, 18.0,
             timestamp('2026-01-15 23:54:30+01'), timestamp('2026-01-15 23:55:30+01'), 60, 'complete'
       - input: ref('fct_trip')
         rows:
@@ -299,7 +299,7 @@ unit_tests:
           'gtfs_passenger_stop' as classification_reason, ['gtfs_passenger_eligible'] as classification_evidence,
           true as are_passenger_boundaries_settled, timestamp('2026-01-15 23:50:00+01') as scheduled_arrival_time,
           timestamp('2026-01-15 23:50:20+01') as scheduled_departure_time, timestamp('2026-01-15 23:51:00+01') as actual_arrival_time,
-          60 as delay_seconds, timestamp('2026-01-15 23:00:00+01') as hour_bracket, 'python_segment' as detection_method,
+          60 as delay_seconds, timestamp('2026-01-15 23:00:00+01') as hour_bracket, 'segment_within_75m' as detection_method,
           75.0 as stop_match_radius_m, 12.0 as stop_distance_m, 15.0 as prev_ping_distance_m, 18.0 as next_ping_distance_m,
           timestamp('2026-01-15 23:50:30+01') as segment_start_time, timestamp('2026-01-15 23:51:30+01') as segment_end_time,
           60 as segment_duration_seconds

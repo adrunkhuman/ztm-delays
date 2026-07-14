@@ -54,6 +54,7 @@ with grouped_trips as (
             or direction_id not in (0, 1)
             or trip_quality not in ('complete', 'partial', 'broken')
             or service_observation_class not in ('regular', 'truncated', 'modified', 'matching_failure')
+            or (service_observation_class = 'matching_failure' and trip_quality != 'broken')
         ) as enum_violations,
         countif(exists(
             select 1
@@ -68,7 +69,8 @@ with grouped_trips as (
                 'large_stop_sequence_gap',
                 'extreme_delay',
                 'stale_stop_progression',
-                'likely_wrong_trip_assignment'
+                'likely_wrong_trip_assignment',
+                'unsettled_passenger_boundaries'
             )
         )) as quality_flag_violations,
         countif(exists(
@@ -79,7 +81,8 @@ with grouped_trips as (
                 'short_end',
                 'large_internal_gap',
                 'stale_progress',
-                'bad_assignment_evidence'
+                'bad_assignment_evidence',
+                'unsettled_passenger_boundaries'
             )
         )) as service_observation_flag_violations
     from {{ ref('fct_trip') }}
