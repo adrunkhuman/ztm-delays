@@ -614,7 +614,7 @@ models:
       - name: gps_date
         description: Warsaw-local processing date inherited from fct_trip for the run that published this matched trip.
       - name: source_gps_date
-        description: Warsaw-local GPS partition containing the direct observed arrival. Null when the scheduled stop was not directly observed.
+        description: Warsaw-local GPS partition containing direct arrival evidence. Null when no arrival timing was retained.
       - name: service_date
         description: GTFS service date for the matched trip. This is the fact partition field.
       - name: trip_id
@@ -694,9 +694,9 @@ models:
       - name: scheduled_departure_time
         description: Scheduled departure timestamp reconstructed from service_date and GTFS departure seconds.
       - name: actual_arrival_time
-        description: Directly observed arrival timestamp when the GPS segment crossed the stop.
+        description: Arrival timestamp retained for observed or uncertain direct-crossing evidence. Null when no arrival timing was retained.
       - name: delay_seconds
-        description: Difference in seconds between actual_arrival_time and scheduled_arrival_time. Null when no direct arrival was observed.
+        description: Difference in seconds between actual_arrival_time and scheduled_arrival_time. Null when no arrival timing was retained.
       - name: uncertainty_evidence
         description: Matcher evidence explaining an uncertain expected-stop state. Empty or null for settled states.
       - name: hour_bracket
@@ -718,7 +718,7 @@ models:
       - name: segment_duration_seconds
         description: Duration in seconds between segment_start_time and segment_end_time when observed.
       - name: is_observed
-        description: True when this scheduled stop has a direct observed arrival row.
+        description: True when observation_status confirms the scheduled stop as observed. Uncertain events may retain timing while this remains false.
       - name: is_match_uncertain
         description: True when the matcher expected-event state is uncertain or the canonical trip is broken or classified as a matching failure.
       - name: observation_status

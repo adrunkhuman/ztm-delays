@@ -60,9 +60,23 @@ with grouped_events as (
             or (observation_status = 'missed' and (actual_arrival_time is not null or delay_seconds is not null))
             or (observation_status in ('skipped_optional', 'not_in_passenger_service')
                 and (actual_arrival_time is not null or delay_seconds is not null))
+            or (observation_status = 'skipped_optional' and stop_service_class != 'request')
+            or (observation_status = 'missed' and (
+                stop_service_class != 'regular'
+                or stop_execution_class != 'passenger'
+                or not are_passenger_boundaries_settled
+                or is_match_uncertain
+            ))
+            or (observation_status = 'not_in_passenger_service' and not (
+                stop_execution_class in ('technical_prefix', 'technical_suffix', 'technical_trip')
+                or stop_service_class = 'not_in_passenger_service'
+            ))
             or (stop_execution_class in ('technical_prefix', 'technical_suffix', 'technical_trip')
                 and observation_status != 'not_in_passenger_service')
-            or ((stop_execution_class = 'unknown' or not are_passenger_boundaries_settled)
+            or (
+                stop_execution_class not in ('technical_prefix', 'technical_suffix', 'technical_trip')
+                and stop_service_class != 'not_in_passenger_service'
+                and (stop_execution_class = 'unknown' or not are_passenger_boundaries_settled)
                 and observation_status != 'uncertain')
         ) as status_violations,
         countif(
