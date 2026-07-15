@@ -42,7 +42,7 @@
           <div class="landing-rank-head trip-rank-grid"><div>#</div><div>Time</div><div>Line</div><div>Route</div><div>Trace</div><div>End</div></div>
           {% for trip in trip_landing_rows %}
             <a class="landing-rank-row trip-rank-grid" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=selected_date, vehicle=trip.vehicle_number) }}">
-              <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
+              <span class="landing-rank-index mono">{{ '%02d'|format(pagination.first_item + loop.index0) }}</span>
               <span class="mono muted">{{ trip.scheduled_start_time|time }}</span>
               <span class="landing-line-pill mono {% if trip.mode == 'tram' %}tram{% endif %}">{{ trip.route_short_name }}</span>
               <span class="landing-route" title="{{ trip.route_label }}">{{ trip.route_label }}</span>
@@ -61,6 +61,11 @@
             </a>
           {% endfor %}
         </section>
+        {{ ui.pager(
+          pagination,
+          url_for('schedule', mode=selected_mode, date=selected_date, rank=selected_rank, page=pagination.page - 1) if pagination.has_previous else none,
+          url_for('schedule', mode=selected_mode, date=selected_date, rank=selected_rank, page=pagination.page + 1) if pagination.has_next else none
+        ) }}
       {% else %}
         <header class="head line-headline">
           <h1 class="hero-title mono">{{ selected_line }}</h1>
@@ -81,7 +86,7 @@
             <div class="trip-direction">
               <div class="trip-dirhead">
                 <h2>→ {{ group.trip_headsign }}</h2>
-                <div class="mono muted">{{ group.trips|length|integer }} runs</div>
+                <div class="mono muted">{{ group.trips|length|integer }} of {{ group.trip_count|integer }} runs</div>
               </div>
               <div class="trip-table-head">
                 <div>Dep</div>
@@ -117,6 +122,11 @@
       {% else %}
         <section class="section muted">No complete trips available for this line and date.</section>
       {% endif %}
+      {{ ui.pager(
+        pagination,
+        url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort=selected_sort, page=pagination.page - 1) if pagination.has_previous else none,
+        url_for('schedule', mode=selected_mode, line=selected_line, date=selected_date, sort=selected_sort, page=pagination.page + 1) if pagination.has_next else none
+      ) }}
       {% endif %}
     </main>
   </div>

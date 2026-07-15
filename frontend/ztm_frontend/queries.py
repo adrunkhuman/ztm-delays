@@ -9,8 +9,9 @@ from typing import Any
 
 from ztm_frontend.db import fetch_all, fetch_one
 
-STOP_ROWS_PER_COURSE = 36
-STOP_PICKER_LIMIT = 300
+LANDING_PAGE_SIZE = 50
+STOP_PICKER_PAGE_SIZE = 12
+MAX_PAGE = (2**63 - 1) // LANDING_PAGE_SIZE
 ON_TIME_EARLY_SECONDS = -60
 ON_TIME_LATE_SECONDS = 180
 SERVICE_DAY_HOURS = (*range(4, 24), *range(4))
@@ -95,16 +96,18 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
     }
 
 
-def get_lines(
+def get_lines(  # noqa: PLR0913
     db_path: Path,
     selected_line: str | None,
     selected_mode: str | None,
     selected_date: str | None,
     selected_rank: str | None,
+    selected_page: str | None = None,
 ) -> dict[str, Any]:
     """Build the line landing or selected-line page data."""
     selected_mode = selected_mode or "bus"
     selected_rank = _selected_line_rank(selected_rank)
+    page = _selected_page(selected_page)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
     line_list = fetch_all(
@@ -124,9 +127,10 @@ def get_lines(
     courses: list[dict[str, Any]] = []
     line_landing_summary = None
     line_landing_rows: list[dict[str, Any]] = []
+    pagination = None
     if selected_line is None:
         line_landing_summary = _line_landing_summary(db_path, selected_date, selected_mode)
-        line_landing_rows = _line_landing_rows(db_path, selected_date, selected_mode, selected_rank)
+        line_landing_rows, pagination = _line_landing_rows(db_path, selected_date, selected_mode, selected_rank, page)
     else:
         summary = fetch_one(
             db_path,
@@ -151,7 +155,6 @@ def get_lines(
               and window_key = ?
               and mode = ?
               and line = ?
-              and course_rank <= 2
             order by course_rank
             """,
             [selected_date, selected_mode, selected_line],
@@ -165,11 +168,9 @@ def get_lines(
               and window_key = ?
               and mode = ?
               and line = ?
-              and display_rank <= ?
-              and has_min_sample
-            order by direction_id, trip_headsign, display_rank
+            order by direction_id, trip_headsign, display_rank, stop_group_id, stop_id
             """,
-            [selected_date, selected_mode, selected_line, STOP_ROWS_PER_COURSE],
+            [selected_date, selected_mode, selected_line],
         )
         stops_by_course = _course_rows(stops)
         for course in courses:
@@ -187,6 +188,7 @@ def get_lines(
         "line_widgets": _line_widgets(db_path, selected_line, selected_date, summary, courses),
         "line_landing_summary": line_landing_summary,
         "line_landing_rows": line_landing_rows,
+        "pagination": pagination,
         "delay_plot": [],
     }
 
@@ -200,11 +202,15 @@ def get_stops(  # noqa: PLR0913
     selected_date: str | None,
     selected_view: str | None = None,
     selected_rank: str | None = None,
+    selected_page: str | None = None,
+    selected_picker_page: str | None = None,
 ) -> dict[str, Any]:
     """Build the stop landing, group, or selected-post page data."""
     selected_mode = selected_mode or "bus"
     selected_view = selected_view if selected_view in {"post", "line"} else "post"
     selected_rank = _selected_stop_rank(selected_rank)
+    page = _selected_page(selected_page)
+    picker_page = _selected_page(selected_picker_page)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
     search_pattern = f"%{search.strip().lower()}%"
@@ -215,14 +221,22 @@ def get_stops(  # noqa: PLR0913
         from dim_stop_group_current
         where list_contains(str_split(modes_served, ', '), ?)
           and (? = '%%' or lower(stop_group_name) like ?)
-        order by stop_group_name
-        limit ?
+        order by stop_group_name, stop_group_id
+        limit ? offset ?
         """,
-        [selected_mode, search_pattern, search_pattern, STOP_PICKER_LIMIT],
+        [
+            selected_mode,
+            search_pattern,
+            search_pattern,
+            STOP_PICKER_PAGE_SIZE + 1,
+            (picker_page - 1) * STOP_PICKER_PAGE_SIZE,
+        ],
     )
+    stop_list, picker_pagination = _page_result(stop_list, picker_page, STOP_PICKER_PAGE_SIZE)
     summary = None
     stop_landing_summary = None
     stop_landing_rows: list[dict[str, Any]] = []
+    pagination = None
     stop_posts: list[dict[str, Any]] = []
     stop_post_groups: list[dict[str, Any]] = []
     selected_post = None
@@ -230,7 +244,7 @@ def get_stops(  # noqa: PLR0913
     stop_line_groups: list[dict[str, Any]] = []
     if selected_stop_group_id is None:
         stop_landing_summary = _stop_landing_summary(db_path, selected_date, selected_mode)
-        stop_landing_rows = _stop_landing_rows(db_path, selected_date, selected_mode, selected_rank)
+        stop_landing_rows, pagination = _stop_landing_rows(db_path, selected_date, selected_mode, selected_rank, page)
     else:
         summary = fetch_one(
             db_path,
@@ -289,33 +303,15 @@ def get_stops(  # noqa: PLR0913
             )
             if selected_post is not None:
                 selected_post["display_name"] = selected_post.get("stop_post_code") or selected_post["stop_id"]
-        line_stats = fetch_all(
-            db_path,
-            """
-            select *
-            from mart_stop_line_window_summary
-            where window_type = 'day'
-              and window_key = ?
-              and mode = ?
-              and entity_type = ?
-              and entity_id = ?
-              and display_rank <= 30
-              and has_min_sample
-            order by display_rank
-            """,
-            [
-                selected_date,
-                selected_mode,
-                "stop_post" if selected_stop_id is not None else "stop_group",
-                selected_stop_id or selected_stop_group_id,
-            ],
-        )
+        if selected_stop_id is not None:
+            line_stats, pagination = _stop_line_rows(db_path, selected_date, selected_mode, selected_stop_id, page)
         stop_line_groups = _stop_group_line_groups(db_path, selected_date, selected_mode, selected_stop_group_id)
     return {
         "date_options": date_options,
         "selected_date": selected_date,
         "date_nav": _date_nav(date_options, selected_date),
         "stop_list": stop_list,
+        "picker_pagination": picker_pagination,
         "selected_stop_group_id": selected_stop_group_id,
         "selected_mode": selected_mode,
         "selected_view": selected_view,
@@ -337,6 +333,7 @@ def get_stops(  # noqa: PLR0913
         ),
         "stop_landing_summary": stop_landing_summary,
         "stop_landing_rows": stop_landing_rows,
+        "pagination": pagination,
         "delay_plot": [],
     }
 
@@ -350,11 +347,13 @@ def get_schedule(  # noqa: PLR0913
     selected_vehicle: str | None,
     selected_sort: str | None = None,
     selected_rank: str | None = None,
+    selected_page: str | None = None,
 ) -> dict[str, Any]:
     """Build the trip landing or selected-line trip page data."""
     selected_mode = selected_mode or "bus"
     selected_sort = selected_sort if selected_sort in {"departure", "delay", "erratic"} else "departure"
     selected_rank = _selected_trip_rank(selected_rank)
+    page = _selected_page(selected_page)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
     line_list = fetch_all(
@@ -371,6 +370,7 @@ def get_schedule(  # noqa: PLR0913
     trips: list[dict[str, Any]] = []
     trip_landing_summary = None
     trip_landing_rows: list[dict[str, Any]] = []
+    pagination = None
     selected_trip = None
     trip_stops: list[dict[str, Any]] = []
     if selected_line is None:
@@ -388,24 +388,13 @@ def get_schedule(  # noqa: PLR0913
             )
             or {}
         )
-        trip_landing_rows = _trip_landing_rows(db_path, selected_date, selected_mode, selected_rank)
+        trip_landing_rows, pagination = _trip_landing_rows(db_path, selected_date, selected_mode, selected_rank, page)
     else:
         rank_column = {"departure": "departure_rank", "delay": "line_end_delay_rank", "erratic": "line_erratic_rank"}[
             selected_sort
         ]
-        trips = fetch_all(
-            db_path,
-            f"""
-            select *
-            from mart_trip_daily
-            where service_date = ?
-              and mode = ?
-              and line = ?
-              and trip_quality = 'complete'
-            order by {rank_column}
-            limit 160
-            """,
-            [selected_date, selected_mode, selected_line],
+        trips, pagination = _selected_line_trip_rows(
+            db_path, selected_date, selected_mode, selected_line, rank_column, page
         )
         for trip in trips:
             trip["trace"] = _trip_trace(trip.get("delay_profile") or [])
@@ -436,6 +425,7 @@ def get_schedule(  # noqa: PLR0913
         "trip_groups": _trip_groups(db_path, selected_date, selected_mode, selected_line, trips),
         "trip_landing_summary": trip_landing_summary,
         "trip_landing_rows": trip_landing_rows,
+        "pagination": pagination,
         "selected_trip": selected_trip,
         "trip_stops": trip_stops,
     }
@@ -513,13 +503,22 @@ def _line_landing_summary(db_path: Path, selected_date: str | None, selected_mod
 
 
 def _line_landing_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str
-) -> list[dict[str, Any]]:
+    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str, page: int
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     metric = {"worst": "median_delay_seconds", "best": "on_time_rate", "erratic": "delay_spread_seconds"}[selected_rank]
-    rows = _ranked_entities(db_path, selected_date, "line", metric, selected_mode)
+    rows = _ranked_entities(
+        db_path,
+        selected_date,
+        "line",
+        metric,
+        selected_mode,
+        limit=LANDING_PAGE_SIZE + 1,
+        offset=(page - 1) * LANDING_PAGE_SIZE,
+    )
+    rows, pagination = _page_result(rows, page)
     for row in rows:
         _attach_shape(row)
-    return rows
+    return rows, pagination
 
 
 def _stop_landing_summary(db_path: Path, selected_date: str | None, selected_mode: str) -> dict[str, Any]:
@@ -541,18 +540,27 @@ def _stop_landing_summary(db_path: Path, selected_date: str | None, selected_mod
 
 
 def _stop_landing_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str
-) -> list[dict[str, Any]]:
+    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str, page: int
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     metric = {"worst": "median_delay_seconds", "best": "on_time_rate", "busiest": "arrival_count"}[selected_rank]
-    rows = _ranked_entities(db_path, selected_date, "stop_group", metric, selected_mode)
+    rows = _ranked_entities(
+        db_path,
+        selected_date,
+        "stop_group",
+        metric,
+        selected_mode,
+        limit=LANDING_PAGE_SIZE + 1,
+        offset=(page - 1) * LANDING_PAGE_SIZE,
+    )
+    rows, pagination = _page_result(rows, page)
     for row in rows:
         _attach_shape(row)
-    return rows
+    return rows, pagination
 
 
 def _trip_landing_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str
-) -> list[dict[str, Any]]:
+    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str, page: int
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rank_column = {"worst": "landing_worst_rank", "best": "landing_best_rank", "erratic": "landing_erratic_rank"}[
         selected_rank
     ]
@@ -566,12 +574,60 @@ def _trip_landing_rows(
           and trip_quality = 'complete'
           and {rank_column} is not null
         order by {rank_column}
+        limit ? offset ?
         """,
-        [selected_date, selected_mode],
+        [selected_date, selected_mode, LANDING_PAGE_SIZE + 1, (page - 1) * LANDING_PAGE_SIZE],
     )
+    rows, pagination = _page_result(rows, page)
     for row in rows:
         row["trace"] = _trip_trace(row.get("delay_profile") or [])
-    return rows
+    return rows, pagination
+
+
+def _selected_line_trip_rows(  # noqa: PLR0913
+    db_path: Path,
+    selected_date: str | None,
+    selected_mode: str,
+    selected_line: str,
+    rank_column: str,
+    page: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows = fetch_all(
+        db_path,
+        f"""
+        select *
+        from mart_trip_daily
+        where service_date = ?
+          and mode = ?
+          and line = ?
+          and trip_quality = 'complete'
+        order by {rank_column}
+        limit ? offset ?
+        """,
+        [selected_date, selected_mode, selected_line, LANDING_PAGE_SIZE + 1, (page - 1) * LANDING_PAGE_SIZE],
+    )
+    return _page_result(rows, page)
+
+
+def _stop_line_rows(
+    db_path: Path, selected_date: str | None, selected_mode: str, selected_stop_id: str, page: int
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows = fetch_all(
+        db_path,
+        """
+        select *
+        from mart_stop_line_window_summary
+        where window_type = 'day'
+          and window_key = ?
+          and mode = ?
+          and entity_type = 'stop_post'
+          and entity_id = ?
+        order by display_rank
+        limit ? offset ?
+        """,
+        [selected_date, selected_mode, selected_stop_id, LANDING_PAGE_SIZE + 1, (page - 1) * LANDING_PAGE_SIZE],
+    )
+    return _page_result(rows, page)
 
 
 def _ranked_entities(  # noqa: PLR0913
@@ -582,6 +638,7 @@ def _ranked_entities(  # noqa: PLR0913
     selected_mode: str | None = None,
     *,
     limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     summary_table = {
         "line": "mart_line_window_summary",
@@ -589,10 +646,10 @@ def _ranked_entities(  # noqa: PLR0913
         "stop_post": "mart_stop_post_window_summary",
     }[entity_type]
     entity_column = {"line": "line", "stop_group": "stop_group_id", "stop_post": "stop_id"}[entity_type]
-    limit_sql = "" if limit is None else "and rankings.rank <= ?"
+    limit_sql = "" if limit is None else "and rankings.rank > ? and rankings.rank <= ?"
     params: list[Any] = [entity_type, metric, selected_date, selected_date, selected_mode, selected_mode]
     if limit is not None:
-        params.append(limit)
+        params.extend((offset, offset + limit))
     return fetch_all(
         db_path,
         f"""
@@ -611,7 +668,7 @@ def _ranked_entities(  # noqa: PLR0913
           and summaries.window_type = 'day'
           and summaries.window_key = ?
           and (? is null or rankings.mode = ?)
-          {limit_sql}
+        {limit_sql}
         order by rankings.mode, rankings.rank
         """,
         params,
@@ -878,7 +935,7 @@ def _trip_groups(
         trips_by_key.setdefault((trip["direction_id"], trip["trip_headsign"]), []).append(trip)
     for group in groups:
         group["trips"] = trips_by_key.get((group["direction_id"], group["trip_headsign"]), [])
-    return groups
+    return [group for group in groups if group["trips"]]
 
 
 def _trip_stops(
@@ -1274,6 +1331,24 @@ def _selected_trip_rank(value: str | None) -> str:
 
 def _selected_stop_rank(value: str | None) -> str:
     return value if value in {"worst", "busiest", "best"} else "worst"
+
+
+def _selected_page(value: str | None) -> int:
+    try:
+        return min(MAX_PAGE, max(1, int(value or 1)))
+    except ValueError:
+        return 1
+
+
+def _page_result(
+    rows: list[dict[str, Any]], page: int, page_size: int = LANDING_PAGE_SIZE
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    return rows[:page_size], {
+        "page": page,
+        "first_item": (page - 1) * page_size + 1,
+        "has_previous": page > 1,
+        "has_next": len(rows) > page_size,
+    }
 
 
 def _export_metadata_sidecar(db_path: Path) -> dict[str, Any]:

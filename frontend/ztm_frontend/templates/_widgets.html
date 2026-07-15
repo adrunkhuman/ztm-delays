@@ -82,3 +82,13 @@
 {% macro chip(line, mode, href=None, active=False) %}
   {% if href %}<a href="{{ href }}" class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</a>{% else %}<span class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</span>{% endif %}
 {% endmacro %}
+
+{% macro pager(pagination, previous_href=None, next_href=None) %}
+  {% if pagination.has_previous or pagination.has_next %}
+    <nav class="pager" aria-label="Pagination">
+      {% if previous_href %}<a href="{{ previous_href }}" rel="prev">← previous</a>{% else %}<span></span>{% endif %}
+      <span class="mono muted">page {{ pagination.page }}</span>
+      {% if next_href %}<a href="{{ next_href }}" rel="next">next →</a>{% else %}<span></span>{% endif %}
+    </nav>
+  {% endif %}
+{% endmacro %}

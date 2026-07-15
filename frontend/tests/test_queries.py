@@ -10,6 +10,7 @@ from ztm_frontend import queries
 
 def test_get_lines_keeps_same_line_bus_and_tram_separate(tmp_path: Path) -> None:
     """Same public line id can exist in both modes; selected mode must scope detail reads."""
+    first_previously_hidden_stop_rank = 37
     db_path = tmp_path / "ztm.duckdb"
     _create_line_smoke_db(db_path)
 
@@ -17,7 +18,12 @@ def test_get_lines_keeps_same_line_bus_and_tram_separate(tmp_path: Path) -> None
 
     assert result["summary"]["mode"] == "bus"
     assert {row["mode"] for row in result["line_list"]} == {"bus"}
-    assert [course["trip_headsign"] for course in result["courses"]] == ["Bus destination"]
+    assert [course["trip_headsign"] for course in result["courses"]] == [
+        "Bus destination",
+        "Bus destination 2",
+        "Bus destination 3",
+    ]
+    assert result["courses"][2]["stops"][0]["display_rank"] == first_previously_hidden_stop_rank
     assert result["line_widgets"]["worst"][0]["direction"] == "Bus destination"
 
 
@@ -70,6 +76,195 @@ def test_trip_stops_use_selected_trip_snapshot(tmp_path: Path) -> None:
     assert [(row["stop_name"], row["delay_seconds"]) for row in rows] == [("Current stop", 120)]
 
 
+def test_trip_landing_rows_are_paginated_before_traces_are_built(tmp_path: Path) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table mart_trip_daily as
+            select
+                date '2026-06-30' as service_date,
+                'bus' as mode,
+                'complete' as trip_quality,
+                range + 1 as landing_worst_rank,
+                range + 1 as landing_best_rank,
+                range + 1 as landing_erratic_rank,
+                'trip-' || lpad((range + 1)::varchar, 2, '0') as trip_id,
+                []::double[] as delay_profile
+            from range(52)
+            """
+        )
+
+    first_rows, first_page = queries._trip_landing_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "worst", 1
+    )
+    second_rows, second_page = queries._trip_landing_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "worst", 2
+    )
+
+    assert len(first_rows) == queries.LANDING_PAGE_SIZE
+    assert first_rows[0]["trip_id"] == "trip-01"
+    assert first_rows[-1]["trip_id"] == "trip-50"
+    assert first_page == {"page": 1, "first_item": 1, "has_previous": False, "has_next": True}
+    assert [row["trip_id"] for row in second_rows] == ["trip-51", "trip-52"]
+    assert second_page == {"page": 2, "first_item": 51, "has_previous": True, "has_next": False}
+
+
+def test_page_parameter_defaults_to_first_page() -> None:
+    requested_page = 3
+
+    assert queries._selected_page(None) == 1  # noqa: SLF001
+    assert queries._selected_page("not-a-number") == 1  # noqa: SLF001
+    assert queries._selected_page("-4") == 1  # noqa: SLF001
+    assert queries._selected_page(str(requested_page)) == requested_page  # noqa: SLF001
+    assert queries._selected_page(str(2**128)) == queries.MAX_PAGE  # noqa: SLF001
+
+
+def test_ranked_entities_apply_limit_and_offset(tmp_path: Path) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table mart_line_window_summary as
+            select
+                range::varchar as line,
+                'bus' as mode,
+                'zone1_public' as universe_type,
+                'day' as window_type,
+                '2026-06-30' as window_key
+            from range(6);
+
+            create table mart_entity_rankings as
+            select
+                range::varchar as entity_id,
+                'bus' as mode,
+                'line' as entity_type,
+                'median_delay_seconds' as metric,
+                'day' as window_type,
+                '2026-06-30' as window_key,
+                range + 1 as rank,
+                6 as n_entities,
+                range::double as value
+            from range(6);
+            """
+        )
+
+    rows = queries._ranked_entities(  # noqa: SLF001
+        db_path, "2026-06-30", "line", "median_delay_seconds", "bus", limit=3, offset=2
+    )
+
+    assert [row["rank"] for row in rows] == [3, 4, 5]
+
+
+def test_ranked_entity_limit_applies_per_mode(tmp_path: Path) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table mart_line_window_summary as
+            select
+                mode || range::varchar as line,
+                mode,
+                'zone1_public' as universe_type,
+                'day' as window_type,
+                '2026-06-30' as window_key
+            from (values ('bus'), ('tram')) as modes(mode)
+            cross join range(3);
+
+            create table mart_entity_rankings as
+            select
+                mode || range::varchar as entity_id,
+                mode,
+                'line' as entity_type,
+                'median_delay_seconds' as metric,
+                'day' as window_type,
+                '2026-06-30' as window_key,
+                range + 1 as rank,
+                3 as n_entities,
+                range::double as value
+            from (values ('bus'), ('tram')) as modes(mode)
+            cross join range(3);
+            """
+        )
+
+    rows = queries._ranked_entities(  # noqa: SLF001
+        db_path, "2026-06-30", "line", "median_delay_seconds", limit=2
+    )
+
+    assert [(row["mode"], row["rank"]) for row in rows] == [
+        ("bus", 1),
+        ("bus", 2),
+        ("tram", 1),
+        ("tram", 2),
+    ]
+
+
+def test_selected_line_trip_rows_are_paginated(tmp_path: Path) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table mart_trip_daily as
+            select
+                date '2026-06-30' as service_date,
+                'bus' as mode,
+                '1' as line,
+                'complete' as trip_quality,
+                range + 1 as departure_rank,
+                'trip-' || lpad((range + 1)::varchar, 2, '0') as trip_id
+            from range(52)
+            """
+        )
+
+    rows, pagination = queries._selected_line_trip_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "1", "departure_rank", 2
+    )
+
+    assert [row["trip_id"] for row in rows] == ["trip-51", "trip-52"]
+    assert pagination == {"page": 2, "first_item": 51, "has_previous": True, "has_next": False}
+
+
+def test_stop_line_rows_include_records_after_old_top_30_cap(tmp_path: Path) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table mart_stop_line_window_summary as
+            select
+                'day' as window_type,
+                '2026-06-30' as window_key,
+                'bus' as mode,
+                'stop_post' as entity_type,
+                '100101' as entity_id,
+                range + 1 as display_rank
+            from range(52)
+            """
+        )
+
+    first_rows, first_page = queries._stop_line_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "100101", 1
+    )
+    second_rows, second_page = queries._stop_line_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "100101", 2
+    )
+
+    assert [row["display_rank"] for row in first_rows][-1] == queries.LANDING_PAGE_SIZE
+    assert first_page["has_next"] is True
+    assert [row["display_rank"] for row in second_rows] == [51, 52]
+    assert second_page["has_next"] is False
+
+
+def test_page_result_supports_compact_picker_pages() -> None:
+    rows = [{"id": index} for index in range(queries.STOP_PICKER_PAGE_SIZE + 1)]
+
+    page_rows, pagination = queries._page_result(  # noqa: SLF001
+        rows, 2, page_size=queries.STOP_PICKER_PAGE_SIZE
+    )
+
+    assert len(page_rows) == queries.STOP_PICKER_PAGE_SIZE
+    assert pagination == {"page": 2, "first_item": 13, "has_previous": True, "has_next": True}
+
+
 def _create_line_smoke_db(db_path: Path) -> None:
     with duckdb.connect(str(db_path)) as connection:
         _execute_many(
@@ -114,6 +309,8 @@ def _line_course_window_sql() -> str:
         select * from (
             values
                 ('1', 'bus', 0, 'Bus destination', 'day', '2026-06-30', 4, 1),
+                ('1', 'bus', 1, 'Bus destination 2', 'day', '2026-06-30', 3, 2),
+                ('1', 'bus', 2, 'Bus destination 3', 'day', '2026-06-30', 2, 3),
                 ('1', 'tram', 0, 'Tram destination', 'day', '2026-06-30', 4, 1)
         ) as rows(line, mode, direction_id, trip_headsign, window_type, window_key, trip_count, course_rank)
     """
@@ -125,6 +322,7 @@ def _line_course_stop_window_sql() -> str:
         select * from (
             values
                 ('1', 'bus', 0, 'Bus destination', '7002', '700201', '01', 'Bus Stop', 'day', '2026-06-30', 1, 4, 20.0, 30.0, 60.0, 30.0, 0, 4, 0, 0.0, 1.0, 0.0, [], true),
+                ('1', 'bus', 2, 'Bus destination 3', '7003', '700301', '01', 'Bus Stop 37', 'day', '2026-06-30', 37, 1, 20.0, 30.0, 60.0, 30.0, 0, 1, 0, 0.0, 1.0, 0.0, [], false),
                 ('1', 'tram', 0, 'Tram destination', '8002', '800201', '01', 'Tram Stop', 'day', '2026-06-30', 1, 4, 200.0, 220.0, 300.0, 80.0, 0, 1, 3, 0.0, 0.25, 0.75, [], true)
         ) as rows(
             line, mode, direction_id, trip_headsign, stop_group_id, stop_id, stop_post_code, stop_name, window_type,

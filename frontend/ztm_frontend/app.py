@@ -59,6 +59,7 @@ def create_app() -> Flask:
                 _selected_mode(request.args.get("mode")),
                 request.args.get("date"),
                 request.args.get("rank"),
+                request.args.get("page"),
             ),
         )
 
@@ -77,6 +78,8 @@ def create_app() -> Flask:
                 request.args.get("date"),
                 request.args.get("view"),
                 request.args.get("rank"),
+                request.args.get("page"),
+                request.args.get("picker_page"),
             ),
         )
 
@@ -94,6 +97,7 @@ def create_app() -> Flask:
                 request.args.get("vehicle"),
                 request.args.get("sort"),
                 request.args.get("rank"),
+                request.args.get("page"),
             ),
         )
 

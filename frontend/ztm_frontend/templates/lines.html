@@ -42,7 +42,7 @@
           <div class="landing-rank-head line-rank-grid"><div>#</div><div>Line</div><div>Route</div><div></div><div>Med</div><div>On t</div></div>
           {% for row in line_landing_rows %}
             <a class="landing-rank-row line-rank-grid" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">
-              <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
+              <span class="landing-rank-index mono">{{ '%02d'|format(pagination.first_item + loop.index0) }}</span>
               <span class="landing-line-pill mono {% if row.mode == 'tram' %}tram{% endif %}">{{ row.route_short_name }}</span>
               <span class="landing-route" title="{{ row.route_label }}">{{ row.route_label }}</span>
               {{ ui.hist(row.shape, true) }}
@@ -51,6 +51,11 @@
             </a>
           {% endfor %}
         </section>
+        {{ ui.pager(
+          pagination,
+          url_for('lines', mode=selected_mode, date=selected_date, rank=selected_rank, page=pagination.page - 1) if pagination.has_previous else none,
+          url_for('lines', mode=selected_mode, date=selected_date, rank=selected_rank, page=pagination.page + 1) if pagination.has_next else none
+        ) }}
       {% elif summary %}
         <header class="head line-headline">
           <h1 class="hero-title mono">{{ summary.route_short_name }}</h1>
