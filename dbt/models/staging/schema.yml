@@ -187,6 +187,33 @@ unit_tests:
           ingested_at: '2026-01-14 23:31:00+00:00'
           gps_date: '2026-01-15'
 
+  - name: stg_gps__pings_deterministically_breaks_ingestion_time_ties
+    model: stg_gps__pings
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: source('raw', 'raw_gps_pings')
+        format: sql
+        rows: |
+          select '188' as Lines, '0007' as Brigade, 52.2 as Lat, 21.1 as Lon, timestamp('2026-01-15 11:00:00+00:00') as Time, '1234' as VehicleNumber, 1 as vehicle_type, timestamp('2026-01-15 11:01:00+00:00') as ingested_at
+          union all select '187', '0008', 52.2, 21.1, timestamp('2026-01-15 11:00:00+00:00'), '1234', 1, timestamp('2026-01-15 11:01:00+00:00')
+          union all select '187', '0007', 52.3, 21.1, timestamp('2026-01-15 11:00:00+00:00'), '1234', 1, timestamp('2026-01-15 11:01:00+00:00')
+          union all select '187', '0007', 52.2, 21.2, timestamp('2026-01-15 11:00:00+00:00'), '1234', 1, timestamp('2026-01-15 11:01:00+00:00')
+          union all select '187', '0007', 52.2, 21.1, timestamp('2026-01-15 11:00:00+00:00'), '1234', 1, timestamp('2026-01-15 11:01:00+00:00')
+          union all select cast(null as string), '0007', 52.2, 21.1, timestamp('2026-01-15 11:00:00+00:00'), '1234', 1, timestamp('2026-01-15 11:01:00+00:00')
+    expect:
+      rows:
+        - line: '187'
+          brigade: '7'
+          lat: 52.2
+          lon: 21.1
+          gps_time: '2026-01-15 11:00:00+00:00'
+          vehicle_number: '1234'
+          vehicle_type: 1
+          ingested_at: '2026-01-15 11:01:00+00:00'
+          gps_date: '2026-01-15'
+
   - name: stg_gtfs__trips_spans_snapshots_and_renames_brigade
     model: stg_gtfs__trips
     given:

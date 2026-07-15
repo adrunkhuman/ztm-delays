@@ -297,6 +297,40 @@ def test_normalize_keeps_same_vehicle_number_separate_across_types(tmp_path: Pat
     ]
 
 
+def test_normalize_deterministically_breaks_ingestion_time_ties(tmp_path: Path) -> None:
+    gps = tmp_path / "gps"
+    _gps(
+        gps,
+        [
+            _row(Lines="188", Brigade="0007", Lat=52.2, Lon=21.1),
+            _row(Lines="187", Brigade="0008", Lat=52.2, Lon=21.1),
+            _row(Lines="187", Brigade="0007", Lat=52.3, Lon=21.1),
+            _row(Lines="187", Brigade="0007", Lat=52.2, Lon=21.2),
+            _row(Lines="187", Brigade="0007", Lat=52.2, Lon=21.1),
+            _row(Lines=None, Brigade="0007", Lat=52.2, Lon=21.1),
+        ],
+    )
+    output = tmp_path / "normalized.parquet"
+
+    with duckdb.connect() as connection:
+        rows = normalize(connection, [next(gps.rglob("*.parquet"))], (date(2026, 1, 15),), output)
+
+    assert rows == 1
+    assert pq.read_table(output).to_pylist() == [
+        {
+            "line": "187",
+            "brigade": "7",
+            "lat": 52.2,
+            "lon": 21.1,
+            "gps_time": datetime(2026, 1, 14, 23, 30, tzinfo=UTC),
+            "vehicle_number": "2",
+            "vehicle_type": 1,
+            "ingested_at": datetime(2026, 1, 15, 0, 0, tzinfo=UTC),
+            "gps_date": date(2026, 1, 15),
+        }
+    ]
+
+
 def test_vehicle_streams_partition_same_number_by_type(tmp_path: Path) -> None:
     config = RunConfig(
         date(2026, 1, 15),
