@@ -88,11 +88,13 @@ SERVING_EXPORT_GCS_PREFIX=serving/duckdb/staging
 SERVING_EXPORT_MAX_BYTES=21474836480
 SERVING_EXPORT_MAX_SOURCE_BYTES=21474836480
 SERVING_EXPORT_MAX_DUCKDB_BYTES=21474836480
+SERVING_EXPORT_STAGING_RETENTION_DAYS=3
 ```
 
 `SERVING_EXPORT_MAX_SOURCE_BYTES` and `SERVING_EXPORT_MAX_DUCKDB_BYTES` default to `SERVING_EXPORT_MAX_BYTES`.
 
-Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`, `max_source_bytes`, `max_duckdb_bytes`, and `cleanup_gcs_staging`.
+Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`,
+`max_source_bytes`, `max_duckdb_bytes`, `cleanup_gcs_staging`, and `staging_retention_days`.
 
 Use one shared host directory for Airflow and frontend serving mounts. Airflow needs write access; frontend should only need read access. On the current VPS the bind-mounted host directory should be writable by the Airflow container user:
 
@@ -100,10 +102,15 @@ Use one shared host directory for Airflow and frontend serving mounts. Airflow n
 sudo install -d -o 50000 -g 0 -m 0775 /home/ubuntu/ztm-pipeline/serving
 ```
 
-Failed exports leave GCS staging files for inspection. Remove them manually when no longer needed:
+Successful exports delete their own temporary GCS objects by default. After every successful publication, the exporter
+also deletes temporary objects from failed or debug exports older than `staging_retention_days` (three days by default).
+The sweep only covers `export_id=...` and `partition_staging/export_id=...`; it never deletes `partition_cache`.
+
+Remove a failed export manually before retention expires when it is no longer needed:
 
 ```bash
 gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=EXPORT_ID/
+gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/partition_staging/export_id=EXPORT_ID/
 ```
 
 ## Manual Recovery

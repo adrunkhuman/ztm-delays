@@ -275,7 +275,8 @@ Useful manual config:
   "validation_memory_limit_mb": 1024,
   "validation_temp_limit_mb": 2048,
   "validation_threads": 1,
-  "cleanup_gcs_staging": false
+  "cleanup_gcs_staging": false,
+  "staging_retention_days": 3
 }
 ```
 
@@ -313,11 +314,27 @@ Use a fresh `export_id` for every rerun. The export ID is embedded in determinis
 successful attempts reserve those job IDs even if GCS staging files are later removed.
 
 The export queries BigQuery table metadata/date ranges, extracts tables to GCS, lists and downloads GCS staging objects,
-and writes the local serving file. If `cleanup_gcs_staging=true`, it also deletes staging objects after a successful
-export. Failed exports leave GCS staging files behind for inspection; remove them manually with:
+and writes the local serving file. If `cleanup_gcs_staging=true`, it attempts to delete the current run's temporary
+staging objects after a successful export. It then performs a best-effort sweep of temporary objects from failed or debug
+runs older than `staging_retention_days`, which defaults to three days and can also be set with
+`SERVING_EXPORT_STAGING_RETENTION_DAYS`. Both cleanup phases are best-effort: failures are logged but do not turn an
+already published artifact into a failed export.
+
+The stale sweep is deliberately restricted to these roots:
+
+```text
+serving/duckdb/staging/export_id=...
+serving/duckdb/staging/partition_staging/export_id=...
+```
+
+It never lists or deletes `serving/duckdb/staging/partition_cache`, which is the active historical partition cache.
+Do not apply a short bucket lifecycle rule to the entire `serving/duckdb/staging/**` prefix.
+
+Failed exports remain available during the retention window. Remove one manually with:
 
 ```bash
 gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=EXPORT_ID/
+gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/partition_staging/export_id=EXPORT_ID/
 ```
 
 Killed exports can also leave local hidden build artifacts under the serving directory. After confirming no serving
