@@ -422,8 +422,8 @@ def _run_stop_alignment_worker(worker: StopAlignmentWorker) -> dict[str, int]:
     passenger_rows: list[dict[str, Any]] = []
     counts = _stop_alignment_counts()
     primary_error: BaseException | None = None
-    normalized_sql = str(worker.normalized_path).replace("'", "''")
-    inputs_sql = str(worker.inputs_path).replace("'", "''")
+    normalized_sql = _quoted_path(worker.normalized_path)
+    inputs_sql = _quoted_path(worker.inputs_path)
     try:
         normalized_connection = duckdb.connect()
         inputs_connection = duckdb.connect()
@@ -434,7 +434,7 @@ def _run_stop_alignment_worker(worker: StopAlignmentWorker) -> dict[str, int]:
             connection.execute("set threads to 1")
             connection.execute(f"set memory_limit to '{worker.memory_limit}'")
             connection.execute(f"set max_temp_directory_size to '{worker.temp_limit}'")
-            connection.execute(f"set temp_directory to '{str(connection_temp_dir).replace("'", "''")}'")
+            connection.execute(f"set temp_directory to '{_quoted_path(connection_temp_dir)}'")
         operational_writer = pq.ParquetWriter(operational_path, STOP_CROSSING_SCHEMA, compression="zstd")
         passenger_writer = pq.ParquetWriter(passenger_path, PASSENGER_STOP_ARRIVAL_SCHEMA, compression="zstd")
         normalized_rows = OrderedArrowRows(
@@ -541,6 +541,10 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _quoted_path(path: Path) -> str:
+    return str(path).replace("'", "''")
+
+
 class ReconstructionRun:
     """Prepare a single Warsaw day without materializing a full GPS day in Python."""
 
@@ -562,7 +566,7 @@ class ReconstructionRun:
             self.connection.execute(f"set threads to {self.config.threads}")
             self.connection.execute(f"set memory_limit to '{self.config.memory_limit}'")
             self.connection.execute(f"set max_temp_directory_size to '{self.config.temp_limit}'")
-            self.connection.execute(f"set temp_directory to '{str(temp).replace("'", "''")}'")
+            self.connection.execute(f"set temp_directory to '{_quoted_path(temp)}'")
         except duckdb.Error as exc:
             raise fail("resource_limit", "unable to configure DuckDB resource limits", 14) from exc
         return self
@@ -664,9 +668,9 @@ class ReconstructionRun:
         if pq.read_schema(semantics_path) != STOP_SEMANTICS_SCHEMA:
             raise fail("invalid_output", "stop semantics schema validation failed", 15)
         self._write_trip_universe(rows, snapshot, settled_passenger_trips, work / "trip_universe.parquet")
-        schedule_sql = str(work / "duty_schedule.parquet").replace("'", "''")
-        semantics_sql = str(semantics_path).replace("'", "''")
-        terminal_sql = str(work / ".terminal_courses.parquet").replace("'", "''")
+        schedule_sql = _quoted_path(work / "duty_schedule.parquet")
+        semantics_sql = _quoted_path(semantics_path)
+        terminal_sql = _quoted_path(work / ".terminal_courses.parquet")
         self._connection().execute(
             f"""
             copy (
@@ -818,7 +822,7 @@ class ReconstructionRun:
             "group by vehicle_type, vehicle_number)"
         ).fetchone()
         artifact_bytes = sum(path.stat().st_size for path in work.iterdir() if path.is_file())
-        execution_sql = str(work / "duty_execution.parquet").replace("'", "''")
+        execution_sql = _quoted_path(work / "duty_execution.parquet")
         accepted_fact_executions = connection.execute(
             f"""
             select count(*)
@@ -956,10 +960,10 @@ class ReconstructionRun:
     def align_stops(self) -> dict[str, int]:
         """Align active vehicles in deterministic chunks and merge private worker shards."""
         work = self._work()
-        execution_path = str(work / "duty_execution.parquet").replace("'", "''")
-        semantics_path = str(work / "stop_semantics.parquet").replace("'", "''")
+        execution_path = _quoted_path(work / "duty_execution.parquet")
+        semantics_path = _quoted_path(work / "stop_semantics.parquet")
         inputs_path = work / ".stop_alignment_inputs.parquet"
-        inputs_sql = str(inputs_path).replace("'", "''")
+        inputs_sql = _quoted_path(inputs_path)
         shard_dir = work / ".stop-alignment-shards"
         counts = _stop_alignment_counts()
         semantic_columns = ", ".join(
@@ -1058,7 +1062,7 @@ class ReconstructionRun:
                     select distinct line, brigade, vehicle_type from alignment_stream
                 )
                 select courses.*
-                from read_parquet('{str(courses).replace("'", "''")}') as courses
+                from read_parquet('{_quoted_path(courses)}') as courses
                 inner join stream_lines on courses.line = stream_lines.line
                     and courses.brigade = stream_lines.brigade
                     and ((courses.mode = 'bus' and stream_lines.vehicle_type = 1)
@@ -1073,7 +1077,7 @@ class ReconstructionRun:
             connection.unregister("alignment_stream")
 
     def _duty_keys(self) -> list[tuple[object, str, str]]:
-        schedule = str(self._work() / "duty_schedule.parquet").replace("'", "''")
+        schedule = _quoted_path(self._work() / "duty_schedule.parquet")
         return [
             (row[0], str(row[1]), str(row[2]))
             for row in self._connection()
@@ -1090,7 +1094,7 @@ class ReconstructionRun:
             self._connection()
             .execute(
                 f"""
-            select * from read_parquet('{str(courses).replace("'", "''")}')
+            select * from read_parquet('{_quoted_path(courses)}')
             where service_date = ? and gtfs_snapshot_id = ? and duty_chain_id = ?
             order by trip_order, trip_id
             """,
@@ -1107,7 +1111,7 @@ class ReconstructionRun:
             self._connection()
             .execute(
                 f"""
-            select * from read_parquet('{str(path).replace("'", "''")}')
+            select * from read_parquet('{_quoted_path(path)}')
             where service_date = ? and gtfs_snapshot_id = ? and duty_chain_id = ?
             order by trip_id, vehicle_type, vehicle_number, candidate_kind, origin_event_time, traversal_id
             """,
@@ -1122,7 +1126,7 @@ class ReconstructionRun:
         path = self.normalized_path or self._work() / "normalized_gps.parquet"
         if not path.is_file():
             raise fail("invalid_output", "normalized GPS must be prepared before iteration", 15)
-        quoted = str(path).replace("'", "''")
+        quoted = _quoted_path(path)
         connection = self._connection()
         for vehicle_type, vehicle_number in connection.execute(
             f"select distinct vehicle_type, vehicle_number from read_parquet('{quoted}') "

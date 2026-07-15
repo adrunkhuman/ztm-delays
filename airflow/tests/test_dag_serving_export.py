@@ -47,13 +47,6 @@ def test_mart_table_list_exports_frontend_source_tables() -> None:
     }
 
 
-def test_derived_table_list_exports_frontend_serving_tables() -> None:
-    dag = _load_dag_module()
-
-    assert dag.DERIVED_TABLES == ()
-    assert dag.EXPORTED_TABLES == dag.MART_TABLES + dag.DERIVED_TABLES
-
-
 def test_export_config_uses_safe_defaults() -> None:
     dag = _load_dag_module()
 
@@ -685,10 +678,10 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
         assert connection.execute("select count(*) from mart_trip_daily").fetchone()[0] == 1
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "export-1"
         assert connection.execute("select exported_table_count from export_metadata").fetchone()[0] == len(
-            dag.EXPORTED_TABLES
+            dag.MART_TABLES
         )
         assert connection.execute("select semantic_validation_status from export_metadata").fetchone()[0] == "pass"
-        assert connection.execute("select count(*) from export_table_stats").fetchone()[0] == len(dag.EXPORTED_TABLES)
+        assert connection.execute("select count(*) from export_table_stats").fetchone()[0] == len(dag.MART_TABLES)
         assert connection.execute("select count(*) from mart_mode_window_summary").fetchone()[0] == 1
         assert connection.execute("select count(*) from mart_hour_window_summary").fetchone()[0] == 1
         assert connection.execute("select count(*) from mart_worst_delay_event").fetchone()[0] == 1

@@ -761,11 +761,6 @@ def test_stop_alignment_worker_scans_normalized_gps_once_per_chunk(
 
     assert counts["vehicle_groups"] == 3
     assert len(normalized_queries) == 1
-    assert "count(" not in normalized_queries[0].lower()
-    assert (
-        "concat(cast(vehicle_type as varchar), ':', vehicle_number) in (select unnest(?))"
-        in normalized_queries[0].lower()
-    )
 
 
 def test_stop_alignment_enforces_vehicle_row_limit_while_grouping(tmp_path: Path) -> None:

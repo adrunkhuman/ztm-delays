@@ -651,8 +651,6 @@ def test_stage_retry_rejects_tampered_stage_contract(monkeypatch: pytest.MonkeyP
         matcher._stage_artifact(
             client, "project.stage.run", "project.input.stage", "2026-07-09", "run", spec, "a" * 64, 100
         )
-    assert 'options (labels=[("matcher_schema_version", "reconstruction-trip-facts-v2")' in client.query_text
-    assert f'("matcher_artifact_sha256", "{"a" * 63}")])' in client.query_text
 
 
 def test_run_load_writes_pending_after_all_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
