@@ -191,12 +191,23 @@ def _requires_later_course_reanchor(
     )
 
 
-def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Allocate a duty by comparing coherent, vehicle-specific paths."""
-    by_trip: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for item in evidence:
-        by_trip[item["trip_id"]].append(item)
-    ordered = sorted(courses, key=lambda row: (row["trip_order"], row["trip_id"]))
+def _path_signature(path: dict[str, Any], ordered: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (course["trip_id"], str(path["selected"][course["trip_id"]]["traversal_id"]))
+        for course in ordered
+        if course["trip_id"] in path["selected"]
+    )
+
+
+def _better_path(left: dict[str, Any], right: dict[str, Any], ordered: list[dict[str, Any]]) -> bool:
+    return (-left["executed"], left["timing_cost"], _path_signature(left, ordered)) < (
+        -right["executed"],
+        right["timing_cost"],
+        _path_signature(right, ordered),
+    )
+
+
+def _candidate_paths(ordered: list[dict[str, Any]], by_trip: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     vehicles = sorted(
         {
             item["vehicle_number"]
@@ -205,21 +216,6 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
             if item["candidate_kind"] == "candidate"
         }
     )
-
-    def path_signature(path: dict[str, Any]) -> tuple[tuple[str, str], ...]:
-        return tuple(
-            (course["trip_id"], str(path["selected"][course["trip_id"]]["traversal_id"]))
-            for course in ordered
-            if course["trip_id"] in path["selected"]
-        )
-
-    def better_path(left: dict[str, Any], right: dict[str, Any]) -> bool:
-        return (-left["executed"], left["timing_cost"], path_signature(left)) < (
-            -right["executed"],
-            right["timing_cost"],
-            path_signature(right),
-        )
-
     paths: list[dict[str, Any]] = []
     for vehicle in vehicles:
         states: dict[tuple[str | None, float | None], dict[str, Any]] = {
@@ -273,7 +269,7 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                         "timing_cost": timing_cost,
                     }
                     key = (traversal_id, delay)
-                    if key not in next_states or better_path(path, next_states[key]):
+                    if key not in next_states or _better_path(path, next_states[key], ordered):
                         next_states[key] = path
             # A skipped course deliberately retains timing, destination, and traversal state.
             ranked_states = sorted(
@@ -281,7 +277,7 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                 key=lambda item: (
                     -item[1]["executed"],
                     item[1]["timing_cost"],
-                    path_signature(item[1]),
+                    _path_signature(item[1], ordered),
                     str(item[0]),
                 ),
             )
@@ -296,87 +292,123 @@ def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -
                     math.inf if item[0] is None else abs(item[0]),
                     -item[1][1]["executed"],
                     item[1][1]["timing_cost"],
-                    path_signature(item[1][1]),
+                    _path_signature(item[1][1], ordered),
                 ),
             )[:DELAY_DIVERSE_STATES]
             retained = [item for _, item in diverse]
             retained_keys = {item[0] for item in retained}
             retained.extend(item for item in ranked_states if item[0] not in retained_keys)
             states = dict(retained[:MAX_PATH_STATES])
-        best = min(states.values(), key=lambda path: (-path["executed"], path["timing_cost"], path_signature(path)))
+        best = min(
+            states.values(),
+            key=lambda path: (-path["executed"], path["timing_cost"], _path_signature(path, ordered)),
+        )
         if best["executed"]:
             paths.append({**best, "vehicle_number": vehicle})
 
-    paths.sort(key=lambda path: (-path["executed"], path["timing_cost"], path["vehicle_number"], path_signature(path)))
-    winning_path = paths[0] if paths else None
+    paths.sort(
+        key=lambda path: (
+            -path["executed"],
+            path["timing_cost"],
+            path["vehicle_number"],
+            _path_signature(path, ordered),
+        )
+    )
+    return paths
+
+
+def _fill_winning_path_gaps(
+    ordered: list[dict[str, Any]],
+    by_trip: dict[str, list[dict[str, Any]]],
+    winning_path: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
     selected = dict(winning_path["selected"]) if winning_path else {}
-    if winning_path:
-        course_by_trip = {course["trip_id"]: course for course in ordered}
-        used = {str(candidate["traversal_id"]) for candidate in selected.values()}
-        for index, course in enumerate(ordered):
-            if course["trip_id"] in selected:
-                continue
-            preceding = next(
-                (selected[row["trip_id"]] for row in reversed(ordered[:index]) if row["trip_id"] in selected),
-                None,
+    if winning_path is None:
+        return selected
+
+    course_by_trip = {course["trip_id"]: course for course in ordered}
+    used = {str(candidate["traversal_id"]) for candidate in selected.values()}
+    for index, course in enumerate(ordered):
+        if course["trip_id"] in selected:
+            continue
+        preceding = next(
+            (selected[row["trip_id"]] for row in reversed(ordered[:index]) if row["trip_id"] in selected),
+            None,
+        )
+        preceding_course = next(
+            (row for row in reversed(ordered[:index]) if row["trip_id"] in selected),
+            None,
+        )
+        following = next(
+            (selected[row["trip_id"]] for row in ordered[index + 1 :] if row["trip_id"] in selected),
+            None,
+        )
+        candidates = [
+            item
+            for item in by_trip[course["trip_id"]]
+            if item["candidate_kind"] == "candidate"
+            and item["vehicle_number"] == winning_path["vehicle_number"]
+            and _plausible_schedule_offset(course, item)
+            and str(item["traversal_id"]) not in used
+            and (preceding is None or item["departure_event_time"] > preceding["destination_event_time"])
+            and (
+                preceding is None
+                or preceding_course is None
+                or not _requires_later_course_reanchor(preceding_course, preceding, course, item)
             )
-            preceding_course = next(
-                (row for row in reversed(ordered[:index]) if row["trip_id"] in selected),
-                None,
-            )
-            following = next(
-                (selected[row["trip_id"]] for row in ordered[index + 1 :] if row["trip_id"] in selected),
-                None,
-            )
-            candidates = [
-                item
-                for item in by_trip[course["trip_id"]]
-                if item["candidate_kind"] == "candidate"
-                and item["vehicle_number"] == winning_path["vehicle_number"]
-                and _plausible_schedule_offset(course, item)
-                and str(item["traversal_id"]) not in used
-                and (preceding is None or item["departure_event_time"] > preceding["destination_event_time"])
-                and (
-                    preceding is None
-                    or preceding_course is None
-                    or not _requires_later_course_reanchor(preceding_course, preceding, course, item)
-                )
-                and (following is None or item["destination_event_time"] < following["departure_event_time"])
-            ]
-            if not candidates:
-                continue
-            neighboring_delays = [
-                (candidate["departure_event_time"] - neighbor["scheduled_start_time"]).total_seconds()
-                for candidate in (preceding, following)
-                if candidate is not None
-                for neighbor in (course_by_trip[candidate["trip_id"]],)
-            ]
-            expected_delay = sum(neighboring_delays) / len(neighboring_delays) if neighboring_delays else 0.0
-            chosen = min(
-                candidates,
-                key=lambda item: (
-                    abs(
-                        (item["departure_event_time"] - course["scheduled_start_time"]).total_seconds() - expected_delay
-                    ),
-                    item["origin_event_time"],
-                    item["destination_event_time"],
-                    str(item["traversal_id"]),
-                ),
-            )
-            selected[course["trip_id"]] = chosen
-            used.add(str(chosen["traversal_id"]))
+            and (following is None or item["destination_event_time"] < following["departure_event_time"])
+        ]
+        if not candidates:
+            continue
+        neighboring_delays = [
+            (candidate["departure_event_time"] - neighbor["scheduled_start_time"]).total_seconds()
+            for candidate in (preceding, following)
+            if candidate is not None
+            for neighbor in (course_by_trip[candidate["trip_id"]],)
+        ]
+        expected_delay = sum(neighboring_delays) / len(neighboring_delays) if neighboring_delays else 0.0
+        chosen = min(
+            candidates,
+            key=lambda item: (
+                abs((item["departure_event_time"] - course["scheduled_start_time"]).total_seconds() - expected_delay),
+                item["origin_event_time"],
+                item["destination_event_time"],
+                str(item["traversal_id"]),
+            ),
+        )
+        selected[course["trip_id"]] = chosen
+        used.add(str(chosen["traversal_id"]))
+    return selected
+
+
+def _ambiguous_trip_ids(ordered: list[dict[str, Any]], paths: list[dict[str, Any]]) -> set[str]:
     ambiguous_trip_ids: set[str] = set()
-    if winning_path:
-        for path in paths[1:]:
-            if path["executed"] != winning_path["executed"]:
-                break
-            if path["timing_cost"] - winning_path["timing_cost"] > PATH_TIMING_TIE_SECONDS:
-                break
-            for course in ordered:
-                winner = winning_path["selected"].get(course["trip_id"])
-                contender = path["selected"].get(course["trip_id"])
-                if winner != contender:
-                    ambiguous_trip_ids.add(course["trip_id"])
+    if not paths:
+        return ambiguous_trip_ids
+    winning_path = paths[0]
+    for path in paths[1:]:
+        if path["executed"] != winning_path["executed"]:
+            break
+        if path["timing_cost"] - winning_path["timing_cost"] > PATH_TIMING_TIE_SECONDS:
+            break
+        for course in ordered:
+            winner = winning_path["selected"].get(course["trip_id"])
+            contender = path["selected"].get(course["trip_id"])
+            if winner != contender:
+                ambiguous_trip_ids.add(course["trip_id"])
+    return ambiguous_trip_ids
+
+
+def settle_duty(courses: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Allocate a duty by comparing coherent, vehicle-specific paths."""
+    by_trip: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in evidence:
+        by_trip[item["trip_id"]].append(item)
+    ordered = sorted(courses, key=lambda row: (row["trip_order"], row["trip_id"]))
+    paths = _candidate_paths(ordered, by_trip)
+    winning_path = paths[0] if paths else None
+    selected = _fill_winning_path_gaps(ordered, by_trip, winning_path)
+    ambiguous_trip_ids = _ambiguous_trip_ids(ordered, paths)
 
     outcomes = []
     for index, course in enumerate(ordered):
