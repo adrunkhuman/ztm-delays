@@ -89,7 +89,8 @@ def normalize(
             ), dedup as (
               select *, row_number() over (
                 partition by vehicle_type, vehicle_number, gps_time
-                order by ingested_at desc, line, brigade, lat, lon
+                order by ingested_at desc nulls last, line nulls last, brigade nulls last,
+                  lat nulls last, lon nulls last
               ) rank from source
             ) select line, brigade, lat, lon, gps_time, vehicle_number, vehicle_type, ingested_at, gps_date from dedup
               where rank = 1 order by vehicle_type, vehicle_number, gps_time, ingested_at, line, brigade

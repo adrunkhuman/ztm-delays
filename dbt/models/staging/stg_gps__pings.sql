@@ -43,7 +43,7 @@ deduplicated as (
     from source
     qualify row_number() over (
         partition by vehicle_type, vehicle_number, gps_time
-        order by ingested_at desc
+        order by ingested_at desc nulls last, line nulls last, brigade nulls last, lat nulls last, lon nulls last
     ) = 1
 )
 
