@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytz
 from flask import Flask, current_app, render_template, request
 
-from ztm_frontend import queries
+from ztm_frontend import db, queries
 
 EARLY_DELAY_SECONDS = -60
 LATE_DELAY_SECONDS = 180
@@ -27,6 +27,7 @@ def create_app() -> Flask:
 
     app.config["ZTM_DUCKDB_PATH"] = db_path
     app.config["ZTM_DUCKDB_META_PATH"] = Path(f"{db_path}.meta.json")
+    app.teardown_appcontext(db.close_request_connections)
 
     app.add_template_filter(_format_delay, "delay")
     app.add_template_filter(_format_integer, "integer")
