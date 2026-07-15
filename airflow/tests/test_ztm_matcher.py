@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,9 @@ def test_config_uses_only_matcher_environment_contract(monkeypatch: pytest.Monke
     assert config.max_publication_bytes == matcher.DEFAULT_MAX_PUBLICATION_BYTES
     assert config.max_rss_bytes == matcher.DEFAULT_MAX_RSS_BYTES
     assert config.max_rss_bytes == 3 * 1024**3
+    assert config.staging_retention_days == 3
+    assert config.intermediate_marker_retention_days == 3
+    assert config.published_marker_retention_days == 30
 
 
 @pytest.mark.parametrize("dataset", ["", "project.dataset", "bad-dataset"])
@@ -588,6 +591,8 @@ def test_load_job_retry_validates_content_bound_identity(monkeypatch: pytest.Mon
 
     assert matcher._load_artifact(client, "matcher_stage", "run", spec, artifact) == identity
     assert client.job.result_called is True
+    assert client.updated_fields == ["expires"]
+    assert datetime.now(UTC) + timedelta(days=2) < client.table.expires < datetime.now(UTC) + timedelta(days=4)
     with pytest.raises(RuntimeError, match="destination"):
         matcher._load_artifact(
             _LoadClient(_LoadJob(identity["job_id"], "project.stage.other"), conflict=True),
@@ -649,8 +654,9 @@ def test_stage_retry_rejects_tampered_stage_contract(monkeypatch: pytest.MonkeyP
     client = Client()
     with pytest.raises(RuntimeError, match="labels"):
         matcher._stage_artifact(
-            client, "project.stage.run", "project.input.stage", "2026-07-09", "run", spec, "a" * 64, 100
+            client, "project.stage.run", "project.input.stage", "2026-07-09", "run", spec, "a" * 64, 100, 3
         )
+    assert "expiration_timestamp=timestamp_add(current_timestamp(), interval 3 day)" in client.query_text
 
 
 def test_run_load_writes_pending_after_all_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -664,6 +670,114 @@ def test_run_load_writes_pending_after_all_artifacts(monkeypatch: pytest.MonkeyP
 
     assert context["status"] == "loaded_pending"
     assert events == ["matcher", "load", "load", "load", "load", "pending"]
+
+
+def test_stale_marker_cleanup_uses_type_specific_retention_and_excludes_current_run(tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+
+    class Blob:
+        def __init__(
+            self,
+            name: str,
+            updated: datetime | None,
+            *,
+            generation: int | None = 1,
+            size: int = 10,
+        ) -> None:
+            self.name = name
+            self.updated = updated
+            self.generation = generation
+            self.size = size
+
+    blobs = [
+        Blob("matcher/runs/processing_date=2026-07-01/run_id=old/pending.json", now - timedelta(days=4)),
+        Blob("matcher/runs/processing_date=2026-07-01/run_id=old/validated.json", now - timedelta(days=4)),
+        Blob("matcher/runs/processing_date=2026-07-01/run_id=old/published.json", now - timedelta(days=14)),
+        Blob("matcher/runs/processing_date=2026-06-01/run_id=expired/published.json", now - timedelta(days=31)),
+        Blob(
+            f"matcher/runs/processing_date=2026-07-09/run_id={matcher._run_id('run')}/pending.json",
+            now - timedelta(days=4),
+        ),
+        Blob("matcher/runs/processing_date=2026-07-14/run_id=recent/pending.json", now - timedelta(days=1)),
+        Blob("matcher/runs/processing_date=2026-07-01/run_id=unknown/pending.json", None),
+        Blob("matcher/runs/processing_date=2026-07-01/run_id=unknown/other.json", now - timedelta(days=31)),
+    ]
+    deleted: list[tuple[str, int | None]] = []
+
+    class Bucket:
+        def list_blobs(self, *, prefix: str) -> list[Blob]:
+            return [blob for blob in blobs if blob.name.startswith(prefix)]
+
+        def blob(self, name: str) -> Any:
+            return types.SimpleNamespace(
+                delete=lambda *, if_generation_match: deleted.append((name, if_generation_match))
+            )
+
+    deleted_count, deleted_bytes = matcher._cleanup_stale_run_markers(
+        _Storage(Bucket()), config, "2026-07-09", "run", now
+    )
+
+    assert deleted_count == 3
+    assert deleted_bytes == 30
+    assert deleted == [
+        ("matcher/runs/processing_date=2026-07-01/run_id=old/pending.json", 1),
+        ("matcher/runs/processing_date=2026-07-01/run_id=old/validated.json", 1),
+        ("matcher/runs/processing_date=2026-06-01/run_id=expired/published.json", 1),
+    ]
+
+
+def test_staging_retention_maintains_only_exact_transient_table_prefixes(tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path)
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    tables = {
+        "ztm-data.matcher_stage.matcher_run_trip_old": types.SimpleNamespace(
+            created=now - timedelta(days=4), expires=None
+        ),
+        "ztm-data.matcher_stage.matcher_run_trip_recent": types.SimpleNamespace(
+            created=now - timedelta(days=1), expires=None
+        ),
+        "ztm-data.matcher_stage.unrelated": types.SimpleNamespace(created=now - timedelta(days=30), expires=None),
+        "ztm-data.matcher_input.matcher_run_stage_trip_old": types.SimpleNamespace(
+            created=now - timedelta(days=4), expires=None
+        ),
+        "ztm-data.matcher_input.reconstruction_trip_facts": types.SimpleNamespace(
+            created=now - timedelta(days=30), expires=None
+        ),
+    }
+    deleted: list[str] = []
+    updated: list[str] = []
+
+    class Client:
+        def list_tables(self, dataset_id: str) -> list[Any]:
+            prefix = f"{dataset_id}."
+            return [
+                types.SimpleNamespace(table_id=name.removeprefix(prefix)) for name in tables if name.startswith(prefix)
+            ]
+
+        def get_table(self, table_id: str) -> Any:
+            return tables[table_id]
+
+        def delete_table(self, table_id: str, *, not_found_ok: bool) -> None:
+            assert not_found_ok
+            deleted.append(table_id)
+
+        def update_table(self, table: Any, fields: list[str]) -> Any:
+            assert fields == ["expires"]
+            updated.append(next(name for name, candidate in tables.items() if candidate is table))
+            return table
+
+    result = matcher._maintain_staging_table_retention(Client(), config, now)
+
+    assert result == (2, 1)
+    assert deleted == [
+        "ztm-data.matcher_stage.matcher_run_trip_old",
+        "ztm-data.matcher_input.matcher_run_stage_trip_old",
+    ]
+    assert updated == ["ztm-data.matcher_stage.matcher_run_trip_recent"]
+    assert tables[updated[0]].expires == datetime(2026, 7, 17, tzinfo=UTC)
 
 
 def test_run_load_does_not_write_pending_after_artifact_failure(
@@ -881,6 +995,7 @@ def test_publication_writes_published_marker_after_post_validation(
     marker["immutable_run_identity"] = matcher._immutable_matcher_run_identity(marker)
     queries: list[str] = []
     written: list[dict[str, object]] = []
+    post_publish_events: list[str] = []
     monkeypatch.setattr(matcher.MatcherConfig, "from_env", lambda: config)
     monkeypatch.setattr(matcher.storage, "Client", lambda **_kwargs: object())
     monkeypatch.setattr(matcher.bigquery, "Client", lambda **_kwargs: object())
@@ -903,7 +1018,19 @@ def test_publication_writes_published_marker_after_post_validation(
     monkeypatch.setattr(
         matcher,
         "_write_published_marker",
-        lambda _client, _config, _date, _run, payload: written.append(payload) or "gs://published",
+        lambda _client, _config, _date, _run, payload: (
+            written.append(payload) or post_publish_events.append("marker") or "gs://published"
+        ),
+    )
+    monkeypatch.setattr(
+        matcher,
+        "_delete_publication_stages_best_effort",
+        lambda *_args: post_publish_events.append("delete_stages"),
+    )
+    monkeypatch.setattr(
+        matcher,
+        "_cleanup_stale_run_markers_best_effort",
+        lambda *_args: post_publish_events.append("cleanup_markers"),
     )
 
     result = matcher.publish_staged_artifacts("2026-07-09", "run")
@@ -911,6 +1038,52 @@ def test_publication_writes_published_marker_after_post_validation(
     assert result["status"] == "published"
     assert len(queries) == 1
     assert written[0]["transaction_job_id"].startswith("matcher_publish_v2_replace_all")
+    assert post_publish_events == ["marker", "delete_stages", "cleanup_markers"]
+
+
+def test_publication_stage_cleanup_deletes_only_run_scoped_stage_tables(tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    published = {
+        spec.key: {
+            "staged_table": f"project.matcher_input.matcher_run_stage_{spec.key}",
+            "stable_table": f"project.matcher_input.{matcher.STABLE_INPUT_TABLES[spec.key]}",
+        }
+        for spec in matcher.ARTIFACTS
+    }
+    deleted: list[tuple[str, bool]] = []
+    client = types.SimpleNamespace(
+        delete_table=lambda table_id, *, not_found_ok: deleted.append((table_id, not_found_ok))
+    )
+
+    matcher._delete_publication_stages_best_effort(client, published)
+
+    assert deleted == [(f"project.matcher_input.matcher_run_stage_{spec.key}", True) for spec in matcher.ARTIFACTS]
+    assert not any(
+        table_id.endswith(matcher.STABLE_INPUT_TABLES[spec.key])
+        for table_id, _ in deleted
+        for spec in matcher.ARTIFACTS
+    )
+
+
+def test_publication_stage_cleanup_continues_after_one_delete_failure(tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    published = {
+        spec.key: {"staged_table": f"project.matcher_input.matcher_run_stage_{spec.key}"} for spec in matcher.ARTIFACTS
+    }
+    attempted: list[str] = []
+
+    def delete_table(table_id: str, *, not_found_ok: bool) -> None:
+        assert not_found_ok
+        attempted.append(table_id)
+        if len(attempted) == 2:
+            raise RuntimeError("delete unavailable")
+
+    matcher._delete_publication_stages_best_effort(
+        types.SimpleNamespace(delete_table=delete_table),
+        published,
+    )
+
+    assert attempted == [f"project.matcher_input.matcher_run_stage_{spec.key}" for spec in matcher.ARTIFACTS]
 
 
 def test_reused_transaction_cannot_certify_newer_partition_replacement(
@@ -1096,6 +1269,8 @@ class _LoadClient:
     def __init__(self, job: _LoadJob, *, conflict: bool) -> None:
         self.job = job
         self.conflict = conflict
+        self.table = types.SimpleNamespace(expires=None)
+        self.updated_fields: list[str] = []
 
     def load_table_from_file(self, _source: Any, _table: str, **_kwargs: Any) -> _LoadJob:
         if self.conflict:
@@ -1104,6 +1279,13 @@ class _LoadClient:
 
     def get_job(self, _job_id: str, **_kwargs: Any) -> _LoadJob:
         return self.job
+
+    def get_table(self, _table_id: str) -> Any:
+        return self.table
+
+    def update_table(self, table: Any, fields: list[str]) -> Any:
+        self.updated_fields.extend(fields)
+        return table
 
 
 def _stub_run_load(
@@ -1133,7 +1315,7 @@ def _stub_run_load(
     monkeypatch.setattr(
         matcher,
         "_load_artifact",
-        lambda _client, dataset, run_id, spec, loaded: (
+        lambda _client, dataset, run_id, spec, loaded, *_args: (
             events.append("load") or matcher._table_identity(dataset, run_id, spec, loaded.sha256)
         ),
     )
@@ -1141,6 +1323,8 @@ def _stub_run_load(
     monkeypatch.setattr(matcher, "_read_validated_marker", lambda *_args: None)
     monkeypatch.setattr(matcher.bigquery, "Client", lambda **_kwargs: object())
     monkeypatch.setattr(matcher.storage, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(matcher, "_cleanup_stale_run_markers_best_effort", lambda *_args: None)
+    monkeypatch.setattr(matcher, "_maintain_staging_table_retention_best_effort", lambda *_args: None)
 
 
 def _config(matcher: types.ModuleType, workspace: Path, **overrides: Any) -> Any:

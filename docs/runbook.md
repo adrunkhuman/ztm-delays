@@ -139,6 +139,53 @@ marker cannot prove this identity: use a new Airflow run ID for controlled recov
 the mapped snapshot and GCS inventories and emits date-specific preflight and trigger commands, but it does not
 download, load, publish, or mutate warehouse data itself.
 
+Run-scoped matcher tables are diagnostic/retry artifacts, not a recovery boundary. `matcher_run_*` load tables and
+`matcher_run_stage_*` publication tables expire after `MATCHER_STAGING_RETENTION_DAYS` (three days by default).
+Publication stages are deleted best-effort only after stable-table post-validation and `published.json` creation; native
+expiration remains the fallback for failed runs and cleanup failures. The four stable matcher-input tables do not use
+either transient prefix and must never receive expiration.
+
+GCS `pending.json` and `validated.json` markers are retained for three days by default; `published.json` is retained for
+30 days. Any matcher load attempt performs best-effort marker cleanup before invoking the matcher, so failed attempts do
+not require a later successful publication for eventual marker cleanup. Immutable raw GPS/GTFS objects plus a fresh,
+deterministic run remain the recovery boundary after transient artifacts expire.
+
+Metadata-only staging audit:
+
+```sql
+with transient_tables as (
+    select
+        table_catalog,
+        table_schema,
+        table_name,
+        total_logical_bytes,
+        creation_time
+    from `ztm-data.region-europe-north1.INFORMATION_SCHEMA.TABLE_STORAGE`
+    where (table_schema = 'ztm_matcher_stage' and starts_with(table_name, 'matcher_run_'))
+       or (table_schema = 'ztm_matcher_input' and starts_with(table_name, 'matcher_run_stage_'))
+),
+
+expirations as (
+    select table_catalog, table_schema, table_name, option_value as expiration_timestamp
+    from `ztm-data.region-europe-north1.INFORMATION_SCHEMA.TABLE_OPTIONS`
+    where option_name = 'expiration_timestamp'
+)
+
+select
+    tables.table_schema,
+    count(*) as table_count,
+    sum(total_logical_bytes) as total_logical_bytes,
+    min(creation_time) as oldest_created,
+    max(creation_time) as newest_created,
+    countif(expiration_timestamp is null) as no_expiration_count,
+    min(expiration_timestamp) as earliest_expiration,
+    max(expiration_timestamp) as latest_expiration
+from transient_tables as tables
+left join expirations using (table_catalog, table_schema, table_name)
+group by tables.table_schema
+order by tables.table_schema;
+```
+
 ## Deployment Sync
 
 Deploy steps:

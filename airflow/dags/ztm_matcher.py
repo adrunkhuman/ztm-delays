@@ -11,7 +11,7 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from importlib import import_module
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
@@ -55,6 +55,9 @@ DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024**3
 DEFAULT_MAX_MARKER_BYTES = 20 * 1024**2
 DEFAULT_MAX_RSS_BYTES = 3 * 1024**3
 DEFAULT_MAX_PUBLICATION_BYTES = 5 * 1024**3
+DEFAULT_STAGING_RETENTION_DAYS = 3
+DEFAULT_INTERMEDIATE_MARKER_RETENTION_DAYS = 3
+DEFAULT_PUBLISHED_MARKER_RETENTION_DAYS = 30
 PUBLICATION_JOB_VERSION = "v2"
 IMMUTABLE_RUN_IDENTITY_VERSION = "matcher-run-identity-v1"
 HISTORICAL_RUN_ID_PREFIX = "matcher-historical-correction__"
@@ -309,6 +312,9 @@ class MatcherConfig:
     max_marker_bytes: int = DEFAULT_MAX_MARKER_BYTES
     max_rss_bytes: int = DEFAULT_MAX_RSS_BYTES
     max_publication_bytes: int = DEFAULT_MAX_PUBLICATION_BYTES
+    staging_retention_days: int = DEFAULT_STAGING_RETENTION_DAYS
+    intermediate_marker_retention_days: int = DEFAULT_INTERMEDIATE_MARKER_RETENTION_DAYS
+    published_marker_retention_days: int = DEFAULT_PUBLISHED_MARKER_RETENTION_DAYS
 
     @classmethod
     def from_env(cls) -> MatcherConfig:
@@ -337,6 +343,13 @@ class MatcherConfig:
             max_marker_bytes=_env_positive_int("MATCHER_MAX_MARKER_BYTES", DEFAULT_MAX_MARKER_BYTES),
             max_rss_bytes=_env_positive_int("MATCHER_MAX_RSS_BYTES", DEFAULT_MAX_RSS_BYTES),
             max_publication_bytes=_env_positive_int("MATCHER_MAX_PUBLICATION_BYTES", DEFAULT_MAX_PUBLICATION_BYTES),
+            staging_retention_days=_env_positive_int("MATCHER_STAGING_RETENTION_DAYS", DEFAULT_STAGING_RETENTION_DAYS),
+            intermediate_marker_retention_days=_env_positive_int(
+                "MATCHER_INTERMEDIATE_MARKER_RETENTION_DAYS", DEFAULT_INTERMEDIATE_MARKER_RETENTION_DAYS
+            ),
+            published_marker_retention_days=_env_positive_int(
+                "MATCHER_PUBLISHED_MARKER_RETENTION_DAYS", DEFAULT_PUBLISHED_MARKER_RETENTION_DAYS
+            ),
         )
 
     def validate(self) -> None:
@@ -375,6 +388,9 @@ class MatcherConfig:
             ("MATCHER_MAX_MARKER_BYTES", self.max_marker_bytes),
             ("MATCHER_MAX_RSS_BYTES", self.max_rss_bytes),
             ("MATCHER_MAX_PUBLICATION_BYTES", self.max_publication_bytes),
+            ("MATCHER_STAGING_RETENTION_DAYS", self.staging_retention_days),
+            ("MATCHER_INTERMEDIATE_MARKER_RETENTION_DAYS", self.intermediate_marker_retention_days),
+            ("MATCHER_PUBLISHED_MARKER_RETENTION_DAYS", self.published_marker_retention_days),
         ):
             if value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -994,7 +1010,12 @@ def _load_config(spec: ArtifactSpec) -> Any:
 
 
 def _load_artifact(
-    client: Any, dataset: str, run_id: str, spec: ArtifactSpec, artifact: ArtifactValidation
+    client: Any,
+    dataset: str,
+    run_id: str,
+    spec: ArtifactSpec,
+    artifact: ArtifactValidation,
+    retention_days: int = DEFAULT_STAGING_RETENTION_DAYS,
 ) -> dict[str, str]:
     table = _table_identity(dataset, run_id, spec, artifact.sha256)
     table_id = table["table_id"]
@@ -1007,8 +1028,61 @@ def _load_artifact(
         except Conflict:
             job = client.get_job(job_id, project=GCP_PROJECT, location=BIGQUERY_LOCATION)
     _verify_load_job(job, job_id, table_id, spec)
+    _set_table_expiration(client, table_id, retention_days)
     _verify_loaded_repeated_fields(client, table_id, artifact)
     return table
+
+
+def _set_table_expiration(client: Any, table_id: str, retention_days: int) -> None:
+    table = client.get_table(table_id)
+    table.expires = datetime.now(UTC) + timedelta(days=retention_days)
+    client.update_table(table, ["expires"])
+
+
+def _maintain_staging_table_retention(client: Any, config: MatcherConfig, now: datetime) -> tuple[int, int]:
+    deleted_count = 0
+    expiration_count = 0
+    targets = (
+        (config.staging_dataset or "", "matcher_run_"),
+        (config.input_dataset, "matcher_run_stage_"),
+    )
+    cutoff = now - timedelta(days=config.staging_retention_days)
+    for dataset, table_prefix in targets:
+        dataset_id = f"{GCP_PROJECT}.{dataset}"
+        for item in client.list_tables(dataset_id):
+            table_name = str(getattr(item, "table_id", ""))
+            if not table_name.startswith(table_prefix):
+                continue
+            table_id = f"{dataset_id}.{table_name}"
+            table = client.get_table(table_id)
+            created = getattr(table, "created", None)
+            if not isinstance(created, datetime):
+                continue
+            if created < cutoff:
+                client.delete_table(table_id, not_found_ok=True)
+                deleted_count += 1
+                continue
+            desired_expiration = created + timedelta(days=config.staging_retention_days)
+            expires = getattr(table, "expires", None)
+            if isinstance(expires, datetime) and expires <= desired_expiration:
+                continue
+            table.expires = desired_expiration
+            client.update_table(table, ["expires"])
+            expiration_count += 1
+    return deleted_count, expiration_count
+
+
+def _maintain_staging_table_retention_best_effort(client: Any, config: MatcherConfig, now: datetime) -> None:
+    try:
+        deleted_count, expiration_count = _maintain_staging_table_retention(client, config, now)
+    except Exception:
+        LOGGER.exception("Failed to maintain matcher staging table retention")
+        return
+    LOGGER.info(
+        "Maintained matcher staging table retention: deleted_tables=%d expiration_updates=%d",
+        deleted_count,
+        expiration_count,
+    )
 
 
 def _verify_loaded_repeated_fields(client: Any, table_id: str, artifact: ArtifactValidation) -> None:
@@ -1075,6 +1149,58 @@ def _validated_name(config: MatcherConfig, processing_date: str, run_id: str) ->
 
 def _pending_name(config: MatcherConfig, processing_date: str, run_id: str) -> str:
     return f"{config.marker_prefix}/processing_date={processing_date}/run_id={_run_id(run_id)}/pending.json"
+
+
+def _cleanup_stale_run_markers(
+    client: Any,
+    config: MatcherConfig,
+    processing_date: str,
+    run_id: str,
+    now: datetime,
+) -> tuple[int, int]:
+    bucket = client.bucket(GCS_BUCKET)
+    current_run_prefix = f"{config.marker_prefix}/processing_date={processing_date}/run_id={_run_id(run_id)}/"
+    cutoffs = {
+        "pending.json": now - timedelta(days=config.intermediate_marker_retention_days),
+        "validated.json": now - timedelta(days=config.intermediate_marker_retention_days),
+        "published.json": now - timedelta(days=config.published_marker_retention_days),
+    }
+    deleted_count = 0
+    deleted_bytes = 0
+    for blob in bucket.list_blobs(prefix=f"{config.marker_prefix}/processing_date="):
+        marker_name = PurePosixPath(blob.name).name
+        cutoff = cutoffs.get(marker_name)
+        if (
+            cutoff is None
+            or blob.name.startswith(current_run_prefix)
+            or blob.updated is None
+            or blob.generation is None
+            or blob.updated >= cutoff
+        ):
+            continue
+        deleted_bytes += int(blob.size or 0)
+        bucket.blob(blob.name).delete(if_generation_match=blob.generation)
+        deleted_count += 1
+    return deleted_count, deleted_bytes
+
+
+def _cleanup_stale_run_markers_best_effort(
+    client: Any,
+    config: MatcherConfig,
+    processing_date: str,
+    run_id: str,
+    now: datetime,
+) -> None:
+    try:
+        deleted_count, deleted_bytes = _cleanup_stale_run_markers(client, config, processing_date, run_id, now)
+    except Exception:
+        LOGGER.exception("Failed to clean stale matcher run markers")
+        return
+    LOGGER.info(
+        "Cleaned stale matcher run markers: deleted_objects=%d deleted_bytes=%d",
+        deleted_count,
+        deleted_bytes,
+    )
 
 
 def _json_bytes(payload: dict[str, object]) -> bytes:
@@ -1388,6 +1514,8 @@ def run_matcher_load(
         workspace.mkdir(parents=True, exist_ok=False)
         bq_client = bigquery.Client(project=GCP_PROJECT)
         storage_client = storage.Client(project=GCP_PROJECT)
+        _maintain_staging_table_retention_best_effort(bq_client, config, datetime.now(UTC))
+        _cleanup_stale_run_markers_best_effort(storage_client, config, processing_date, run_id, datetime.now(UTC))
         _reject_legacy_validated_marker(storage_client, config, processing_date, run_id)
         snapshot_uri = _snapshot_gcs_path(bq_client, snapshot_id)
         gps_inventory, gtfs_inventory, gps_root, gtfs_zip = _download_inputs(
@@ -1451,7 +1579,14 @@ def run_matcher_load(
         pending["immutable_run_identity"] = _immutable_matcher_run_identity(pending)
         _reject_conflicting_marker(storage_client, config, processing_date, run_id, pending)
         for spec in ARTIFACTS:
-            _load_artifact(bq_client, config.staging_dataset or "", run_id, spec, artifacts[spec.key])
+            _load_artifact(
+                bq_client,
+                config.staging_dataset or "",
+                run_id,
+                spec,
+                artifacts[spec.key],
+                config.staging_retention_days,
+            )
         pending_uri = _write_pending(storage_client, config, processing_date, run_id, pending)
     except Exception:
         if not config.keep_workspace:
@@ -1828,6 +1963,7 @@ def _stage_artifact(
     spec: ArtifactSpec,
     artifact_sha256: str,
     max_bytes: int,
+    retention_days: int = DEFAULT_STAGING_RETENTION_DAYS,
 ) -> None:
     """Create a stage only through its deterministic query job, then validate it."""
     columns = _column_list(spec)
@@ -1838,7 +1974,10 @@ def _stage_artifact(
         f"""
         create table `{staged_table}`
         partition by {spec.partition_field}
-        options (labels=[{label_sql}]) as
+        options (
+          expiration_timestamp=timestamp_add(current_timestamp(), interval {retention_days} day),
+          labels=[{label_sql}]
+        ) as
         select {columns}
         from `{source_table}`
         where {spec.partition_field} = @processing_date
@@ -1924,6 +2063,25 @@ def _write_published_marker(
     return f"gs://{GCS_BUCKET}/{name}"
 
 
+def _delete_publication_stages_best_effort(client: Any, published: dict[str, dict[str, object]]) -> None:
+    deleted_count = 0
+    failed_count = 0
+    for spec in ARTIFACTS:
+        table_id = str(published[spec.key]["staged_table"])
+        try:
+            client.delete_table(table_id, not_found_ok=True)
+        except Exception:
+            failed_count += 1
+            LOGGER.exception("Failed to delete matcher publication staging table: %s", table_id)
+            continue
+        deleted_count += 1
+    LOGGER.info(
+        "Deleted matcher publication staging tables: deleted_tables=%d failed_tables=%d",
+        deleted_count,
+        failed_count,
+    )
+
+
 def publish_staged_artifacts(
     processing_date: str,
     run_id: str,
@@ -1950,6 +2108,7 @@ def publish_staged_artifacts(
     # Complete every source/stage check before inspecting or changing stable inputs.
     # A stage failure therefore cannot delete either retained stable partition.
     bq_client = bigquery.Client(project=GCP_PROJECT)
+    _maintain_staging_table_retention_best_effort(bq_client, config, datetime.now(UTC))
     _ensure_stable_input_tables(bq_client, config.input_dataset)
     published: dict[str, dict[str, object]] = {}
     for spec in ARTIFACTS:
@@ -1982,6 +2141,7 @@ def publish_staged_artifacts(
             spec,
             sha256,
             config.max_publication_bytes,
+            config.staging_retention_days,
         )
         staged_rows = _require_exact_processing_partition(
             bq_client,
@@ -2095,6 +2255,8 @@ def publish_staged_artifacts(
             }
         },
     )
+    _delete_publication_stages_best_effort(bq_client, published)
+    _cleanup_stale_run_markers_best_effort(storage_client, config, processing_date, run_id, datetime.now(UTC))
     return {"enabled": True, "status": "published", "marker_uri": marker_uri, "stable_inputs": published}
 
 

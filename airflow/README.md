@@ -33,6 +33,9 @@ Runtime env defaults match the current VPS:
 | `MATCHER_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
 | `MATCHER_MAX_RSS_BYTES` | `3221225472` (3 GiB) |
 | `MATCHER_MAX_PUBLICATION_BYTES` | `5368709120` (5 GiB) |
+| `MATCHER_STAGING_RETENTION_DAYS` | `3` |
+| `MATCHER_INTERMEDIATE_MARKER_RETENTION_DAYS` | `3` |
+| `MATCHER_PUBLISHED_MARKER_RETENTION_DAYS` | `30` |
 
 - Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
 - `dbt/` is mounted at `DBT_PROJECT_DIR`.
@@ -68,6 +71,11 @@ Runtime env defaults match the current VPS:
 Production requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, the matcher source mount, and writable workspace and `uv` environment paths.
 
 Before publication, Airflow verifies artifact schemas, hashes, snapshot lineage, row grains, processing dates, non-empty outputs, bus/tram coverage, accepted-execution counts, peak RSS, and zero swap. It then replaces the four stable `ztm_matcher_input` partitions in one BigQuery transaction. The stable dataset and tables are created idempotently on first publication.
+
+Run-scoped BigQuery load and publication tables expire after three days. Publication staging tables are also deleted
+best-effort after the published marker exists and post-validation succeeds. Pending and validated GCS markers are kept
+for three days; published markers are kept for 30 days. Stable matcher-input tables never match the transient cleanup
+prefixes.
 
 The three fact artifacts remain partitioned by `gps_date`, which is always the matcher processing date. `source_gps_date` carries the actual raw GPS date for each direct stop observation, while dbt selects the one processing-date artifact that already contains both sides of a normal overnight trip. Stop semantics remains partitioned by `processing_date`. dbt then publishes `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` for current and prior service dates before rebuilding coverage, status, and serving marts.
 
