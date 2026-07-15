@@ -59,7 +59,7 @@ Use these names carefully:
 
 Normal nightly GPS runs download and match both source GPS dates `D-1` and `D` in one processing-date `D` artifact. They then publish current and prior service-date facts from that one artifact; `source_gps_date` retains which side of midnight produced each direct observation.
 
-Current service-date facts exclude trips ending after the processed GPS date. Those overnight trips publish on the next run, when the same service date is rebuilt as prior service.
+The initial current service-date publication excludes trips ending after the processed GPS date. Those overnight trips publish on the next run, when the same service date is rebuilt as prior service. If that service date is later rebuilt from its original processing date, fact publication preserves the newer `gps_date` overlay so the rerun cannot discard already-completed overnight trips.
 
 ## Core Tables
 

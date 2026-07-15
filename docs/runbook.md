@@ -44,6 +44,10 @@ production DAG publishes both the current service date and the prior service dat
 service-date partition can contain rows from two GPS dates with different governing GTFS snapshots; fact publication
 preserves each row's snapshot lineage and joins schedule metadata on `gtfs_snapshot_id`.
 
+When an older processing date `D` republishes current service date `D`, the fact models replace rows produced by `D` but
+retain rows already published from `gps_date > D`. Those newer rows are after-midnight overlays from a later matcher run;
+dropping them would regress the service-date partition to its pre-overnight state. For the same trip, the newer overlay wins.
+
 `insert_overwrite` replaces the listed partitions even when the compiled source query returns zero rows. Historical
 reruns must derive the governing GTFS snapshot from the warehouse processing-date mapping, not from the latest snapshot,
 and must stop on schedule-version or snapshot-lineage test failures before continuing to later dates. Those expensive
