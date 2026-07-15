@@ -65,6 +65,7 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.validation_memory_limit_mb == 1024
     assert config.validation_temp_limit_mb == 2048
     assert config.validation_threads == 1
+    assert config.staging_retention_days == 3
 
 
 def test_export_config_uses_gps_models_asset_changed_partition_dates() -> None:
@@ -179,6 +180,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
                     "validation_memory_limit_mb": 512,
                     "validation_temp_limit_mb": 768,
                     "validation_threads": 2,
+                    "staging_retention_days": 5,
                 }
             )
         }
@@ -197,6 +199,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
     assert config.validation_memory_limit_mb == 512
     assert config.validation_temp_limit_mb == 768
     assert config.validation_threads == 2
+    assert config.staging_retention_days == 5
 
 
 @pytest.mark.parametrize(
@@ -206,6 +209,9 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
         ("output_filename", "nested/ztm.duckdb", ValueError),
         ("max_source_bytes", 0, ValueError),
         ("validation_timeout_seconds", 0, ValueError),
+        ("staging_retention_days", 0, ValueError),
+        ("staging_retention_days", True, ValueError),
+        ("gcs_prefix", "/", ValueError),
         ("cleanup_gcs_staging", "yes", TypeError),
     ],
 )
@@ -568,6 +574,166 @@ def test_cleanup_gcs_staging_resolves_listed_blobs_by_name(tmp_path: Path) -> No
         "prefix/export_id=export-1/mart_trip_daily/part-000.parquet",
         "prefix/export_id=export-1/mart_trip_daily/_SUCCESS",
     ]
+
+
+def test_cleanup_stale_gcs_staging_deletes_only_expired_temporary_objects(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    old = datetime(2026, 7, 1, tzinfo=UTC)
+    cutoff = datetime(2026, 7, 2, tzinfo=UTC)
+    recent = datetime(2026, 7, 4, tzinfo=UTC)
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob("prefix/export_id=old/mart/part.parquet", updated=old, size=100),
+            FakeBlob("prefix/partition_staging/export_id=old/mart/date=2026-07-01/part.parquet", updated=old, size=200),
+            FakeBlob("prefix/export_id=cutoff/mart/part.parquet", updated=cutoff, size=300),
+            FakeBlob("prefix/export_id=recent/mart/part.parquet", updated=recent, size=400),
+            FakeBlob("prefix/export_id=current/mart/part.parquet", updated=old, size=500),
+            FakeBlob("prefix/export_id=unknown/mart/part.parquet", size=600),
+            FakeBlob("prefix/export_id=mixed/mart/old.parquet", updated=old, size=700),
+            FakeBlob("prefix/export_id=mixed/mart/recent.parquet", updated=recent, size=800),
+            FakeBlob("prefix/partition_staging/export_id=mixed/mart/old.parquet", updated=old, size=900),
+            FakeBlob("prefix/partition_cache/mart/date=2026-07-01/part.parquet", updated=old, fail_delete=True),
+        ]
+    )
+    config = dag.ExportConfig(
+        export_id="current",
+        output_dir=tmp_path,
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=1000,
+        cleanup_gcs_staging=True,
+        staging_retention_days=3,
+    )
+
+    result = dag._cleanup_stale_gcs_staging(
+        storage_client,
+        config,
+        datetime(2026, 7, 5, tzinfo=UTC),
+    )
+
+    assert result == dag.StagingCleanupResult(deleted_object_count=2, deleted_bytes=300)
+    assert storage_client.list_prefixes == [
+        "prefix/export_id=",
+        "prefix/partition_staging/export_id=",
+    ]
+    assert storage_client.deleted_blob_names == [
+        "prefix/export_id=old/mart/part.parquet",
+        "prefix/partition_staging/export_id=old/mart/date=2026-07-01/part.parquet",
+    ]
+
+
+def test_cleanup_stale_gcs_staging_is_best_effort_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    dag = _load_dag_module()
+    config = dag.ExportConfig(
+        export_id="current",
+        output_dir=tmp_path,
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=1000,
+        cleanup_gcs_staging=True,
+    )
+
+    def fail_cleanup(*_args: object) -> None:
+        raise RuntimeError("cleanup unavailable")
+
+    monkeypatch.setattr(dag, "_cleanup_stale_gcs_staging", fail_cleanup)
+
+    dag._cleanup_stale_gcs_staging_best_effort(
+        FakeStorageClient([]),
+        config,
+        datetime(2026, 7, 5, tzinfo=UTC),
+    )
+
+    assert "Failed to clean stale serving export GCS staging" in caplog.text
+
+
+def test_run_serving_export_keeps_published_result_when_current_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    dag = _load_dag_module()
+    config = dag.ExportConfig(
+        export_id="current",
+        output_dir=tmp_path,
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=1000,
+        cleanup_gcs_staging=True,
+    )
+    published = dag.ExportResult(
+        export_id="current",
+        duckdb_path=str(tmp_path / "ztm.duckdb"),
+        metadata_path=str(tmp_path / "ztm.duckdb.meta.json"),
+        duckdb_size_bytes=100,
+        source_size_bytes=200,
+        source_row_count=3,
+        exported_table_count=len(dag.MART_TABLES),
+    )
+    stale_cleanup_called = []
+
+    monkeypatch.setattr(dag.bigquery, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(dag.storage, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(dag, "_poller_status", lambda *_args: None)
+    monkeypatch.setattr(dag, "_source_table_stats", lambda *_args: [])
+    monkeypatch.setattr(dag, "_validate_source_stats", lambda *_args: None)
+    monkeypatch.setattr(dag, "_extract_and_download_marts", lambda *_args: {})
+    monkeypatch.setattr(dag, "_publish_duckdb", lambda *_args: published)
+
+    def fail_current_cleanup(*_args: object) -> None:
+        raise RuntimeError("cleanup unavailable")
+
+    monkeypatch.setattr(dag, "_cleanup_gcs_staging", fail_current_cleanup)
+    monkeypatch.setattr(
+        dag,
+        "_cleanup_stale_gcs_staging_best_effort",
+        lambda *_args: stale_cleanup_called.append(True),
+    )
+
+    result = dag._run_serving_export(config)
+
+    assert result is published
+    assert stale_cleanup_called == [True]
+    assert "Failed to clean current serving export GCS staging" in caplog.text
+
+
+def test_cleanup_stale_gcs_staging_uses_listed_generation_precondition(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob(
+                "prefix/export_id=old/mart/part.parquet",
+                updated=datetime(2026, 7, 1, tzinfo=UTC),
+                generation=1,
+                current_generation=2,
+            )
+        ]
+    )
+    config = dag.ExportConfig(
+        export_id="current",
+        output_dir=tmp_path,
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=1000,
+        cleanup_gcs_staging=True,
+    )
+
+    with pytest.raises(RuntimeError, match="stale generation was deleted"):
+        dag._cleanup_stale_gcs_staging(storage_client, config, datetime(2026, 7, 5, tzinfo=UTC))
+
+    assert storage_client.deleted_blob_names == []
 
 
 def test_configure_duckdb_build_connection_sets_resource_limits(tmp_path: Path) -> None:
@@ -1453,7 +1619,11 @@ class FakeBucket:
         self.blob_names.append(blob_name)
         if matching_blob.data:
             return matching_blob
-        return FakeBlob(blob_name, deleted_blob_names=self.deleted_blob_names)
+        return FakeBlob(
+            blob_name,
+            deleted_blob_names=self.deleted_blob_names,
+            generation=matching_blob.current_generation or matching_blob.generation,
+        )
 
     def copy_blob(self, blob: FakeBlob, _destination_bucket: FakeBucket, new_name: str) -> FakeBlob:
         if blob.fail_copy:
@@ -1472,15 +1642,21 @@ class FakeBlob:
     fail_copy: bool = False
     data: bytes = b""
     deleted_blob_names: list[str] | None = None
+    updated: datetime | None = None
+    size: int | None = None
+    generation: int | None = 1
+    current_generation: int | None = None
 
     def download_to_filename(self, filename: str) -> None:
         if self.fail_download:
             raise RuntimeError("stale listed blob was downloaded")
         Path(filename).write_text("downloaded", encoding="utf-8")
 
-    def delete(self) -> None:
+    def delete(self, *, if_generation_match: int | None = None) -> None:
         if self.fail_delete:
             raise RuntimeError("stale listed blob was deleted")
+        if if_generation_match is not None and if_generation_match != self.generation:
+            raise RuntimeError("stale generation was deleted")
         if self.deleted_blob_names is not None:
             self.deleted_blob_names.append(self.name)
 

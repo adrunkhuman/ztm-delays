@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -30,6 +31,8 @@ from ztm_airflow_common import (
     SERVING_EXPORT_MAX_BYTES,
     airflow_failure_alert,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -66,6 +69,7 @@ SEMANTIC_VALIDATION_TEMP_LIMIT_MB = 2048
 SEMANTIC_VALIDATION_THREADS = 1
 SEMANTIC_VALIDATION_MAX_REPORT_BYTES = 64 * 1024
 SEMANTIC_VALIDATION_MAX_WARNINGS = 100
+STAGING_RETENTION_DAYS = 3
 SEMANTIC_WARNING_FIELDS = {
     "serving_date_absent": {"code", "service_date"},
     "pipeline_status_mode_absent": {"code", "service_date", "mode"},
@@ -148,6 +152,7 @@ class ExportConfig:
     validation_memory_limit_mb: int = SEMANTIC_VALIDATION_MEMORY_LIMIT_MB
     validation_temp_limit_mb: int = SEMANTIC_VALIDATION_TEMP_LIMIT_MB
     validation_threads: int = SEMANTIC_VALIDATION_THREADS
+    staging_retention_days: int = STAGING_RETENTION_DAYS
 
 
 @dataclass(frozen=True)
@@ -173,6 +178,14 @@ class ExportResult:
     source_size_bytes: int
     source_row_count: int
     exported_table_count: int
+
+
+@dataclass(frozen=True)
+class StagingCleanupResult:
+    """Summary of stale temporary GCS objects deleted after publication."""
+
+    deleted_object_count: int
+    deleted_bytes: int
 
 
 @dataclass(frozen=True)
@@ -205,17 +218,20 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
     )
     if Path(output_filename).name != output_filename:
         raise ValueError("output_filename must be a bare filename")
+    gcs_prefix = _string_config(
+        conf,
+        "gcs_prefix",
+        os.getenv("SERVING_EXPORT_GCS_PREFIX", SERVING_EXPORT_GCS_PREFIX),
+    ).strip("/")
+    if not gcs_prefix:
+        raise ValueError("gcs_prefix must contain a non-slash path component")
 
     return ExportConfig(
         export_id=export_id,
         output_dir=output_dir,
         output_filename=output_filename,
         gcs_bucket=_string_config(conf, "gcs_bucket", os.getenv("GCS_BUCKET", GCS_BUCKET)),
-        gcs_prefix=_string_config(
-            conf,
-            "gcs_prefix",
-            os.getenv("SERVING_EXPORT_GCS_PREFIX", SERVING_EXPORT_GCS_PREFIX),
-        ).strip("/"),
+        gcs_prefix=gcs_prefix,
         max_source_bytes=_int_config(
             conf,
             "max_source_bytes",
@@ -247,6 +263,11 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
             conf,
             "validation_threads",
             os.getenv("SERVING_EXPORT_VALIDATION_THREADS", str(SEMANTIC_VALIDATION_THREADS)),
+        ),
+        staging_retention_days=_int_config(
+            conf,
+            "staging_retention_days",
+            os.getenv("SERVING_EXPORT_STAGING_RETENTION_DAYS", str(STAGING_RETENTION_DAYS)),
         ),
     )
 
@@ -309,7 +330,7 @@ def _int_config(conf: dict[str, object], key: str, default: str) -> int:
     value = conf.get(key, default)
     if isinstance(value, str):
         value = int(value)
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{key} must be a positive integer")
     return value
 
@@ -362,7 +383,8 @@ def _run_serving_export(config: ExportConfig) -> ExportResult:
         result = _publish_duckdb(config, parquet_paths_by_table, source_stats, exported_at, poller_status)
 
     if config.cleanup_gcs_staging:
-        _cleanup_gcs_staging(storage_client, config)
+        _cleanup_gcs_staging_best_effort(storage_client, config)
+    _cleanup_stale_gcs_staging_best_effort(storage_client, config, exported_at)
 
     return result
 
@@ -1209,8 +1231,70 @@ def _cleanup_gcs_staging(storage_client: storage.Client, config: ExportConfig) -
         f"{config.gcs_prefix}/partition_staging/export_id={config.export_id}/",
     ]
     for prefix in prefixes:
-        for blob_name in [blob.name for blob in bucket.list_blobs(prefix=prefix)]:
-            bucket.blob(blob_name).delete()
+        for blob in bucket.list_blobs(prefix=prefix):
+            bucket.blob(blob.name).delete(if_generation_match=blob.generation)
+
+
+def _cleanup_gcs_staging_best_effort(storage_client: storage.Client, config: ExportConfig) -> None:
+    try:
+        _cleanup_gcs_staging(storage_client, config)
+    except Exception:
+        LOGGER.exception("Failed to clean current serving export GCS staging")
+
+
+def _cleanup_stale_gcs_staging(
+    storage_client: storage.Client,
+    config: ExportConfig,
+    now: datetime,
+) -> StagingCleanupResult:
+    bucket = storage_client.bucket(config.gcs_bucket)
+    cutoff = now - timedelta(days=config.staging_retention_days)
+    temporary_roots = (
+        f"{config.gcs_prefix}/export_id=",
+        f"{config.gcs_prefix}/partition_staging/export_id=",
+    )
+    blobs_by_export: dict[str, list[storage.Blob]] = {}
+    for root in temporary_roots:
+        for blob in bucket.list_blobs(prefix=root):
+            relative_name = blob.name.removeprefix(root)
+            export_id, separator, _remainder = relative_name.partition("/")
+            if not separator or not export_id:
+                continue
+            blobs_by_export.setdefault(export_id, []).append(blob)
+
+    deleted_object_count = 0
+    deleted_bytes = 0
+    for export_id, blobs in blobs_by_export.items():
+        if export_id == config.export_id or any(
+            blob.updated is None or blob.generation is None or blob.updated >= cutoff for blob in blobs
+        ):
+            continue
+        for blob in blobs:
+            deleted_bytes += int(blob.size or 0)
+            bucket.blob(blob.name).delete(if_generation_match=blob.generation)
+            deleted_object_count += 1
+    return StagingCleanupResult(
+        deleted_object_count=deleted_object_count,
+        deleted_bytes=deleted_bytes,
+    )
+
+
+def _cleanup_stale_gcs_staging_best_effort(
+    storage_client: storage.Client,
+    config: ExportConfig,
+    now: datetime,
+) -> None:
+    try:
+        result = _cleanup_stale_gcs_staging(storage_client, config, now)
+    except Exception:
+        LOGGER.exception("Failed to clean stale serving export GCS staging")
+        return
+    LOGGER.info(
+        "Cleaned stale serving export GCS staging: deleted_objects=%d deleted_bytes=%d retention_days=%d",
+        result.deleted_object_count,
+        result.deleted_bytes,
+        config.staging_retention_days,
+    )
 
 
 def _bigquery_job_id(*parts: str) -> str:
