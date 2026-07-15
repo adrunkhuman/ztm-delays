@@ -115,7 +115,7 @@ All listed tables are exported to DuckDB unless explicitly marked sidecar. `Colu
 | `fct_expected_stop_event` | One scheduled stop per matched vehicle trip | Trip detail stop list only | `service_date`, `trip_id`, `vehicle_number`, `mode`, `line`, `stop_sequence`, `stop_id`, `stop_group_id`, `stop_post_code`, `stop_name`, `scheduled_arrival_time`, `actual_arrival_time`, `delay_seconds`, `observation_status` |
 | `mart_pipeline_status` | Operational `service_date`, `mode` | Recent-days status table | `service_date`, `mode`, `completeness_ratio`, `service_coverage_ratio`, `trips_complete`, `trips_partial`, `trips_broken`, `stop_arrivals_count`, `latest_gtfs_snapshot_at`, `health_ratio`, `health_label` |
 | `mart_pipeline_status_recent_summary` | One row per mode | Status top panels | `mode`, `day_count`, `first_date`, `last_date`, `completeness_ratio`, `service_coverage_ratio`, `trips_complete`, `trips_broken`, `health_ratio`, `health_label` |
-| `export_metadata` | One row | Footer and operator metadata | Display: `source_row_count`, `exported_at`; operational fields may remain |
+| `export_metadata` | One row | Footer and operator metadata | Display: `source_row_count`, `exported_at`; embedded operational fields are `semantic_validation_status` and `semantic_validation_warnings_json` |
 | `export_table_stats` | One row per exported table | Export validation and operator inspection; no visible widget depends on it | `table_name`, `row_count`, `source_size_bytes`, `min_date`, `max_date`, `date_count` |
 
 `mart_entity_rankings.metric` values: `median_delay_seconds`, `on_time_rate`, `arrival_count`, `delay_spread_seconds`. Ranking order is highest value first for all four current UI ranks: worst delay, best on-time, busiest, and most erratic. Rows exist only for entities meeting the `rank_eligibility_min_arrivals` threshold.
@@ -130,7 +130,11 @@ All listed tables are exported to DuckDB unless explicitly marked sidecar. `Colu
 
 ## Sidecar Contract
 
-`ztm.duckdb.meta.json` supplies sanitized poller status. The frontend displays fields directly.
+`ztm.duckdb.meta.json` supplies sanitized poller status and bounded semantic-validation results. The frontend displays
+poller fields directly; semantic warnings are currently operational metadata.
+
+The sidecar owns the full semantic report below. `export_metadata` embeds only the status and serialized bounded warning
+array; checked dates, total warning count, and truncation state are sidecar-only.
 
 | Field | Display use |
 | --- | --- |
@@ -140,6 +144,11 @@ All listed tables are exported to DuckDB unless explicitly marked sidecar. `Colu
 | `poller_status.last_success_at` | Last successful poll. |
 | `poller_status.vehicle_types.bus.consecutive_failures` | Bus failure count. |
 | `poller_status.vehicle_types.tram.consecutive_failures` | Tram failure count. |
+| `semantic_validation.status` | Operational `pass` or `warning` result for the published artifact. |
+| `semantic_validation.checked_dates` | Changed dates plus the latest serving date checked by bounded fact validation. |
+| `semantic_validation.warning_count` | Total warnings found before bounded report truncation. |
+| `semantic_validation.warnings_truncated` | True when the sidecar omits warnings beyond the report limit. |
+| `semantic_validation.warnings` | Bounded warning records for incomplete but internally consistent source days. |
 
 ## Page Mapping
 
