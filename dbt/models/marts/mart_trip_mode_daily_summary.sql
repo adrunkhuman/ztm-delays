@@ -25,7 +25,7 @@ counts as (
         service_date,
         mode,
         count(*) as trip_count,
-        safe_divide(countif(end_delay_seconds between -60 and 180), count(*)) as on_time_rate
+        safe_divide(countif(end_delay_seconds > -60 and end_delay_seconds < 180), count(*)) as on_time_rate
     from trips
     group by service_date, mode
 ),

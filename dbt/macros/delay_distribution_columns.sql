@@ -6,7 +6,7 @@
     approx_quantiles({{ delay_column }}, 100)[offset(50)] as p50_delay_seconds,
     approx_quantiles({{ delay_column }}, 100)[offset(90)] as p90_delay_seconds,
     stddev_samp({{ delay_column }}) as stddev_delay_seconds,
-    safe_divide(countif({{ delay_column }} between -60 and 180), count(*)) as on_time_rate,
+    safe_divide(countif({{ delay_column }} > -60 and {{ delay_column }} < 180), count(*)) as on_time_rate,
     [
         struct(
             'early_over_5m' as bucket_label,
@@ -23,14 +23,14 @@
         struct(
             'early_1_to_2m' as bucket_label,
             -120 as min_delay_seconds,
-            -61 as max_delay_seconds,
-            countif({{ delay_column }} between -120 and -61) as n
+            -60 as max_delay_seconds,
+            countif({{ delay_column }} between -120 and -60) as n
         ),
         struct(
             'on_time_early_30_60s' as bucket_label,
-            -60 as min_delay_seconds,
+            -59 as min_delay_seconds,
             -31 as max_delay_seconds,
-            countif({{ delay_column }} between -60 and -31) as n
+            countif({{ delay_column }} between -59 and -31) as n
         ),
         struct(
             'on_time_early_0_30s' as bucket_label,
@@ -53,14 +53,14 @@
         struct(
             'on_time_late_1_to_3m' as bucket_label,
             61 as min_delay_seconds,
-            180 as max_delay_seconds,
-            countif({{ delay_column }} between 61 and 180) as n
+            179 as max_delay_seconds,
+            countif({{ delay_column }} between 61 and 179) as n
         ),
         struct(
             'late_3_to_5m' as bucket_label,
-            181 as min_delay_seconds,
+            180 as min_delay_seconds,
             300 as max_delay_seconds,
-            countif({{ delay_column }} between 181 and 300) as n
+            countif({{ delay_column }} between 180 and 300) as n
         ),
         struct(
             'late_5_to_10m' as bucket_label,

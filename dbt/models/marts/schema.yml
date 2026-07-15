@@ -881,6 +881,42 @@ models:
         description: Timestamp when this status mart table was generated.
 
 unit_tests:
+  - name: mart_trip_mode_daily_summary_uses_exclusive_on_time_boundaries
+    model: mart_trip_mode_daily_summary
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: ref('int_serving_trip_execution')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, 'bus' as mode, 'complete' as trip_quality, -60 as end_delay_seconds
+          union all select date '2026-01-15', 'bus', 'complete', -59
+          union all select date '2026-01-15', 'bus', 'complete', 179
+          union all select date '2026-01-15', 'bus', 'complete', 180
+    expect:
+      format: sql
+      rows: |
+        select date '2026-01-15' as service_date, 'bus' as mode, 4 as trip_count, 0.5 as on_time_rate, 60.0 as median_delay_seconds
+
+  - name: mart_mode_window_summary_uses_ztm_delay_boundaries
+    model: mart_mode_window_summary
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: ref('int_serving_stop_arrival')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, 'bus' as mode, 'complete' as trip_quality, cast(null as string) as schedule_day_type, 'snapshot' as gtfs_snapshot_id, 'trip-1' as trip_id, '1001' as vehicle_number, '187' as line, 'group-1' as stop_group_id, 'stop-1' as stop_id, -60 as delay_seconds
+          union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-2', '1002', '187', 'group-1', 'stop-1', -59
+          union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-3', '1003', '187', 'group-1', 'stop-1', 179
+          union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-4', '1004', '187', 'group-1', 'stop-1', 180
+    expect:
+      rows:
+        - {mode: bus, window_type: day, early_count: 1, on_time_count: 2, late_count: 1, early_rate: 0.25, on_time_rate: 0.5, late_rate: 0.25}
+        - {mode: bus, window_type: month, early_count: 1, on_time_count: 2, late_count: 1, early_rate: 0.25, on_time_rate: 0.5, late_rate: 0.25}
+
   - name: mart_pipeline_status_uses_one_operational_day_grain
     model: mart_pipeline_status
     overrides:
