@@ -30,6 +30,7 @@ EXPECTED_RETRY_FLUSH_CALLS = 2
 EGRESS_CHECK_URL = "https://example.test/egress"
 CUSTOM_SPOOL_MAX_BYTES = 12345
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
+RAW_GPS_CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "raw_gps_v1.json"
 
 
 @pytest.fixture(autouse=True)
@@ -178,7 +179,12 @@ def test_upload_hour_writes_append_safe_part_file_with_expected_schema() -> None
     assert bucket.blob_obj.content_type == "application/octet-stream"
 
     table = pq.read_table(io.BytesIO(bucket.blob_obj.data))
-    assert table.schema.names == poller.SCHEMA.names
+    contract = json.loads(RAW_GPS_CONTRACT.read_text(encoding="utf-8"))
+    expected_schema = [(field["name"], field["arrow_type"], field["nullable"]) for field in contract["fields"]]
+    actual_schema = [(field.name, str(field.type), field.nullable) for field in table.schema]
+    assert contract["version"] == "raw-gps-v1"
+    assert actual_schema == expected_schema
+    assert table.schema == poller.SCHEMA
     assert table.num_rows == 1
 
 

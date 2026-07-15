@@ -1554,6 +1554,18 @@ def test_rejects_schema_drift(tmp_path: Path) -> None:
             run.prepare()
 
 
+def test_rejects_readable_raw_gps_schema_drift(tmp_path: Path) -> None:
+    path = tmp_path / "drifted.parquet"
+    drifted_schema = pa.schema(list(RAW_GPS_SCHEMA)[:-1])
+    pq.write_table(pa.Table.from_pylist([_row()], schema=drifted_schema), path)
+
+    with duckdb.connect() as connection, pytest.raises(MatcherError) as error:
+        normalize(connection, [path], (date(2026, 1, 15),), tmp_path / "normalized.parquet")
+
+    assert error.value.code == "schema_drift"
+    assert error.value.exit_code == 11
+
+
 def test_rejects_a_vehicle_group_over_its_bound(tmp_path: Path) -> None:
     root, zip_path = tmp_path / "gps", tmp_path / "snapshot.zip"
     _gps(root, [_row(), _row(Time=datetime(2026, 1, 15, 0, 0, tzinfo=UTC))])

@@ -18,36 +18,44 @@ sources:
               period: minute
         columns:
           - name: Lines
+            data_type: STRING
             tests:
               - not_null:
                   config: &raw_gps_processing_date_filter
                     where: "Time >= timestamp(date('{{ var(\"processing_date\", \"1970-01-01\") }}'), 'Europe/Warsaw') and Time < timestamp(date_add(date('{{ var(\"processing_date\", \"1970-01-01\") }}'), interval 1 day), 'Europe/Warsaw')"
           - name: Brigade
+            data_type: STRING
             tests:
               - not_null:
                   config: *raw_gps_processing_date_filter
           - name: Lat
+            data_type: FLOAT64
             tests:
               - not_null:
                   config: *raw_gps_processing_date_filter
           - name: Lon
+            data_type: FLOAT64
             tests:
               - not_null:
                   config: *raw_gps_processing_date_filter
           - name: Time
+            data_type: TIMESTAMP
             tests:
               - not_null:
                   config:
                     where: "Time is null"
           - name: VehicleNumber
+            data_type: STRING
             tests:
               - not_null:
                   config: *raw_gps_processing_date_filter
           - name: vehicle_type
+            data_type: INT64
             tests:
               - not_null:
                   config: *raw_gps_processing_date_filter
           - name: ingested_at
+            data_type: TIMESTAMP
             tests:
               - not_null:
                   config: *raw_gps_processing_date_filter

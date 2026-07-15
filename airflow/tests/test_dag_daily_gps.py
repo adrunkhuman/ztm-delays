@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from dataclasses import dataclass
@@ -74,6 +75,11 @@ def test_load_raw_gps_pings_uses_expected_bigquery_load_contract(monkeypatch: py
     assert client.load_calls[0].job_config.time_partitioning.field == "Time"
     assert client.load_calls[0].job_config.time_partitioning.require_partition_filter is True
     assert client.load_calls[0].job_config.clustering_fields == ["Lines"]
+    contract_path = Path(__file__).resolve().parents[2] / "contracts" / "raw_gps_v1.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    assert [
+        (field.name, field.field_type, field.mode == "NULLABLE") for field in client.load_calls[0].job_config.schema
+    ] == [(field["name"], field["bigquery_type"], field["nullable"]) for field in contract["fields"]]
     assert all(load_call.job.result_called for load_call in client.load_calls)
 
 
@@ -873,15 +879,17 @@ class FakeTable:
 
 
 class FakeLoadJobConfig:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
+        schema: list[FakeSchemaField],
         source_format: str,
         create_disposition: str,
         write_disposition: str,
         time_partitioning: FakeTimePartitioning,
         clustering_fields: list[str],
     ) -> None:
+        self.schema = schema
         self.source_format = source_format
         self.create_disposition = create_disposition
         self.write_disposition = write_disposition

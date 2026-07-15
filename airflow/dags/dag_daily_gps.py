@@ -47,6 +47,16 @@ GPS_RAW_LOAD_CRON = "20 * * * *"
 GPS_WAREHOUSE_CRON = "0 4 * * *"
 
 RAW_GPS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gps_pings"
+RAW_GPS_SCHEMA = [
+    bigquery.SchemaField("Lines", "STRING"),
+    bigquery.SchemaField("Brigade", "STRING"),
+    bigquery.SchemaField("Lat", "FLOAT64"),
+    bigquery.SchemaField("Lon", "FLOAT64"),
+    bigquery.SchemaField("Time", "TIMESTAMP"),
+    bigquery.SchemaField("VehicleNumber", "STRING"),
+    bigquery.SchemaField("vehicle_type", "INT64"),
+    bigquery.SchemaField("ingested_at", "TIMESTAMP"),
+]
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 INT_GTFS_PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_gtfs_processing_snapshot"
 DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
@@ -163,6 +173,7 @@ def _load_raw_gps_pings(processing_date: str) -> int:
 
     client = bigquery.Client(project=GCP_PROJECT)
     job_config = bigquery.LoadJobConfig(
+        schema=RAW_GPS_SCHEMA,
         source_format=bigquery.SourceFormat.PARQUET,
         create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
