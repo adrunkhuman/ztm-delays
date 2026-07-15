@@ -15,7 +15,7 @@ DuckDB is a serving artifact, not a mirror of `ztm_marts`. Every displayed stati
 
 - Strict public delay statistics use `trip_quality = 'complete'`.
 - Delay is `actual_arrival_time - scheduled_arrival_time`, seconds; positive is late.
-- On-time is inclusive: `-60 <= delay_seconds <= 180`.
+- Early is `delay_seconds <= -60`, late is `delay_seconds >= 180`, and on-time is strictly between those bounds.
 - Medians and p90s are true BigQuery quantiles at the exact display grain.
 - No weighted median/p90 recombination exists in DuckDB or Python.
 - Stop group is `LEFT(stop_id, 4)`.
@@ -33,7 +33,7 @@ Use these names consistently instead of repeating ad-hoc metric shapes.
 
 `delay_histogram`: ordered `array<struct<bucket_label, min_delay_seconds, max_delay_seconds, n>>` with these fixed labels: `early_over_5m`, `early_2_to_5m`, `early_1_to_2m`, `on_time_early_30_60s`, `on_time_early_0_30s`, `on_time_late_0_30s`, `on_time_late_30_60s`, `on_time_late_1_to_3m`, `late_3_to_5m`, `late_5_to_10m`, `late_10_to_20m`, `late_over_20m`.
 
-Bucket bounds are, in order: `< -300`, `-300..-121`, `-120..-61`, `-60..-31`, `-30..-1`, `0..30`, `31..60`, `61..180`, `181..300`, `301..600`, `601..1200`, `> 1200`.
+Bucket bounds are, in order: `< -300`, `-300..-121`, `-120..-60`, `-59..-31`, `-30..-1`, `0..30`, `31..60`, `61..179`, `180..300`, `301..600`, `601..1200`, `> 1200`.
 
 `universe_type`: `all_observed` for detail pages, `zone1_public` for rankings.
 
