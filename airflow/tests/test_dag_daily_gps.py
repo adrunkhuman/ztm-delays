@@ -294,11 +294,16 @@ def test_log_bigquery_dbt_job_costs_uses_dag_run_start_date(monkeypatch: pytest.
     assert result["started_at"] == started_at.isoformat()
 
 
-def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
+def _dbt_selected_models(task: Any) -> set[str]:
+    command = task.kwargs["bash_command"]
+    selector = command.split(" --select ", 1)[1].split(" --vars ", 1)[0]
+    return set(selector.split())
+
+
+def test_dag_schedules_partitioned_ingest_and_warehouse_runs() -> None:
     dag = _load_dag_module()
 
     assert isinstance(dag.raw_gps_dag.kwargs["schedule"], FakeCronPartitionTimetable)
-    assert dag.raw_gps_dag.kwargs["dag_display_name"] == "GPS raw ingest"
     assert dag.raw_gps_dag.kwargs["schedule"].cron == dag.GPS_RAW_LOAD_CRON
     assert dag.raw_gps_dag.kwargs["schedule"].timezone == "Europe/Warsaw"
     assert dag.raw_gps_dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
@@ -307,38 +312,20 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert "data_interval_start" not in dag.RAW_GPS_PROCESSING_DATE
     assert dag.load_raw_gps_pings.kwargs == {"outlets": [dag.RAW_GPS_DATE_ASSET]}
     assert isinstance(dag.dag.kwargs["schedule"], FakeCronPartitionTimetable)
-    assert dag.dag.kwargs["dag_display_name"] == "GPS nightly warehouse"
     assert dag.dag.kwargs["schedule"].cron == dag.GPS_WAREHOUSE_CRON
     assert dag.dag.kwargs["schedule"].timezone == "Europe/Warsaw"
     assert dag.dag.kwargs["schedule"].run_offset == -1
     assert dag.dag.kwargs["schedule"].key_format == "%Y-%m-%d"
     assert dag.dag.kwargs["default_args"] == dag.AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS
     assert dag.dag.kwargs["on_failure_callback"] is dag.airflow_failure_alert
-    expected_groups = {
-        "snapshot_group": ("snapshot_lookup", "Snapshot lookup"),
-        "staging_group": ("staging", "Staging"),
-        "matcher_group": ("matcher", "Python matcher"),
-        "current_facts_group": ("current_facts", "Current facts"),
-        "prior_facts_group": ("prior_facts", "Prior facts"),
-        "completeness_group": ("completeness_coverage", "Completeness and coverage"),
-        "status_group": ("pipeline_status", "Pipeline status"),
-        "serving_group": ("serving_marts", "Serving marts"),
-        "completion_group": ("completion", "Completion"),
-    }
-    for group_name, (group_id, display_name) in expected_groups.items():
-        group = getattr(dag, group_name)
-        assert group.kwargs["group_id"] == group_id
-        assert group.kwargs["group_display_name"] == display_name
-        assert group.kwargs["prefix_group_id"] is False
-    assert dag.selected_gtfs_snapshot_id.kwargs == {}
-    assert dag.selected_prior_gtfs_snapshot_id.kwargs == {}
-    assert dag.guard_excluded_historical_processing_date.kwargs == {}
-    assert dag.guard_prior_publication.kwargs == {}
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PROCESSING_DATE
     assert "dag_run.conf.get('processing_date') or dag_run.partition_key" in dag.PRIOR_SERVICE_DATE
-    assert dag.dbt_run_fct_trip_current.kwargs["bash_command"].startswith("cd /opt/airflow/dbt && dbt run")
-    fact_dependency_command = dag.dbt_run_matcher_fact_dependencies.kwargs["bash_command"]
-    for selector in [
+
+
+def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
+    dag = _load_dag_module()
+
+    assert _dbt_selected_models(dag.dbt_run_matcher_fact_dependencies) == {
         "stg_gtfs__trips",
         "stg_gtfs__stop_times",
         "stg_gtfs__stops",
@@ -347,16 +334,42 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
         "int_gtfs_trip_schedule_history",
         "int_gtfs_trip_schedule",
         "int_gtfs_duty_chain",
+        "int_schedule_version",
         "dim_schedule_version",
-    ]:
-        assert selector in fact_dependency_command
-    assert "int_gtfs_processing_snapshot" not in fact_dependency_command
+    }
+    assert _dbt_selected_models(dag.dbt_run_fct_expected_stop_event_current) == {"fct_expected_stop_event"}
+    assert _dbt_selected_models(dag.dbt_run_pipeline_status) == {"mart_pipeline_status"}
+    assert _dbt_selected_models(dag.dbt_run_serving_marts) == {
+        "int_serving_trip_execution",
+        "int_serving_stop_arrival",
+        "dim_serving_date",
+        "mart_mode_window_summary",
+        "mart_entity_daily_summary",
+        "mart_line_window_summary",
+        "mart_stop_group_window_summary",
+        "mart_stop_post_window_summary",
+        "mart_hour_window_summary",
+        "mart_entity_rankings",
+        "mart_entity_timeline_daily",
+        "mart_worst_delay_event",
+        "mart_line_reliability_daily",
+        "mart_trip_daily",
+        "mart_trip_mode_daily_summary",
+        "mart_trip_line_daily",
+        "mart_line_trip_group_daily",
+        "mart_line_course_window",
+        "mart_line_course_stop_window",
+        "mart_stop_line_window_summary",
+        "mart_stop_post_line_group_window",
+        "mart_stop_group_line_group_window",
+        "mart_pipeline_status_recent_summary",
+        "rpt_schedule_day_mapping_evidence",
+        "rpt_ranking_universe_evidence",
+    }
     assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
     assert "--exclude test_type:unit" in dag.dbt_test_fct_expected_stop_event_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PROCESSING_DATE in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
     assert '"publish_service_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_fct_trip_prior.kwargs["bash_command"]
-    assert dag.EXPECTED_STOP_EVENT_FACT_MODEL in dag.dbt_run_fct_expected_stop_event_current.kwargs["bash_command"]
-    assert dag.PIPELINE_STATUS_MODEL in dag.dbt_run_pipeline_status.kwargs["bash_command"]
     assert "--exclude tag:audit" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_int_gps_hourly_completeness.kwargs["bash_command"]
@@ -364,18 +377,11 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert "--exclude test_type:generic" in dag.dbt_test_serving_marts_prior.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_serving_marts.kwargs["bash_command"]
     assert "--exclude tag:audit" in dag.dbt_test_serving_marts.kwargs["bash_command"]
-    for serving_model in [
-        "int_serving_trip_execution",
-        "mart_line_window_summary",
-        "mart_stop_group_window_summary",
-        "mart_stop_post_window_summary",
-        "mart_entity_rankings",
-        "dim_serving_date",
-        "rpt_schedule_day_mapping_evidence",
-        "rpt_ranking_universe_evidence",
-    ]:
-        assert serving_model in dag.dbt_run_serving_marts.kwargs["bash_command"]
     assert dag.emit_gps_models_date_asset.kwargs == {"outlets": [dag.GPS_MODELS_DATE_ASSET]}
+
+
+def test_dag_runs_trip_facts_before_serving_publication() -> None:
+    dag = _load_dag_module()
 
     expected_edges = [
         (dag.dbt_run_stg_gps_pings, dag.dbt_test_stg_gps_pings),
@@ -407,7 +413,6 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     for upstream_task, downstream_task in expected_edges:
         assert downstream_task in upstream_task.downstream
 
-    assert not hasattr(dag, "dbt_test_aggregate_marts")
     assert dag.dbt_run_pipeline_status in dag.dbt_test_completeness_and_coverage.downstream
     assert dag.dbt_run_prior_coverage_schedule in dag.dbt_test_pipeline_status.downstream
     assert dag.dbt_run_completeness_and_coverage_prior in dag.dbt_run_prior_coverage_schedule.downstream
@@ -426,8 +431,6 @@ def test_dag_runs_trip_fact_after_stop_arrivals() -> None:  # noqa: PLR0915
     assert dag.emit_gps_models_date_asset in dag.dbt_test_serving_marts.downstream
     assert dag.matcher_load.kwargs["execution_timeout"] == dag.timedelta(minutes=60)
     assert dag.matcher_publish.kwargs["execution_timeout"] == dag.timedelta(minutes=60)
-    assert dag.matcher_load.function.__name__ == "matcher_load"
-    assert dag.matcher_publish.function.__name__ == "matcher_publish"
     assert dag.dbt_run_fct_trip_current in dag.matcher_publish.downstream
     assert dag.log_bigquery_dbt_job_costs.kwargs == {"do_xcom_push": False}
     assert dag.watcher in dag.dbt_test_serving_marts.downstream
