@@ -171,6 +171,9 @@ jobs:
           --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
         working-directory: dbt
 
+      - name: Check raw GPS schema contract
+        run: python .github/scripts/check_raw_gps_contract.py
+
       - name: Run dbt unit tests
         run: >-
           uv run dbt test --profiles-dir .

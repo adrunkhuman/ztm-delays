@@ -1,0 +1,13 @@
+{
+  "version": "raw-gps-v1",
+  "fields": [
+    {"name": "Lines", "arrow_type": "string", "bigquery_type": "STRING", "nullable": true},
+    {"name": "Brigade", "arrow_type": "string", "bigquery_type": "STRING", "nullable": true},
+    {"name": "Lat", "arrow_type": "double", "bigquery_type": "FLOAT64", "nullable": true},
+    {"name": "Lon", "arrow_type": "double", "bigquery_type": "FLOAT64", "nullable": true},
+    {"name": "Time", "arrow_type": "timestamp[us, tz=UTC]", "bigquery_type": "TIMESTAMP", "nullable": true},
+    {"name": "VehicleNumber", "arrow_type": "string", "bigquery_type": "STRING", "nullable": true},
+    {"name": "vehicle_type", "arrow_type": "int64", "bigquery_type": "INT64", "nullable": true},
+    {"name": "ingested_at", "arrow_type": "timestamp[us, tz=UTC]", "bigquery_type": "TIMESTAMP", "nullable": true}
+  ]
+}
