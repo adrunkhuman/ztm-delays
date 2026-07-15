@@ -4,13 +4,16 @@ import json
 import os
 import re
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from airflow.sdk import DAG, PartitionedAssetTimetable, get_current_context, task
 from google.api_core.exceptions import Conflict, NotFound
@@ -57,6 +60,18 @@ POLLER_HEARTBEAT_STALE_SECONDS = 180
 DUCKDB_MEMORY_LIMIT = "1GB"
 DUCKDB_TEMP_DIRECTORY_LIMIT = "2GB"
 DUCKDB_THREADS = 2
+SEMANTIC_VALIDATION_TIMEOUT_SECONDS = 120
+SEMANTIC_VALIDATION_MEMORY_LIMIT_MB = 1024
+SEMANTIC_VALIDATION_TEMP_LIMIT_MB = 2048
+SEMANTIC_VALIDATION_THREADS = 1
+SEMANTIC_VALIDATION_MAX_REPORT_BYTES = 64 * 1024
+SEMANTIC_VALIDATION_MAX_WARNINGS = 100
+SEMANTIC_WARNING_FIELDS = {
+    "serving_date_absent": {"code", "service_date"},
+    "pipeline_status_mode_absent": {"code", "service_date", "mode"},
+    "incomplete_gps_day": {"code", "service_date", "mode", "completeness_ratio"},
+    "zero_service_coverage": {"code", "service_date", "mode", "expected_trips"},
+}
 MART_TABLES = (
     "dim_serving_date",
     "dim_stop_group_current",
@@ -132,6 +147,10 @@ class ExportConfig:
     max_duckdb_bytes: int
     cleanup_gcs_staging: bool
     changed_partition_dates: tuple[str, ...] = ()
+    validation_timeout_seconds: int = SEMANTIC_VALIDATION_TIMEOUT_SECONDS
+    validation_memory_limit_mb: int = SEMANTIC_VALIDATION_MEMORY_LIMIT_MB
+    validation_temp_limit_mb: int = SEMANTIC_VALIDATION_TEMP_LIMIT_MB
+    validation_threads: int = SEMANTIC_VALIDATION_THREADS
 
 
 @dataclass(frozen=True)
@@ -212,6 +231,26 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
         ),
         cleanup_gcs_staging=_bool_config(conf, "cleanup_gcs_staging", True),
         changed_partition_dates=_changed_partition_dates(context, conf),
+        validation_timeout_seconds=_int_config(
+            conf,
+            "validation_timeout_seconds",
+            os.getenv("SERVING_EXPORT_VALIDATION_TIMEOUT_SECONDS", str(SEMANTIC_VALIDATION_TIMEOUT_SECONDS)),
+        ),
+        validation_memory_limit_mb=_int_config(
+            conf,
+            "validation_memory_limit_mb",
+            os.getenv("SERVING_EXPORT_VALIDATION_MEMORY_LIMIT_MB", str(SEMANTIC_VALIDATION_MEMORY_LIMIT_MB)),
+        ),
+        validation_temp_limit_mb=_int_config(
+            conf,
+            "validation_temp_limit_mb",
+            os.getenv("SERVING_EXPORT_VALIDATION_TEMP_LIMIT_MB", str(SEMANTIC_VALIDATION_TEMP_LIMIT_MB)),
+        ),
+        validation_threads=_int_config(
+            conf,
+            "validation_threads",
+            os.getenv("SERVING_EXPORT_VALIDATION_THREADS", str(SEMANTIC_VALIDATION_THREADS)),
+        ),
     )
 
 
@@ -720,13 +759,17 @@ def _publish_duckdb(
     final_path = config.output_dir / config.output_filename
     temp_path = config.output_dir / f".{config.output_filename}.{config.export_id}.tmp"
     duckdb_temp_dir = config.output_dir / f".duckdb-tmp-{config.export_id}"
+    validation_temp_dir = config.output_dir / f".validation-tmp-{config.export_id}"
     metadata_path = config.output_dir / f"{config.output_filename}.meta.json"
     if temp_path.exists():
         temp_path.unlink()
     _remove_duckdb_sidecar_files(temp_path)
     if duckdb_temp_dir.exists():
         shutil.rmtree(duckdb_temp_dir)
+    if validation_temp_dir.exists():
+        shutil.rmtree(validation_temp_dir)
     duckdb_temp_dir.mkdir(parents=True)
+    validation_temp_dir.mkdir(parents=True)
 
     try:
         build_input = DuckdbBuildInput(
@@ -740,23 +783,38 @@ def _publish_duckdb(
         duckdb_size_bytes = temp_path.stat().st_size
         _enforce_duckdb_size(duckdb_size_bytes, config.max_duckdb_bytes)
 
+        _validate_duckdb_export(duckdb_module, temp_path, source_stats)
+        semantic_validation = _run_semantic_validation(config, temp_path, validation_temp_dir)
+        _record_semantic_validation(duckdb_module, temp_path, semantic_validation)
+        duckdb_size_bytes = temp_path.stat().st_size
+        _enforce_duckdb_size(duckdb_size_bytes, config.max_duckdb_bytes)
         _update_duckdb_file_size(duckdb_module, temp_path, duckdb_size_bytes)
         duckdb_size_bytes = temp_path.stat().st_size
-        metadata = _export_metadata(config, source_stats, exported_at, duckdb_size_bytes, poller_status)
-        _validate_duckdb_export(duckdb_module, temp_path, source_stats)
+        metadata = _export_metadata(
+            config,
+            source_stats,
+            exported_at,
+            duckdb_size_bytes,
+            poller_status,
+            semantic_validation,
+        )
     except Exception:
         temp_path.unlink(missing_ok=True)
         _remove_duckdb_sidecar_files(temp_path)
         shutil.rmtree(duckdb_temp_dir, ignore_errors=True)
+        shutil.rmtree(validation_temp_dir, ignore_errors=True)
         raise
     shutil.rmtree(duckdb_temp_dir, ignore_errors=True)
+    shutil.rmtree(validation_temp_dir, ignore_errors=True)
 
+    previous_metadata = metadata_path.read_bytes() if metadata_path.exists() else None
     try:
-        temp_path.replace(final_path)
         _write_metadata_file(metadata_path, metadata)
+        temp_path.replace(final_path)
     except Exception:
         temp_path.unlink(missing_ok=True)
         _remove_duckdb_sidecar_files(temp_path)
+        _restore_metadata_file(metadata_path, previous_metadata)
         raise
     return ExportResult(
         export_id=config.export_id,
@@ -854,7 +912,7 @@ def _configure_duckdb_build_connection(connection: DuckdbConnection, temp_direct
     connection.execute(f"set max_temp_directory_size = '{DUCKDB_TEMP_DIRECTORY_LIMIT}'")
     connection.execute(f"set memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
     connection.execute(f"set threads = {DUCKDB_THREADS}")
-    # Serving SQL must order explicitly; preserving import order is wasted memory here.
+    # Do not rely on Parquet import order; serving queries must specify their own ordering.
     connection.execute("set preserve_insertion_order = false")
 
 
@@ -1134,6 +1192,111 @@ def _update_duckdb_file_size(duckdb_module: ModuleType, path: Path, duckdb_size_
         connection.execute("update export_metadata set duckdb_file_size_bytes = ?", [duckdb_size_bytes])
 
 
+def _run_semantic_validation(
+    config: ExportConfig,
+    path: Path,
+    temp_directory: Path,
+) -> dict[str, object]:
+    validator_path = Path(__file__).with_name("serving_export_validator.py")
+    command = [
+        sys.executable,
+        str(validator_path),
+        str(path),
+        "--memory-limit-mb",
+        str(config.validation_memory_limit_mb),
+        "--temp-limit-mb",
+        str(config.validation_temp_limit_mb),
+        "--threads",
+        str(config.validation_threads),
+        "--temp-directory",
+        str(temp_directory),
+    ]
+    for partition_date in config.changed_partition_dates:
+        command.extend(["--date", partition_date])
+    process = subprocess.Popen(  # noqa: S603 - command uses fixed local code and validated scalar arguments.
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=config.validation_timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        _kill_validation_process(process)
+        process.communicate()
+        raise RuntimeError(
+            f"Serving semantic validation timed out after {config.validation_timeout_seconds} seconds"
+        ) from exc
+    if process.returncode != 0:
+        error = stderr.strip()[-1000:] or f"exit code {process.returncode}"
+        raise RuntimeError(f"Serving semantic validation failed: {error}")
+    if len(stdout.encode("utf-8")) > SEMANTIC_VALIDATION_MAX_REPORT_BYTES:
+        raise RuntimeError("Serving semantic validation report exceeds configured bound")
+    try:
+        report = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Serving semantic validation returned invalid JSON") from exc
+    return _validate_semantic_report(report)
+
+
+def _kill_validation_process(process: subprocess.Popen[str]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        return
+    process.kill()
+
+
+def _validate_semantic_report(report: object) -> dict[str, object]:
+    if not isinstance(report, dict) or report.get("status") not in {"pass", "warning"}:
+        raise TypeError("Serving semantic validation returned an invalid report")
+    report_dict = cast("dict[str, object]", report)
+    warnings = report_dict.get("warnings")
+    checked_dates = report_dict.get("checked_dates")
+    warning_count = report_dict.get("warning_count")
+    warnings_truncated = report_dict.get("warnings_truncated")
+    if (
+        not isinstance(warnings, list)
+        or not isinstance(checked_dates, list)
+        or not all(isinstance(value, str) and EXPORT_DATE_PATTERN.fullmatch(value) for value in checked_dates)
+        or not isinstance(warning_count, int)
+        or warning_count < len(warnings)
+        or not isinstance(warnings_truncated, bool)
+        or warnings_truncated != (warning_count > len(warnings))
+        or (not warnings_truncated and warning_count != len(warnings))
+        or len(warnings) > SEMANTIC_VALIDATION_MAX_WARNINGS
+        or report_dict["status"] != ("warning" if warning_count else "pass")
+    ):
+        raise TypeError("Serving semantic validation returned an invalid report")
+    for warning in warnings:
+        if not isinstance(warning, dict):
+            raise TypeError("Serving semantic validation returned an invalid report")
+        code = warning.get("code")
+        if not isinstance(code, str) or set(warning) != SEMANTIC_WARNING_FIELDS.get(code):
+            raise TypeError("Serving semantic validation returned an invalid report")
+        service_date = warning.get("service_date")
+        if not isinstance(service_date, str) or not EXPORT_DATE_PATTERN.fullmatch(service_date):
+            raise TypeError("Serving semantic validation returned an invalid report")
+    return report_dict
+
+
+def _record_semantic_validation(
+    duckdb_module: ModuleType,
+    path: Path,
+    report: dict[str, object],
+) -> None:
+    with duckdb_module.connect(str(path)) as connection:
+        connection.execute("alter table export_metadata add column semantic_validation_status varchar")
+        connection.execute("alter table export_metadata add column semantic_validation_warnings_json varchar")
+        connection.execute(
+            "update export_metadata set semantic_validation_status = ?, semantic_validation_warnings_json = ?",
+            [report["status"], json.dumps(report["warnings"], sort_keys=True)],
+        )
+
+
 def _validate_duckdb_export(duckdb_module: ModuleType, path: Path, source_stats: Sequence[TableStats]) -> None:
     with duckdb_module.connect(str(path), read_only=True) as connection:
         table_rows = connection.execute(
@@ -1171,12 +1334,13 @@ def _validate_duckdb_export(duckdb_module: ModuleType, path: Path, source_stats:
                 )
 
 
-def _export_metadata(
+def _export_metadata(  # noqa: PLR0913
     config: ExportConfig,
     source_stats: Sequence[TableStats],
     exported_at: datetime,
     duckdb_size_bytes: int,
     poller_status: dict[str, object] | None = None,
+    semantic_validation: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "export_id": config.export_id,
@@ -1192,6 +1356,14 @@ def _export_metadata(
         "source_row_count": sum(stat.row_count for stat in source_stats),
         "exported_table_count": len(EXPORTED_TABLES),
         "poller_status": poller_status or _unknown_poller_status("not_collected"),
+        "semantic_validation": semantic_validation
+        or {
+            "status": "unknown",
+            "checked_dates": [],
+            "warning_count": 0,
+            "warnings_truncated": False,
+            "warnings": [],
+        },
         "tables": [asdict(stat) for stat in source_stats],
     }
 
@@ -1293,6 +1465,15 @@ def _write_metadata_file(path: Path, metadata: dict[str, object]) -> None:
     temp_path.replace(path)
 
 
+def _restore_metadata_file(path: Path, previous_metadata: bytes | None) -> None:
+    if previous_metadata is None:
+        path.unlink(missing_ok=True)
+        return
+    temp_path = path.with_suffix(f"{path.suffix}.restore.tmp")
+    temp_path.write_bytes(previous_metadata)
+    temp_path.replace(path)
+
+
 def _remove_duckdb_sidecar_files(path: Path) -> None:
     path.with_name(f"{path.name}.wal").unlink(missing_ok=True)
 
@@ -1336,7 +1517,7 @@ with DAG(
 
     @task(retries=0, on_failure_callback=airflow_failure_alert)
     def export_serving_duckdb() -> dict[str, object]:
-        """Airflow task entrypoint for the manual alpha export."""
+        """Publish the validated serving artifact."""
         result = _run_serving_export(_export_config(get_current_context()))
         return asdict(result)
 

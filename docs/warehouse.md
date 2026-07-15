@@ -169,12 +169,12 @@ No `agg_service_coverage` row means no scheduled bus/tram service for that slice
 ## Serving Export
 
 `dag_serving_export` is asset-triggered after successful GPS model publication and can also be run manually for recovery.
-It exports a fixed allowlist from `ztm_marts` to GCS Parquet, downloads it in the Airflow worker, builds derived DuckDB
-serving tables, validates guardrails, and atomically swaps the stable DuckDB file.
+It exports a fixed allowlist from `ztm_marts` to GCS Parquet, downloads it in the Airflow worker, builds and validates the
+DuckDB artifact, and atomically swaps the stable file.
 
-The DuckDB artifact is not a mirror of `ztm_marts`. It contains only current frontend source tables, derived serving tables, `export_metadata`, and `export_table_stats`.
+The DuckDB artifact is not a mirror of `ztm_marts`. It contains only current frontend source tables, `export_metadata`, and `export_table_stats`.
 
-Changing the frontend serving surface means changing the export allowlist, derived SQL, tests, and serving contract together.
+Changing the frontend serving surface means changing the export allowlist, tests, and serving contract together.
 
 ## Tests
 

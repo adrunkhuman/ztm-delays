@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
+import time
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -65,6 +68,10 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.max_duckdb_bytes == 20 * 1024 * 1024 * 1024
     assert config.cleanup_gcs_staging is True
     assert config.changed_partition_dates == ()
+    assert config.validation_timeout_seconds == 120
+    assert config.validation_memory_limit_mb == 1024
+    assert config.validation_temp_limit_mb == 2048
+    assert config.validation_threads == 1
 
 
 def test_export_config_uses_gps_models_asset_changed_partition_dates() -> None:
@@ -175,6 +182,10 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
                     "max_duckdb_bytes": "456",
                     "cleanup_gcs_staging": False,
                     "changed_partition_dates": ["2026-07-06", "2026-07-07", "2026-07-07"],
+                    "validation_timeout_seconds": 30,
+                    "validation_memory_limit_mb": 512,
+                    "validation_temp_limit_mb": 768,
+                    "validation_threads": 2,
                 }
             )
         }
@@ -189,6 +200,10 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
     assert config.max_duckdb_bytes == 456
     assert config.cleanup_gcs_staging is False
     assert config.changed_partition_dates == ("2026-07-06", "2026-07-07")
+    assert config.validation_timeout_seconds == 30
+    assert config.validation_memory_limit_mb == 512
+    assert config.validation_temp_limit_mb == 768
+    assert config.validation_threads == 2
 
 
 @pytest.mark.parametrize(
@@ -197,6 +212,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
         ("export_id", "bad;id", ValueError),
         ("output_filename", "nested/ztm.duckdb", ValueError),
         ("max_source_bytes", 0, ValueError),
+        ("validation_timeout_seconds", 0, ValueError),
         ("cleanup_gcs_staging", "yes", TypeError),
     ],
 )
@@ -641,7 +657,7 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
     source_stats = [
         dag.TableStats(
             table_name=table_name,
-            row_count=1,
+            row_count=2 if table_name == "mart_pipeline_status" else 1,
             size_bytes=10,
             min_date="2026-06-27" if table_name == "mart_trip_daily" else None,
             max_date="2026-07-02" if table_name == "mart_trip_daily" else None,
@@ -671,6 +687,7 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
         assert connection.execute("select exported_table_count from export_metadata").fetchone()[0] == len(
             dag.EXPORTED_TABLES
         )
+        assert connection.execute("select semantic_validation_status from export_metadata").fetchone()[0] == "pass"
         assert connection.execute("select count(*) from export_table_stats").fetchone()[0] == len(dag.EXPORTED_TABLES)
         assert connection.execute("select count(*) from mart_mode_window_summary").fetchone()[0] == 1
         assert connection.execute("select count(*) from mart_hour_window_summary").fetchone()[0] == 1
@@ -689,6 +706,14 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
             "Boundary Stop",
             "Zabki",
         )
+    sidecar = json.loads(Path(result.metadata_path).read_text(encoding="utf-8"))
+    assert sidecar["semantic_validation"] == {
+        "checked_dates": ["2026-07-02"],
+        "status": "pass",
+        "warning_count": 0,
+        "warnings_truncated": False,
+        "warnings": [],
+    }
 
 
 def test_export_metadata_includes_last_export_and_poller_status(tmp_path: Path) -> None:
@@ -839,13 +864,259 @@ def test_publish_duckdb_keeps_previous_file_when_validation_fails(tmp_path: Path
     assert list(tmp_path.glob(".duckdb-tmp-*")) == []
 
 
+def test_publish_duckdb_blocks_semantic_failure_and_keeps_previous_artifact(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    final_path = tmp_path / "ztm.duckdb"
+    metadata_path = tmp_path / "ztm.duckdb.meta.json"
+    final_path.write_text("old duckdb", encoding="utf-8")
+    metadata_path.write_text("old metadata", encoding="utf-8")
+    parquet_paths_by_table = _write_minimal_parquet_files(
+        tmp_path,
+        dag.MART_TABLES,
+        duckdb,
+        duplicate_trip=True,
+    )
+    source_stats = [
+        dag.TableStats(
+            table_name=table_name,
+            row_count=2 if table_name in {"mart_trip_daily", "mart_pipeline_status"} else 1,
+            size_bytes=10,
+        )
+        for table_name in dag.MART_TABLES
+    ]
+    config = _test_export_config(dag, tmp_path)
+
+    with pytest.raises(RuntimeError, match="mart_trip_daily_unique_key"):
+        dag._publish_duckdb(config, parquet_paths_by_table, source_stats, datetime(2026, 7, 2, tzinfo=UTC))
+
+    assert final_path.read_text(encoding="utf-8") == "old duckdb"
+    assert metadata_path.read_text(encoding="utf-8") == "old metadata"
+    assert list(tmp_path.glob(".validation-tmp-*")) == []
+
+
+def test_publish_duckdb_blocks_invalid_pipeline_status(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    parquet_paths_by_table = _write_minimal_parquet_files(
+        tmp_path,
+        dag.MART_TABLES,
+        duckdb,
+        invalid_status=True,
+    )
+    source_stats = [
+        dag.TableStats(
+            table_name=table_name,
+            row_count=2 if table_name == "mart_pipeline_status" else 1,
+            size_bytes=10,
+        )
+        for table_name in dag.MART_TABLES
+    ]
+
+    with pytest.raises(RuntimeError, match="mart_pipeline_status_contract"):
+        dag._publish_duckdb(
+            _test_export_config(dag, tmp_path),
+            parquet_paths_by_table,
+            source_stats,
+            datetime(2026, 7, 2, tzinfo=UTC),
+        )
+
+
+def test_publish_duckdb_checks_corrupt_changed_date_before_clean_latest_date(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    parquet_paths_by_table = _write_minimal_parquet_files(
+        tmp_path,
+        dag.MART_TABLES,
+        duckdb,
+        historical_duplicate_trip=True,
+    )
+    row_counts = {"dim_serving_date": 2, "mart_mode_window_summary": 2, "mart_pipeline_status": 2, "mart_trip_daily": 3}
+    source_stats = [
+        dag.TableStats(table_name=table_name, row_count=row_counts.get(table_name, 1), size_bytes=10)
+        for table_name in dag.MART_TABLES
+    ]
+    config = replace(_test_export_config(dag, tmp_path), changed_partition_dates=("2026-07-01",))
+
+    with pytest.raises(RuntimeError, match="mart_trip_daily_unique_key"):
+        dag._publish_duckdb(
+            config,
+            parquet_paths_by_table,
+            source_stats,
+            datetime(2026, 7, 2, tzinfo=UTC),
+        )
+
+
+def test_publish_duckdb_records_warning_only_degradation(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    parquet_paths_by_table = _write_minimal_parquet_files(
+        tmp_path,
+        dag.MART_TABLES,
+        duckdb,
+        incomplete_status=True,
+    )
+    source_stats = [
+        dag.TableStats(
+            table_name=table_name,
+            row_count=2 if table_name == "mart_pipeline_status" else 1,
+            size_bytes=10,
+        )
+        for table_name in dag.MART_TABLES
+    ]
+
+    result = dag._publish_duckdb(
+        _test_export_config(dag, tmp_path),
+        parquet_paths_by_table,
+        source_stats,
+        datetime(2026, 7, 2, tzinfo=UTC),
+    )
+
+    sidecar = json.loads(Path(result.metadata_path).read_text(encoding="utf-8"))
+    assert sidecar["semantic_validation"]["status"] == "warning"
+    assert sidecar["semantic_validation"]["warning_count"] == 1
+    assert sidecar["semantic_validation"]["warnings_truncated"] is False
+    assert sidecar["semantic_validation"]["warnings"] == [
+        {
+            "code": "incomplete_gps_day",
+            "completeness_ratio": 23 / 24,
+            "mode": "bus",
+            "service_date": "2026-07-02",
+        }
+    ]
+
+
+def test_semantic_validation_timeout_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    config = _test_export_config(dag, tmp_path)
+
+    class TimeoutProcess:
+        pid = 999_999
+        returncode = None
+
+        def communicate(self, timeout: int | None = None) -> tuple[str, str]:
+            if timeout is not None:
+                raise dag.subprocess.TimeoutExpired(["validator"], timeout)
+            return "", ""
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(dag.subprocess, "Popen", lambda *_args, **_kwargs: TimeoutProcess())
+
+    with pytest.raises(RuntimeError, match="timed out after 120 seconds"):
+        dag._run_semantic_validation(config, tmp_path / "candidate.duckdb", tmp_path / "validation-temp")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group termination is a Linux runtime contract")
+def test_semantic_validation_terminates_timed_out_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dag = _load_dag_module()
+    survived_path = tmp_path / "survived"
+    child_code = (
+        "import pathlib, time; time.sleep(1.5); "
+        f"pathlib.Path({str(survived_path)!r}).write_text('bad', encoding='utf-8')"
+    )
+    (tmp_path / "serving_export_validator.py").write_text(
+        f"import subprocess, sys, time\nsubprocess.Popen([sys.executable, '-c', {child_code!r}])\ntime.sleep(30)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dag, "__file__", str(tmp_path / "dag_serving_export.py"))
+    config = replace(_test_export_config(dag, tmp_path), validation_timeout_seconds=1)
+
+    with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+        dag._run_semantic_validation(config, tmp_path / "candidate.duckdb", tmp_path / "validation-temp")
+
+    time.sleep(1)
+    assert not survived_path.exists()
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        {"status": "pass", "checked_dates": [], "warning_count": 1, "warnings_truncated": False, "warnings": []},
+        {
+            "status": "warning",
+            "checked_dates": ["not-a-date"],
+            "warning_count": 1,
+            "warnings_truncated": False,
+            "warnings": [{"code": "serving_date_absent", "service_date": "not-a-date"}],
+        },
+        {
+            "status": "warning",
+            "checked_dates": ["2026-07-02"],
+            "warning_count": 2,
+            "warnings_truncated": False,
+            "warnings": [{"code": "serving_date_absent", "service_date": "2026-07-02"}],
+        },
+        {
+            "status": "warning",
+            "checked_dates": ["2026-07-02"],
+            "warning_count": 1,
+            "warnings_truncated": False,
+            "warnings": [{"code": "unexpected", "service_date": "2026-07-02"}],
+        },
+    ],
+)
+def test_semantic_validation_rejects_malformed_child_reports(report: dict[str, object]) -> None:
+    dag = _load_dag_module()
+
+    with pytest.raises(TypeError, match="invalid report"):
+        dag._validate_semantic_report(report)
+
+
+def test_semantic_validation_report_exposes_warning_truncation() -> None:
+    validator = _load_validator_module()
+    warnings = [
+        {"code": "serving_date_absent", "service_date": "2026-01-01"} for _ in range(validator.MAX_WARNINGS + 1)
+    ]
+
+    report = validator._validation_report(("2026-01-01",), warnings)
+
+    assert report["warning_count"] == validator.MAX_WARNINGS + 1
+    assert report["warnings_truncated"] is True
+    assert len(report["warnings"]) == validator.MAX_WARNINGS
+
+
+@pytest.mark.skipif(os.name != "posix", reason="RLIMIT_AS is a Linux runtime contract")
+def test_validator_applies_process_memory_limit_in_child() -> None:
+    validator_path = Path(__file__).parents[1] / "dags" / "serving_export_validator.py"
+    code = (
+        "import importlib.util, resource; "
+        f"spec=importlib.util.spec_from_file_location('validator', {str(validator_path)!r}); "
+        "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+        "module._apply_process_memory_limit(256); print(resource.getrlimit(resource.RLIMIT_AS))"
+    )
+
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter and repository module path.
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == str((256 * 1024 * 1024, 256 * 1024 * 1024))
+
+
 def test_publish_duckdb_cleans_temp_files_when_metadata_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     duckdb = pytest.importorskip("duckdb")
     dag = _load_dag_module()
+    final_path = tmp_path / "ztm.duckdb"
+    metadata_path = tmp_path / "ztm.duckdb.meta.json"
+    final_path.write_text("old duckdb", encoding="utf-8")
+    metadata_path.write_text("old metadata", encoding="utf-8")
     parquet_paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
-    source_stats = [dag.TableStats(table_name=table_name, row_count=1, size_bytes=10) for table_name in dag.MART_TABLES]
+    source_stats = [
+        dag.TableStats(
+            table_name=table_name,
+            row_count=2 if table_name == "mart_pipeline_status" else 1,
+            size_bytes=10,
+        )
+        for table_name in dag.MART_TABLES
+    ]
     config = dag.ExportConfig(
         export_id="export-1",
         output_dir=tmp_path,
@@ -868,6 +1139,48 @@ def test_publish_duckdb_cleans_temp_files_when_metadata_write_fails(
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
     assert list(tmp_path.glob(".duckdb-tmp-*")) == []
+    assert final_path.read_text(encoding="utf-8") == "old duckdb"
+    assert metadata_path.read_text(encoding="utf-8") == "old metadata"
+    assert list(tmp_path.glob(".validation-tmp-*")) == []
+
+
+def test_publish_duckdb_restores_sidecar_when_database_swap_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    final_path = tmp_path / "ztm.duckdb"
+    metadata_path = tmp_path / "ztm.duckdb.meta.json"
+    final_path.write_text("old duckdb", encoding="utf-8")
+    metadata_path.write_text("old metadata", encoding="utf-8")
+    parquet_paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
+    source_stats = [
+        dag.TableStats(
+            table_name=table_name,
+            row_count=2 if table_name == "mart_pipeline_status" else 1,
+            size_bytes=10,
+        )
+        for table_name in dag.MART_TABLES
+    ]
+    original_replace = Path.replace
+
+    def fail_database_swap(path: Path, target: Path) -> Path:
+        if path.name == ".ztm.duckdb.export-1.tmp":
+            raise OSError("database swap failed")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_database_swap)
+
+    with pytest.raises(OSError, match="database swap failed"):
+        dag._publish_duckdb(
+            _test_export_config(dag, tmp_path),
+            parquet_paths_by_table,
+            source_stats,
+            datetime(2026, 7, 2, tzinfo=UTC),
+        )
+
+    assert final_path.read_text(encoding="utf-8") == "old duckdb"
+    assert metadata_path.read_text(encoding="utf-8") == "old metadata"
 
 
 def test_dag_is_asset_scheduled_and_exposes_single_export_task() -> None:
@@ -897,6 +1210,16 @@ def _load_dag_module() -> types.ModuleType:
 
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_validator_module() -> types.ModuleType:
+    module_path = Path(__file__).parents[1] / "dags" / "serving_export_validator.py"
+    spec = importlib.util.spec_from_file_location("serving_export_validator_under_test", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("failed to load serving validator module spec")
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
@@ -1192,7 +1515,16 @@ class RecordingDuckdbConnection:
         self.queries.append(query)
 
 
-def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], duckdb: Any) -> dict[str, list[Path]]:
+def _write_minimal_parquet_files(  # noqa: C901, PLR0913
+    tmp_path: Path,
+    table_names: tuple[str, ...],
+    duckdb: Any,
+    *,
+    duplicate_trip: bool = False,
+    incomplete_status: bool = False,
+    invalid_status: bool = False,
+    historical_duplicate_trip: bool = False,
+) -> dict[str, list[Path]]:
     paths_by_table = {}
     with duckdb.connect() as connection:
         for table_name in table_names:
@@ -1202,6 +1534,21 @@ def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], d
             escaped_path = path.as_posix().replace("'", "''")
             if table_name == "mart_trip_daily":
                 connection.execute(_copy_minimal_trip_sql(escaped_path))
+                if duplicate_trip:
+                    duplicate_path = table_dir / "duplicate.parquet"
+                    connection.execute("create temp table duplicate_trip as select * from read_parquet(?)", [str(path)])
+                    duplicate_relation = connection.table("duplicate_trip")
+                    duplicate_relation.union(duplicate_relation).write_parquet(str(duplicate_path))
+                    connection.execute("drop table duplicate_trip")
+                    duplicate_path.replace(path)
+            elif table_name == "fct_expected_stop_event":
+                connection.execute(_copy_minimal_expected_stop_event_sql(escaped_path))
+            elif table_name == "dim_serving_date":
+                connection.execute(_copy_minimal_serving_date_sql(escaped_path))
+            elif table_name == "mart_mode_window_summary":
+                connection.execute(_copy_minimal_mode_window_sql(escaped_path))
+            elif table_name == "mart_pipeline_status":
+                connection.execute(_copy_minimal_pipeline_status_sql(escaped_path, incomplete_status, invalid_status))
             elif table_name == "dim_stop_post_current":
                 connection.execute(_copy_minimal_stop_post_current_sql(escaped_path))
             elif table_name == "dim_stop_group_current":
@@ -1211,7 +1558,149 @@ def _write_minimal_parquet_files(tmp_path: Path, table_names: tuple[str, ...], d
                     f"copy (select 1 as id, ? as table_name) to '{escaped_path}' (format parquet)", [table_name]
                 )
             paths_by_table[table_name] = [path]
+        if historical_duplicate_trip:
+            _add_historical_duplicate_trip(connection, paths_by_table)
     return paths_by_table
+
+
+def _add_historical_duplicate_trip(connection: Any, paths_by_table: dict[str, list[Path]]) -> None:
+    additions = {
+        "dim_serving_date": connection.sql(
+            "select date '2026-07-01', '2026-07-01', null::date, date '2026-07-02', false, 2"
+        ),
+        "mart_mode_window_summary": connection.sql(
+            "select 'bus', 'day', '2026-07-01', date '2026-07-01', date '2026-07-01', 1"
+        ),
+    }
+    historical_trip = connection.sql(
+        """
+        select
+            'gtfs-old', date '2026-07-01', 'trip-old', '1002', '190', '190', 'bus', 0,
+            'Old', timestamp '2026-07-01 06:00:00', 'complete'
+        """
+    )
+    additions["mart_trip_daily"] = historical_trip.union(historical_trip)
+    for table_name, addition in additions.items():
+        path = paths_by_table[table_name][0]
+        replacement = path.with_name("historical.parquet")
+        connection.read_parquet(str(path)).union(addition).write_parquet(str(replacement))
+        replacement.replace(path)
+
+
+def _test_export_config(dag: Any, tmp_path: Path) -> Any:
+    return dag.ExportConfig(
+        export_id="export-1",
+        output_dir=tmp_path,
+        output_filename="ztm.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=10_000_000,
+        cleanup_gcs_staging=False,
+    )
+
+
+def _copy_minimal_serving_date_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select
+                date '2026-07-02' as service_date,
+                '2026-07-02' as service_date_key,
+                null::date as previous_service_date,
+                null::date as next_service_date,
+                true as is_latest,
+                1 as service_date_rank_desc
+        ) to '{escaped_path}' (format parquet)
+    """
+
+
+def _copy_minimal_mode_window_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select
+                'bus' as mode,
+                'day' as window_type,
+                '2026-07-02' as window_key,
+                date '2026-07-02' as source_start_date,
+                date '2026-07-02' as source_end_date,
+                1 as source_day_count
+        ) to '{escaped_path}' (format parquet)
+    """
+
+
+def _copy_minimal_pipeline_status_sql(escaped_path: str, incomplete_status: bool, invalid_status: bool) -> str:
+    present_hours = 25 if invalid_status else (23 if incomplete_status else 24)
+    missing_hours = "[23]" if incomplete_status else "[]"
+    completeness_ratio = 1.0 if invalid_status else present_hours / 24
+    return f"""
+        copy (
+            select
+                date '2026-07-02' as service_date,
+                1 as vehicle_type,
+                'bus' as mode,
+                24 as expected_hours,
+                {present_hours} as present_hours,
+                {missing_hours}::integer[] as missing_hours,
+                timestamp '2026-07-02 00:00:00' as first_observed_time,
+                timestamp '2026-07-02 23:59:00' as last_observed_time,
+                {completeness_ratio}::double as completeness_ratio,
+                {str(not incomplete_status).lower()} as is_complete_day,
+                100 as gps_row_count,
+                10 as max_vehicle_count,
+                1.0::double as mean_hourly_coverage_ratio,
+                1.0::double as min_hourly_coverage_ratio,
+                10 as max_gap_seconds,
+                100 as pings_total,
+                1 as trips_observed,
+                1 as trips_complete,
+                0 as trips_partial,
+                0 as trips_broken,
+                0.0::double as broken_rate,
+                1 as expected_trips,
+                1 as observed_trips,
+                1.0::double as service_coverage_ratio,
+                20.0::double as expected_service_minutes,
+                20.0::double as observed_service_minutes,
+                1 as stop_arrivals_count,
+                'gtfs-1' as latest_gtfs_snapshot_id,
+                timestamp '2026-07-02 00:00:00' as latest_gtfs_snapshot_at,
+                1 as gtfs_snapshot_age_hours,
+                1 as schedule_versions_active,
+                1.0::double as health_ratio,
+                'good' as health_label,
+                null::timestamp as last_export_at,
+                timestamp '2026-07-02 23:59:00' as status_generated_at
+            union all
+            select
+                date '2026-07-02', 2, 'tram', 24, 24, []::integer[],
+                timestamp '2026-07-02 00:00:00', timestamp '2026-07-02 23:59:00', 1.0::double, true,
+                100, 10, 1.0::double, 1.0::double, 10, 100, 1, 1, 0, 0, 0.0::double,
+                1, 1, 1.0::double, 20.0::double, 20.0::double, 1, 'gtfs-1',
+                timestamp '2026-07-02 00:00:00', 1, 1, 1.0::double, 'good', null::timestamp,
+                timestamp '2026-07-02 23:59:00'
+        ) to '{escaped_path}' (format parquet)
+    """
+
+
+def _copy_minimal_expected_stop_event_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select
+                'gtfs-1' as gtfs_snapshot_id,
+                date '2026-07-02' as service_date,
+                'trip-1' as trip_id,
+                '1001' as vehicle_number,
+                0 as stop_sequence,
+                '700201' as stop_id,
+                '7002' as stop_group_id,
+                '01' as stop_post_code,
+                'Boundary Stop 01' as stop_name,
+                timestamp '2026-07-02 06:00:00' as scheduled_arrival_time,
+                timestamp '2026-07-02 06:01:00' as actual_arrival_time,
+                60 as delay_seconds,
+                'observed' as observation_status
+        ) to '{escaped_path}' (format parquet)
+    """
 
 
 def _copy_minimal_stop_post_current_sql(escaped_path: str) -> str:
@@ -1263,6 +1752,7 @@ def _copy_minimal_trip_sql(escaped_path: str) -> str:
     return f"""
         copy (
             select
+                'gtfs-1' as gtfs_snapshot_id,
                 date '2026-07-02' as service_date,
                 'trip-1' as trip_id,
                 '1001' as vehicle_number,

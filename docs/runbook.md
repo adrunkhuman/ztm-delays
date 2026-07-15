@@ -243,15 +243,19 @@ jobs from the same principal can be included while jobs from another principal o
 
 `dag_serving_export` normally consumes the `gps_models_date` asset after nightly marts succeed. It can also be triggered
 manually after a wider mart rebuild. It exports the fixed frontend source-table allowlist to GCS Parquet under
-`gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds page-shaped DuckDB serving tables locally,
-validates the artifact, and atomically swaps the stable serving file. When changing the frontend serving surface, update
-the DAG source allowlist, derived-table SQL, tests, and `docs/serving_contract.md` together.
+`gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=.../`, builds and validates the DuckDB artifact locally, and
+atomically swaps the stable serving file. When changing the frontend serving surface, update the DAG source allowlist,
+tests, and `docs/serving_contract.md` together.
 
 Default output path inside the Airflow container:
 
 ```text
 /opt/airflow/serving/ztm.duckdb
 ```
+
+The equivalent environment overrides are `SERVING_EXPORT_VALIDATION_TIMEOUT_SECONDS`,
+`SERVING_EXPORT_VALIDATION_MEMORY_LIMIT_MB`, `SERVING_EXPORT_VALIDATION_TEMP_LIMIT_MB`, and
+`SERVING_EXPORT_VALIDATION_THREADS`. Values supplied in `dag_run.conf` take precedence over environment values.
 
 Mount that directory to a stable VPS host path before using the export for the frontend. The frontend container should
 mount the same host path read-only and reopen DuckDB connections when `export_metadata.export_id` or the metadata JSON
@@ -267,6 +271,10 @@ Useful manual config:
   "changed_partition_dates": ["2026-07-01", "2026-07-02"],
   "max_source_bytes": 21474836480,
   "max_duckdb_bytes": 21474836480,
+  "validation_timeout_seconds": 120,
+  "validation_memory_limit_mb": 1024,
+  "validation_temp_limit_mb": 2048,
+  "validation_threads": 1,
   "cleanup_gcs_staging": false
 }
 ```
@@ -281,12 +289,25 @@ publication. This is a one-time migration; normal nightly runs replace only prio
 
 The Airflow image must include the `duckdb` Python package. The export fails before publication if required mart tables
 are missing, required serving tables are empty, source bytes exceed the configured guardrail, the built DuckDB file
-exceeds its guardrail, or validation cannot query the expected tables.
+exceeds its guardrail, or structural or semantic validation fails.
 
 DuckDB builds run with the current VPS resource profile: `memory_limit='1GB'`, `max_temp_directory_size='2GB'`,
 `threads=2`, and `preserve_insertion_order=false`. The DuckDB memory limit is separate from `max_duckdb_bytes`, which
 only guards the final output file size. Resource-pressure failures leave the stable serving file unchanged; free
 disk/memory or reduce the export scope, then rerun with a fresh `export_id`.
+
+Semantic validation runs in an isolated process against the temporary DuckDB before publication. It applies a hard
+wall-clock timeout plus its own DuckDB memory, spill, and thread limits. Deterministic checks cover serving-date alignment,
+pipeline-status identities and bounds, unique trip/event keys, and trip-to-stop-event relationships for changed dates plus
+the latest serving date. Missing serving dates, incomplete GPS days, absent status modes, and zero scheduled-service
+coverage are warnings rather than publication failures. The sidecar records the complete validation summary under
+`semantic_validation`; embedded `export_metadata` records `semantic_validation_status` and
+`semantic_validation_warnings_json`. Validation does not issue BigQuery query jobs.
+
+Warning codes are `serving_date_absent`, `pipeline_status_mode_absent`, `incomplete_gps_day`, and
+`zero_service_coverage`. Records include `service_date` and, where applicable, `mode`, `completeness_ratio`, or
+`expected_trips`. At most 100 warning records are included; `warning_count` and `warnings_truncated` expose omissions.
+The complete child report is capped at 64 KiB, and exceeding that cap blocks publication.
 
 Use a fresh `export_id` for every rerun. The export ID is embedded in deterministic BigQuery extract job IDs; failed or
 successful attempts reserve those job IDs even if GCS staging files are later removed.
@@ -304,12 +325,16 @@ export is running, remove them with:
 
 ```bash
 rm -rf /opt/airflow/serving/.duckdb-tmp-EXPORT_ID \
-  /opt/airflow/serving/.ztm.duckdb.EXPORT_ID.tmp*
+  /opt/airflow/serving/.validation-tmp-EXPORT_ID \
+  /opt/airflow/serving/.ztm.duckdb.EXPORT_ID.tmp* \
+  /opt/airflow/serving/ztm.duckdb.meta.json.tmp \
+  /opt/airflow/serving/ztm.duckdb.meta.json.restore.tmp
 ```
 
-The stable DuckDB file and sidecar JSON are not swapped transactionally as one unit. The DuckDB file is the source of
-truth for consumers; use `export_metadata` inside the database when exact consistency matters. The sidecar is
-`ztm.duckdb.meta.json` by default and mirrors the same export summary for operational inspection.
+The stable DuckDB file and sidecar JSON are not swapped transactionally as one unit. The sidecar is replaced first and
+the DuckDB last, so a sidecar-write failure cannot expose a new database. Frontend consumers accept sidecar fields only
+when its `export_id` matches `export_metadata`; the DuckDB remains the source of truth for exact consistency. The sidecar
+is `ztm.duckdb.meta.json` by default and mirrors the same export summary for operational inspection.
 
 ## Operational Notes
 
