@@ -5,9 +5,12 @@ TS_SOCKS_ADDR="${TS_SOCKS_ADDR:-127.0.0.1:1055}"
 TS_EXIT_NODE="${TS_EXIT_NODE:-100.103.142.113}"
 TS_STATE_DIR="${TS_STATE_DIR:-/var/lib/tailscale}"
 TS_STATE_FILE="${TS_STATE_DIR}/tailscaled.state"
+TAILSCALE_SOCKET="${TAILSCALE_SOCKET:-/var/run/tailscale/tailscaled.sock}"
 TAILSCALED_PID_FILE="${TAILSCALED_PID_FILE:-/tmp/tailscaled.pid}"
 POLLER_PID_FILE="${POLLER_PID_FILE:-/tmp/ztm-poller.pid}"
 STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-300}"
+TAILSCALE_READY_ATTEMPTS="${TAILSCALE_READY_ATTEMPTS:-30}"
+TAILSCALE_READY_INTERVAL_SECONDS="${TAILSCALE_READY_INTERVAL_SECONDS:-1}"
 STARTED_AT=$(date +%s)
 TERMINATE_REQUESTED=0
 
@@ -15,19 +18,12 @@ if [ -z "${TS_HOSTNAME:-}" ]; then
   TS_HOSTNAME="ztm-poller"
 fi
 
-mkdir -p /var/run/tailscale "${TS_STATE_DIR}"
+mkdir -p "$(dirname "${TAILSCALE_SOCKET}")" "${TS_STATE_DIR}"
 
 if [ ! -f "${TS_STATE_FILE}" ] && [ -z "${TS_AUTHKEY:-}" ]; then
   echo "TS_AUTHKEY is required when ${TS_STATE_FILE} does not exist" >&2
   exit 1
 fi
-
-tailscaled \
-  --tun=userspace-networking \
-  --socks5-server="${TS_SOCKS_ADDR}" \
-  --state="${TS_STATE_FILE}" &
-TAILSCALED_PID=$!
-echo "${TAILSCALED_PID}" >"${TAILSCALED_PID_FILE}"
 
 terminate() {
   TERMINATE_REQUESTED=1
@@ -36,29 +32,65 @@ terminate() {
   fi
 }
 
+stop_tailscaled() {
+  if [ -n "${TAILSCALED_PID:-}" ]; then
+    kill -TERM "${TAILSCALED_PID}" 2>/dev/null || true
+    wait "${TAILSCALED_PID}" 2>/dev/null || true
+  fi
+}
+
 trap terminate INT TERM
 
-for _attempt in $(seq 1 30); do
-  if [ -S /var/run/tailscale/tailscaled.sock ]; then
+tailscaled \
+  --tun=userspace-networking \
+  --socks5-server="${TS_SOCKS_ADDR}" \
+  --state="${TS_STATE_FILE}" \
+  --socket="${TAILSCALE_SOCKET}" &
+TAILSCALED_PID=$!
+echo "${TAILSCALED_PID}" >"${TAILSCALED_PID_FILE}"
+
+for _attempt in $(seq 1 "${TAILSCALE_READY_ATTEMPTS}"); do
+  if [ -S "${TAILSCALE_SOCKET}" ]; then
     break
   fi
-  sleep 1
+  sleep "${TAILSCALE_READY_INTERVAL_SECONDS}"
+  if [ "${TERMINATE_REQUESTED}" -eq 1 ]; then
+    break
+  fi
 done
 
-if [ ! -S /var/run/tailscale/tailscaled.sock ]; then
+if [ "${TERMINATE_REQUESTED}" -eq 1 ]; then
+  stop_tailscaled
+  exit 0
+fi
+
+if [ ! -S "${TAILSCALE_SOCKET}" ]; then
   echo "tailscaled did not become ready" >&2
+  stop_tailscaled
   exit 1
 fi
 
+set +e
 if [ -n "${TS_AUTHKEY:-}" ]; then
-  tailscale up \
+  tailscale --socket="${TAILSCALE_SOCKET}" up \
     --authkey="${TS_AUTHKEY}" \
     --exit-node="${TS_EXIT_NODE}" \
     --hostname="${TS_HOSTNAME}"
 else
-  tailscale up \
+  tailscale --socket="${TAILSCALE_SOCKET}" up \
     --exit-node="${TS_EXIT_NODE}" \
     --hostname="${TS_HOSTNAME}"
+fi
+TAILSCALE_STATUS=$?
+set -e
+
+if [ "${TERMINATE_REQUESTED}" -eq 1 ]; then
+  stop_tailscaled
+  exit 0
+fi
+if [ "${TAILSCALE_STATUS}" -ne 0 ]; then
+  stop_tailscaled
+  exit "${TAILSCALE_STATUS}"
 fi
 
 export ZTM_API_PROXY="socks5h://${TS_SOCKS_ADDR}"
@@ -87,6 +119,5 @@ if [ "${POLLER_STATUS}" -ne 0 ] && [ "${TERMINATE_REQUESTED}" -eq 0 ]; then
   fi
 fi
 
-kill -TERM "${TAILSCALED_PID}" 2>/dev/null || true
-wait "${TAILSCALED_PID}" 2>/dev/null || true
+stop_tailscaled
 exit "${POLLER_STATUS}"

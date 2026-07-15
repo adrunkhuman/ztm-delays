@@ -470,6 +470,46 @@ def _prepare_spool(config: Config) -> None:
         raise RuntimeError(f"poller spool directory is not writable path={config.spool_dir}")
 
 
+def _spool_hour(value: str) -> datetime:
+    hour = datetime.fromisoformat(value)
+    if hour.utcoffset() is None or any((hour.minute, hour.second, hour.microsecond)):
+        raise ValueError("poller spool hour must be an aware whole hour")
+    return hour
+
+
+def _spool_rows(payload: object) -> list[GpsRow]:
+    if not isinstance(payload, list):
+        raise TypeError("poller spool hour payload must be a list")
+    return [_gps_row_from_spool(row_payload) for row_payload in payload]
+
+
+def _spool_vehicle_payload(payload: dict[str, object]) -> dict[str, object]:
+    vehicle_payload = payload.get("vehicle_types")
+    if not isinstance(vehicle_payload, dict):
+        raise TypeError("poller spool vehicle_types must be an object")
+    return cast("dict[str, object]", vehicle_payload)
+
+
+def _restore_spool_buffers(
+    config: Config,
+    buffers: dict[str, dict[datetime, list[GpsRow]]],
+    vehicle_payload: dict[str, object],
+) -> int:
+    vehicle_names = {vehicle_type.name for vehicle_type in config.vehicle_types}
+    restored_rows = 0
+    for vehicle_type_name, hour_payload in vehicle_payload.items():
+        if vehicle_type_name not in vehicle_names:
+            continue
+        if not isinstance(hour_payload, dict):
+            raise TypeError("poller spool vehicle payload must be an object")
+        for hour_value, rows_payload in cast("dict[str, object]", hour_payload).items():
+            hour = _spool_hour(hour_value)
+            rows = _spool_rows(rows_payload)
+            buffers[vehicle_type_name][hour].extend(rows)
+            restored_rows += len(rows)
+    return restored_rows
+
+
 def _load_spool(config: Config) -> dict[str, dict[datetime, list[GpsRow]]]:
     buffers = _empty_buffers(config)
     spool_path = _spool_path(config)
@@ -478,25 +518,17 @@ def _load_spool(config: Config) -> dict[str, dict[datetime, list[GpsRow]]]:
     if spool_path.stat().st_size > config.spool_max_bytes:
         raise RuntimeError(f"poller spool exceeds POLLER_SPOOL_MAX_BYTES path={spool_path}")
 
-    payload = json.loads(spool_path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(spool_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"poller spool is unreadable path={spool_path}") from exc
     if not isinstance(payload, dict) or payload.get("version") != 1:
         raise RuntimeError("poller spool has unsupported format")
-    vehicle_payload = payload.get("vehicle_types")
-    if not isinstance(vehicle_payload, dict):
-        raise TypeError("poller spool is missing vehicle_types")
-
-    vehicle_names = {vehicle_type.name for vehicle_type in config.vehicle_types}
-    restored_rows = 0
-    for vehicle_type_name, hour_payload in vehicle_payload.items():
-        if vehicle_type_name not in vehicle_names or not isinstance(hour_payload, dict):
-            continue
-        for hour_value, rows_payload in hour_payload.items():
-            if not isinstance(rows_payload, list):
-                raise TypeError("poller spool hour payload must be a list")
-            hour = datetime.fromisoformat(hour_value)
-            rows = [_gps_row_from_spool(row_payload) for row_payload in rows_payload]
-            buffers[vehicle_type_name][hour].extend(rows)
-            restored_rows += len(rows)
+    try:
+        vehicle_payload = _spool_vehicle_payload(cast("dict[str, object]", payload))
+        restored_rows = _restore_spool_buffers(config, buffers, vehicle_payload)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("poller spool has invalid contents") from exc
     LOGGER.info("loaded poller spool path=%s rows=%d", spool_path, restored_rows)
     return buffers
 
@@ -557,12 +589,15 @@ def _gps_row_from_spool(payload: object) -> GpsRow:
     if not isinstance(payload, dict):
         raise TypeError("poller spool row must be an object")
     row_payload = cast("dict[str, object]", payload)
+    gps_time = datetime.fromisoformat(str(row_payload["Time"]))
+    if gps_time.utcoffset() is None:
+        raise ValueError("poller spool row Time must include an offset")
     return {
         "Lines": str(row_payload["Lines"]),
         "Brigade": str(row_payload["Brigade"]),
         "Lat": float(cast("str | float", row_payload["Lat"])),
         "Lon": float(cast("str | float", row_payload["Lon"])),
-        "Time": datetime.fromisoformat(str(row_payload["Time"])).astimezone(UTC),
+        "Time": gps_time.astimezone(UTC),
         "VehicleNumber": str(row_payload["VehicleNumber"]),
         "vehicle_type": int(cast("str | int", row_payload["vehicle_type"])),
     }
@@ -614,7 +649,11 @@ def _parse_record(record: dict[str, object], vehicle_type_id: int) -> GpsRow | N
 
 def _parse_warsaw_time(value: str) -> datetime:
     local_time = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=WARSAW_TZ)
-    return local_time.astimezone(UTC)
+    naive_time = local_time.replace(tzinfo=None)
+    utc_time = local_time.astimezone(UTC)
+    if utc_time.astimezone(WARSAW_TZ).replace(tzinfo=None) != naive_time:
+        raise ValueError(f"nonexistent Warsaw local time: {value}")
+    return utc_time
 
 
 def _hour_key(value: datetime) -> datetime:
