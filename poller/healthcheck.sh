@@ -29,4 +29,4 @@ if [ ! -S "${TAILSCALE_SOCKET}" ]; then
   exit 1
 fi
 
-tailscale status >/dev/null 2>&1
+tailscale --socket="${TAILSCALE_SOCKET}" status >/dev/null 2>&1

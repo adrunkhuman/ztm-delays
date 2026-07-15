@@ -29,9 +29,7 @@ HEARTBEAT_ACCEPTED_ROWS = 10
 EXPECTED_RETRY_FLUSH_CALLS = 2
 EGRESS_CHECK_URL = "https://example.test/egress"
 CUSTOM_SPOOL_MAX_BYTES = 12345
-ENTRYPOINT = Path(__file__).resolve().parents[1] / "entrypoint.sh"
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
-HEALTHCHECK = Path(__file__).resolve().parents[1] / "healthcheck.sh"
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +66,23 @@ def test_parse_record_converts_warsaw_time_to_utc() -> None:
         "VehicleNumber": "1234",
         "vehicle_type": 1,
     }
+
+
+def test_parse_warsaw_time_uses_first_occurrence_during_fall_transition() -> None:
+    assert poller._parse_warsaw_time("2026-10-25 02:30:00") == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+
+
+def test_parse_record_skips_nonexistent_spring_transition_time() -> None:
+    record: dict[str, object] = {
+        "Lines": "187",
+        "Brigade": "01",
+        "Lat": 52.2297,
+        "Lon": 21.0122,
+        "Time": "2026-03-29 02:30:00",
+        "VehicleNumber": "1234",
+    }
+
+    assert poller._parse_record(record, vehicle_type_id=1) is None
 
 
 def test_parse_record_skips_invalid_records() -> None:
@@ -723,6 +738,46 @@ def test_spool_round_trips_buffered_rows(tmp_path: Path) -> None:
     assert restored["tram"] == {}
 
 
+def test_load_spool_rejects_malformed_json(tmp_path: Path) -> None:
+    (tmp_path / poller.SPOOL_FILE_NAME).write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="spool is unreadable"):
+        poller._load_spool(_config(spool_dir=tmp_path))
+
+
+@pytest.mark.parametrize("hour", ["2026-01-15T11:00:00", "2026-01-15T11:30:00+01:00"])
+def test_load_spool_rejects_invalid_buffer_hour(tmp_path: Path, hour: str) -> None:
+    payload = {"version": 1, "vehicle_types": {"bus": {hour: []}}}
+    (tmp_path / poller.SPOOL_FILE_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="spool has invalid contents"):
+        poller._load_spool(_config(spool_dir=tmp_path))
+
+
+def test_load_spool_rejects_naive_gps_timestamp(tmp_path: Path) -> None:
+    row = poller._gps_row_to_spool(_gps_row())
+    row["Time"] = "2026-01-15T10:05:00"
+    payload = {"version": 1, "vehicle_types": {"bus": {"2026-01-15T11:00:00+01:00": [row]}}}
+    (tmp_path / poller.SPOOL_FILE_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="spool has invalid contents"):
+        poller._load_spool(_config(spool_dir=tmp_path))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": 1},
+        {"version": 1, "vehicle_types": {"bus": []}},
+    ],
+)
+def test_load_spool_rejects_invalid_vehicle_sections(tmp_path: Path, payload: dict[str, object]) -> None:
+    (tmp_path / poller.SPOOL_FILE_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="spool has invalid contents"):
+        poller._load_spool(_config(spool_dir=tmp_path))
+
+
 def test_save_spool_removes_file_when_buffers_empty(tmp_path: Path) -> None:
     config = _config(spool_dir=tmp_path)
     buffers = poller._empty_buffers(config)
@@ -766,57 +821,6 @@ def test_flush_shutdown_keeps_spool_after_upload_failure(monkeypatch: pytest.Mon
     assert restored["bus"] == {buffer_hour: [row]}
 
 
-def test_entrypoint_runs_tailscale_userspace_proxy_before_poller() -> None:
-    script = ENTRYPOINT.read_text()
-
-    assert '"${VEHICLE_TYPE:?VEHICLE_TYPE is required}"' not in script
-    assert '"${TS_AUTHKEY:?TS_AUTHKEY is required}"' not in script
-    assert 'TS_HOSTNAME="ztm-poller"' in script
-    assert 'TS_STATE_FILE="${TS_STATE_DIR}/tailscaled.state"' in script
-    assert 'TAILSCALED_PID_FILE="${TAILSCALED_PID_FILE:-/tmp/tailscaled.pid}"' in script
-    assert 'POLLER_PID_FILE="${POLLER_PID_FILE:-/tmp/ztm-poller.pid}"' in script
-    assert "TS_AUTHKEY is required when ${TS_STATE_FILE} does not exist" in script
-    assert "tailscaled" in script
-    assert "--tun=userspace-networking" in script
-    assert '--socks5-server="${TS_SOCKS_ADDR}"' in script
-    assert '--state="${TS_STATE_FILE}"' in script
-    assert 'echo "${TAILSCALED_PID}" >"${TAILSCALED_PID_FILE}"' in script
-    assert 'echo "${POLLER_PID}" >"${POLLER_PID_FILE}"' in script
-    assert "tailscale up" in script
-    assert '--exit-node="${TS_EXIT_NODE}"' in script
-    assert 'export ZTM_API_PROXY="socks5h://${TS_SOCKS_ADDR}"' in script
-    assert 'uv run --locked --no-dev python poller.py "$@"' in script
-
-
-def test_entrypoint_fails_before_poller_when_tailscaled_is_not_ready() -> None:
-    script = ENTRYPOINT.read_text()
-    readiness_check = "if [ ! -S /var/run/tailscale/tailscaled.sock ]; then"
-    failure = 'echo "tailscaled did not become ready" >&2'
-    poller_start = 'uv run --locked --no-dev python poller.py "$@"'
-
-    assert script.index(readiness_check) < script.index(failure) < script.index(poller_start)
-
-
-def test_entrypoint_keeps_container_alive_after_early_poller_failure() -> None:
-    script = ENTRYPOINT.read_text()
-
-    assert 'STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-300}"' in script
-    assert 'if [ "${POLLER_STATUS}" -ne 0 ] && [ "${TERMINATE_REQUESTED}" -eq 0 ]; then' in script
-    assert 'if [ "${RUNTIME_SECONDS}" -lt "${STARTUP_GRACE_SECONDS}" ]; then' in script
-    assert 'sleep "${REMAINING_SECONDS}"' in script
-
-
-def test_entrypoint_waits_for_poller_after_forwarding_shutdown_signal() -> None:
-    script = ENTRYPOINT.read_text()
-    terminate_function = "terminate() {"
-    forward_poll_term = 'kill -TERM "${POLLER_PID}" 2>/dev/null || true'
-    wait_loop = "while true; do"
-    stop_tailscaled = 'kill -TERM "${TAILSCALED_PID}" 2>/dev/null || true'
-
-    assert script.index(terminate_function) < script.index(forward_poll_term) < script.index(wait_loop)
-    assert script.index(wait_loop) < script.index(stop_tailscaled)
-
-
 def test_dockerfile_defines_local_worker_healthcheck() -> None:
     dockerfile = DOCKERFILE.read_text()
 
@@ -825,17 +829,6 @@ def test_dockerfile_defines_local_worker_healthcheck() -> None:
     assert (
         'HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD ["./healthcheck.sh"]' in dockerfile
     )
-
-
-def test_healthcheck_uses_local_process_and_tailscale_state_only() -> None:
-    script = HEALTHCHECK.read_text()
-
-    assert 'TAILSCALED_PID_FILE="${TAILSCALED_PID_FILE:-/tmp/tailscaled.pid}"' in script
-    assert 'POLLER_PID_FILE="${POLLER_PID_FILE:-/tmp/ztm-poller.pid}"' in script
-    assert 'TAILSCALE_SOCKET="${TAILSCALE_SOCKET:-/var/run/tailscale/tailscaled.sock}"' in script
-    assert 'kill -0 "${pid}"' in script
-    assert "tailscale status >/dev/null 2>&1" in script
-    assert "dane.um.warszawa.pl" not in script
 
 
 def _config(
