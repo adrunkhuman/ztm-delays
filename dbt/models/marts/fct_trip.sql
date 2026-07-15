@@ -149,7 +149,21 @@ enriched as (
 
 select *
 from enriched
-{% if is_incremental() and publish_service_date != var("processing_date") %}
+-- A historical rerun of D must not discard overnight completions already published by D+1.
+{% if is_incremental() and publish_service_date == var("processing_date") %}
+where not exists (
+    select 1
+    from {{ this }} as existing
+    where existing.service_date = date('{{ publish_service_date }}')
+      and existing.gps_date > date('{{ var("processing_date") }}')
+      and existing.trip_id = enriched.trip_id
+)
+union all by name
+select existing.*
+from {{ this }} as existing
+where existing.service_date = date('{{ publish_service_date }}')
+  and existing.gps_date > date('{{ var("processing_date") }}')
+{% elif is_incremental() %}
 union all by name
 select existing.*
 from {{ this }} as existing

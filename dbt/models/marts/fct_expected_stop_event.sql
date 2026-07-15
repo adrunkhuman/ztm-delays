@@ -343,7 +343,14 @@ from expected_events
 
 select *
 from published
-{% if is_incremental() and publish_service_date != var("processing_date") %}
+-- Keep child facts aligned with future overnight trip overlays preserved by fct_trip.
+{% if is_incremental() and publish_service_date == var("processing_date") %}
+union all by name
+select existing.*
+from {{ this }} as existing
+where existing.service_date = date('{{ publish_service_date }}')
+  and existing.gps_date > date('{{ var("processing_date") }}')
+{% elif is_incremental() %}
 union all by name
 select existing.*
 from {{ this }} as existing

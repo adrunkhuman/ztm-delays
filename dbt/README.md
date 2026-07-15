@@ -22,7 +22,7 @@ uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select dim_line 
 
 Historical facts bake labels from the selected snapshot used for their rebuild. `_current` dimensions are present-day convenience surfaces only and must not be used to relabel historical facts.
 
-The three facts overwrite `publish_service_date`, defaulting to `processing_date`. A normal matcher `gps_date = processing_date` artifact already combines source GPS dates `D-1` and `D`; dbt selects that one artifact by exact `gps_date` when publishing both service-date partitions. `source_gps_date` keeps direct-arrival lineage. Outage-boundary runs explicitly use current-only input rather than reading an excluded prior GPS date.
+The three facts overwrite `publish_service_date`, defaulting to `processing_date`. A normal matcher `gps_date = processing_date` artifact already combines source GPS dates `D-1` and `D`; dbt selects that one artifact by exact `gps_date` when publishing both service-date partitions. `source_gps_date` keeps direct-arrival lineage. Outage-boundary runs explicitly use current-only input rather than reading an excluded prior GPS date. If historical processing date `D` later republishes service date `D`, rows already published from `gps_date > D` are retained, and a newer overlay supersedes the same trip from `D`.
 
 Schedule versions are per-line timetable fingerprints derived from selected snapshots across collected history. They intentionally exclude display labels and unstable GTFS identifiers. Nightly runs use the latest built GTFS snapshot and republish the prior service date, so late corrections for yesterday are picked up by the next run.
 
