@@ -621,6 +621,28 @@ td:nth-child(n + 2) {
   width: 100%;
 }
 
+.pager {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  min-height: 42px;
+  border-top: 1px solid var(--border);
+  font-size: 0.7rem;
+}
+
+.pager a {
+  color: var(--fg2);
+  font-family: var(--mono);
+}
+
+.pager a:last-child {
+  text-align: right;
+}
+
+.pager a:hover {
+  color: var(--fg);
+}
+
 .widget {
   display: flex;
   flex-direction: column;
@@ -994,6 +1016,17 @@ td:nth-child(n + 2) {
   column-gap: 2.6rem;
   padding-top: 1.3rem;
   border-top: 1px solid var(--border);
+}
+
+.dirs {
+  row-gap: 2rem;
+}
+
+.rail .pager {
+  margin-top: 0.45rem;
+  min-height: 30px;
+  border-top-color: var(--hair);
+  font-size: 0.58rem;
 }
 
 .dirhead {

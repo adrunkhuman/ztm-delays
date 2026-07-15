@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import duckdb
 
+from ztm_frontend import queries
 from ztm_frontend.app import create_app
 from ztm_frontend.queries import get_status
 
@@ -65,3 +66,33 @@ def test_status_page_renders_current_pipeline_contract(tmp_path: Path, monkeypat
     assert b"observed minutes" in response.data
     assert b"Bus partial" in response.data
     assert b"matched" not in response.data
+
+
+def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_get_stops(*args: object) -> dict[str, object]:
+        captured["page"] = args[-2]
+        captured["picker_page"] = args[-1]
+        return {
+            "selected_stop_group_id": None,
+            "selected_mode": "bus",
+            "selected_rank": "worst",
+            "selected_date": "2026-06-30",
+            "search": "central",
+            "date_nav": {"previous": None, "next": None},
+            "stop_list": [{"stop_group_id": "1001", "stop_group_name": "Central", "modes_served": "bus"}],
+            "picker_pagination": {"page": 3, "first_item": 25, "has_previous": True, "has_next": True},
+            "stop_landing_summary": {},
+            "stop_landing_rows": [],
+            "pagination": {"page": 2, "first_item": 51, "has_previous": True, "has_next": True},
+        }
+
+    monkeypatch.setattr(queries, "get_stops", fake_get_stops)
+    monkeypatch.setattr(queries, "get_export_metadata", lambda _path: {})
+
+    response = create_app().test_client().get("/stops/?q=central&page=2&picker_page=3")
+
+    assert response.status_code == HTTPStatus.OK
+    assert captured == {"page": "2", "picker_page": "3"}
+    assert b"picker_page=3" in response.data

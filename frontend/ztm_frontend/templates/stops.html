@@ -37,7 +37,7 @@
         <div class="railgroup">
           <div class="label">Posts</div>
           {% for post in stop_widgets.posts %}
-            <a class="railpost {% if post.stop_id == selected_stop_id %}active{% endif %}" href="{{ url_for('stops', stop_group_id=selected_stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">
+            <a class="railpost {% if post.stop_id == selected_stop_id %}active{% endif %}" href="{{ url_for('stops', stop_group_id=selected_stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date, picker_page=picker_pagination.page) }}">
               <span class="n">{{ post.display_name }}</span><span class="d">{{ post.stop_name }}</span><span class="p mono {{ post.on_time_rate|percent_class }}">{{ post.on_time_rate|percent }}</span>
             </a>
           {% endfor %}
@@ -45,10 +45,15 @@
       {% endif %}
 
       <div class="railgroup">
-        <div class="label">Nearby</div>
-        {% for row in stop_list[:12] %}
-          <a class="rail-link {% if row.stop_group_id == selected_stop_group_id %}active{% endif %}" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=selected_mode, q=search, date=selected_date) }}">{{ row.stop_group_name }}</a>
+        <div class="label">{% if search %}Results{% else %}Stops{% endif %}</div>
+        {% for row in stop_list %}
+          <a class="rail-link {% if row.stop_group_id == selected_stop_group_id %}active{% endif %}" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=selected_mode, q=search, date=selected_date, picker_page=picker_pagination.page) }}">{{ row.stop_group_name }}</a>
         {% endfor %}
+        {{ ui.pager(
+          picker_pagination,
+          url_for('stops', stop_group_id=selected_stop_group_id, post=selected_post.display_name if selected_post else none, mode=selected_mode, q=search, date=selected_date, view=selected_view, rank=selected_rank, page=pagination.page if pagination else none, picker_page=picker_pagination.page - 1) if picker_pagination.has_previous else none,
+          url_for('stops', stop_group_id=selected_stop_group_id, post=selected_post.display_name if selected_post else none, mode=selected_mode, q=search, date=selected_date, view=selected_view, rank=selected_rank, page=pagination.page if pagination else none, picker_page=picker_pagination.page + 1) if picker_pagination.has_next else none
+        ) }}
       </div>
     </aside>
 
@@ -61,21 +66,21 @@
             <span><b class="{{ (stop_landing_summary.on_time_rate or none)|percent_class }}">{{ (stop_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
             <span><b class="{{ (stop_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (stop_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
           </div>
-          {{ ui.datebox(selected_date, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.next) if date_nav.next else none) }}
+          {{ ui.datebox(selected_date, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.previous, picker_page=picker_pagination.page) if date_nav.previous else none, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.next, picker_page=picker_pagination.page) if date_nav.next else none) }}
         </header>
 
         <div class="landing-rank-switch scope">
           <span class="label">Sort</span>
-          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='worst') }}" class="{% if selected_rank == 'worst' %}active{% endif %}">worst delay</a>
-          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='busiest') }}" class="{% if selected_rank == 'busiest' %}active{% endif %}">busiest</a>
-          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='best') }}" class="{% if selected_rank == 'best' %}active{% endif %}">best</a>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='worst', picker_page=picker_pagination.page) }}" class="{% if selected_rank == 'worst' %}active{% endif %}">worst delay</a>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='busiest', picker_page=picker_pagination.page) }}" class="{% if selected_rank == 'busiest' %}active{% endif %}">busiest</a>
+          <a href="{{ url_for('stops', mode=selected_mode, q=search, date=selected_date, rank='best', picker_page=picker_pagination.page) }}" class="{% if selected_rank == 'best' %}active{% endif %}">best</a>
         </div>
 
         <section class="landing-rank">
           <div class="landing-rank-head stop-rank-grid"><div>#</div><div>Stop group</div><div></div><div>Med</div><div>On t</div></div>
           {% for row in stop_landing_rows %}
-            <a class="landing-rank-row stop-rank-grid" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=selected_mode, q=search, date=selected_date) }}">
-              <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
+            <a class="landing-rank-row stop-rank-grid" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=selected_mode, q=search, date=selected_date, picker_page=picker_pagination.page) }}">
+              <span class="landing-rank-index mono">{{ '%02d'|format(pagination.first_item + loop.index0) }}</span>
               <span class="landing-stop-name" title="{{ row.stop_group_name }}">{{ row.stop_group_name }}</span>
               {{ ui.hist(row.shape, true) }}
               <span class="landing-value mono {{ row.median_delay_seconds|delay_class }}">{{ row.median_delay_seconds|delay }}</span>
@@ -83,6 +88,11 @@
             </a>
           {% endfor %}
         </section>
+        {{ ui.pager(
+          pagination,
+          url_for('stops', mode=selected_mode, q=search, date=selected_date, rank=selected_rank, page=pagination.page - 1, picker_page=picker_pagination.page) if pagination.has_previous else none,
+          url_for('stops', mode=selected_mode, q=search, date=selected_date, rank=selected_rank, page=pagination.page + 1, picker_page=picker_pagination.page) if pagination.has_next else none
+        ) }}
       {% elif summary %}
         <header class="head">
           <h1 class="hero-title">{{ summary.stop_group_name }}</h1>
@@ -102,26 +112,26 @@
             {% if selected_post and stop_widgets.posts|length > 1 %}
               <div class="post-tabs">
                 {% for post in stop_widgets.posts %}
-                  <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}" class="post-tab {% if post.stop_id == selected_stop_id %}active{% endif %}">{{ post.display_name }}</a>
+                  <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date, picker_page=picker_pagination.page) }}" class="post-tab {% if post.stop_id == selected_stop_id %}active{% endif %}">{{ post.display_name }}</a>
                 {% endfor %}
               </div>
             {% endif %}
           </div>
-          {{ ui.datebox(selected_date, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.previous) if date_nav.previous else none, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.next) if date_nav.next else none) }}
+          {{ ui.datebox(selected_date, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.previous, picker_page=picker_pagination.page) if date_nav.previous else none, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.next, picker_page=picker_pagination.page) if date_nav.next else none) }}
         </header>
 
         {% if not selected_post %}
           <section class="section post-landing">
             <div class="stop-view-switch scope">
-              <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=selected_mode, q=search, date=selected_date, view='post') }}" class="{% if selected_view == 'post' %}active{% endif %}">by post</a>
-              <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=selected_mode, q=search, date=selected_date, view='line') }}" class="{% if selected_view == 'line' %}active{% endif %}">by line</a>
+              <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=selected_mode, q=search, date=selected_date, view='post', picker_page=picker_pagination.page) }}" class="{% if selected_view == 'post' %}active{% endif %}">by post</a>
+              <a href="{{ url_for('stops', stop_group_id=summary.stop_group_id, mode=selected_mode, q=search, date=selected_date, view='line', picker_page=picker_pagination.page) }}" class="{% if selected_view == 'line' %}active{% endif %}">by line</a>
             </div>
             {% if selected_view == 'post' %}
               <div class="post-list">
               {% for post in stop_widgets.posts %}
                 <div class="post-band">
-                  <a class="post-band-hit" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}" aria-label="open post {{ post.display_name }}"></a>
-                  <a class="post-band-meta" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">
+                  <a class="post-band-hit" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date, picker_page=picker_pagination.page) }}" aria-label="open post {{ post.display_name }}"></a>
+                  <a class="post-band-meta" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date, picker_page=picker_pagination.page) }}">
                     <div class="post-band-id">
                       <div class="post-band-number mono">{{ post.display_name }}</div>
                       <div class="post-band-subline">
@@ -134,7 +144,7 @@
                       </div>
                     </div>
                   </a>
-                  <a class="post-band-charts" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">
+                  <a class="post-band-charts" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date, picker_page=picker_pagination.page) }}">
                     <div class="post-band-chart">
                       {{ ui.hist(post.shape, true) }}
                       <div class="plot-axis mini-axis mini-delay-axis"><span>−1m</span><span>0</span><span>+5m</span></div>
@@ -172,7 +182,7 @@
                           <span class="stop-line-headsign" title="{{ destination.trip_headsign }}">→ {{ destination.trip_headsign }}</span>
                           <span class="stop-line-posts">
                             {% for post in destination.posts %}
-                              <a class="stop-line-post" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date) }}">{{ post.display_name }}</a>
+                              <a class="stop-line-post" href="{{ url_for('stops', stop_group_id=summary.stop_group_id, post=post.display_name, mode=selected_mode, q=search, date=selected_date, picker_page=picker_pagination.page) }}">{{ post.display_name }}</a>
                             {% endfor %}
                           </span>
                         </div>
@@ -241,6 +251,11 @@
             {% endfor %}
           </div>
           </section>
+          {{ ui.pager(
+            pagination,
+            url_for('stops', stop_group_id=selected_stop_group_id, post=selected_post.display_name, mode=selected_mode, q=search, date=selected_date, page=pagination.page - 1, picker_page=picker_pagination.page) if pagination.has_previous else none,
+            url_for('stops', stop_group_id=selected_stop_group_id, post=selected_post.display_name, mode=selected_mode, q=search, date=selected_date, page=pagination.page + 1, picker_page=picker_pagination.page) if pagination.has_next else none
+          ) }}
         {% endif %}
       {% else %}
         <div class="section muted">No stop data available.</div>
