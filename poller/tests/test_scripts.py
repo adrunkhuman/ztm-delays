@@ -151,8 +151,6 @@ def test_entrypoint_fails_before_poller_without_state_or_authkey(tmp_path: Path)
 def test_entrypoint_does_not_start_poller_when_proxy_is_not_ready(tmp_path: Path) -> None:
     bin_dir, call_log = _fake_commands(tmp_path, create_socket=False)
     env = _entrypoint_env(tmp_path, bin_dir, call_log)
-    env["TAILSCALE_READY_ATTEMPTS"] = "1"
-    env["TAILSCALE_READY_INTERVAL_SECONDS"] = "0"
 
     result = subprocess.run(
         ["/bin/sh", str(ENTRYPOINT)],
