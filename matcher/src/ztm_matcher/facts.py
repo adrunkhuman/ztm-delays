@@ -199,13 +199,18 @@ def _install_warsaw_scheduled_time_macro(connection: duckdb.DuckDBPyConnection) 
 
 def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Path, trip_universe: Path) -> str:
     return f"""
-        with accepted as (
+        with public_service_trips as (
+            select distinct gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id
+            from read_parquet('{_quoted(semantics)}')
+            where stop_service_class != 'not_in_passenger_service'
+        ), accepted as (
             select executions.*, universe.is_zone1_public_ranking_trip
             from read_parquet('{_quoted(executions)}') executions
             inner join read_parquet('{_quoted(trip_universe)}') universe
                 using (gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id)
+            inner join public_service_trips
+                using (gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id)
             where execution_status = 'executed' and confidence = 'high'
-              and universe.is_public_service_segment
               and duty_chain_source != 'line_brigade'
               and ownership_interval_start_time is not null and ownership_interval_end_time is not null
         ), regular_stops as (
