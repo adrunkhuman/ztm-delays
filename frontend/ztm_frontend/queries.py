@@ -964,6 +964,7 @@ def _trip_stops(
           and (? is null or gtfs_snapshot_id = ?)
           and trip_id = ?
           and vehicle_number = ?
+          and observation_status != 'not_in_passenger_service'
         order by stop_sequence
         """,
         [selected_date, gtfs_snapshot_id, gtfs_snapshot_id, trip_id, vehicle_number],

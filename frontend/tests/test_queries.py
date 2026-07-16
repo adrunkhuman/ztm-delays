@@ -62,7 +62,8 @@ def test_trip_stops_use_selected_trip_snapshot(tmp_path: Path) -> None:
             select * from (
                 values
                     ('snapshot-a', date '2026-06-30', 'trip-1', '1001', 0, '100101', '1001', '01', 'Old stop', timestamp '2026-06-30 08:00:00', timestamp '2026-06-30 08:01:00', 60, 'observed'),
-                    ('snapshot-b', date '2026-06-30', 'trip-1', '1001', 0, '100101', '1001', '01', 'Current stop', timestamp '2026-06-30 08:00:00', timestamp '2026-06-30 08:02:00', 120, 'observed')
+                    ('snapshot-b', date '2026-06-30', 'trip-1', '1001', 0, '100101', '1001', '01', 'Current stop', timestamp '2026-06-30 08:00:00', timestamp '2026-06-30 08:02:00', 120, 'observed'),
+                    ('snapshot-b', date '2026-06-30', 'trip-1', '1001', 1, '999999', '9999', '99', 'Depot', timestamp '2026-06-30 08:05:00', null, null, 'not_in_passenger_service')
             ) as rows(
                 gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence, stop_id,
                 stop_group_id, stop_post_code, stop_name, scheduled_arrival_time, actual_arrival_time,

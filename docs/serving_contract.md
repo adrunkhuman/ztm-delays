@@ -215,7 +215,7 @@ array; checked dates, total warning count, and truncation state are sidecar-only
 | Selected line group headers | `mart_line_trip_group_daily`. |
 | Selected line trip rows | `mart_trip_daily`, ordered by precomputed rank for selected sort and browsable in 20-row pages. |
 | Trip detail header/summary | `mart_trip_daily`. |
-| Trip detail stop list | `fct_expected_stop_event`. |
+| Trip detail stop list | `fct_expected_stop_event`, excluding `observation_status = 'not_in_passenger_service'`. |
 
 ### Status `/status`
 
