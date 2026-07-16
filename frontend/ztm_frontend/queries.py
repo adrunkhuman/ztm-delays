@@ -3,7 +3,7 @@ from __future__ import annotations
 # ruff: noqa: S608
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -867,6 +867,11 @@ def _hour_bars(
 def _week_bars(
     db_path: Path, entity_type: str, entity_id: str | None, mode: str | None, selected_date: str | None
 ) -> list[dict[str, Any]]:
+    if selected_date is None:
+        return []
+    selected_day = date.fromisoformat(selected_date)
+    week_start = selected_day - timedelta(days=selected_day.weekday())
+    week_end = week_start + timedelta(days=6)
     rows = fetch_all(
         db_path,
         """
@@ -875,19 +880,22 @@ def _week_bars(
         where entity_type = ?
           and entity_id = ?
           and (? is null or mode = ?)
-          and service_date between cast(? as date) - interval 6 day and cast(? as date)
+          and service_date between cast(? as date) and cast(? as date)
         order by service_date
         """,
-        [entity_type, entity_id, mode, mode, selected_date, selected_date],
+        [entity_type, entity_id, mode, mode, week_start, week_end],
     )
+    delays_by_date = {str(row["service_date"]): row.get("median_delay_seconds") for row in rows}
     bars = []
-    for row in rows:
-        service_date = str(row["service_date"])
-        delay = row.get("median_delay_seconds")
+    for day_offset in range(7):
+        service_day = week_start + timedelta(days=day_offset)
+        service_date = service_day.isoformat()
+        delay = delays_by_date.get(service_date)
         height = 0 if delay is None else max(4, min(38, round(abs(float(delay)) * 0.35)))
         bars.append(
             {
-                "label": date.fromisoformat(service_date).strftime("%a")[:1],
+                "service_date": service_date,
+                "label": service_day.strftime("%a")[:1],
                 "delay": delay,
                 "height": height,
                 "selected": service_date == selected_date,

@@ -54,7 +54,7 @@
   <div class="week">
     <div class="plot week-plot">
       {% for row in week %}
-        <span class="week-day {% if row.selected %}selected{% endif %}"><span class="daybar" style="height: {{ row.height }}px"></span></span>
+        <span class="week-day {% if row.selected %}selected{% endif %}" title="{{ row.service_date }} · {{ row.delay|delay }}"><span class="daybar" style="height: {{ row.height }}px"></span></span>
       {% endfor %}
     </div>
     <div class="plot-axis week-axis">

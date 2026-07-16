@@ -284,6 +284,38 @@ def test_page_result_supports_compact_picker_pages() -> None:
     assert pagination == {"page": 2, "first_item": 13, "has_previous": True, "has_next": True}
 
 
+def test_week_bars_cover_selected_calendar_week(tmp_path: Path) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table mart_entity_daily_summary as
+            select * from (
+                values
+                    ('line', '1', 'bus', date '2026-07-13', 10.0),
+                    ('line', '1', 'bus', date '2026-07-14', 20.0),
+                    ('line', '1', 'bus', date '2026-07-19', 70.0),
+                    ('line', '1', 'bus', date '2026-07-20', 80.0)
+            ) as rows(entity_type, entity_id, mode, service_date, median_delay_seconds)
+            """
+        )
+
+    bars = queries._week_bars(db_path, "line", "1", "bus", "2026-07-13")  # noqa: SLF001
+
+    assert [row["service_date"] for row in bars] == [
+        "2026-07-13",
+        "2026-07-14",
+        "2026-07-15",
+        "2026-07-16",
+        "2026-07-17",
+        "2026-07-18",
+        "2026-07-19",
+    ]
+    assert [row["label"] for row in bars] == ["M", "T", "W", "T", "F", "S", "S"]
+    assert [row["delay"] for row in bars] == [10.0, 20.0, None, None, None, None, 70.0]
+    assert [row["selected"] for row in bars] == [True, False, False, False, False, False, False]
+
+
 def _create_line_smoke_db(db_path: Path) -> None:
     with duckdb.connect(str(db_path)) as connection:
         _execute_many(
