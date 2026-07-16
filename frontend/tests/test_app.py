@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -99,6 +100,7 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
     )
 
     assert response.status_code == HTTPStatus.OK
+    assert re.search(rb'href="/static/site\.css\?v=[0-9a-f]{12}"', response.data)
     assert captured == {"page": "2", "picker_page": "3", "date": "2026-06-30"}
     assert b'href="/lines/?date=2026-06-30"' in response.data
     assert b"picker_page=3" in response.data

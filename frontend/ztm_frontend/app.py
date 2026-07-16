@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,8 @@ def create_app() -> Flask:
     """Create the Flask app without opening the DuckDB artifact at import time."""
     app = Flask(__name__)
     db_path = Path(os.environ.get("ZTM_DUCKDB_PATH", "ztm/ztm.duckdb"))
+    stylesheet_path = Path(app.static_folder or "") / "site.css"
+    stylesheet_version = sha256(stylesheet_path.read_bytes()).hexdigest()[:12]
 
     app.config["ZTM_DUCKDB_PATH"] = db_path
     app.config["ZTM_DUCKDB_META_PATH"] = Path(f"{db_path}.meta.json")
@@ -42,6 +45,7 @@ def create_app() -> Flask:
         return {
             "meta": queries.get_export_metadata(current_app.config["ZTM_DUCKDB_PATH"]),
             "navigation_date": _selected_date_arg(),
+            "stylesheet_version": stylesheet_version,
         }
 
     @app.get("/")
