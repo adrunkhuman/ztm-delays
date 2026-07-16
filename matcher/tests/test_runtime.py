@@ -1276,6 +1276,8 @@ def test_fact_scheduled_times_use_warsaw_wall_clock_across_dst_and_overnight(
         for row in universe_rows:
             if row["trip_id"] == executions[0]["trip_id"]:
                 row["service_date"] = service_date
+                row["is_public_service_segment"] = True
+                row["is_public_passenger_segment"] = True
         pq.write_table(pa.Table.from_pylist(universe_rows, schema=universe_table.schema), universe_path)
 
         arrivals_path = work / "passenger_stop_arrivals.parquet"
