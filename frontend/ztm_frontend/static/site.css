@@ -2008,45 +2008,11 @@ td:nth-child(n + 2) {
 }
 
 .stop-departure-grid {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) 42px;
-  column-gap: 10px;
-  align-items: center;
+  grid-template-columns: 44px 42px minmax(0, 1fr) 52px;
 }
 
-.stop-departure-run {
-  height: 36px;
-  border-bottom: 1px solid #232323;
-}
-
-.stop-departure-run:hover {
-  background: var(--hover);
-}
-
-.stop-departure-route {
-  display: flex;
-  gap: 0.55rem;
-  align-items: baseline;
-  min-width: 0;
-}
-
-.stop-departure-line {
-  flex: none;
-  color: var(--fg);
-  font-size: 0.78rem;
-  font-weight: 700;
-}
-
-.stop-departure-line:hover {
-  color: var(--blue);
-}
-
-.stop-departure-headsign {
-  overflow: hidden;
-  color: var(--fg2);
-  font-size: 0.78rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.stop-departure-grid.landing-rank-head > :nth-child(3) {
+  text-align: left;
 }
 
 .trip-axis {

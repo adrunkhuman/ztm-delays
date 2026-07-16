@@ -222,18 +222,15 @@
           <section class="section">
             <div class="label" style="margin-bottom: .8rem">Worst departures</div>
             <div class="stop-departure-table">
-              <div class="trip-table-head stop-departure-grid">
-                <div>Dep</div><div>Line → destination</div><div>Delay</div>
+              <div class="landing-rank-head stop-departure-grid">
+                <div>Time</div><div>Line</div><div>Route</div><div>Delay</div>
               </div>
               {% for row in stop_widgets.worst %}
-                <div class="stop-departure-run stop-departure-grid">
+                <div class="landing-rank-row stop-departure-grid">
                   <time class="mono muted" datetime="{{ selected_date }}T{{ row.time }}">{{ row.time }}</time>
-                  <span class="stop-departure-route">
-                    <a class="stop-departure-line mono" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">{{ row.line }}</a>
-                    <span class="muted">→</span>
-                    <span class="stop-departure-headsign" title="{{ row.headsign }}">{{ row.headsign }}</span>
-                  </span>
-                  <span class="trip-end mono {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
+                  <a class="landing-line-pill mono {% if row.mode == 'tram' %}tram{% endif %}" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">{{ row.line }}</a>
+                  <span class="landing-route" title="{{ row.headsign }}">{{ row.headsign }}</span>
+                  <span class="landing-value mono {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
                 </div>
               {% endfor %}
             </div>
