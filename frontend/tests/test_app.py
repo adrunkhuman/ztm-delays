@@ -85,7 +85,7 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
             "picker_pagination": {"page": 3, "first_item": 25, "has_previous": True, "has_next": True},
             "stop_landing_summary": {},
             "stop_landing_rows": [],
-            "pagination": {"page": 2, "first_item": 51, "has_previous": True, "has_next": True},
+            "pagination": {"page": 2, "first_item": 21, "has_previous": True, "has_next": True},
         }
 
     monkeypatch.setattr(queries, "get_stops", fake_get_stops)
@@ -96,3 +96,5 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
     assert response.status_code == HTTPStatus.OK
     assert captured == {"page": "2", "picker_page": "3"}
     assert b"picker_page=3" in response.data
+    assert b'rel="next">&gt;</a>' in response.data
+    assert b"next \xe2\x86\x92" not in response.data

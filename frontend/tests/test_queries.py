@@ -98,16 +98,16 @@ def test_trip_landing_rows_are_paginated_before_traces_are_built(tmp_path: Path)
     first_rows, first_page = queries._trip_landing_rows(  # noqa: SLF001
         db_path, "2026-06-30", "bus", "worst", 1
     )
-    second_rows, second_page = queries._trip_landing_rows(  # noqa: SLF001
-        db_path, "2026-06-30", "bus", "worst", 2
+    third_rows, third_page = queries._trip_landing_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "worst", 3
     )
 
     assert len(first_rows) == queries.LANDING_PAGE_SIZE
     assert first_rows[0]["trip_id"] == "trip-01"
-    assert first_rows[-1]["trip_id"] == "trip-50"
+    assert first_rows[-1]["trip_id"] == "trip-20"
     assert first_page == {"page": 1, "first_item": 1, "has_previous": False, "has_next": True}
-    assert [row["trip_id"] for row in second_rows] == ["trip-51", "trip-52"]
-    assert second_page == {"page": 2, "first_item": 51, "has_previous": True, "has_next": False}
+    assert [row["trip_id"] for row in third_rows] == [f"trip-{number:02}" for number in range(41, 53)]
+    assert third_page == {"page": 3, "first_item": 41, "has_previous": True, "has_next": False}
 
 
 def test_page_parameter_defaults_to_first_page() -> None:
@@ -217,11 +217,11 @@ def test_selected_line_trip_rows_are_paginated(tmp_path: Path) -> None:
         )
 
     rows, pagination = queries._selected_line_trip_rows(  # noqa: SLF001
-        db_path, "2026-06-30", "bus", "1", "departure_rank", 2
+        db_path, "2026-06-30", "bus", "1", "departure_rank", 3
     )
 
-    assert [row["trip_id"] for row in rows] == ["trip-51", "trip-52"]
-    assert pagination == {"page": 2, "first_item": 51, "has_previous": True, "has_next": False}
+    assert [row["trip_id"] for row in rows] == [f"trip-{number:02}" for number in range(41, 53)]
+    assert pagination == {"page": 3, "first_item": 41, "has_previous": True, "has_next": False}
 
 
 def test_stop_line_rows_include_records_after_old_top_30_cap(tmp_path: Path) -> None:
@@ -244,14 +244,14 @@ def test_stop_line_rows_include_records_after_old_top_30_cap(tmp_path: Path) -> 
     first_rows, first_page = queries._stop_line_rows(  # noqa: SLF001
         db_path, "2026-06-30", "bus", "100101", 1
     )
-    second_rows, second_page = queries._stop_line_rows(  # noqa: SLF001
-        db_path, "2026-06-30", "bus", "100101", 2
+    third_rows, third_page = queries._stop_line_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "100101", 3
     )
 
     assert [row["display_rank"] for row in first_rows][-1] == queries.LANDING_PAGE_SIZE
     assert first_page["has_next"] is True
-    assert [row["display_rank"] for row in second_rows] == [51, 52]
-    assert second_page["has_next"] is False
+    assert [row["display_rank"] for row in third_rows] == list(range(41, 53))
+    assert third_page["has_next"] is False
 
 
 def test_page_result_supports_compact_picker_pages() -> None:

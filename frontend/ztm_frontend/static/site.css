@@ -636,11 +636,17 @@ td:nth-child(n + 2) {
 }
 
 .pager a:last-child {
+  color: var(--blue);
+  font-size: 1rem;
   text-align: right;
 }
 
 .pager a:hover {
   color: var(--fg);
+}
+
+.pager a:last-child:hover {
+  color: var(--blue);
 }
 
 .widget {

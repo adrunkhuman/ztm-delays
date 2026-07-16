@@ -176,7 +176,7 @@ array; checked dates, total warning count, and truncation state are sidecar-only
 | --- | --- |
 | Line rail | `mart_line_window_summary`, `universe_type = 'all_observed'`. |
 | Landing summary | `mart_mode_window_summary`. |
-| Landing ranks | `mart_entity_rankings` joined to `mart_line_window_summary`, summary `universe_type = 'zone1_public'`; full ranking is browsable in 50-row pages. |
+| Landing ranks | `mart_entity_rankings` joined to `mart_line_window_summary`, summary `universe_type = 'zone1_public'`; full ranking is browsable in 20-row pages. |
 | Selected line summary/histogram | `mart_line_window_summary`. |
 | Selected line hours | `mart_hour_window_summary`, `entity_type = 'line'`. |
 | Selected line week bars | `mart_entity_daily_summary`, `entity_type = 'line'`, frontend filters a 7-day range around the selected date. |
@@ -192,7 +192,7 @@ array; checked dates, total warning count, and truncation state are sidecar-only
 | --- | --- |
 | Stop picker | `dim_stop_group_current`; matching stops are browsable in 12-row pages. |
 | Landing summary | `mart_mode_window_summary`. |
-| Landing ranks | `mart_entity_rankings` joined to `mart_stop_group_window_summary`, summary `universe_type = 'zone1_public'`; full ranking is browsable in 50-row pages. |
+| Landing ranks | `mart_entity_rankings` joined to `mart_stop_group_window_summary`, summary `universe_type = 'zone1_public'`; full ranking is browsable in 20-row pages. |
 | Group header | `mart_stop_group_window_summary`. |
 | Post chooser and post bands | `mart_stop_post_window_summary`. |
 | Post-band hour sparklines | `mart_hour_window_summary`, `entity_type = 'stop_post'`, batched for all posts. |
@@ -203,7 +203,7 @@ array; checked dates, total warning count, and truncation state are sidecar-only
 | Selected post week bars | `mart_entity_daily_summary`, `entity_type = 'stop_post'`, frontend filters a 7-day range around the selected date. |
 | Every departure timeline | `mart_entity_timeline_daily`, `entity_type = 'stop_post'`. |
 | Worst departures | `mart_worst_delay_event`, `scope_type = 'stop_post'`, `delay_rank <= 8`. |
-| Lines here | `mart_stop_line_window_summary`, `entity_type = 'stop_post'`; all rows are browsable in 50-row pages. |
+| Lines here | `mart_stop_line_window_summary`, `entity_type = 'stop_post'`; all rows are browsable in 20-row pages. |
 
 ### Trips `/trips/`, `/schedule/`, `/trips/<trip_id>`
 
@@ -211,9 +211,9 @@ array; checked dates, total warning count, and truncation state are sidecar-only
 | --- | --- |
 | Line rail | `mart_trip_line_daily`. |
 | Landing summary | `mart_trip_mode_daily_summary`. |
-| Landing rank rows | `mart_trip_daily`, selected `landing_*_rank`; full ranking is browsable in 50-row pages. |
+| Landing rank rows | `mart_trip_daily`, selected `landing_*_rank`; full ranking is browsable in 20-row pages. |
 | Selected line group headers | `mart_line_trip_group_daily`. |
-| Selected line trip rows | `mart_trip_daily`, ordered by precomputed rank for selected sort and browsable in 50-row pages. |
+| Selected line trip rows | `mart_trip_daily`, ordered by precomputed rank for selected sort and browsable in 20-row pages. |
 | Trip detail header/summary | `mart_trip_daily`. |
 | Trip detail stop list | `fct_expected_stop_event`. |
 

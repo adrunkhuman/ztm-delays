@@ -9,7 +9,7 @@ from typing import Any
 
 from ztm_frontend.db import fetch_all, fetch_one
 
-LANDING_PAGE_SIZE = 50
+LANDING_PAGE_SIZE = 20
 STOP_PICKER_PAGE_SIZE = 12
 MAX_PAGE = (2**63 - 1) // LANDING_PAGE_SIZE
 ON_TIME_EARLY_SECONDS = -60

@@ -88,7 +88,7 @@
     <nav class="pager" aria-label="Pagination">
       {% if previous_href %}<a href="{{ previous_href }}" rel="prev">← previous</a>{% else %}<span></span>{% endif %}
       <span class="mono muted">page {{ pagination.page }}</span>
-      {% if next_href %}<a href="{{ next_href }}" rel="next">next →</a>{% else %}<span></span>{% endif %}
+      {% if next_href %}<a href="{{ next_href }}" rel="next">&gt;</a>{% else %}<span></span>{% endif %}
     </nav>
   {% endif %}
 {% endmacro %}
