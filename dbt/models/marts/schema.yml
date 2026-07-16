@@ -913,11 +913,48 @@ unit_tests:
           select date '2026-01-15' as service_date, 'bus' as mode, 'complete' as trip_quality, cast(null as string) as schedule_day_type, 'snapshot' as gtfs_snapshot_id, 'trip-1' as trip_id, '1001' as vehicle_number, '187' as line, 'group-1' as stop_group_id, 'stop-1' as stop_id, -60 as delay_seconds
           union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-2', '1002', '187', 'group-1', 'stop-1', -59
           union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-3', '1003', '187', 'group-1', 'stop-1', 179
-          union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-4', '1004', '187', 'group-1', 'stop-1', 180
+           union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-4', '1004', '187', 'group-1', 'stop-1', 180
+      - input: ref('dim_serving_window_date')
+        format: sql
+        rows: |
+          select 'day' as window_type, '2026-01-15' as window_key, date '2026-01-15' as source_end_date, date '2026-01-15' as service_date, cast(null as string) as schedule_day_type, 1 as date_rank
+          union all select 'month', '2026-01', date '2026-01-15', date '2026-01-15', cast(null as string), 1
     expect:
       rows:
         - {mode: bus, window_type: day, early_count: 1, on_time_count: 2, late_count: 1, early_rate: 0.25, on_time_rate: 0.5, late_rate: 0.25}
         - {mode: bus, window_type: month, early_count: 1, on_time_count: 2, late_count: 1, early_rate: 0.25, on_time_rate: 0.5, late_rate: 0.25}
+
+  - name: dim_serving_window_date_uses_latest_matching_service_dates
+    model: dim_serving_window_date
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        serving_window_matching_date_count: 2
+    given:
+      - input: ref('int_serving_stop_arrival')
+        format: sql
+        rows: |
+          select date '2026-01-11' as service_date, 'sunday_holiday' as schedule_day_type
+          union all select date '2026-01-12', 'monday'
+          union all select date '2026-01-13', 'tuesday'
+          union all select date '2026-01-14', 'wednesday'
+          union all select date '2026-01-15', 'thursday'
+          union all select date '2026-01-04', 'sunday_holiday'
+          union all select date '2025-12-28', 'sunday_holiday'
+    expect:
+      format: sql
+      rows: |
+        select 'day' as window_type, '2026-01-15' as window_key, date '2026-01-15' as source_end_date, date '2026-01-15' as service_date, 'thursday' as schedule_day_type, 1 as date_rank
+        union all select 'month', '2026-01', date '2026-01-15', date '2026-01-15', 'thursday', 1
+        union all select 'month', '2026-01', date '2026-01-15', date '2026-01-14', 'wednesday', 2
+        union all select 'month', '2026-01', date '2026-01-15', date '2026-01-13', 'tuesday', 3
+        union all select 'month', '2026-01', date '2026-01-15', date '2026-01-12', 'monday', 4
+        union all select 'month', '2026-01', date '2026-01-15', date '2026-01-11', 'sunday_holiday', 5
+        union all select 'month', '2026-01', date '2026-01-15', date '2026-01-04', 'sunday_holiday', 6
+        union all select 'weekdays', '2026-01-15', date '2026-01-15', date '2026-01-15', 'thursday', 1
+        union all select 'weekdays', '2026-01-15', date '2026-01-15', date '2026-01-14', 'wednesday', 2
+        union all select 'weekend', '2026-01-15', date '2026-01-15', date '2026-01-11', 'sunday_holiday', 1
+        union all select 'weekend', '2026-01-15', date '2026-01-15', date '2026-01-04', 'sunday_holiday', 2
 
   - name: mart_pipeline_status_uses_one_operational_day_grain
     model: mart_pipeline_status

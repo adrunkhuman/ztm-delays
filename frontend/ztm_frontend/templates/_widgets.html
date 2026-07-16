@@ -1,8 +1,8 @@
-{% macro datebox(selected_date, previous_href=None, next_href=None, selected_window='day', show_scopes=True) %}
+{% macro datebox(display_label, previous_href=None, next_href=None, selected_window='day', show_scopes=True) %}
   <div class="datebox">
     <div class="date">
       <a href="{{ previous_href or '#' }}" class="{% if not previous_href %}disabled{% endif %}">‹</a>
-      <b>{{ selected_date or "n/a" }}</b>
+      <b>{{ display_label or "n/a" }}</b>
       <a href="{{ next_href or '#' }}" class="{% if not next_href %}disabled{% endif %}">›</a>
     </div>
     {% if show_scopes %}

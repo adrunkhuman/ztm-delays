@@ -78,10 +78,13 @@ SEMANTIC_WARNING_FIELDS = {
 }
 MART_TABLES = (
     "dim_serving_date",
+    "dim_serving_window_date",
+    "dim_schedule_version",
     "dim_stop_group_current",
     "dim_stop_post_current",
     "fct_expected_stop_event",
     "mart_entity_daily_summary",
+    "mart_entity_window_daily_summary",
     "mart_entity_rankings",
     "mart_entity_timeline_daily",
     "mart_hour_window_summary",
@@ -104,13 +107,16 @@ MART_TABLES = (
     "mart_worst_delay_event",
 )
 PARTITIONED_EXPORT_TABLES = {
+    "dim_serving_window_date": "source_end_date",
     "fct_expected_stop_event": "service_date",
     "mart_entity_timeline_daily": "service_date",
+    "mart_entity_window_daily_summary": "source_end_date",
     "mart_hour_window_summary": "source_end_date",
 }
 PARTITION_CACHE_MANIFEST = "_MANIFEST.json"
 DATE_RANGE_SQL_BY_TABLE = {
     "dim_serving_date": "service_date",
+    "dim_serving_window_date": "source_end_date",
     "fct_expected_stop_event": "service_date",
     "mart_entity_daily_summary": "service_date",
     "mart_entity_rankings": "source_end_date",

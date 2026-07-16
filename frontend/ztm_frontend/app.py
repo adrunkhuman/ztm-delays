@@ -51,7 +51,7 @@ def create_app() -> Flask:  # noqa: C901
 
     @app.url_defaults
     def preserve_window(endpoint: str, values: dict[str, Any]) -> None:
-        if endpoint not in {"index", "lines", "stops"} or "window" in values:
+        if endpoint not in {"index", "lines", "stops", "schedule"} or "window" in values:
             return
         selected_window = queries.normalize_window(request.args.get("window"))
         if selected_window != "day":
@@ -120,6 +120,7 @@ def create_app() -> Flask:  # noqa: C901
                 request.args.get("sort"),
                 request.args.get("rank"),
                 request.args.get("page"),
+                request.args.get("window"),
             ),
         )
 
@@ -132,6 +133,8 @@ def create_app() -> Flask:  # noqa: C901
                 trip_id,
                 _selected_date_arg(),
                 request.args.get("vehicle"),
+                request.args.get("window"),
+                request.args.get("return_date"),
             ),
         )
 

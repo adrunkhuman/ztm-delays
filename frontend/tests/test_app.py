@@ -83,6 +83,7 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
             "selected_rank": "worst",
             "selected_date": "2026-06-30",
             "selected_window": queries.normalize_window(args[-1] if isinstance(args[-1], str) else None),
+            "window_context": {"label": "June 2026 · through 30 Jun"},
             "search": "central",
             "date_nav": {"previous": None, "next": None},
             "stop_list": [{"stop_group_id": "1001", "stop_group_name": "Central", "modes_served": "bus"}],

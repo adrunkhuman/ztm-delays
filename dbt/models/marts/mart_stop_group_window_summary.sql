@@ -1,4 +1,5 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
+{% set lookback_days = var("serving_window_lookback_days", 420) %}
 
 {{
     config(
@@ -13,38 +14,32 @@
 }}
 
 with base as (
-    select *, concat(gtfs_snapshot_id, '|', trip_id, '|', coalesce(vehicle_number, '')) as trip_key
-    from {{ ref('int_serving_stop_arrival') }}
-    where service_date between date_sub(date('{{ processing_date }}'), interval 60 day) and date('{{ processing_date }}')
+    select windows.window_type, windows.window_key, windows.source_end_date, 'all_observed' as universe_type, arrivals.*, concat(arrivals.gtfs_snapshot_id, '|', arrivals.trip_id, '|', coalesce(arrivals.vehicle_number, '')) as trip_key
+    from {{ ref('int_serving_stop_arrival') }} as arrivals
+    inner join {{ ref('dim_serving_window_date') }} as windows
+        on arrivals.service_date = windows.service_date
+        and windows.source_end_date = date('{{ processing_date }}')
+    where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
+        and date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')
 ),
 
-windowed as (
-    select 'day' as window_type, cast(service_date as string) as window_key, service_date as source_end_date, 'all_observed' as universe_type, * from base where service_date = date('{{ processing_date }}')
-    union all
-    select 'month', format_date('%Y-%m', date('{{ processing_date }}')), date('{{ processing_date }}'), 'all_observed', * from base where date_trunc(service_date, month) = date_trunc(date('{{ processing_date }}'), month)
-    union all
-    select 'weekdays', cast(date('{{ processing_date }}') as string), date('{{ processing_date }}'), 'all_observed', * from base where schedule_day_type in ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'weekday')
-    union all
-    select 'weekend', cast(date('{{ processing_date }}') as string), date('{{ processing_date }}'), 'all_observed', * from base where schedule_day_type in ('saturday', 'sunday_holiday')
-),
-
 zone1_windowed as (
-    select windowed.* replace ('zone1_public' as universe_type)
-    from windowed
+    select base.* replace ('zone1_public' as universe_type)
+    from base
     inner join {{ ref('int_serving_trip_universe') }} as universe
-        on windowed.gtfs_snapshot_id = universe.gtfs_snapshot_id
-        and windowed.gps_date = universe.processing_date
-        and windowed.service_date = universe.service_date
-        and windowed.trip_id = universe.trip_id
-    where universe.processing_date between date_sub(date('{{ processing_date }}'), interval 60 day)
+        on base.gtfs_snapshot_id = universe.gtfs_snapshot_id
+        and base.gps_date = universe.processing_date
+        and base.service_date = universe.service_date
+        and base.trip_id = universe.trip_id
+    where universe.processing_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
         and date('{{ var("max_gps_date", processing_date) }}')
       and universe.is_zone1_public_ranking_trip
 ),
 
 all_windowed as (
-    select * from windowed
+    select * from base
     union all
     select * from zone1_windowed
 ),

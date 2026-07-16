@@ -20,10 +20,13 @@ def test_mart_table_list_exports_frontend_source_tables() -> None:
 
     assert set(dag.MART_TABLES) == {
         "dim_serving_date",
+        "dim_serving_window_date",
+        "dim_schedule_version",
         "dim_stop_group_current",
         "dim_stop_post_current",
         "fct_expected_stop_event",
         "mart_entity_daily_summary",
+        "mart_entity_window_daily_summary",
         "mart_entity_rankings",
         "mart_entity_timeline_daily",
         "mart_hour_window_summary",

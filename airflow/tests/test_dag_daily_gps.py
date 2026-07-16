@@ -348,9 +348,11 @@ def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
     assert _dbt_selected_models(dag.dbt_run_serving_marts) == {
         "int_serving_trip_execution",
         "int_serving_stop_arrival",
+        "dim_serving_window_date",
         "dim_serving_date",
         "mart_mode_window_summary",
         "mart_entity_daily_summary",
+        "mart_entity_window_daily_summary",
         "mart_line_window_summary",
         "mart_stop_group_window_summary",
         "mart_stop_post_window_summary",

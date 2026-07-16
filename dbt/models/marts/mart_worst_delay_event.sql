@@ -8,6 +8,7 @@
         partitions=["date('" ~ processing_date ~ "')"],
         cluster_by=["scope_type", "mode", "scope_id"],
         require_partition_filter=true,
+        on_schema_change='append_new_columns',
         post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
@@ -39,11 +40,13 @@ select
     scope_type,
     scope_id,
     service_date,
+    schedule_day_type,
     mode,
     line,
     route_short_name,
     trip_id,
     vehicle_number,
+    schedule_version_id,
     trip_headsign,
     scheduled_arrival_time,
     format_timestamp('%H:%M', scheduled_arrival_time, 'Europe/Warsaw') as time_label,

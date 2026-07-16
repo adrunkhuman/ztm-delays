@@ -1,4 +1,5 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
+{% set lookback_days = var("serving_window_lookback_days", 420) %}
 
 {{
     config(
@@ -13,9 +14,13 @@
 }}
 
 with base as (
-    select *
-    from {{ ref('int_serving_stop_arrival') }}
-    where service_date = date('{{ processing_date }}')
+    select windows.window_type, windows.window_key, windows.source_end_date, arrivals.*
+    from {{ ref('int_serving_stop_arrival') }} as arrivals
+    inner join {{ ref('dim_serving_window_date') }} as windows
+        on arrivals.service_date = windows.service_date
+        and windows.source_end_date = date('{{ processing_date }}')
+    where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
+        and date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')
 ),
@@ -29,10 +34,7 @@ entities as (
 keyed as (
     select
         *,
-        'day' as window_type,
-        cast(service_date as string) as window_key,
-        service_date as source_end_date,
-        to_json_string(struct(entity_type, entity_id, line, direction_id, trip_headsign)) as grain_key
+        to_json_string(struct(entity_type, entity_id, line, direction_id, trip_headsign, window_type, window_key)) as grain_key
     from entities
 ),
 

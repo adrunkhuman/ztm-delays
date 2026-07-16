@@ -1,6 +1,6 @@
 # Serving Contract
 
-Proposal for the serving-layer redesign. This is an approval gate: do not change dbt models, the DuckDB export, or `frontend/ztm_frontend/queries.py` until this contract is approved.
+Serving-layer implementation contract for the warehouse-built DuckDB export.
 
 The frontend reads one artifact and one sidecar:
 
@@ -45,20 +45,18 @@ Bucket bounds are, in order: `< -300`, `-300..-121`, `-120..-60`, `-59..-31`, `-
 
 | Window | Definition |
 | --- | --- |
-| `day` | One service date, matching current page filtering. |
-| `weekdays` | Schedule service that actually ran as weekday service, over the applicable source window ending at `window_key`. |
-| `weekend` | Schedule service that actually ran as Saturday or Sunday/holiday service, over the applicable source window ending at `window_key`. |
-| `month` | Calendar month. No schedule-change cutoff. Partial current month is valid. |
+| `day` | The observed processing date. |
+| `weekdays` | The latest 60 distinct observed service dates at or before the processing date whose baked `schedule_day_type` is `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, or `weekday`. |
+| `weekend` | The latest 60 distinct observed service dates at or before the processing date whose baked `schedule_day_type` is `saturday` or `sunday_holiday`. |
+| `month` | Distinct observed service dates in the processing date's calendar month through that date. Partial current month is valid. |
 
 Schedule classification comes from GTFS service patterns, not calendar weekday. Before implementation trusts `weekdays`/`weekend`, verify observed `service_id` tokens against `dim_schedule_date.schedule_day_type`.
 
 Initial mapping after audit: `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `weekday` -> `weekdays`; `saturday`, `sunday_holiday` -> `weekend`; `mixed`, `unknown` excluded until explicitly mapped.
 
-Source-window cutoffs:
+`dim_serving_window_date` is the canonical membership table exported with the serving artifact. It is keyed by `source_end_date`, `window_type`, `window_key`, and `service_date`, with a descending `date_rank`; its source scan has a configurable 420-day default lookback. All window marts join this membership rather than constructing their own calendar unions.
 
-- Line-grain windows use the shorter of the last 60 matching service dates or since the line's latest schedule-version change.
-- Non-line windows use a flat last 60 matching service dates. This applies to mode, stop-group, and stop-post tables because those entities can combine many lines with different schedule versions.
-- `month` ignores schedule-version cutoffs for every entity type.
+Line-grain `weekdays` and `weekend` windows retain only rows whose schedule version is active at the anchor `source_end_date`, preventing obsolete line patterns from mixing into current-pattern comparisons. `day` and `month` preserve their full observed-date behavior; `month` has no schedule-version cutoff. Non-line windows retain canonical membership without line-version filtering because they combine multiple lines.
 
 Schedule change means `schedule_version_id` / timetable fingerprint, not GTFS snapshot ID.
 
@@ -91,11 +89,14 @@ All listed tables are exported to DuckDB unless explicitly marked sidecar. `Colu
 | Table | Grain | Purpose | Columns |
 | --- | --- | --- | --- |
 | `dim_serving_date` | One available service date; `is_latest` marks the latest complete day per `mart_pipeline_status`, not the newest ingested partial day. | Default date and datebox navigation | `service_date`, `service_date_key`, `previous_service_date`, `next_service_date`, `is_latest`, `service_date_rank_desc` |
+| `dim_serving_window_date` | One canonical service-date membership per anchor and window | Shared aggregate-window membership and auditability | `window_type`, `window_key`, `source_end_date`, `service_date`, `schedule_day_type`, `date_rank` |
+| `dim_schedule_version` | One historical line/direction/day-type timetable version | Applies the selected anchor's active line pattern to grouped trip and reliability event lists | `schedule_version_id`, `line`, `direction_id`, `schedule_day_type`, `valid_from_date`, `valid_to_date` |
 | `dim_stop_group_current` | One current stop group | Stop picker only; never relabel historical facts | `stop_group_id`, `stop_group_name`, `modes_served` |
 | `dim_stop_post_current` | One current stop post | Current post metadata where needed | `stop_id`, `stop_group_id`, `stop_post_code`, `stop_name`, `modes_served` |
 | `mart_mode_window_summary` | `mode`, `window_type`, `window_key` | Overview cards, overview histograms, landing summaries | `mode`, `window_cols`, `line_count`, `stop_group_count`, `stop_post_count`, `delay_metric_cols` |
 | `mart_hour_window_summary` | `entity_type`, `entity_id`, `mode`, `window_type`, `window_key`, `local_hour` | Median-by-hour widgets and post-band hour sparklines | `entity_type`, `entity_id`, `mode`, `window_cols`, `local_hour`, `service_hour_index`, `hour_bracket_label`, `arrival_count`, `median_delay_seconds`, `has_min_sample` |
-| `mart_entity_daily_summary` | `entity_type`, `entity_id`, `mode`, `service_date` | Widgets labelled `This week`; frontend filters a 7-day range around the selected date | `entity_type`, `entity_id`, `mode`, `service_date`, `arrival_count`, `median_delay_seconds` |
+| `mart_entity_daily_summary` | `entity_type`, `entity_id`, `mode`, `service_date` | Day view's `This week` widget and month-over-month context | `entity_type`, `entity_id`, `mode`, `service_date`, `schedule_day_type`, `arrival_count`, `median_delay_seconds` |
+| `mart_entity_window_daily_summary` | `entity_type`, `entity_id`, `mode`, `window_type`, `window_key`, `service_date` | Exact service-day and weekly trend bars inside a selected aggregate window; line rows apply the anchor's active timetable versions | `entity_type`, `entity_id`, `mode`, `window_cols`, `service_date`, `schedule_day_type`, `arrival_count`, `median_delay_seconds` |
 | `mart_line_window_summary` | `line`, `mode`, `universe_type`, `window_type`, `window_key` | Line rail, line landing rows, selected line summary | `line`, `mode`, `route_short_name`, `route_label`, `universe_type`, `window_cols`, `delay_metric_cols` |
 | `mart_line_course_window` | `line`, `direction_id`, `trip_headsign`, `universe_type`, `window_type`, `window_key` | Selected-line direction blocks | `line`, `mode`, `route_short_name`, `direction_id`, `trip_headsign`, `universe_type`, `window_cols`, `trip_count`, `course_rank` |
 | `mart_line_course_stop_window` | One displayed stop row per line course/window | Selected-line stop lists; no per-course N+1 | `line`, `mode`, `route_short_name`, `direction_id`, `trip_headsign`, `stop_sequence`, `stop_group_id`, `stop_id`, `stop_post_code`, `stop_name`, `universe_type`, `window_type`, `window_key`, `display_rank`, `delay_metric_cols`, `has_min_sample` |
@@ -106,11 +107,11 @@ All listed tables are exported to DuckDB unless explicitly marked sidecar. `Colu
 | `mart_stop_line_window_summary` | `entity_type`, `entity_id`, `line`, `direction_id`, `trip_headsign`, `window_type`, `window_key` | Selected stop `Lines here - worst first` | `entity_type`, `entity_id`, `stop_group_id`, `stop_id`, `stop_post_code`, `line`, `mode`, `route_short_name`, `direction_id`, `trip_headsign`, `window_type`, `window_key`, `display_rank`, `delay_metric_cols`, `has_min_sample` |
 | `mart_entity_rankings` | One eligible ranked entity per metric, mode, and window | Landing ranks and future rank badges | `entity_type`, `entity_id`, `mode`, `window_type`, `window_key`, `metric`, `value`, `rank`, `n_entities` |
 | `mart_entity_timeline_daily` | One displayed timeline point | Selected line/stop every-departure timelines | `entity_type`, `entity_id`, `mode`, `service_date`, `point_rank`, `x_percent`, `delay_seconds`, `source_event_time` |
-| `mart_worst_delay_event` | One ranked delay event per scope | Worst departure lists | `scope_type`, `scope_id`, `service_date`, `mode`, `line`, `route_short_name`, `trip_id`, `vehicle_number`, `trip_headsign`, `scheduled_arrival_time`, `time_label`, `stop_group_id`, `stop_id`, `stop_post_code`, `stop_name`, `delay_seconds`, `delay_rank` |
-| `mart_line_reliability_daily` | `service_date`, `line`, `direction_id`, `trip_headsign` | Line reliability strip | `service_date`, `mode`, `line`, `route_short_name`, `direction_id`, `trip_headsign`, `display_rank`, `clean_count`, `partial_count`, `broken_count`, `outcomes` |
+| `mart_worst_delay_event` | One ranked delay event per scope | Worst departure lists | `scope_type`, `scope_id`, `service_date`, `schedule_day_type`, `mode`, `line`, `route_short_name`, `trip_id`, `vehicle_number`, `schedule_version_id`, `trip_headsign`, `scheduled_arrival_time`, `time_label`, `stop_group_id`, `stop_id`, `stop_post_code`, `stop_name`, `delay_seconds`, `delay_rank` |
+| `mart_line_reliability_daily` | `service_date`, `line`, `schedule_version_id`, `direction_id`, `trip_headsign` | Line reliability strip | `service_date`, `schedule_day_type`, `mode`, `line`, `route_short_name`, `schedule_version_id`, `direction_id`, `trip_headsign`, `display_rank`, `clean_count`, `partial_count`, `broken_count`, `outcomes` |
 | `mart_trip_mode_daily_summary` | `service_date`, `mode` | Trips landing summary | `service_date`, `mode`, `trip_count`, `median_delay_seconds`, `on_time_rate` |
 | `mart_trip_line_daily` | `service_date`, `mode`, `line` | Trip page line picker | `service_date`, `mode`, `line`, `route_short_name`, `trip_count`, `line_display_rank` |
-| `mart_trip_daily` | One canonical observed vehicle trip execution | Trip landing rows, selected-line trip rows, trip detail header | `gtfs_snapshot_id`, `service_date`, `gps_date`, `trip_id`, `vehicle_number`, `line`, `route_short_name`, `mode`, `brigade`, `direction_id`, `trip_headsign`, `route_label`, `origin_stop_name`, `destination_stop_name`, `scheduled_start_time`, `scheduled_end_time`, `actual_start_time`, `actual_end_time`, `start_delay_seconds`, `end_delay_seconds`, `stops_expected`, `stops_detected`, `trip_quality`, `delay_profile`, `erratic_score`, `departure_rank`, `line_end_delay_rank`, `line_erratic_rank`, `landing_worst_rank`, `landing_best_rank`, `landing_erratic_rank` |
+| `mart_trip_daily` | One canonical observed vehicle trip execution | Trip landing rows, selected-line trip rows, trip detail header | `gtfs_snapshot_id`, `service_date`, `schedule_day_type`, `gps_date`, `trip_id`, `vehicle_number`, `schedule_version_id`, `line`, `route_short_name`, `mode`, `brigade`, `direction_id`, `trip_headsign`, `route_label`, `origin_stop_name`, `destination_stop_name`, `scheduled_start_time`, `scheduled_end_time`, `actual_start_time`, `actual_end_time`, `start_delay_seconds`, `end_delay_seconds`, `stops_expected`, `stops_detected`, `trip_quality`, `delay_profile`, `erratic_score`, `departure_rank`, `line_end_delay_rank`, `line_erratic_rank`, `landing_worst_rank`, `landing_best_rank`, `landing_erratic_rank` |
 | `mart_line_trip_group_daily` | `service_date`, `line`, `direction_id`, `trip_headsign` | Selected trip page group headers | `service_date`, `mode`, `line`, `direction_id`, `trip_headsign`, `origin_stop_name`, `destination_stop_name`, `trip_count`, `display_rank` |
 | `fct_expected_stop_event` | One scheduled stop per matched vehicle trip | Trip detail stop list only | `service_date`, `trip_id`, `vehicle_number`, `mode`, `line`, `stop_sequence`, `stop_id`, `stop_group_id`, `stop_post_code`, `stop_name`, `scheduled_arrival_time`, `actual_arrival_time`, `delay_seconds`, `observation_status` |
 | `mart_pipeline_status` | Operational `service_date`, `mode` | Recent-days status table | `service_date`, `mode`, `completeness_ratio`, `service_coverage_ratio`, `trips_complete`, `trips_partial`, `trips_broken`, `stop_arrivals_count`, `latest_gtfs_snapshot_at`, `health_ratio`, `health_label` |

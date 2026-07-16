@@ -24,7 +24,7 @@
             <span><b class="{{ (trip_landing_summary.on_time_rate or none)|percent_class }}">{{ (trip_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
             <span><b class="{{ (trip_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (trip_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
           </div>
-          {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none, 'day', false) }}
+          {{ ui.datebox(window_context.label, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none, selected_window) }}
         </header>
 
         <div class="landing-rank-switch scope">
@@ -37,9 +37,9 @@
         <section class="landing-rank">
           <div class="landing-rank-head trip-rank-grid"><div>#</div><div>Time</div><div>Line</div><div>Route</div><div>Trace</div><div>End</div></div>
           {% for trip in trip_landing_rows %}
-            <a class="landing-rank-row trip-rank-grid" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=selected_date, vehicle=trip.vehicle_number) }}">
+            <a class="landing-rank-row trip-rank-grid" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=trip.service_date, vehicle=trip.vehicle_number, window=selected_window, return_date=selected_date) }}">
               <span class="landing-rank-index mono">{{ '%02d'|format(pagination.first_item + loop.index0) }}</span>
-              <span class="mono muted">{{ trip.scheduled_start_time|time }}</span>
+              <span class="mono muted">{{ trip.display_date }}{{ trip.scheduled_start_time|time }}</span>
               <span class="landing-line-pill mono {% if trip.mode == 'tram' %}tram{% endif %}">{{ trip.route_short_name }}</span>
               <span class="landing-route" title="{{ trip.route_label }}">{{ trip.route_label }}</span>
               <span class="trip-trace" aria-label="per-stop delay trace">
@@ -66,7 +66,7 @@
         <header class="head line-headline">
           <h1 class="hero-title mono">{{ selected_line }}</h1>
           <div class="tag {{ selected_mode }}">{{ selected_mode|upper }}</div>
-          {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.next) if date_nav.next else none, 'day', false) }}
+          {{ ui.datebox(window_context.label, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.next) if date_nav.next else none, selected_window) }}
         </header>
 
         <div class="trip-sort scope">
@@ -90,8 +90,8 @@
                 <div>End</div>
               </div>
               {% for trip in group.trips %}
-                <a class="trip-run" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=selected_date, vehicle=trip.vehicle_number) }}">
-                  <span class="trip-dep mono">{{ trip.scheduled_start_time|time }}</span>
+                <a class="trip-run" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=trip.service_date, vehicle=trip.vehicle_number, window=selected_window, return_date=selected_date) }}">
+                  <span class="trip-dep mono">{{ trip.display_date }}{{ trip.scheduled_start_time|time }}</span>
                   <span class="trip-trace" aria-label="per-stop delay trace">
                     <span class="trip-trace-base"></span>
                     <span class="trip-trace-stops">
@@ -116,7 +116,7 @@
           <span>each square = one stop, in travel order</span>
         </div>
       {% else %}
-        <section class="section muted">No complete trips available for this line and date.</section>
+        <section class="section muted">No complete trips available for this line and window.</section>
       {% endif %}
       {{ ui.pager(
         pagination,
