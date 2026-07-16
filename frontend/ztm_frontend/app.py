@@ -39,13 +39,16 @@ def create_app() -> Flask:
 
     @app.context_processor
     def inject_globals() -> dict[str, Any]:
-        return {"meta": queries.get_export_metadata(current_app.config["ZTM_DUCKDB_PATH"])}
+        return {
+            "meta": queries.get_export_metadata(current_app.config["ZTM_DUCKDB_PATH"]),
+            "navigation_date": _selected_date_arg(),
+        }
 
     @app.get("/")
     def index() -> str:
         return render_template(
             "overview.html",
-            **queries.get_overview(current_app.config["ZTM_DUCKDB_PATH"], request.args.get("date")),
+            **queries.get_overview(current_app.config["ZTM_DUCKDB_PATH"], _selected_date_arg()),
         )
 
     @app.get("/lines/")
@@ -57,7 +60,7 @@ def create_app() -> Flask:
                 current_app.config["ZTM_DUCKDB_PATH"],
                 line,
                 _selected_mode(request.args.get("mode")),
-                request.args.get("date"),
+                _selected_date_arg(),
                 request.args.get("rank"),
                 request.args.get("page"),
             ),
@@ -75,7 +78,7 @@ def create_app() -> Flask:
                 _selected_mode(request.args.get("mode")),
                 request.args.get("q", ""),
                 post or request.args.get("post"),
-                request.args.get("date"),
+                _selected_date_arg(),
                 request.args.get("view"),
                 request.args.get("rank"),
                 request.args.get("page"),
@@ -92,7 +95,7 @@ def create_app() -> Flask:
                 current_app.config["ZTM_DUCKDB_PATH"],
                 _selected_mode(request.args.get("mode")),
                 request.args.get("line"),
-                request.args.get("date"),
+                _selected_date_arg(),
                 request.args.get("trip"),
                 request.args.get("vehicle"),
                 request.args.get("sort"),
@@ -108,7 +111,7 @@ def create_app() -> Flask:
             **queries.get_trip_detail(
                 current_app.config["ZTM_DUCKDB_PATH"],
                 trip_id,
-                request.args.get("date"),
+                _selected_date_arg(),
                 request.args.get("vehicle"),
             ),
         )
@@ -133,6 +136,12 @@ def _format_delay(value: float | None) -> str:
 def _selected_mode(value: str | None) -> str | None:
     if value in {"bus", "tram"}:
         return value
+    return None
+
+
+def _selected_date_arg() -> str | None:
+    if request.headers.get("HX-Request") == "true":
+        return request.args.get("date")
     return None
 
 

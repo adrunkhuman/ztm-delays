@@ -15,14 +15,14 @@
     <div id="page" class="page" hx-history-elt hx-boost:inherited="swap:outerSync select:#page target:#page" hx-indicator:inherited=".loadline">
       <div class="loadline" aria-hidden="true"></div>
       <nav class="nav">
-        <a class="brand" href="{{ url_for('index') }}">ZTM<span>/delays</span></a>
+        <a class="brand" href="{{ url_for('index', date=navigation_date) }}">ZTM<span>/delays</span></a>
         <div class="nav-links" aria-label="Main navigation">
-          <a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">overview</a>
-          <a href="{{ url_for('lines') }}" class="{% if request.endpoint == 'lines' %}active{% endif %}">lines</a>
-          <a href="{{ url_for('stops') }}" class="{% if request.endpoint == 'stops' %}active{% endif %}">stops</a>
-          <a href="{{ url_for('schedule') }}" class="{% if request.endpoint in ['schedule', 'trip_detail'] %}active{% endif %}">trips</a>
+          <a href="{{ url_for('index', date=navigation_date) }}" class="{% if request.endpoint == 'index' %}active{% endif %}">overview</a>
+          <a href="{{ url_for('lines', date=navigation_date) }}" class="{% if request.endpoint == 'lines' %}active{% endif %}">lines</a>
+          <a href="{{ url_for('stops', date=navigation_date) }}" class="{% if request.endpoint == 'stops' %}active{% endif %}">stops</a>
+          <a href="{{ url_for('schedule', date=navigation_date) }}" class="{% if request.endpoint in ['schedule', 'trip_detail'] %}active{% endif %}">trips</a>
         </div>
-        <a class="status-link {% if request.endpoint == 'status' %}active{% endif %}" href="{{ url_for('status') }}">status</a>
+        <a class="status-link {% if request.endpoint == 'status' %}active{% endif %}" href="{{ url_for('status', date=navigation_date) }}">status</a>
       </nav>
 
       {% block body %}{% endblock %}

@@ -74,6 +74,7 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
     def fake_get_stops(*args: object) -> dict[str, object]:
         captured["page"] = args[-2]
         captured["picker_page"] = args[-1]
+        captured["date"] = args[5]
         return {
             "selected_stop_group_id": None,
             "selected_mode": "bus",
@@ -91,12 +92,23 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(queries, "get_stops", fake_get_stops)
     monkeypatch.setattr(queries, "get_export_metadata", lambda _path: {})
 
-    response = create_app().test_client().get("/stops/?q=central&page=2&picker_page=3")
+    client = create_app().test_client()
+    response = client.get(
+        "/stops/?q=central&page=2&picker_page=3&date=2026-06-30",
+        headers={"HX-Request": "true"},
+    )
 
     assert response.status_code == HTTPStatus.OK
-    assert captured == {"page": "2", "picker_page": "3"}
+    assert captured == {"page": "2", "picker_page": "3", "date": "2026-06-30"}
+    assert b'href="/lines/?date=2026-06-30"' in response.data
     assert b"picker_page=3" in response.data
     assert b'rel="prev">&lt;</a>' in response.data
     assert b'rel="next">&gt;</a>' in response.data
     assert b"\xe2\x86\x90 previous" not in response.data
     assert b"next \xe2\x86\x92" not in response.data
+
+    refreshed_response = client.get("/stops/?q=central&page=2&picker_page=3&date=2026-06-30")
+
+    assert refreshed_response.status_code == HTTPStatus.OK
+    assert captured["date"] is None
+    assert b'href="/lines/"' in refreshed_response.data
