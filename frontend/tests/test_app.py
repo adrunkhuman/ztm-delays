@@ -96,5 +96,7 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
     assert response.status_code == HTTPStatus.OK
     assert captured == {"page": "2", "picker_page": "3"}
     assert b"picker_page=3" in response.data
+    assert b'rel="prev">&lt;</a>' in response.data
     assert b'rel="next">&gt;</a>' in response.data
+    assert b"\xe2\x86\x90 previous" not in response.data
     assert b"next \xe2\x86\x92" not in response.data

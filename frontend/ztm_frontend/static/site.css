@@ -652,10 +652,16 @@ td:nth-child(n + 2) {
   text-align: right;
 }
 
+.pager a:first-child {
+  color: var(--blue);
+  font-size: 1rem;
+}
+
 .pager a:hover {
   color: var(--fg);
 }
 
+.pager a:first-child:hover,
 .pager a:last-child:hover {
   color: var(--blue);
 }
