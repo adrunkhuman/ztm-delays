@@ -50,6 +50,10 @@ models:
         description: Last scheduled arrival time for the trip, in seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
       - name: stop_count
         description: Number of scheduled stops in the trip.
+      - name: passenger_stop_count
+        description: Number of stops that permit pickup, drop-off, or request service. Zero identifies an explicit non-passenger technical trip.
+      - name: is_public_service_segment
+        description: True when the trip contains at least one passenger-eligible stop.
       - name: ordered_stop_ids
         description: Pipe-delimited stop_id sequence ordered by GTFS stop_sequence.
       - name: ordered_arrival_time_seconds
@@ -205,6 +209,11 @@ models:
         tests:
           - not_null:
               config: *int_gtfs_duty_chain_processing_date_filter
+      - name: passenger_stop_count
+        description: Number of passenger-eligible stops in the scheduled trip.
+        tests:
+          - not_null:
+              config: *int_gtfs_duty_chain_processing_date_filter
       - name: origin_stop_id
         description: First scheduled stop_id.
       - name: origin_stop_name
@@ -214,22 +223,22 @@ models:
       - name: destination_stop_name
         description: Last scheduled stop name.
       - name: is_depot_pull_out
-        description: True when the trip starts at a depot stop such as R-3 Zajezdnia Ostrobramska.
+        description: True when an explicit non-passenger trip starts at a depot-named stop such as R-3 Zajezdnia Ostrobramska.
         tests:
           - not_null:
               config: *int_gtfs_duty_chain_processing_date_filter
       - name: is_depot_pull_in
-        description: True when the trip ends at a depot stop such as R-3 Zajezdnia Ostrobramska.
+        description: True when an explicit non-passenger trip ends at a depot-named stop such as R-3 Zajezdnia Ostrobramska.
         tests:
           - not_null:
               config: *int_gtfs_duty_chain_processing_date_filter
       - name: is_depot_segment
-        description: True when either terminal is a depot stop.
+        description: True when GTFS marks every stop as unavailable for both pickup and drop-off. Current source snapshots encode these technical movements as two-stop trips.
         tests:
           - not_null:
               config: *int_gtfs_duty_chain_processing_date_filter
       - name: is_public_service_segment
-        description: True when neither terminal is classified as a depot stop.
+        description: True when the trip contains at least one passenger-eligible stop, regardless of terminal names.
         tests:
           - not_null:
               config: *int_gtfs_duty_chain_processing_date_filter
@@ -313,12 +322,12 @@ unit_tests:
       - input: ref('int_gtfs_trip_schedule')
         format: sql
         rows: |
-          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '10' as line, 0 as direction_id, 'simple-a' as trip_id, 'svc' as service_id, 'Simple A' as trip_headsign, 'shape-simple-a' as shape_id, 3600 as trip_start_seconds, 3900 as trip_end_seconds, 2 as stop_count, 'S1 | S2' as ordered_stop_ids, '3600 | 3900' as ordered_arrival_time_seconds, 'simple-a-signature' as trip_timetable_signature
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'simple-b', 'svc', 'Simple B', 'shape-simple-b', 4200, 4500, 2, 'S2 | S3', '4200 | 4500', 'simple-b-signature'
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'cross-a', 'svc', 'Cross A', 'shape-cross-a', 3600, 3900, 2, 'S1 | S2', '3600 | 3900', 'cross-a-signature'
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '20', 1, 'cross-b', 'svc', 'Cross B', 'shape-cross-b', 4200, 4500, 2, 'S2 | S3', '4200 | 4500', 'cross-b-signature'
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '30', 0, 'overlap-a', 'svc', 'Overlap A', 'shape-overlap-a', 3600, 5000, 2, 'S1 | S2', '3600 | 5000', 'overlap-a-signature'
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '30', 0, 'overlap-b', 'svc', 'Overlap B', 'shape-overlap-b', 4800, 5400, 2, 'S2 | S3', '4800 | 5400', 'overlap-b-signature'
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '10' as line, 0 as direction_id, 'simple-a' as trip_id, 'svc' as service_id, 'Simple A' as trip_headsign, 'shape-simple-a' as shape_id, 3600 as trip_start_seconds, 3900 as trip_end_seconds, 2 as stop_count, 2 as passenger_stop_count, true as is_public_service_segment, 'S1 | S2' as ordered_stop_ids, '3600 | 3900' as ordered_arrival_time_seconds, 'simple-a-signature' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'simple-b', 'svc', 'Simple B', 'shape-simple-b', 4200, 4500, 2, 2, true, 'S2 | S3', '4200 | 4500', 'simple-b-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'cross-a', 'svc', 'Cross A', 'shape-cross-a', 3600, 3900, 2, 2, true, 'S1 | S2', '3600 | 3900', 'cross-a-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '20', 1, 'cross-b', 'svc', 'Cross B', 'shape-cross-b', 4200, 4500, 2, 2, true, 'S2 | S3', '4200 | 4500', 'cross-b-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '30', 0, 'overlap-a', 'svc', 'Overlap A', 'shape-overlap-a', 3600, 5000, 2, 2, true, 'S1 | S2', '3600 | 5000', 'overlap-a-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '30', 0, 'overlap-b', 'svc', 'Overlap B', 'shape-overlap-b', 4800, 5400, 2, 2, true, 'S2 | S3', '4800 | 5400', 'overlap-b-signature'
       - input: ref('stg_gtfs__trips')
         format: sql
         rows: |
@@ -448,9 +457,9 @@ unit_tests:
       - input: ref('int_gtfs_trip_schedule')
         format: sql
         rows: |
-          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '10' as line, 0 as direction_id, 'pull-out' as trip_id, 'svc' as service_id, 'Pull Out' as trip_headsign, 'shape-a' as shape_id, 3600 as trip_start_seconds, 3900 as trip_end_seconds, 2 as stop_count, 'DEPOT | S1' as ordered_stop_ids, '3600 | 3900' as ordered_arrival_time_seconds, 'pull-out-signature' as trip_timetable_signature
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'public-trip', 'svc', 'Public', 'shape-b', 4200, 4500, 2, 'S1 | S2', '4200 | 4500', 'public-signature'
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'pull-in', 'svc', 'Pull In', 'shape-c', 4800, 5100, 2, 'S2 | DEPOT', '4800 | 5100', 'pull-in-signature'
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '10' as line, 0 as direction_id, 'pull-out' as trip_id, 'svc' as service_id, 'Pull Out' as trip_headsign, 'shape-a' as shape_id, 3600 as trip_start_seconds, 3900 as trip_end_seconds, 2 as stop_count, 0 as passenger_stop_count, false as is_public_service_segment, 'DEPOT | S1' as ordered_stop_ids, '3600 | 3900' as ordered_arrival_time_seconds, 'pull-out-signature' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'public-trip', 'svc', 'Public', 'shape-b', 4200, 4500, 2, 2, true, 'DEPOT | S2', '4200 | 4500', 'public-signature'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '10', 0, 'pull-in', 'svc', 'Pull In', 'shape-c', 4800, 5100, 2, 0, false, 'S2 | DEPOT', '4800 | 5100', 'pull-in-signature'
       - input: ref('stg_gtfs__trips')
         format: sql
         rows: |
@@ -466,7 +475,7 @@ unit_tests:
         rows: |
           select 'pull-out' as trip_id, 'DEPOT' as stop_id, 1 as stop_sequence, 3600 as arrival_time_seconds, 3600 as departure_time_seconds, 'snapshot-valid' as gtfs_snapshot_id
           union all select 'pull-out', 'S1', 2, 3900, 3900, 'snapshot-valid'
-          union all select 'public-trip', 'S1', 1, 4200, 4200, 'snapshot-valid'
+          union all select 'public-trip', 'DEPOT', 1, 4200, 4200, 'snapshot-valid'
           union all select 'public-trip', 'S2', 2, 4500, 4500, 'snapshot-valid'
           union all select 'pull-in', 'S2', 1, 4800, 4800, 'snapshot-valid'
           union all select 'pull-in', 'DEPOT', 2, 5100, 5100, 'snapshot-valid'
@@ -500,9 +509,9 @@ unit_tests:
       - input: ref('int_gtfs_trip_schedule')
         format: sql
         rows: |
-          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, 'N1' as line, 0 as direction_id, 'overnight-a' as trip_id, 'svc' as service_id, 'Overnight A' as trip_headsign, 'shape-overnight-a' as shape_id, 85000 as trip_start_seconds, 87000 as trip_end_seconds, 2 as stop_count, 'S1 | S2' as ordered_stop_ids, '85000 | 87000' as ordered_arrival_time_seconds, 'overnight-a-signature' as trip_timetable_signature
-          union all select date '2026-01-15', date '2026-01-16', 'weekday', 'svc', 'snapshot-valid', 'N1', 0, 'overnight-a', 'svc', 'Overnight A', 'shape-overnight-a', 85000, 87000, 2, 'S1 | S2', '85000 | 87000', 'overnight-a-signature'
-          union all select date '2026-01-15', date '2026-01-16', 'weekday', 'svc', 'snapshot-valid', 'N1', 0, 'overnight-b', 'svc', 'Overnight B', 'shape-overnight-b', 88000, 89000, 2, 'S2 | S3', '88000 | 89000', 'overnight-b-signature'
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, 'N1' as line, 0 as direction_id, 'overnight-a' as trip_id, 'svc' as service_id, 'Overnight A' as trip_headsign, 'shape-overnight-a' as shape_id, 85000 as trip_start_seconds, 87000 as trip_end_seconds, 2 as stop_count, 2 as passenger_stop_count, true as is_public_service_segment, 'S1 | S2' as ordered_stop_ids, '85000 | 87000' as ordered_arrival_time_seconds, 'overnight-a-signature' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-16', 'weekday', 'svc', 'snapshot-valid', 'N1', 0, 'overnight-a', 'svc', 'Overnight A', 'shape-overnight-a', 85000, 87000, 2, 2, true, 'S1 | S2', '85000 | 87000', 'overnight-a-signature'
+          union all select date '2026-01-15', date '2026-01-16', 'weekday', 'svc', 'snapshot-valid', 'N1', 0, 'overnight-b', 'svc', 'Overnight B', 'shape-overnight-b', 88000, 89000, 2, 2, true, 'S2 | S3', '88000 | 89000', 'overnight-b-signature'
       - input: ref('stg_gtfs__trips')
         format: sql
         rows: |
@@ -556,8 +565,8 @@ unit_tests:
       - input: ref('int_gtfs_trip_schedule')
         format: sql
         rows: |
-          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '99' as line, 0 as direction_id, 'block-literal' as trip_id, 'svc' as service_id, 'Block Literal' as trip_headsign, 'shape-block-literal' as shape_id, 3600 as trip_start_seconds, 3900 as trip_end_seconds, 2 as stop_count, 'S1 | S2' as ordered_stop_ids, '3600 | 3900' as ordered_arrival_time_seconds, 'block-literal-signature' as trip_timetable_signature
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '40', 0, 'fallback-collision', 'svc', 'Fallback Collision', 'shape-fallback-collision', 4200, 4500, 2, 'S2 | S3', '4200 | 4500', 'fallback-collision-signature'
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '99' as line, 0 as direction_id, 'block-literal' as trip_id, 'svc' as service_id, 'Block Literal' as trip_headsign, 'shape-block-literal' as shape_id, 3600 as trip_start_seconds, 3900 as trip_end_seconds, 2 as stop_count, 2 as passenger_stop_count, true as is_public_service_segment, 'S1 | S2' as ordered_stop_ids, '3600 | 3900' as ordered_arrival_time_seconds, 'block-literal-signature' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '40', 0, 'fallback-collision', 'svc', 'Fallback Collision', 'shape-fallback-collision', 4200, 4500, 2, 2, true, 'S2 | S3', '4200 | 4500', 'fallback-collision-signature'
       - input: ref('stg_gtfs__trips')
         format: sql
         rows: |
@@ -613,14 +622,17 @@ unit_tests:
         rows: |
           select 'trip-prior' as trip_id, '187' as line, '2026-07-01:PcS' as service_id, 'Prior Head' as trip_headsign, 0 as direction_id, '12' as brigade, 'shape-prior' as shape_id, 'snapshot-prior' as gtfs_snapshot_id
           union all select 'trip-same-day', '187', 'NdM', 'Same Day Head', 0, '12', 'shape-same-day', 'snapshot-same-day'
+          union all select 'trip-technical', '187', 'NdM', 'Technical', 0, '12', 'shape-technical', 'snapshot-same-day'
           union all select 'trip-other-line' as trip_id, '999' as line, 'NdM' as service_id, 'Other Line' as trip_headsign, 0 as direction_id, '1' as brigade, 'shape-other-line' as shape_id, 'snapshot-prior' as gtfs_snapshot_id
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
-          select 'trip-prior' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'snapshot-prior' as gtfs_snapshot_id
-          union all select 'trip-prior', '100102', 2, 36600, 36600, 'snapshot-prior'
-          union all select 'trip-same-day', '999901', 1, 40000, 40000, 'snapshot-same-day'
-          union all select 'trip-other-line', '999901', 1, 40000, 40000, 'snapshot-prior'
+          select 'trip-prior' as trip_id, '100101' as stop_id, 1 as stop_sequence, 36000 as arrival_time_seconds, 36000 as departure_time_seconds, 'regular' as stop_service_class, 'snapshot-prior' as gtfs_snapshot_id
+          union all select 'trip-prior', '100102', 2, 36600, 36600, 'regular', 'snapshot-prior'
+          union all select 'trip-same-day', '999901', 1, 40000, 40000, 'regular', 'snapshot-same-day'
+          union all select 'trip-technical', 'DEPOT', 1, 41000, 41000, 'not_in_passenger_service', 'snapshot-same-day'
+          union all select 'trip-technical', '999901', 2, 41500, 41500, 'not_in_passenger_service', 'snapshot-same-day'
+          union all select 'trip-other-line', '999901', 1, 40000, 40000, 'regular', 'snapshot-prior'
     expect:
       rows:
         - service_date: '2026-07-08'
@@ -637,9 +649,30 @@ unit_tests:
           trip_start_seconds: 40000
           trip_end_seconds: 40000
           stop_count: 1
+          passenger_stop_count: 1
+          is_public_service_segment: true
           ordered_stop_ids: '999901'
           ordered_arrival_time_seconds: '40000'
           trip_timetable_signature: '000001:999901:00040000'
+        - service_date: '2026-07-08'
+          processing_date: '2026-07-08'
+          schedule_day_type: 'sunday_holiday'
+          schedule_service_ids: 'NdM'
+          gtfs_snapshot_id: 'snapshot-same-day'
+          line: '187'
+          direction_id: 0
+          trip_id: 'trip-technical'
+          service_id: 'NdM'
+          trip_headsign: 'Technical'
+          shape_id: 'shape-technical'
+          trip_start_seconds: 41000
+          trip_end_seconds: 41500
+          stop_count: 2
+          passenger_stop_count: 0
+          is_public_service_segment: false
+          ordered_stop_ids: 'DEPOT | 999901'
+          ordered_arrival_time_seconds: '41000 | 41500'
+          trip_timetable_signature: '000001:DEPOT:00041000 | 000002:999901:00041500'
 
   - name: int_schedule_version_collapses_republish_and_opens_changed_version
     model: int_schedule_version
@@ -719,10 +752,10 @@ unit_tests:
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
-          select 'trip-overnight' as trip_id, '100101' as stop_id, 1 as stop_sequence, 90000 as arrival_time_seconds, 90000 as departure_time_seconds, 'snapshot-prior' as gtfs_snapshot_id
-          union all select 'trip-overnight', '100102', 2, 90600, 90600, 'snapshot-prior'
-          union all select 'trip-daytime', '200101', 1, 36000, 36000, 'snapshot-prior'
-          union all select 'trip-daytime', '200102', 2, 36600, 36600, 'snapshot-prior'
+          select 'trip-overnight' as trip_id, '100101' as stop_id, 1 as stop_sequence, 90000 as arrival_time_seconds, 90000 as departure_time_seconds, 'regular' as stop_service_class, 'snapshot-prior' as gtfs_snapshot_id
+          union all select 'trip-overnight', '100102', 2, 90600, 90600, 'regular', 'snapshot-prior'
+          union all select 'trip-daytime', '200101', 1, 36000, 36000, 'regular', 'snapshot-prior'
+          union all select 'trip-daytime', '200102', 2, 36600, 36600, 'regular', 'snapshot-prior'
     expect:
       rows:
         - service_date: '2026-07-07'
@@ -739,6 +772,8 @@ unit_tests:
           trip_start_seconds: 36000
           trip_end_seconds: 36600
           stop_count: 2
+          passenger_stop_count: 2
+          is_public_service_segment: true
           ordered_stop_ids: '200101 | 200102'
           ordered_arrival_time_seconds: '36000 | 36600'
           trip_timetable_signature: '000001:200101:00036000 | 000002:200102:00036600'
@@ -756,6 +791,8 @@ unit_tests:
           trip_start_seconds: 90000
           trip_end_seconds: 90600
           stop_count: 2
+          passenger_stop_count: 2
+          is_public_service_segment: true
           ordered_stop_ids: '100101 | 100102'
           ordered_arrival_time_seconds: '90000 | 90600'
           trip_timetable_signature: '000001:100101:00090000 | 000002:100102:00090600'
@@ -786,10 +823,10 @@ unit_tests:
       - input: ref('stg_gtfs__stop_times')
         format: sql
         rows: |
-          select 'trip-prior-night' as trip_id, '100101' as stop_id, 1 as stop_sequence, 90000 as arrival_time_seconds, 90000 as departure_time_seconds, 'snapshot-old' as gtfs_snapshot_id
-          union all select 'trip-prior-night', '100102', 2, 90600, 90600, 'snapshot-old'
-          union all select 'trip-prior-wrong-snapshot', '999901', 1, 90000, 90000, 'snapshot-current'
-          union all select 'trip-current-day', '200101', 1, 36000, 36000, 'snapshot-current'
+          select 'trip-prior-night' as trip_id, '100101' as stop_id, 1 as stop_sequence, 90000 as arrival_time_seconds, 90000 as departure_time_seconds, 'regular' as stop_service_class, 'snapshot-old' as gtfs_snapshot_id
+          union all select 'trip-prior-night', '100102', 2, 90600, 90600, 'regular', 'snapshot-old'
+          union all select 'trip-prior-wrong-snapshot', '999901', 1, 90000, 90000, 'regular', 'snapshot-current'
+          union all select 'trip-current-day', '200101', 1, 36000, 36000, 'regular', 'snapshot-current'
     expect:
       rows:
         - service_date: '2026-07-07'
@@ -806,6 +843,8 @@ unit_tests:
           trip_start_seconds: 90000
           trip_end_seconds: 90000
           stop_count: 1
+          passenger_stop_count: 1
+          is_public_service_segment: true
           ordered_stop_ids: '999901'
           ordered_arrival_time_seconds: '90000'
           trip_timetable_signature: '000001:999901:00090000'
@@ -823,6 +862,8 @@ unit_tests:
           trip_start_seconds: 36000
           trip_end_seconds: 36000
           stop_count: 1
+          passenger_stop_count: 1
+          is_public_service_segment: true
           ordered_stop_ids: '200101'
           ordered_arrival_time_seconds: '36000'
           trip_timetable_signature: '000001:200101:00036000'

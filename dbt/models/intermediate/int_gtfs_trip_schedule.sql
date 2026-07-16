@@ -165,7 +165,8 @@ trip_stop_times as (
         stop_times.stop_sequence,
         stop_times.stop_id,
         stop_times.arrival_time_seconds,
-        stop_times.departure_time_seconds
+        stop_times.departure_time_seconds,
+        stop_times.stop_service_class
     from active_trips
     inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
         on active_trips.trip_id = stop_times.trip_id
@@ -195,6 +196,7 @@ trip_schedules as (
             coalesce(departure_time_seconds, arrival_time_seconds)
         )) as trip_end_seconds,
         count(*) as stop_count,
+        countif(stop_service_class != 'not_in_passenger_service') as passenger_stop_count,
         string_agg(stop_id, ' | ' order by stop_sequence) as ordered_stop_ids,
         string_agg(cast(arrival_time_seconds as string), ' | ' order by stop_sequence) as ordered_arrival_time_seconds,
         string_agg(
@@ -232,6 +234,8 @@ select
     trip_start_seconds,
     trip_end_seconds,
     stop_count,
+    passenger_stop_count,
+    passenger_stop_count > 0 as is_public_service_segment,
     ordered_stop_ids,
     ordered_arrival_time_seconds,
     trip_timetable_signature

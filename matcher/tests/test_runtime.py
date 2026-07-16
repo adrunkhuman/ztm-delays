@@ -919,7 +919,8 @@ def test_schedule_trip_universe_classifies_zone_depot_technical_and_short_turns(
     assert universe["full-two"]["is_zone1_public_ranking_trip"]
     assert universe["non-zone1"]["non_zone1_stop_count"] == 2
     assert not universe["non-zone1"]["is_zone1_public_ranking_trip"]
-    assert not universe["depot"]["is_public_passenger_segment"]
+    assert universe["depot"]["is_public_passenger_segment"]
+    assert universe["depot"]["is_zone1_public_ranking_trip"]
     assert universe["technical"]["is_public_passenger_segment"]
     assert not universe["all-technical"]["is_public_passenger_segment"]
     assert not universe["malformed"]["is_public_passenger_segment"]
@@ -1389,6 +1390,98 @@ def test_medium_direct_arrivals_are_uncertain_not_fact_evidence(tmp_path: Path) 
     assert all(row["actual_arrival_time"] is None and row["delay_seconds"] is None for row in expected)
     assert all(row["uncertainty_evidence"] == ["alignment_ambiguous_or_medium"] for row in expected)
     assert all(row["source_gps_date"] is None for row in expected)
+
+
+def test_request_stops_do_not_create_required_stop_sequence_gaps(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("1",))
+        run.align_stops()
+        work = run._work()
+        semantics_path = work / "stop_semantics.parquet"
+        semantic_table = pq.read_table(semantics_path)
+        semantics = semantic_table.to_pylist()
+        trip_semantics = [row for row in semantics if row["trip_id"] == "today"]
+        first, last = trip_semantics
+        required_sequences = (first["stop_sequence"], last["stop_sequence"] + 9)
+        passenger_rows = [
+            first
+            | {
+                "stop_service_class": "regular",
+                "stop_execution_class": "passenger",
+                "is_passenger_stop": True,
+                "are_passenger_boundaries_settled": True,
+                "first_passenger_stop_sequence": required_sequences[0],
+                "last_passenger_stop_sequence": required_sequences[1],
+            },
+            first
+            | {
+                "stop_id": "request-stop",
+                "stop_group_id": "request-stop",
+                "stop_sequence": first["stop_sequence"] + 5,
+                "pickup_type": 2,
+                "drop_off_type": 2,
+                "stop_service_class": "request",
+                "stop_execution_class": "passenger",
+                "is_passenger_stop": True,
+                "are_passenger_boundaries_settled": True,
+                "first_passenger_stop_sequence": required_sequences[0],
+                "last_passenger_stop_sequence": required_sequences[1],
+            },
+            last
+            | {
+                "stop_sequence": required_sequences[1],
+                "stop_service_class": "regular",
+                "stop_execution_class": "passenger",
+                "is_passenger_stop": True,
+                "are_passenger_boundaries_settled": True,
+                "first_passenger_stop_sequence": required_sequences[0],
+                "last_passenger_stop_sequence": required_sequences[1],
+            },
+        ]
+        semantics = [row for row in semantics if row["trip_id"] != "today"] + passenger_rows
+        pq.write_table(pa.Table.from_pylist(semantics, schema=semantic_table.schema), semantics_path)
+
+        arrivals_path = work / "passenger_stop_arrivals.parquet"
+        arrival_table = pq.read_table(arrivals_path)
+        template = arrival_table.to_pylist()[0]
+        arrivals = [
+            template
+            | {
+                "stop_id": row["stop_id"],
+                "stop_group_id": row["stop_group_id"],
+                "stop_sequence": row["stop_sequence"],
+                "pickup_type": row["pickup_type"],
+                "drop_off_type": row["drop_off_type"],
+                "stop_service_class": row["stop_service_class"],
+                "stop_execution_class": "passenger",
+                "is_passenger_stop": True,
+                "are_passenger_boundaries_settled": True,
+                "alignment_confidence": "high",
+                "actual_arrival_time": datetime(2026, 1, 15, 1, index, tzinfo=UTC),
+                "arrival_delay_seconds": 0,
+            }
+            for index, row in enumerate(passenger_rows)
+        ]
+        pq.write_table(pa.Table.from_pylist(arrivals, schema=arrival_table.schema), arrivals_path)
+
+        run.build_facts()
+        trip = pq.read_table(work / "reconstruction_trip_facts.parquet").to_pylist()[0]
+
+    assert trip["passenger_stops_expected"] == trip["passenger_stops_detected"] == 2
+    assert trip["optional_passenger_stops_expected"] == trip["optional_passenger_stops_detected"] == 1
+    assert trip["max_stop_sequence_gap"] == 1
+    assert trip["trip_quality"] == "complete"
 
 
 def test_matching_failure_absent_events_are_uncertain_without_lineage(tmp_path: Path) -> None:

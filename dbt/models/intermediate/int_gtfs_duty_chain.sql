@@ -28,7 +28,9 @@ with scheduled_trips as (
         end as duty_chain_source,
         schedule.trip_start_seconds,
         schedule.trip_end_seconds,
-        schedule.stop_count
+        schedule.stop_count,
+        schedule.passenger_stop_count,
+        schedule.is_public_service_segment
     from {{ ref('int_gtfs_trip_schedule') }} as schedule
     inner join {{ ref('stg_gtfs__trips') }} as trips
         on schedule.gtfs_snapshot_id = trips.gtfs_snapshot_id
@@ -61,7 +63,9 @@ service_day_trips as (
         duty_chain_source,
         trip_start_seconds,
         trip_end_seconds,
-        stop_count
+        stop_count,
+        passenger_stop_count,
+        is_public_service_segment
     from scheduled_trips
 ),
 
@@ -112,8 +116,10 @@ classified_trip_bounds as (
     select
         *,
         regexp_contains(coalesce(origin_stop_name, ''), r'(?i)(^R-[0-9]+\s+Zajezdnia|^Zajezdnia|\sZajezdnia)')
+            and passenger_stop_count = 0
             as is_depot_pull_out,
         regexp_contains(coalesce(destination_stop_name, ''), r'(?i)(^R-[0-9]+\s+Zajezdnia|^Zajezdnia|\sZajezdnia)')
+            and passenger_stop_count = 0
             as is_depot_pull_in
     from trip_bounds
 ),
@@ -167,14 +173,15 @@ select
     ordered.scheduled_start_time,
     ordered.scheduled_end_time,
     ordered.stop_count,
+    ordered.passenger_stop_count,
     ordered.origin_stop_id,
     ordered.origin_stop_name,
     ordered.destination_stop_id,
     ordered.destination_stop_name,
     ordered.is_depot_pull_out,
     ordered.is_depot_pull_in,
-    ordered.is_depot_pull_out or ordered.is_depot_pull_in as is_depot_segment,
-    not (ordered.is_depot_pull_out or ordered.is_depot_pull_in) as is_public_service_segment,
+    not ordered.is_public_service_segment as is_depot_segment,
+    ordered.is_public_service_segment,
     ordered.first_stop_sequence,
     ordered.last_stop_sequence,
     cast(null as float64) as scheduled_distance_meters,

@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from ztm_matcher.gtfs import Snapshot, StopTime, Trip, load, select
-from ztm_matcher.semantics import _depot, _is_depot_segment, duties, stop_semantics
+from ztm_matcher.semantics import _is_technical_trip, duties, stop_semantics
 
 
 def _zip(path: Path, block: str = "block-a", *, include_zone_id: bool = True) -> None:
@@ -153,13 +153,7 @@ def test_select_uses_shared_warsaw_wall_clock_policy_across_dst() -> None:
         assert current["scheduled_end_time"] == expected_end
 
 
-def test_depot_name_parity_is_case_insensitive() -> None:
-    assert _depot("r-4 zajezdnia Żoliborz")
-    assert _depot("Metro Zajezdnia")
-    assert not _depot("Zajezdniowa")
-
-
-def test_replacement_line_can_serve_a_depot_named_passenger_terminal() -> None:
-    assert not _is_depot_segment("Z26", "Z26", "Zajezdnia Wola", "Metro Ratusz Arsenał", 6)
-    assert _is_depot_segment("Z26", "Z26", "Zajezdnia Wola", "Metro Ratusz Arsenał", 1)
-    assert _is_depot_segment("26", "26", "Zajezdnia Wola", "Metro Ratusz Arsenał", 6)
+def test_only_trips_without_passenger_eligible_stops_are_technical() -> None:
+    assert _is_technical_trip(0)
+    assert not _is_technical_trip(1)
+    assert not _is_technical_trip(25)

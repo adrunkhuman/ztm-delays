@@ -34,6 +34,7 @@ where scheduled_start_date between date('{{ var("aggregation_start_date", var("p
       or modified_trip_count is null
       or expected_service_minutes is null
       or expected_service_minutes < 0
+      or latest_scheduled_end_time is null
       or observed_service_minutes is null
       or observed_service_minutes < 0
       or service_coverage_ratio is null
@@ -44,5 +45,8 @@ where scheduled_start_date between date('{{ var("aggregation_start_date", var("p
       or extract(minute from service_hour at time zone 'Europe/Warsaw') != 0
       or extract(second from service_hour at time zone 'Europe/Warsaw') != 0
       or service_hour_end != timestamp_add(service_hour, interval 1 hour)
-      or is_settled_hour != (service_hour_end < timestamp_sub(current_timestamp(), interval 90 minute))
+      or is_settled_hour != (
+          latest_scheduled_end_time < timestamp_sub(current_timestamp(), interval 90 minute)
+          and date(latest_scheduled_end_time, 'Europe/Warsaw') <= date('{{ var("max_gps_date", var("processing_date")) }}')
+      )
   )
