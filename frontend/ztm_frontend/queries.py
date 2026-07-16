@@ -3,13 +3,13 @@ from __future__ import annotations
 # ruff: noqa: S608
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from ztm_frontend.db import fetch_all, fetch_one
 
-LANDING_PAGE_SIZE = 50
+LANDING_PAGE_SIZE = 20
 STOP_PICKER_PAGE_SIZE = 12
 MAX_PAGE = (2**63 - 1) // LANDING_PAGE_SIZE
 ON_TIME_EARLY_SECONDS = -60
@@ -180,6 +180,7 @@ def get_lines(  # noqa: PLR0913
         "selected_date": selected_date,
         "date_nav": _date_nav(date_options, selected_date),
         "line_list": line_list,
+        "line_groups": _line_rail_groups(line_list),
         "selected_line": selected_line,
         "selected_mode": selected_mode,
         "selected_rank": selected_rank,
@@ -421,6 +422,7 @@ def get_schedule(  # noqa: PLR0913
         "selected_sort": selected_sort,
         "selected_rank": selected_rank,
         "line_list": line_list,
+        "line_groups": _line_rail_groups(line_list),
         "trips": trips,
         "trip_groups": _trip_groups(db_path, selected_date, selected_mode, selected_line, trips),
         "trip_landing_summary": trip_landing_summary,
@@ -865,6 +867,11 @@ def _hour_bars(
 def _week_bars(
     db_path: Path, entity_type: str, entity_id: str | None, mode: str | None, selected_date: str | None
 ) -> list[dict[str, Any]]:
+    if selected_date is None:
+        return []
+    selected_day = date.fromisoformat(selected_date)
+    week_start = selected_day - timedelta(days=selected_day.weekday())
+    week_end = week_start + timedelta(days=6)
     rows = fetch_all(
         db_path,
         """
@@ -873,19 +880,22 @@ def _week_bars(
         where entity_type = ?
           and entity_id = ?
           and (? is null or mode = ?)
-          and service_date between cast(? as date) - interval 6 day and cast(? as date)
+          and service_date between cast(? as date) and cast(? as date)
         order by service_date
         """,
-        [entity_type, entity_id, mode, mode, selected_date, selected_date],
+        [entity_type, entity_id, mode, mode, week_start, week_end],
     )
+    delays_by_date = {str(row["service_date"]): row.get("median_delay_seconds") for row in rows}
     bars = []
-    for row in rows:
-        service_date = str(row["service_date"])
-        delay = row.get("median_delay_seconds")
+    for day_offset in range(7):
+        service_day = week_start + timedelta(days=day_offset)
+        service_date = service_day.isoformat()
+        delay = delays_by_date.get(service_date)
         height = 0 if delay is None else max(4, min(38, round(abs(float(delay)) * 0.35)))
         bars.append(
             {
-                "label": date.fromisoformat(service_date).strftime("%a")[:1],
+                "service_date": service_date,
+                "label": service_day.strftime("%a")[:1],
                 "delay": delay,
                 "height": height,
                 "selected": service_date == selected_date,
@@ -954,6 +964,7 @@ def _trip_stops(
           and (? is null or gtfs_snapshot_id = ?)
           and trip_id = ?
           and vehicle_number = ?
+          and observation_status != 'not_in_passenger_service'
         order by stop_sequence
         """,
         [selected_date, gtfs_snapshot_id, gtfs_snapshot_id, trip_id, vehicle_number],
@@ -1234,6 +1245,32 @@ def _by_mode_list(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]
     for row in rows:
         grouped.setdefault(row["mode"], []).append(row)
     return grouped
+
+
+def _line_rail_groups(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    regular: list[dict[str, Any]] = []
+    replacement: list[dict[str, Any]] = []
+    night: list[dict[str, Any]] = []
+    for row in rows:
+        line = str(row["line"]).upper()
+        if line.startswith("Z"):
+            replacement.append(row)
+        elif line.startswith("N"):
+            night.append(row)
+        else:
+            regular.append(row)
+
+    for group in (regular, replacement, night):
+        group.sort(key=_line_rail_sort_key)
+    return [group for group in (regular, replacement, night) if group]
+
+
+def _line_rail_sort_key(row: dict[str, Any]) -> tuple[int, int, str]:
+    line = str(row["line"]).upper()
+    if line.isdigit():
+        return 0, int(line), line
+    number = "".join(character for character in line if character.isdigit())
+    return 1, int(number or 0), line
 
 
 def _trip_trace(delays: list[int]) -> list[dict[str, Any]]:

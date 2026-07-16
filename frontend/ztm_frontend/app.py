@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,8 @@ def create_app() -> Flask:
     """Create the Flask app without opening the DuckDB artifact at import time."""
     app = Flask(__name__)
     db_path = Path(os.environ.get("ZTM_DUCKDB_PATH", "ztm/ztm.duckdb"))
+    stylesheet_path = Path(app.static_folder or "") / "site.css"
+    stylesheet_version = sha256(stylesheet_path.read_bytes()).hexdigest()[:12]
 
     app.config["ZTM_DUCKDB_PATH"] = db_path
     app.config["ZTM_DUCKDB_META_PATH"] = Path(f"{db_path}.meta.json")
@@ -39,13 +42,17 @@ def create_app() -> Flask:
 
     @app.context_processor
     def inject_globals() -> dict[str, Any]:
-        return {"meta": queries.get_export_metadata(current_app.config["ZTM_DUCKDB_PATH"])}
+        return {
+            "meta": queries.get_export_metadata(current_app.config["ZTM_DUCKDB_PATH"]),
+            "navigation_date": _selected_date_arg(),
+            "stylesheet_version": stylesheet_version,
+        }
 
     @app.get("/")
     def index() -> str:
         return render_template(
             "overview.html",
-            **queries.get_overview(current_app.config["ZTM_DUCKDB_PATH"], request.args.get("date")),
+            **queries.get_overview(current_app.config["ZTM_DUCKDB_PATH"], _selected_date_arg()),
         )
 
     @app.get("/lines/")
@@ -57,7 +64,7 @@ def create_app() -> Flask:
                 current_app.config["ZTM_DUCKDB_PATH"],
                 line,
                 _selected_mode(request.args.get("mode")),
-                request.args.get("date"),
+                _selected_date_arg(),
                 request.args.get("rank"),
                 request.args.get("page"),
             ),
@@ -75,7 +82,7 @@ def create_app() -> Flask:
                 _selected_mode(request.args.get("mode")),
                 request.args.get("q", ""),
                 post or request.args.get("post"),
-                request.args.get("date"),
+                _selected_date_arg(),
                 request.args.get("view"),
                 request.args.get("rank"),
                 request.args.get("page"),
@@ -92,7 +99,7 @@ def create_app() -> Flask:
                 current_app.config["ZTM_DUCKDB_PATH"],
                 _selected_mode(request.args.get("mode")),
                 request.args.get("line"),
-                request.args.get("date"),
+                _selected_date_arg(),
                 request.args.get("trip"),
                 request.args.get("vehicle"),
                 request.args.get("sort"),
@@ -108,7 +115,7 @@ def create_app() -> Flask:
             **queries.get_trip_detail(
                 current_app.config["ZTM_DUCKDB_PATH"],
                 trip_id,
-                request.args.get("date"),
+                _selected_date_arg(),
                 request.args.get("vehicle"),
             ),
         )
@@ -133,6 +140,12 @@ def _format_delay(value: float | None) -> str:
 def _selected_mode(value: str | None) -> str | None:
     if value in {"bus", "tram"}:
         return value
+    return None
+
+
+def _selected_date_arg() -> str | None:
+    if request.headers.get("HX-Request") == "true":
+        return request.args.get("date")
     return None
 
 

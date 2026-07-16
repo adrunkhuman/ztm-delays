@@ -11,11 +11,7 @@
         <a href="{{ url_for('lines', mode='tram', date=selected_date) }}" class="{% if selected_mode == 'tram' %}active{% endif %}">TRAM</a>
       </div>
       <div class="line-rail-scroll">
-        <div class="linegrid">
-          {% for row in line_list %}
-            <a href="{{ url_for('lines', line=row.line, mode=selected_mode, date=selected_date) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
-          {% endfor %}
-        </div>
+        {{ ui.line_rail(line_groups, 'lines', selected_line, selected_mode, selected_date) }}
       </div>
     </aside>
 

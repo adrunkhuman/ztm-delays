@@ -54,7 +54,7 @@
   <div class="week">
     <div class="plot week-plot">
       {% for row in week %}
-        <span class="week-day {% if row.selected %}selected{% endif %}"><span class="daybar" style="height: {{ row.height }}px"></span></span>
+        <span class="week-day {% if row.selected %}selected{% endif %}" title="{{ row.service_date }} · {{ row.delay|delay }}"><span class="daybar" style="height: {{ row.height }}px"></span></span>
       {% endfor %}
     </div>
     <div class="plot-axis week-axis">
@@ -83,12 +83,24 @@
   {% if href %}<a href="{{ href }}" class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</a>{% else %}<span class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</span>{% endif %}
 {% endmacro %}
 
+{% macro line_rail(line_groups, endpoint, selected_line, selected_mode, selected_date, selected_sort=None) %}
+  <div class="line-rail-groups">
+    {% for group in line_groups %}
+      <div class="linegrid">
+        {% for row in group %}
+          <a href="{{ url_for(endpoint, line=row.line, mode=selected_mode, date=selected_date, sort=selected_sort) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
+        {% endfor %}
+      </div>
+    {% endfor %}
+  </div>
+{% endmacro %}
+
 {% macro pager(pagination, previous_href=None, next_href=None) %}
   {% if pagination.has_previous or pagination.has_next %}
     <nav class="pager" aria-label="Pagination">
-      {% if previous_href %}<a href="{{ previous_href }}" rel="prev">← previous</a>{% else %}<span></span>{% endif %}
+      {% if previous_href %}<a href="{{ previous_href }}" rel="prev">&lt;</a>{% else %}<span></span>{% endif %}
       <span class="mono muted">page {{ pagination.page }}</span>
-      {% if next_href %}<a href="{{ next_href }}" rel="next">next →</a>{% else %}<span></span>{% endif %}
+      {% if next_href %}<a href="{{ next_href }}" rel="next">&gt;</a>{% else %}<span></span>{% endif %}
     </nav>
   {% endif %}
 {% endmacro %}

@@ -62,7 +62,8 @@ def test_trip_stops_use_selected_trip_snapshot(tmp_path: Path) -> None:
             select * from (
                 values
                     ('snapshot-a', date '2026-06-30', 'trip-1', '1001', 0, '100101', '1001', '01', 'Old stop', timestamp '2026-06-30 08:00:00', timestamp '2026-06-30 08:01:00', 60, 'observed'),
-                    ('snapshot-b', date '2026-06-30', 'trip-1', '1001', 0, '100101', '1001', '01', 'Current stop', timestamp '2026-06-30 08:00:00', timestamp '2026-06-30 08:02:00', 120, 'observed')
+                    ('snapshot-b', date '2026-06-30', 'trip-1', '1001', 0, '100101', '1001', '01', 'Current stop', timestamp '2026-06-30 08:00:00', timestamp '2026-06-30 08:02:00', 120, 'observed'),
+                    ('snapshot-b', date '2026-06-30', 'trip-1', '1001', 1, '999999', '9999', '99', 'Depot', timestamp '2026-06-30 08:05:00', null, null, 'not_in_passenger_service')
             ) as rows(
                 gtfs_snapshot_id, service_date, trip_id, vehicle_number, stop_sequence, stop_id,
                 stop_group_id, stop_post_code, stop_name, scheduled_arrival_time, actual_arrival_time,
@@ -98,16 +99,16 @@ def test_trip_landing_rows_are_paginated_before_traces_are_built(tmp_path: Path)
     first_rows, first_page = queries._trip_landing_rows(  # noqa: SLF001
         db_path, "2026-06-30", "bus", "worst", 1
     )
-    second_rows, second_page = queries._trip_landing_rows(  # noqa: SLF001
-        db_path, "2026-06-30", "bus", "worst", 2
+    third_rows, third_page = queries._trip_landing_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "worst", 3
     )
 
     assert len(first_rows) == queries.LANDING_PAGE_SIZE
     assert first_rows[0]["trip_id"] == "trip-01"
-    assert first_rows[-1]["trip_id"] == "trip-50"
+    assert first_rows[-1]["trip_id"] == "trip-20"
     assert first_page == {"page": 1, "first_item": 1, "has_previous": False, "has_next": True}
-    assert [row["trip_id"] for row in second_rows] == ["trip-51", "trip-52"]
-    assert second_page == {"page": 2, "first_item": 51, "has_previous": True, "has_next": False}
+    assert [row["trip_id"] for row in third_rows] == [f"trip-{number:02}" for number in range(41, 53)]
+    assert third_page == {"page": 3, "first_item": 41, "has_previous": True, "has_next": False}
 
 
 def test_page_parameter_defaults_to_first_page() -> None:
@@ -118,6 +119,25 @@ def test_page_parameter_defaults_to_first_page() -> None:
     assert queries._selected_page("-4") == 1  # noqa: SLF001
     assert queries._selected_page(str(requested_page)) == requested_page  # noqa: SLF001
     assert queries._selected_page(str(2**128)) == queries.MAX_PAGE  # noqa: SLF001
+
+
+def test_line_rail_groups_regular_replacement_and_night_lines() -> None:
+    rows = [
+        {"line": "N36"},
+        {"line": "Z21"},
+        {"line": "E-1"},
+        {"line": "733"},
+        {"line": "102"},
+        {"line": "Z-8"},
+    ]
+
+    groups = queries._line_rail_groups(rows)  # noqa: SLF001
+
+    assert [[row["line"] for row in group] for group in groups] == [
+        ["102", "733", "E-1"],
+        ["Z-8", "Z21"],
+        ["N36"],
+    ]
 
 
 def test_ranked_entities_apply_limit_and_offset(tmp_path: Path) -> None:
@@ -217,11 +237,11 @@ def test_selected_line_trip_rows_are_paginated(tmp_path: Path) -> None:
         )
 
     rows, pagination = queries._selected_line_trip_rows(  # noqa: SLF001
-        db_path, "2026-06-30", "bus", "1", "departure_rank", 2
+        db_path, "2026-06-30", "bus", "1", "departure_rank", 3
     )
 
-    assert [row["trip_id"] for row in rows] == ["trip-51", "trip-52"]
-    assert pagination == {"page": 2, "first_item": 51, "has_previous": True, "has_next": False}
+    assert [row["trip_id"] for row in rows] == [f"trip-{number:02}" for number in range(41, 53)]
+    assert pagination == {"page": 3, "first_item": 41, "has_previous": True, "has_next": False}
 
 
 def test_stop_line_rows_include_records_after_old_top_30_cap(tmp_path: Path) -> None:
@@ -244,14 +264,14 @@ def test_stop_line_rows_include_records_after_old_top_30_cap(tmp_path: Path) -> 
     first_rows, first_page = queries._stop_line_rows(  # noqa: SLF001
         db_path, "2026-06-30", "bus", "100101", 1
     )
-    second_rows, second_page = queries._stop_line_rows(  # noqa: SLF001
-        db_path, "2026-06-30", "bus", "100101", 2
+    third_rows, third_page = queries._stop_line_rows(  # noqa: SLF001
+        db_path, "2026-06-30", "bus", "100101", 3
     )
 
     assert [row["display_rank"] for row in first_rows][-1] == queries.LANDING_PAGE_SIZE
     assert first_page["has_next"] is True
-    assert [row["display_rank"] for row in second_rows] == [51, 52]
-    assert second_page["has_next"] is False
+    assert [row["display_rank"] for row in third_rows] == list(range(41, 53))
+    assert third_page["has_next"] is False
 
 
 def test_page_result_supports_compact_picker_pages() -> None:
@@ -263,6 +283,38 @@ def test_page_result_supports_compact_picker_pages() -> None:
 
     assert len(page_rows) == queries.STOP_PICKER_PAGE_SIZE
     assert pagination == {"page": 2, "first_item": 13, "has_previous": True, "has_next": True}
+
+
+def test_week_bars_cover_selected_calendar_week(tmp_path: Path) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table mart_entity_daily_summary as
+            select * from (
+                values
+                    ('line', '1', 'bus', date '2026-07-13', 10.0),
+                    ('line', '1', 'bus', date '2026-07-14', 20.0),
+                    ('line', '1', 'bus', date '2026-07-19', 70.0),
+                    ('line', '1', 'bus', date '2026-07-20', 80.0)
+            ) as rows(entity_type, entity_id, mode, service_date, median_delay_seconds)
+            """
+        )
+
+    bars = queries._week_bars(db_path, "line", "1", "bus", "2026-07-13")  # noqa: SLF001
+
+    assert [row["service_date"] for row in bars] == [
+        "2026-07-13",
+        "2026-07-14",
+        "2026-07-15",
+        "2026-07-16",
+        "2026-07-17",
+        "2026-07-18",
+        "2026-07-19",
+    ]
+    assert [row["label"] for row in bars] == ["M", "T", "W", "T", "F", "S", "S"]
+    assert [row["delay"] for row in bars] == [10.0, 20.0, None, None, None, None, 70.0]
+    assert [row["selected"] for row in bars] == [True, False, False, False, False, False, False]
 
 
 def _create_line_smoke_db(db_path: Path) -> None:
