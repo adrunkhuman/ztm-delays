@@ -211,7 +211,12 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
             select accepted.gtfs_snapshot_id, accepted.processing_date, accepted.service_date, accepted.trip_id,
                 accepted.vehicle_number, semantics.stop_sequence,
                 warsaw_scheduled_time(semantics.service_date, semantics.arrival_time_seconds)
-                    as scheduled_arrival_time
+                    as scheduled_arrival_time,
+                row_number() over (
+                    partition by accepted.gtfs_snapshot_id, accepted.processing_date, accepted.service_date,
+                        accepted.trip_id, accepted.vehicle_number
+                    order by semantics.stop_sequence
+                )::bigint as required_stop_ordinal
             from accepted inner join read_parquet('{_quoted(semantics)}') semantics
                 using (gtfs_snapshot_id, processing_date, service_date, duty_chain_id, trip_id)
             where semantics.are_passenger_boundaries_settled and semantics.is_passenger_stop
@@ -225,22 +230,23 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
               and semantics.stop_execution_class = 'passenger' and semantics.stop_service_class = 'request'
         ), regular_arrivals_base as (
             select accepted.gtfs_snapshot_id, accepted.processing_date, accepted.service_date, accepted.trip_id,
-                accepted.vehicle_number, arrivals.stop_sequence, arrivals.actual_arrival_time,
+                accepted.vehicle_number, arrivals.stop_sequence, regular_stops.required_stop_ordinal,
+                arrivals.actual_arrival_time,
                 arrivals.arrival_delay_seconds
             from accepted inner join read_parquet('{_quoted(arrivals)}') arrivals
                 using (gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number)
-            where arrivals.are_passenger_boundaries_settled and arrivals.is_passenger_stop
-              and arrivals.stop_execution_class = 'passenger' and arrivals.stop_service_class = 'regular'
-              and arrivals.alignment_confidence = 'high'
+            inner join regular_stops
+                using (gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number, stop_sequence)
+            where arrivals.alignment_confidence = 'high'
         ), regular_arrivals as (
             select *, lag(stop_sequence) over (
                 partition by gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number
                 order by actual_arrival_time, stop_sequence
             ) previous_by_time,
-            lag(stop_sequence) over (
+            lag(required_stop_ordinal) over (
                 partition by gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number
-                order by stop_sequence
-            ) previous_by_sequence
+                order by required_stop_ordinal
+            ) previous_required_stop_ordinal
             from regular_arrivals_base
         ), regular_metrics as (
             select gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number,
@@ -250,7 +256,7 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
                 arg_max(actual_arrival_time, stop_sequence) actual_end_time,
                 arg_min(arrival_delay_seconds, stop_sequence)::bigint start_delay_seconds,
                 arg_max(arrival_delay_seconds, stop_sequence)::bigint end_delay_seconds,
-                coalesce(max(stop_sequence - previous_by_sequence), 0)::bigint max_stop_sequence_gap,
+                coalesce(max(required_stop_ordinal - previous_required_stop_ordinal), 0)::bigint max_stop_sequence_gap,
                 coalesce(bool_or(stop_sequence < previous_by_time), false) has_non_monotonic_stop_progression
             from regular_arrivals group by all
         ), ping_segments as (

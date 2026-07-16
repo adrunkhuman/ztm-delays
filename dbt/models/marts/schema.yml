@@ -466,17 +466,17 @@ models:
       - name: end_delay_seconds
         description: Difference in seconds between actual_end_time and scheduled_end_time. Positive values are late.
       - name: stops_expected
-        description: Scheduled stop count for the matched trip.
+        description: Number of required regular passenger stops for the matched trip. Request and explicit non-passenger stops are excluded.
       - name: stops_detected
-        description: Number of scheduled stops detected from GPS segment crossings.
+        description: Number of required regular passenger stops detected from high-confidence GPS segment crossings.
       - name: detected_stop_ratio
-        description: stops_detected divided by stops_expected.
+        description: Detected required regular passenger stops divided by expected required regular passenger stops.
       - name: first_detected_stop_sequence
         description: Lowest scheduled stop_sequence detected for this realized trip.
       - name: last_detected_stop_sequence
         description: Highest scheduled stop_sequence detected for this realized trip.
       - name: max_stop_sequence_gap
-        description: Largest scheduled stop_sequence gap between consecutive detected stops.
+        description: Largest ordinal gap between consecutive detected required regular passenger stops. Request and explicit non-passenger stops do not enlarge this gap.
       - name: max_ping_gap_seconds
         description: Largest observed time gap between consecutive matched GPS pings for this vehicle trip. A value of 0 can mean no consecutive matched ping pair was available.
       - name: max_speed_mps
@@ -492,9 +492,9 @@ models:
       - name: has_stale_stop_progression
         description: True when the last detected stop is still outside terminal tolerance but its timestamp is within 120 seconds of, or later than, the scheduled trip end. This flags weak trip-progress evidence, not high delay by itself.
       - name: trip_quality
-        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_ping_gap_seconds > 1800, non-monotonic stop progression, or max_speed_mps > 50. complete: detected_stop_ratio >= 0.80, first and last stops observed within 2 stop_sequence positions, max_stop_sequence_gap <= 4, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips. High delay or large internal stop gaps are not broken by themselves when endpoint evidence is coherent."
+        description: "Reconstruction quality class. Thresholds are provisional. broken: detected_stop_ratio < 0.30, max_ping_gap_seconds > 1800, non-monotonic stop progression, or max_speed_mps > 50. complete: detected_stop_ratio >= 0.80, first and last required stops observed within 2 raw stop_sequence positions, required-stop ordinal gap <= 4, and max_ping_gap_seconds <= 900. partial: all other plausible observed trips. Request stops are optional and do not create required-stop gaps. High delay or large internal required-stop gaps are not broken by themselves when endpoint evidence is coherent."
       - name: quality_flags
-        description: "Array of explainable quality flags for filtering and debug views. missing_first_stop: first detected stop is not within 2 stop_sequence positions from the first scheduled stop. missing_last_stop: last detected stop is not within 2 positions from the last scheduled stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected stops move backward by stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. large_stop_sequence_gap: detected stops skip a large scheduled sequence span. extreme_delay: trusted start or end endpoint delay > 3600 seconds. stale_stop_progression: detected stops remain far from the terminal when the scheduled trip should be ending. likely_wrong_trip_assignment: detected_stop_ratio < 0.30 or non-monotonic progression."
+        description: "Array of explainable quality flags for filtering and debug views. missing_first_stop: first detected required stop is not within 2 raw stop_sequence positions from the first required stop. missing_last_stop: last detected required stop is not within 2 positions from the last required stop. low_stop_coverage: detected_stop_ratio < 0.80. large_ping_gap: max_ping_gap_seconds > 900. non_monotonic_stop_progression: detected required stops move backward by raw stop_sequence when ordered by actual time. impossible_speed_jump: max_speed_mps > 50. large_stop_sequence_gap: detected required regular stops skip more than the allowed number of required-stop ordinals; request stops do not count as gaps. extreme_delay: trusted start or end endpoint delay > 3600 seconds. stale_stop_progression: detected stops remain far from the terminal when the scheduled trip should be ending. likely_wrong_trip_assignment: detected_stop_ratio < 0.30 or non-monotonic progression."
       - name: service_observation_class
         description: "Observed service class, separate from trip_quality. Precedence is matching_failure, modified, regular, then truncated. regular means route endpoints were observed without modified-service evidence, even if reconstruction quality is partial. truncated means coherent shortened service missing the scheduled origin and/or destination. modified means plausible operational deviation such as a large internal gap or stale route progress. matching_failure means evidence is too weak or contradictory to treat as operated service."
       - name: service_observation_flags
@@ -759,7 +759,7 @@ models:
         description: Largest gap reported by present hourly buckets. Missing hours are represented through missing_hours, not as 3600-second gaps.
 
   - name: agg_service_coverage
-    description: Schedule-aware hourly service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service comes from the selected GTFS bus/tram schedule; observed service counts distinct regular/truncated/modified scheduled trip_id values from fct_trip after selected-snapshot and best-class dedupe, and excludes matching failures. Rows exist only for scheduled bus/tram service; absence of a row is not a zero-coverage row.
+    description: Schedule-aware hourly passenger-service coverage by line, direction, headsign, and scheduled-start date for live-GPS modes only. Normal builds replace the inclusive aggregation_start_date-through-processing_date scheduled-start-date partitions. Expected service excludes explicit non-passenger technical trips; observed service counts distinct regular/truncated/modified scheduled trip_id values from fct_trip after selected-snapshot and best-class dedupe, and excludes matching failures. Rows exist only for scheduled bus/tram passenger service; absence of a row is not a zero-coverage row.
     columns:
       - name: service_date
         description: GTFS service date assigned to the scheduled trips. Overnight service can have service_hour on the next calendar date.
@@ -803,12 +803,14 @@ models:
         description: Number of distinct observed trip_id values whose selected candidate is classified as modified service in the service hour.
       - name: expected_service_minutes
         description: Sum of scheduled trip durations in minutes for trips starting in service_hour.
+      - name: latest_scheduled_end_time
+        description: Latest scheduled end timestamp among passenger trips starting in service_hour. Coverage remains unsettled until this timestamp is old enough and its Warsaw-local GPS date has been loaded.
       - name: observed_service_minutes
         description: Sum of observed regular/truncated/modified trip durations in minutes from actual_start_time to actual_end_time after best-class dedupe. Negative durations are treated as 0 minutes.
       - name: service_coverage_ratio
         description: observed_trip_count divided by expected_trip_count.
       - name: is_settled_hour
-        description: True when service_hour_end is more than 90 minutes before current_timestamp, allowing delayed trips to appear before coverage is judged.
+        description: True when the latest trip scheduled in the hour ended more than 90 minutes ago and max_gps_date includes that trip's Warsaw-local end date.
 
   - name: mart_pipeline_status
     description: Daily operational-health status by Warsaw-local status date and mode. Normal builds replace the inclusive aggregation_start_date-through-processing_date service-date partitions. The service_date field is aligned to the GPS processing date and scheduled-start date so ingestion, matching, trip quality, arrivals, and service coverage use one operational-day grain. Near-real-time poller liveness comes from the private poller heartbeat, not this historical mart.
@@ -1091,16 +1093,17 @@ unit_tests:
       vars:
         processing_date: '2026-01-15'
         aggregation_start_date: '2026-01-15'
-        max_gps_date: '2026-01-16'
+        max_gps_date: '2026-01-15'
     given:
       - input: ref('int_gtfs_trip_schedule')
         format: sql
         rows: |
-          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-1' as trip_id, 'svc' as service_id, 'Central' as trip_headsign, 'shape-1' as shape_id, 84600 as trip_start_seconds, 90000 as trip_end_seconds, 10 as stop_count, '1001' as ordered_stop_ids, '84600' as ordered_arrival_time_seconds, 'sig-1' as trip_timetable_signature
-          union all select date '2026-01-15', date '2026-01-16', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-1', 'svc', 'Central', 'shape-1', 84600, 90000, 10, '1001', '84600', 'sig-1'
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-2', 'svc', 'Central', 'shape-2', 84900, 86700, 10, '1001', '84900', 'sig-2'
-          union all select date '2026-01-14', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-overnight', 'svc', 'Central', 'shape-3', 90000, 91800, 10, '1001', '90000', 'sig-3'
-          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', 'M1', 0, 'metro-trip', 'svc', 'Metro', 'shape-m', 84600, 85200, 10, '9001', '84600', 'sig-m'
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date, 'weekday' as schedule_day_type, 'svc' as schedule_service_ids, 'snapshot-valid' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-1' as trip_id, 'svc' as service_id, 'Central' as trip_headsign, 'shape-1' as shape_id, 84600 as trip_start_seconds, 90000 as trip_end_seconds, 10 as stop_count, 10 as passenger_stop_count, true as is_public_service_segment, '1001' as ordered_stop_ids, '84600' as ordered_arrival_time_seconds, 'sig-1' as trip_timetable_signature
+          union all select date '2026-01-15', date '2026-01-16', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-1', 'svc', 'Central', 'shape-1', 84600, 90000, 10, 10, true, '1001', '84600', 'sig-1'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-2', 'svc', 'Central', 'shape-2', 84900, 86700, 10, 10, true, '1001', '84900', 'sig-2'
+          union all select date '2026-01-14', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-overnight', 'svc', 'Central', 'shape-3', 90000, 91800, 10, 10, true, '1001', '90000', 'sig-3'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', '187', 0, 'trip-technical', 'svc', 'Central', 'shape-t', 85200, 85500, 2, 0, false, 'DEPOT | S1', '85200 | 85500', 'sig-t'
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'svc', 'snapshot-valid', 'M1', 0, 'metro-trip', 'svc', 'Metro', 'shape-m', 84600, 85200, 10, 10, true, '9001', '84600', 'sig-m'
       - input: ref('dim_schedule_version')
         format: sql
         rows: |
@@ -1236,16 +1239,17 @@ unit_tests:
           timestamp('2026-01-15 23:00:00+01') as service_hour,
           timestamp('2026-01-16 00:00:00+01') as service_hour_end,
           2 as expected_trip_count,
-          2 as observed_trip_count,
-          2 as complete_trip_count,
+          1 as observed_trip_count,
+          1 as complete_trip_count,
           0 as partial_trip_count,
-          2 as regular_trip_count,
+          1 as regular_trip_count,
           0 as truncated_trip_count,
           0 as modified_trip_count,
           120.0 as expected_service_minutes,
-          105.0 as observed_service_minutes,
-          1.0 as service_coverage_ratio,
-          true as is_settled_hour
+          timestamp('2026-01-16 01:00:00+01') as latest_scheduled_end_time,
+          80.0 as observed_service_minutes,
+          0.5 as service_coverage_ratio,
+          false as is_settled_hour
         union all
         select
           date '2026-01-14' as service_date,
@@ -1262,15 +1266,16 @@ unit_tests:
           timestamp('2026-01-15 01:00:00+01') as service_hour,
           timestamp('2026-01-15 02:00:00+01') as service_hour_end,
           1 as expected_trip_count,
-          1 as observed_trip_count,
+          0 as observed_trip_count,
           0 as complete_trip_count,
-          1 as partial_trip_count,
+          0 as partial_trip_count,
           0 as regular_trip_count,
           0 as truncated_trip_count,
-          1 as modified_trip_count,
+          0 as modified_trip_count,
           30.0 as expected_service_minutes,
-          30.0 as observed_service_minutes,
-          1.0 as service_coverage_ratio,
+          timestamp('2026-01-15 01:30:00+01') as latest_scheduled_end_time,
+          0.0 as observed_service_minutes,
+          0.0 as service_coverage_ratio,
           true as is_settled_hour
 
   - name: fct_expected_stop_event_emits_observed_missed_and_uncertain_rows

@@ -17,6 +17,7 @@
         partitions=partition_dates,
         cluster_by=["line", "direction_id", "service_hour"],
         require_partition_filter=true,
+        on_schema_change='append_new_columns',
         post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
@@ -43,6 +44,7 @@ with raw_scheduled_trips as (
     where schedule.processing_date between date('{{ aggregation_start_date }}')
         and date('{{ processing_date }}')
       and schedule.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+      and schedule.is_public_service_segment
       and routes.mode in ('bus', 'tram')
 ),
 
@@ -77,7 +79,8 @@ expected_by_hour as (
         schedule_version_id,
         timestamp_trunc(scheduled_start_time, hour, 'Europe/Warsaw') as service_hour,
         count(distinct trip_id) as expected_trip_count,
-        sum(timestamp_diff(scheduled_end_time, scheduled_start_time, second)) / 60.0 as expected_service_minutes
+        sum(timestamp_diff(scheduled_end_time, scheduled_start_time, second)) / 60.0 as expected_service_minutes,
+        max(scheduled_end_time) as latest_scheduled_end_time
     from scheduled_trips
     group by
         service_date,
@@ -208,10 +211,12 @@ select
     coalesce(observed.truncated_trip_count, 0) as truncated_trip_count,
     coalesce(observed.modified_trip_count, 0) as modified_trip_count,
     expected.expected_service_minutes,
+    expected.latest_scheduled_end_time,
     coalesce(observed.observed_service_minutes, 0.0) as observed_service_minutes,
     least(1.0, safe_divide(coalesce(observed.observed_trip_count, 0), expected.expected_trip_count))
         as service_coverage_ratio,
-    timestamp_add(expected.service_hour, interval 1 hour) < timestamp_sub(current_timestamp(), interval 90 minute)
+    expected.latest_scheduled_end_time < timestamp_sub(current_timestamp(), interval 90 minute)
+        and date(expected.latest_scheduled_end_time, 'Europe/Warsaw') <= date('{{ max_gps_date }}')
         as is_settled_hour
 from expected_by_hour as expected
 left join observed_by_hour as observed
