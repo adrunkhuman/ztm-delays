@@ -221,14 +221,22 @@
 
           <section class="section">
             <div class="label" style="margin-bottom: .8rem">Worst departures</div>
-            {% for row in stop_widgets.worst %}
-              <div class="worst-row">
-                <span class="mono muted">{{ row.time }}</span>
-                <span>{{ ui.chip(row.line, row.mode, url_for('lines', line=row.line, mode=row.mode, date=selected_date)) }}</span>
-                <span class="data-link">{{ row.headsign }}</span>
-                <span class="sval {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
+            <div class="stop-departure-table">
+              <div class="trip-table-head stop-departure-grid">
+                <div>Dep</div><div>Line → destination</div><div>Delay</div>
               </div>
-            {% endfor %}
+              {% for row in stop_widgets.worst %}
+                <div class="stop-departure-run stop-departure-grid">
+                  <span class="trip-dep mono">{{ row.time }}</span>
+                  <span class="stop-departure-route">
+                    <a class="stop-departure-line mono" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">{{ row.line }}</a>
+                    <span class="muted">→</span>
+                    <span class="stop-departure-headsign" title="{{ row.headsign }}">{{ row.headsign }}</span>
+                  </span>
+                  <span class="trip-end mono {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
+                </div>
+              {% endfor %}
+            </div>
           </section>
 
           <section class="section">
