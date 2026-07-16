@@ -42,9 +42,18 @@ def create_app() -> Flask:  # noqa: C901
 
     @app.context_processor
     def inject_globals() -> dict[str, Any]:
+        requested_window = queries.normalize_window(request.args.get("window"))
+        grouped_windows_available = queries.grouped_windows_available(current_app.config["ZTM_DUCKDB_PATH"])
+        if requested_window != "day" and not grouped_windows_available:
+            current_app.logger.warning(
+                "Grouped window %s requested before serving artifact rebuild: %s",
+                requested_window,
+                current_app.config["ZTM_DUCKDB_PATH"],
+            )
         return {
             "meta": queries.get_export_metadata(current_app.config["ZTM_DUCKDB_PATH"]),
             "navigation_date": _selected_date_arg(),
+            "grouped_windows_available": grouped_windows_available,
             "scope_href": _scope_href,
             "stylesheet_version": stylesheet_version,
         }

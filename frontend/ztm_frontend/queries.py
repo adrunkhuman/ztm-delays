@@ -1734,6 +1734,11 @@ def _available_window(db_path: Path, value: str | None) -> str:
     window_type = normalize_window(value)
     if window_type == "day":
         return window_type
+    return window_type if grouped_windows_available(db_path) else "day"
+
+
+def grouped_windows_available(db_path: Path) -> bool:
+    """Return whether the artifact contains the complete grouped-window contract."""
     capability = fetch_one(
         db_path,
         """
@@ -1743,7 +1748,7 @@ def _available_window(db_path: Path, value: str | None) -> str:
         having count(distinct table_name) = 3
         """,
     )
-    return window_type if capability else "day"
+    return capability is not None
 
 
 def _window_context(

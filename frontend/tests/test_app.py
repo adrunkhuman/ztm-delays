@@ -95,6 +95,7 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(queries, "get_stops", fake_get_stops)
     monkeypatch.setattr(queries, "get_export_metadata", lambda _path: {})
+    monkeypatch.setattr(queries, "grouped_windows_available", lambda _path: True)
 
     client = create_app().test_client()
     response = client.get(

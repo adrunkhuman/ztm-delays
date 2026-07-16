@@ -365,8 +365,20 @@ td:nth-child(n + 2) {
   font-size: 0.68rem;
 }
 
-.scope a {
+.scope a,
+.scope span {
   color: var(--muted);
+}
+
+.scope span {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.scope-note {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.62rem;
 }
 
 .scope a.active,
