@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% import "_widgets.html" as ui %}
+{% import "_widgets.html" as ui with context %}
 
 {% block title %}overview · ZTM delays{% endblock %}
 
@@ -10,7 +10,7 @@
     <main class="main">
       <header class="head">
         <h1 class="hero-title">overview</h1>
-        {{ ui.datebox(selected_date, url_for('index', date=date_nav.previous) if date_nav.previous else none, url_for('index', date=date_nav.next) if date_nav.next else none) }}
+        {{ ui.datebox(window_context.label, url_for('index', date=date_nav.previous) if date_nav.previous else none, url_for('index', date=date_nav.next) if date_nav.next else none, selected_window) }}
       </header>
 
       <section class="overview-grid">
@@ -41,8 +41,8 @@
         </div>
         <div class="widget overview-empty" aria-hidden="true"></div>
         <div class="widget chart-widget">
-          <div class="label">This week · network mean</div>
-          {{ ui.week_bars(overview_widgets.bus.week) }}
+          <div class="label">{{ overview_widgets.bus.comparison_label }}</div>
+          {{ ui.week_bars(overview_widgets.bus.comparison) }}
         </div>
       </section>
 

@@ -42,6 +42,9 @@ TRIP_TRACE_EARLY_MAX_PX = 7
 TIMELINE_MIN_GAP_PERCENT = 0.55
 EXPECTED_STOP_EVENT_TABLE = "fct_expected_stop_event"
 NUMERIC_STOP_POST_SUFFIX_LENGTH = 2
+WINDOW_TYPES = ("day", "weekdays", "weekend", "month")
+MAX_TREND_LABELS = 12
+MAX_RELIABILITY_OUTCOMES = 160
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -70,13 +73,31 @@ def get_export_metadata(db_path: Path) -> dict[str, Any]:
     return metadata
 
 
-def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
+def get_overview(db_path: Path, selected_date: str | None, selected_window: str | None = None) -> dict[str, Any]:
     """Build the network overview page data."""
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
-    mode_stats = _mode_stats(db_path, selected_date)
-    worst_lines = _ranked_entities(db_path, selected_date, "line", "median_delay_seconds", limit=8)
-    worst_stops = _ranked_entities(db_path, selected_date, "stop_post", "median_delay_seconds", limit=8)
+    selected_window = _available_window(db_path, selected_window)
+    window_key = _window_key(selected_date, selected_window)
+    mode_stats = _mode_stats(db_path, window_key, selected_window, selected_date)
+    worst_lines = _ranked_entities(
+        db_path,
+        window_key,
+        "line",
+        "median_delay_seconds",
+        window_type=selected_window,
+        source_end_date=selected_date,
+        limit=8,
+    )
+    worst_stops = _ranked_entities(
+        db_path,
+        window_key,
+        "stop_post",
+        "median_delay_seconds",
+        window_type=selected_window,
+        source_end_date=selected_date,
+        limit=8,
+    )
     for row in worst_lines:
         _attach_shape(row)
     for row in worst_stops:
@@ -84,12 +105,15 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
         row["display_name"] = f"{row['stop_group_name']} [{row['stop_post_code']}]"
         _attach_shape(row)
     mode_stats_by_mode = _by_mode(mode_stats)
+    window_context = _window_context(db_path, selected_window, selected_date, next(iter(mode_stats), None))
     return {
         "date_options": date_options,
         "selected_date": selected_date,
-        "date_nav": _date_nav(date_options, selected_date),
+        "selected_window": selected_window,
+        "date_nav": _window_date_nav(date_options, selected_date, selected_window),
+        "window_context": window_context,
         "mode_stats": mode_stats_by_mode,
-        "overview_widgets": _overview_widgets(db_path, mode_stats_by_mode, selected_date),
+        "overview_widgets": _overview_widgets(db_path, mode_stats_by_mode, selected_date, selected_window, window_key),
         "worst_lines": _by_mode_list(worst_lines),
         "worst_stops": _by_mode_list(worst_stops),
         "delay_plots": {"bus": [], "tram": []},
@@ -103,6 +127,7 @@ def get_lines(  # noqa: PLR0913
     selected_date: str | None,
     selected_rank: str | None,
     selected_page: str | None = None,
+    selected_window: str | None = None,
 ) -> dict[str, Any]:
     """Build the line landing or selected-line page data."""
     selected_mode = selected_mode or "bus"
@@ -110,18 +135,21 @@ def get_lines(  # noqa: PLR0913
     page = _selected_page(selected_page)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
+    selected_window = _available_window(db_path, selected_window)
+    window_key = _window_key(selected_date, selected_window)
     line_list = fetch_all(
         db_path,
         """
         select line, mode, route_short_name, trip_count, arrival_count
         from mart_line_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
           and universe_type = 'all_observed'
         order by mode, try_cast(line as integer), line
         """,
-        [selected_date, selected_mode],
+        [selected_window, window_key, selected_date, selected_mode],
     )
     summary = None
     courses: list[dict[str, Any]] = []
@@ -129,48 +157,53 @@ def get_lines(  # noqa: PLR0913
     line_landing_rows: list[dict[str, Any]] = []
     pagination = None
     if selected_line is None:
-        line_landing_summary = _line_landing_summary(db_path, selected_date, selected_mode)
-        line_landing_rows, pagination = _line_landing_rows(db_path, selected_date, selected_mode, selected_rank, page)
+        line_landing_summary = _line_landing_summary(db_path, window_key, selected_mode, selected_window, selected_date)
+        line_landing_rows, pagination = _line_landing_rows(
+            db_path, window_key, selected_mode, selected_rank, page, selected_window, selected_date
+        )
     else:
         summary = fetch_one(
             db_path,
             """
             select *
             from mart_line_window_summary
-            where window_type = 'day'
+            where window_type = ?
               and window_key = ?
+              and source_end_date = cast(? as date)
               and mode = ?
               and line = ?
               and universe_type = 'all_observed'
             limit 1
             """,
-            [selected_date, selected_mode, selected_line],
+            [selected_window, window_key, selected_date, selected_mode, selected_line],
         )
         courses = fetch_all(
             db_path,
             """
             select direction_id, trip_headsign, trip_count
             from mart_line_course_window
-            where window_type = 'day'
+            where window_type = ?
               and window_key = ?
+              and source_end_date = cast(? as date)
               and mode = ?
               and line = ?
             order by course_rank
             """,
-            [selected_date, selected_mode, selected_line],
+            [selected_window, window_key, selected_date, selected_mode, selected_line],
         )
         stops = fetch_all(
             db_path,
             """
             select *
             from mart_line_course_stop_window
-            where window_type = 'day'
+            where window_type = ?
               and window_key = ?
+              and source_end_date = cast(? as date)
               and mode = ?
               and line = ?
             order by direction_id, trip_headsign, display_rank, stop_group_id, stop_id
             """,
-            [selected_date, selected_mode, selected_line],
+            [selected_window, window_key, selected_date, selected_mode, selected_line],
         )
         stops_by_course = _course_rows(stops)
         for course in courses:
@@ -178,7 +211,15 @@ def get_lines(  # noqa: PLR0913
     return {
         "date_options": date_options,
         "selected_date": selected_date,
-        "date_nav": _date_nav(date_options, selected_date),
+        "selected_window": selected_window,
+        "date_nav": _window_date_nav(date_options, selected_date, selected_window),
+        "window_context": _window_context(
+            db_path,
+            selected_window,
+            selected_date,
+            summary or line_landing_summary,
+            prefer_summary=summary is not None,
+        ),
         "line_list": line_list,
         "line_groups": _line_rail_groups(line_list),
         "selected_line": selected_line,
@@ -186,7 +227,9 @@ def get_lines(  # noqa: PLR0913
         "selected_rank": selected_rank,
         "summary": summary,
         "courses": courses,
-        "line_widgets": _line_widgets(db_path, selected_line, selected_date, summary, courses),
+        "line_widgets": _line_widgets(
+            db_path, selected_line, selected_date, summary, courses, selected_window, window_key
+        ),
         "line_landing_summary": line_landing_summary,
         "line_landing_rows": line_landing_rows,
         "pagination": pagination,
@@ -205,15 +248,19 @@ def get_stops(  # noqa: PLR0913
     selected_rank: str | None = None,
     selected_page: str | None = None,
     selected_picker_page: str | None = None,
+    selected_window: str | None = None,
 ) -> dict[str, Any]:
     """Build the stop landing, group, or selected-post page data."""
     selected_mode = selected_mode or "bus"
     selected_view = selected_view if selected_view in {"post", "line"} else "post"
+    requested_stop_id = selected_stop_id
     selected_rank = _selected_stop_rank(selected_rank)
     page = _selected_page(selected_page)
     picker_page = _selected_page(selected_picker_page)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
+    selected_window = _available_window(db_path, selected_window)
+    window_key = _window_key(selected_date, selected_window)
     search_pattern = f"%{search.strip().lower()}%"
     stop_list = fetch_all(
         db_path,
@@ -244,38 +291,44 @@ def get_stops(  # noqa: PLR0913
     line_stats: list[dict[str, Any]] = []
     stop_line_groups: list[dict[str, Any]] = []
     if selected_stop_group_id is None:
-        stop_landing_summary = _stop_landing_summary(db_path, selected_date, selected_mode)
-        stop_landing_rows, pagination = _stop_landing_rows(db_path, selected_date, selected_mode, selected_rank, page)
+        stop_landing_summary = _stop_landing_summary(db_path, window_key, selected_mode, selected_window, selected_date)
+        stop_landing_rows, pagination = _stop_landing_rows(
+            db_path, window_key, selected_mode, selected_rank, page, selected_window, selected_date
+        )
     else:
         summary = fetch_one(
             db_path,
             """
             select *
             from mart_stop_group_window_summary
-            where window_type = 'day'
+            where window_type = ?
               and window_key = ?
+              and source_end_date = cast(? as date)
               and mode = ?
               and stop_group_id = ?
               and universe_type = 'all_observed'
             limit 1
             """,
-            [selected_date, selected_mode, selected_stop_group_id],
+            [selected_window, window_key, selected_date, selected_mode, selected_stop_group_id],
         )
         stop_posts = fetch_all(
             db_path,
             """
             select *
             from mart_stop_post_window_summary
-            where window_type = 'day'
+            where window_type = ?
               and window_key = ?
+              and source_end_date = cast(? as date)
               and mode = ?
               and stop_group_id = ?
               and universe_type = 'all_observed'
             order by stop_id
             """,
-            [selected_date, selected_mode, selected_stop_group_id],
+            [selected_window, window_key, selected_date, selected_mode, selected_stop_group_id],
         )
-        line_groups_by_post = _line_groups_by_post(db_path, selected_date, selected_mode, selected_stop_group_id)
+        line_groups_by_post = _line_groups_by_post(
+            db_path, window_key, selected_date, selected_mode, selected_stop_group_id, selected_window
+        )
         lines_by_post = _lines_by_post(line_groups_by_post)
         for post in stop_posts:
             post["display_name"] = post.get("stop_post_code") or post["stop_id"]
@@ -293,24 +346,39 @@ def get_stops(  # noqa: PLR0913
                 """
                 select *
                 from mart_stop_post_window_summary
-                where window_type = 'day'
+                where window_type = ?
                   and window_key = ?
+                  and source_end_date = cast(? as date)
                   and mode = ?
                   and stop_id = ?
                   and universe_type = 'all_observed'
                 limit 1
                 """,
-                [selected_date, selected_mode, selected_stop_id],
+                [selected_window, window_key, selected_date, selected_mode, selected_stop_id],
             )
             if selected_post is not None:
                 selected_post["display_name"] = selected_post.get("stop_post_code") or selected_post["stop_id"]
         if selected_stop_id is not None:
-            line_stats, pagination = _stop_line_rows(db_path, selected_date, selected_mode, selected_stop_id, page)
-        stop_line_groups = _stop_group_line_groups(db_path, selected_date, selected_mode, selected_stop_group_id)
+            line_stats, pagination = _stop_line_rows(
+                db_path,
+                selected_date,
+                selected_mode,
+                selected_stop_id,
+                page,
+                window_type=selected_window,
+                window_key=window_key,
+            )
+        stop_line_groups = _stop_group_line_groups(
+            db_path, window_key, selected_date, selected_mode, selected_stop_group_id, selected_window
+        )
     return {
         "date_options": date_options,
         "selected_date": selected_date,
-        "date_nav": _date_nav(date_options, selected_date),
+        "selected_window": selected_window,
+        "date_nav": _window_date_nav(date_options, selected_date, selected_window),
+        "window_context": _window_context(
+            db_path, selected_window, selected_date, selected_post or summary or stop_landing_summary
+        ),
         "stop_list": stop_list,
         "picker_pagination": picker_pagination,
         "selected_stop_group_id": selected_stop_group_id,
@@ -319,6 +387,7 @@ def get_stops(  # noqa: PLR0913
         "selected_rank": selected_rank,
         "search": search,
         "selected_stop_id": selected_stop_id,
+        "requested_stop_id": requested_stop_id,
         "summary": summary,
         "stop_posts": stop_posts,
         "stop_post_groups": stop_post_groups,
@@ -330,7 +399,12 @@ def get_stops(  # noqa: PLR0913
             stop_posts,
             selected_post or summary,
             line_stats,
-            {"selected_date": selected_date, "selected_mode": selected_mode},
+            {
+                "selected_date": selected_date,
+                "selected_mode": selected_mode,
+                "selected_window": selected_window,
+                "window_key": window_key,
+            },
         ),
         "stop_landing_summary": stop_landing_summary,
         "stop_landing_rows": stop_landing_rows,
@@ -349,6 +423,7 @@ def get_schedule(  # noqa: PLR0913
     selected_sort: str | None = None,
     selected_rank: str | None = None,
     selected_page: str | None = None,
+    selected_window: str | None = None,
 ) -> dict[str, Any]:
     """Build the trip landing or selected-line trip page data."""
     selected_mode = selected_mode or "bus"
@@ -357,17 +432,49 @@ def get_schedule(  # noqa: PLR0913
     page = _selected_page(selected_page)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
+    selected_window = _available_window(db_path, selected_window)
+    window_key = _window_key(selected_date, selected_window)
+    mode_summary = next(
+        (
+            row
+            for row in _mode_stats(db_path, window_key, selected_window, selected_date)
+            if row["mode"] == selected_mode
+        ),
+        {},
+    )
+    scope_params = _window_scope_params(mode_summary, selected_date)
     line_list = fetch_all(
         db_path,
-        """
-        select line, mode, route_short_name, trip_count
-        from mart_trip_line_daily
-        where service_date = ?
+        f"""
+        select line, mode, any_value(route_short_name) as route_short_name, count(*) as trip_count
+        from mart_trip_daily
+        where service_date between cast(? as date) and cast(? as date)
+          {_schedule_day_filter(selected_window)}
+          {_active_schedule_version_filter(selected_window, "mart_trip_daily.schedule_version_id")}
           and mode = ?
-        order by line_display_rank
+          and trip_quality = 'complete'
+        group by line, mode
+        order by try_cast(line as integer), line
         """,
-        [selected_date, selected_mode],
+        [*scope_params, *_active_schedule_version_params(selected_window, selected_date), selected_mode],
     )
+    line_scope_summary = None
+    if selected_line is not None:
+        line_scope_summary = fetch_one(
+            db_path,
+            """
+            select source_start_date, source_end_date, source_day_count
+            from mart_line_window_summary
+            where window_type = ?
+              and window_key = ?
+              and source_end_date = cast(? as date)
+              and mode = ?
+              and line = ?
+              and universe_type = 'all_observed'
+            limit 1
+            """,
+            [selected_window, window_key, selected_date, selected_mode, selected_line],
+        )
     trips: list[dict[str, Any]] = []
     trip_landing_summary = None
     trip_landing_rows: list[dict[str, Any]] = []
@@ -378,24 +485,33 @@ def get_schedule(  # noqa: PLR0913
         trip_landing_summary = (
             fetch_one(
                 db_path,
-                """
-            select *
-            from mart_trip_mode_daily_summary
-            where service_date = ?
+                f"""
+            select
+                count(*) as trip_count,
+                avg(case when end_delay_seconds > -60 and end_delay_seconds < 180 then 1.0 else 0.0 end) as on_time_rate,
+                median(end_delay_seconds) as median_delay_seconds
+            from mart_trip_daily
+            where service_date between cast(? as date) and cast(? as date)
+              {_schedule_day_filter(selected_window)}
+              {_active_schedule_version_filter(selected_window, "mart_trip_daily.schedule_version_id")}
               and mode = ?
-            limit 1
+              and trip_quality = 'complete'
             """,
-                [selected_date, selected_mode],
+                [*scope_params, *_active_schedule_version_params(selected_window, selected_date), selected_mode],
             )
             or {}
         )
-        trip_landing_rows, pagination = _trip_landing_rows(db_path, selected_date, selected_mode, selected_rank, page)
+        trip_landing_rows, pagination = _trip_landing_rows(
+            db_path, selected_date, selected_mode, selected_rank, page, selected_window, mode_summary
+        )
     else:
-        rank_column = {"departure": "departure_rank", "delay": "line_end_delay_rank", "erratic": "line_erratic_rank"}[
-            selected_sort
-        ]
+        order_by = {
+            "departure": "service_date desc, scheduled_start_time, trip_id, vehicle_number",
+            "delay": "end_delay_seconds desc, service_date desc, scheduled_start_time",
+            "erratic": "erratic_score desc, service_date desc, scheduled_start_time",
+        }[selected_sort]
         trips, pagination = _selected_line_trip_rows(
-            db_path, selected_date, selected_mode, selected_line, rank_column, page
+            db_path, selected_date, selected_mode, selected_line, order_by, page, selected_window, mode_summary
         )
         for trip in trips:
             trip["trace"] = _trip_trace(trip.get("delay_profile") or [])
@@ -406,7 +522,7 @@ def get_schedule(  # noqa: PLR0913
         if selected_trip is not None:
             trip_stops = _trip_stops(
                 db_path,
-                selected_date,
+                str(selected_trip["service_date"]),
                 selected_trip.get("gtfs_snapshot_id"),
                 selected_trip["trip_id"],
                 selected_trip["vehicle_number"],
@@ -414,7 +530,15 @@ def get_schedule(  # noqa: PLR0913
     return {
         "date_options": date_options,
         "selected_date": selected_date,
-        "date_nav": _date_nav(date_options, selected_date),
+        "selected_window": selected_window,
+        "date_nav": _window_date_nav(date_options, selected_date, selected_window),
+        "window_context": _window_context(
+            db_path,
+            selected_window,
+            selected_date,
+            line_scope_summary or mode_summary,
+            prefer_summary=line_scope_summary is not None,
+        ),
         "selected_mode": selected_mode,
         "selected_line": selected_line,
         "selected_trip_id": selected_trip_id,
@@ -424,7 +548,9 @@ def get_schedule(  # noqa: PLR0913
         "line_list": line_list,
         "line_groups": _line_rail_groups(line_list),
         "trips": trips,
-        "trip_groups": _trip_groups(db_path, selected_date, selected_mode, selected_line, trips),
+        "trip_groups": _trip_groups(
+            db_path, selected_date, selected_mode, selected_line, trips, selected_window, mode_summary
+        ),
         "trip_landing_summary": trip_landing_summary,
         "trip_landing_rows": trip_landing_rows,
         "pagination": pagination,
@@ -433,8 +559,13 @@ def get_schedule(  # noqa: PLR0913
     }
 
 
-def get_trip_detail(
-    db_path: Path, trip_id: str, selected_date: str | None, selected_vehicle: str | None
+def get_trip_detail(  # noqa: PLR0913
+    db_path: Path,
+    trip_id: str,
+    selected_date: str | None,
+    selected_vehicle: str | None,
+    return_window: str | None = None,
+    return_date: str | None = None,
 ) -> dict[str, Any]:
     """Build an individual trip detail page."""
     date_options = _date_options(db_path)
@@ -462,7 +593,13 @@ def get_trip_detail(
             trip["trip_id"],
             trip["vehicle_number"],
         )
-    return {"selected_date": selected_date, "trip": trip, "trip_stops": trip_stops}
+    return {
+        "selected_date": selected_date,
+        "return_window": normalize_window(return_window),
+        "return_date": return_date or selected_date,
+        "trip": trip,
+        "trip_stops": trip_stops,
+    }
 
 
 def get_status(db_path: Path) -> dict[str, Any]:
@@ -486,34 +623,49 @@ def get_status(db_path: Path) -> dict[str, Any]:
     }
 
 
-def _line_landing_summary(db_path: Path, selected_date: str | None, selected_mode: str) -> dict[str, Any]:
+def _line_landing_summary(
+    db_path: Path,
+    window_key: str | None,
+    selected_mode: str,
+    window_type: str,
+    source_end_date: str | None,
+) -> dict[str, Any]:
     return (
         fetch_one(
             db_path,
             """
         select line_count, arrival_count, median_delay_seconds, on_time_rate
         from mart_mode_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
         limit 1
         """,
-            [selected_date, selected_mode],
+            [window_type, window_key, source_end_date, selected_mode],
         )
         or {}
     )
 
 
-def _line_landing_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str, page: int
+def _line_landing_rows(  # noqa: PLR0913
+    db_path: Path,
+    window_key: str | None,
+    selected_mode: str,
+    selected_rank: str,
+    page: int,
+    window_type: str,
+    source_end_date: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     metric = {"worst": "median_delay_seconds", "best": "on_time_rate", "erratic": "delay_spread_seconds"}[selected_rank]
     rows = _ranked_entities(
         db_path,
-        selected_date,
+        window_key,
         "line",
         metric,
         selected_mode,
+        window_type=window_type,
+        source_end_date=source_end_date,
         limit=LANDING_PAGE_SIZE + 1,
         offset=(page - 1) * LANDING_PAGE_SIZE,
     )
@@ -523,34 +675,49 @@ def _line_landing_rows(
     return rows, pagination
 
 
-def _stop_landing_summary(db_path: Path, selected_date: str | None, selected_mode: str) -> dict[str, Any]:
+def _stop_landing_summary(
+    db_path: Path,
+    window_key: str | None,
+    selected_mode: str,
+    window_type: str,
+    source_end_date: str | None,
+) -> dict[str, Any]:
     return (
         fetch_one(
             db_path,
             """
         select stop_group_count, arrival_count, median_delay_seconds, on_time_rate
         from mart_mode_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
         limit 1
         """,
-            [selected_date, selected_mode],
+            [window_type, window_key, source_end_date, selected_mode],
         )
         or {}
     )
 
 
-def _stop_landing_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str, page: int
+def _stop_landing_rows(  # noqa: PLR0913
+    db_path: Path,
+    window_key: str | None,
+    selected_mode: str,
+    selected_rank: str,
+    page: int,
+    window_type: str,
+    source_end_date: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     metric = {"worst": "median_delay_seconds", "best": "on_time_rate", "busiest": "arrival_count"}[selected_rank]
     rows = _ranked_entities(
         db_path,
-        selected_date,
+        window_key,
         "stop_group",
         metric,
         selected_mode,
+        window_type=window_type,
+        source_end_date=source_end_date,
         limit=LANDING_PAGE_SIZE + 1,
         offset=(page - 1) * LANDING_PAGE_SIZE,
     )
@@ -560,29 +727,46 @@ def _stop_landing_rows(
     return rows, pagination
 
 
-def _trip_landing_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str, page: int
+def _trip_landing_rows(  # noqa: PLR0913
+    db_path: Path,
+    selected_date: str | None,
+    selected_mode: str,
+    selected_rank: str,
+    page: int,
+    window_type: str = "day",
+    summary: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    rank_column = {"worst": "landing_worst_rank", "best": "landing_best_rank", "erratic": "landing_erratic_rank"}[
-        selected_rank
-    ]
+    summary = summary or {}
+    order_by = {
+        "worst": "abs(end_delay_seconds) desc, end_delay_seconds desc, service_date desc",
+        "best": "abs(end_delay_seconds), service_date desc, scheduled_start_time",
+        "erratic": "erratic_score desc, end_delay_seconds desc, service_date desc",
+    }[selected_rank]
     rows = fetch_all(
         db_path,
         f"""
         select *
         from mart_trip_daily
-        where service_date = ?
+        where service_date between cast(? as date) and cast(? as date)
+          {_schedule_day_filter(window_type)}
+          {_active_schedule_version_filter(window_type, "mart_trip_daily.schedule_version_id")}
           and mode = ?
           and trip_quality = 'complete'
-          and {rank_column} is not null
-        order by {rank_column}
+        order by {order_by}
         limit ? offset ?
         """,
-        [selected_date, selected_mode, LANDING_PAGE_SIZE + 1, (page - 1) * LANDING_PAGE_SIZE],
+        [
+            *_window_scope_params(summary, selected_date),
+            *_active_schedule_version_params(window_type, selected_date),
+            selected_mode,
+            LANDING_PAGE_SIZE + 1,
+            (page - 1) * LANDING_PAGE_SIZE,
+        ],
     )
     rows, pagination = _page_result(rows, page)
     for row in rows:
         row["trace"] = _trip_trace(row.get("delay_profile") or [])
+        row["display_date"] = _trip_display_date(row, window_type)
     return rows, pagination
 
 
@@ -591,43 +775,74 @@ def _selected_line_trip_rows(  # noqa: PLR0913
     selected_date: str | None,
     selected_mode: str,
     selected_line: str,
-    rank_column: str,
+    order_by: str,
     page: int,
+    window_type: str = "day",
+    summary: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    summary = summary or {}
     rows = fetch_all(
         db_path,
         f"""
         select *
         from mart_trip_daily
-        where service_date = ?
+        where service_date between cast(? as date) and cast(? as date)
+          {_schedule_day_filter(window_type)}
+          {_active_schedule_version_filter(window_type, "mart_trip_daily.schedule_version_id")}
           and mode = ?
           and line = ?
           and trip_quality = 'complete'
-        order by {rank_column}
+        order by {order_by}
         limit ? offset ?
         """,
-        [selected_date, selected_mode, selected_line, LANDING_PAGE_SIZE + 1, (page - 1) * LANDING_PAGE_SIZE],
+        [
+            *_window_scope_params(summary, selected_date),
+            *_active_schedule_version_params(window_type, selected_date),
+            selected_mode,
+            selected_line,
+            LANDING_PAGE_SIZE + 1,
+            (page - 1) * LANDING_PAGE_SIZE,
+        ],
     )
-    return _page_result(rows, page)
+    rows, pagination = _page_result(rows, page)
+    for row in rows:
+        row["display_date"] = _trip_display_date(row, window_type)
+    return rows, pagination
 
 
-def _stop_line_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_stop_id: str, page: int
+def _stop_line_rows(  # noqa: PLR0913
+    db_path: Path,
+    selected_date: str | None,
+    selected_mode: str,
+    selected_stop_id: str,
+    page: int,
+    window_type: str = "day",
+    window_key: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    window_key = window_key or selected_date
     rows = fetch_all(
         db_path,
         """
         select *
         from mart_stop_line_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
           and entity_type = 'stop_post'
           and entity_id = ?
         order by display_rank
         limit ? offset ?
         """,
-        [selected_date, selected_mode, selected_stop_id, LANDING_PAGE_SIZE + 1, (page - 1) * LANDING_PAGE_SIZE],
+        [
+            window_type,
+            window_key,
+            selected_date,
+            selected_mode,
+            selected_stop_id,
+            LANDING_PAGE_SIZE + 1,
+            (page - 1) * LANDING_PAGE_SIZE,
+        ],
     )
     return _page_result(rows, page)
 
@@ -639,6 +854,8 @@ def _ranked_entities(  # noqa: PLR0913
     metric: str,
     selected_mode: str | None = None,
     *,
+    window_type: str = "day",
+    source_end_date: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -649,7 +866,19 @@ def _ranked_entities(  # noqa: PLR0913
     }[entity_type]
     entity_column = {"line": "line", "stop_group": "stop_group_id", "stop_post": "stop_id"}[entity_type]
     limit_sql = "" if limit is None else "and rankings.rank > ? and rankings.rank <= ?"
-    params: list[Any] = [entity_type, metric, selected_date, selected_date, selected_mode, selected_mode]
+    source_end_date = source_end_date or selected_date
+    params: list[Any] = [
+        entity_type,
+        metric,
+        window_type,
+        selected_date,
+        source_end_date,
+        window_type,
+        selected_date,
+        source_end_date,
+        selected_mode,
+        selected_mode,
+    ]
     if limit is not None:
         params.extend((offset, offset + limit))
     return fetch_all(
@@ -665,10 +894,12 @@ def _ranked_entities(  # noqa: PLR0913
             and summaries.universe_type = 'zone1_public'
         where rankings.entity_type = ?
           and rankings.metric = ?
-          and rankings.window_type = 'day'
+          and rankings.window_type = ?
           and rankings.window_key = ?
-          and summaries.window_type = 'day'
+          and rankings.source_end_date = cast(? as date)
+          and summaries.window_type = ?
           and summaries.window_key = ?
+          and summaries.source_end_date = cast(? as date)
           and (? is null or rankings.mode = ?)
         {limit_sql}
         order by rankings.mode, rankings.rank
@@ -677,22 +908,29 @@ def _ranked_entities(  # noqa: PLR0913
     )
 
 
-def _mode_stats(db_path: Path, selected_date: str | None) -> list[dict[str, Any]]:
+def _mode_stats(
+    db_path: Path, window_key: str | None, window_type: str, source_end_date: str | None
+) -> list[dict[str, Any]]:
     return fetch_all(
         db_path,
         """
         select *
         from mart_mode_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
         order by mode
         """,
-        [selected_date],
+        [window_type, window_key, source_end_date],
     )
 
 
 def _overview_widgets(
-    db_path: Path, mode_stats: dict[str, dict[str, Any]], selected_date: str | None
+    db_path: Path,
+    mode_stats: dict[str, dict[str, Any]],
+    selected_date: str | None,
+    window_type: str,
+    window_key: str | None,
 ) -> dict[str, dict[str, Any]]:
     widgets = {}
     for mode in ("bus", "tram"):
@@ -704,8 +942,9 @@ def _overview_widgets(
                 row.get("delay_histogram"),
                 row.get("p90_delay_seconds"),
             ),
-            "hours": _hour_bars(db_path, "mode", mode, mode, selected_date),
-            "week": _week_bars(db_path, "mode", mode, mode, selected_date),
+            "hours": _hour_bars(db_path, "mode", mode, mode, window_key, window_type, selected_date),
+            "comparison": _comparison_bars(db_path, "mode", mode, mode, selected_date, window_type),
+            "comparison_label": _comparison_label(window_type),
             "segments": _on_time_segments(
                 row.get("on_time_rate") or 0, row.get("early_count"), row.get("on_time_count"), row.get("late_count")
             ),
@@ -713,12 +952,14 @@ def _overview_widgets(
     return widgets
 
 
-def _line_widgets(
+def _line_widgets(  # noqa: PLR0913
     db_path: Path,
     selected_line: str | None,
     selected_date: str | None,
     summary: dict[str, Any] | None,
     courses: list[dict[str, Any]],
+    window_type: str,
+    window_key: str | None,
 ) -> dict[str, Any]:
     if summary is None or selected_line is None:
         return {}
@@ -726,31 +967,52 @@ def _line_widgets(
         for stop in course.get("stops", []):
             _attach_shape(stop)
             stop["direction"] = course["trip_headsign"]
+    scope_params = _window_scope_params(summary, selected_date)
     worst_rows = fetch_all(
         db_path,
-        """
-        select time_label as time, trip_headsign as direction, stop_name, stop_group_id, delay_seconds
+        f"""
+        select
+            case when ? = 'day' then time_label else strftime(service_date, '%d %b') || ' · ' || time_label end as time,
+            trip_headsign as direction,
+            stop_name,
+            stop_group_id,
+            delay_seconds
         from mart_worst_delay_event
-        where service_date = ?
+        where service_date between cast(? as date) and cast(? as date)
+          {_schedule_day_filter(window_type)}
+          {_active_schedule_version_filter(window_type, "mart_worst_delay_event.schedule_version_id")}
           and mode = ?
           and scope_type = 'line'
           and scope_id = ?
-          and delay_rank <= 6
-        order by delay_rank
+        order by delay_seconds desc, service_date desc, scheduled_arrival_time
+        limit 6
         """,
-        [selected_date, summary.get("mode"), selected_line],
+        [
+            window_type,
+            *scope_params,
+            *_active_schedule_version_params(window_type, selected_date),
+            summary.get("mode"),
+            selected_line,
+        ],
     )
     reliability_rows = fetch_all(
         db_path,
-        """
+        f"""
         select direction_id, trip_headsign, clean_count, partial_count, broken_count, outcomes
         from mart_line_reliability_daily
-        where service_date = ?
+        where service_date between cast(? as date) and cast(? as date)
+          {_schedule_day_filter(window_type)}
+          {_active_schedule_version_filter(window_type, "mart_line_reliability_daily.schedule_version_id")}
           and mode = ?
           and line = ?
-        order by display_rank
+        order by service_date, display_rank
         """,
-        [selected_date, summary.get("mode"), selected_line],
+        [
+            *scope_params,
+            *_active_schedule_version_params(window_type, selected_date),
+            summary.get("mode"),
+            selected_line,
+        ],
     )
     return {
         "shape": _delay_shape(
@@ -759,9 +1021,15 @@ def _line_widgets(
             summary.get("delay_histogram"),
             summary.get("p90_delay_seconds"),
         ),
-        "hours": _hour_bars(db_path, "line", selected_line, summary.get("mode"), selected_date),
-        "week": _week_bars(db_path, "line", selected_line, summary.get("mode"), selected_date),
-        "timeline": _timeline(db_path, "line", selected_line, summary.get("mode"), selected_date),
+        "hours": _hour_bars(
+            db_path, "line", selected_line, summary.get("mode"), window_key, window_type, selected_date
+        ),
+        "comparison": _comparison_bars(db_path, "line", selected_line, summary.get("mode"), selected_date, window_type),
+        "comparison_label": _comparison_label(window_type),
+        "daily": _period_daily_bars(db_path, "line", selected_line, summary.get("mode"), selected_date, window_type),
+        "timeline": _timeline(db_path, "line", selected_line, summary.get("mode"), selected_date)
+        if window_type == "day"
+        else [],
         "segments": _on_time_segments(
             summary.get("on_time_rate") or 0,
             summary.get("early_count"),
@@ -769,7 +1037,7 @@ def _line_widgets(
             summary.get("late_count"),
         ),
         "worst": worst_rows,
-        "reliability": _reliability_strip_from_rows(reliability_rows),
+        "reliability": _period_reliability(reliability_rows),
     }
 
 
@@ -784,10 +1052,14 @@ def _stop_widgets(
         return {"posts": [], "worst": [], "line_rows": []}
     selected_date = context["selected_date"]
     selected_mode = context["selected_mode"] or "bus"
+    window_type = context["selected_window"] or "day"
+    window_key = context["window_key"]
     posts = []
     for post in stop_posts:
         _attach_shape(post)
-        post["hours"] = _hour_bars(db_path, "stop_post", post["stop_id"], selected_mode, selected_date)
+        post["hours"] = _hour_bars(
+            db_path, "stop_post", post["stop_id"], selected_mode, window_key, window_type, selected_date
+        )
         posts.append(post)
     line_rows = []
     for row in line_stats:
@@ -797,19 +1069,26 @@ def _stop_widgets(
     selected_stop_id = summary.get("stop_id")
     entity_type = "stop_post" if selected_stop_id is not None else "stop_group"
     entity_id = selected_stop_id or summary.get("stop_group_id")
+    scope_params = _window_scope_params(summary, selected_date)
     worst_rows = fetch_all(
         db_path,
-        """
-        select time_label as time, line, mode, trip_headsign as headsign, delay_seconds
+        f"""
+        select
+            case when ? = 'day' then time_label else strftime(service_date, '%d %b') || ' · ' || time_label end as time,
+            line,
+            mode,
+            trip_headsign as headsign,
+            delay_seconds
         from mart_worst_delay_event
-        where service_date = ?
+        where service_date between cast(? as date) and cast(? as date)
+          {_schedule_day_filter(window_type)}
           and mode = ?
           and scope_type = ?
           and scope_id = ?
-          and delay_rank <= 8
-        order by delay_rank
+        order by delay_seconds desc, service_date desc, scheduled_arrival_time
+        limit 8
         """,
-        [selected_date, selected_mode, entity_type, entity_id],
+        [window_type, *scope_params, selected_mode, entity_type, entity_id],
     )
     return {
         "posts": posts,
@@ -819,9 +1098,13 @@ def _stop_widgets(
             summary.get("delay_histogram"),
             summary.get("p90_delay_seconds"),
         ),
-        "hours": _hour_bars(db_path, entity_type, entity_id, selected_mode, selected_date),
-        "week": _week_bars(db_path, entity_type, entity_id, selected_mode, selected_date),
-        "timeline": _timeline(db_path, entity_type, entity_id, selected_mode, selected_date),
+        "hours": _hour_bars(db_path, entity_type, entity_id, selected_mode, window_key, window_type, selected_date),
+        "comparison": _comparison_bars(db_path, entity_type, entity_id, selected_mode, selected_date, window_type),
+        "comparison_label": _comparison_label(window_type),
+        "daily": _period_daily_bars(db_path, entity_type, entity_id, selected_mode, selected_date, window_type),
+        "timeline": _timeline(db_path, entity_type, entity_id, selected_mode, selected_date)
+        if window_type == "day"
+        else [],
         "segments": _on_time_segments(
             summary.get("on_time_rate") or 0,
             summary.get("early_count"),
@@ -833,22 +1116,30 @@ def _stop_widgets(
     }
 
 
-def _hour_bars(
-    db_path: Path, entity_type: str, entity_id: str | None, mode: str | None, selected_date: str | None
+def _hour_bars(  # noqa: PLR0913
+    db_path: Path,
+    entity_type: str,
+    entity_id: str | None,
+    mode: str | None,
+    window_key: str | None,
+    window_type: str = "day",
+    source_end_date: str | None = None,
 ) -> list[dict[str, Any]]:
+    source_end_date = source_end_date or window_key
     rows = fetch_all(
         db_path,
         """
         select local_hour, median_delay_seconds, has_min_sample
         from mart_hour_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and entity_type = ?
           and entity_id = ?
           and (? is null or mode = ?)
         order by service_hour_index
         """,
-        [selected_date, entity_type, entity_id, mode, mode],
+        [window_type, window_key, source_end_date, entity_type, entity_id, mode, mode],
     )
     delays_by_hour = {
         int(row["local_hour"]): row.get("median_delay_seconds") for row in rows if row.get("has_min_sample")
@@ -904,6 +1195,158 @@ def _week_bars(
     return bars
 
 
+def _comparison_bars(  # noqa: PLR0913
+    db_path: Path,
+    entity_type: str,
+    entity_id: str | None,
+    mode: str | None,
+    selected_date: str | None,
+    window_type: str,
+) -> list[dict[str, Any]]:
+    if window_type == "day":
+        return _week_bars(db_path, entity_type, entity_id, mode, selected_date)
+    if selected_date is None:
+        return []
+    if window_type == "month":
+        rows = fetch_all(
+            db_path,
+            """
+            select date_trunc('month', service_date) as bucket_date, median(median_delay_seconds) as delay
+            from mart_entity_daily_summary
+            where entity_type = ?
+              and entity_id = ?
+              and (? is null or mode = ?)
+              and service_date between date_trunc('month', cast(? as date)) - interval '5 months'
+                  and cast(? as date)
+            group by bucket_date
+            order by bucket_date
+            """,
+            [entity_type, entity_id, mode, mode, selected_date, selected_date],
+        )
+        return _trend_bars(rows, "%b")
+    rows = fetch_all(
+        db_path,
+        """
+        select date_trunc('week', service_date) as bucket_date, median(median_delay_seconds) as delay
+        from mart_entity_window_daily_summary
+        where entity_type = ?
+          and entity_id = ?
+          and (? is null or mode = ?)
+          and window_type = ?
+          and window_key = ?
+          and source_end_date = cast(? as date)
+        group by bucket_date
+        order by bucket_date desc
+        limit 12
+        """,
+        [
+            entity_type,
+            entity_id,
+            mode,
+            mode,
+            window_type,
+            _window_key(selected_date, window_type),
+            selected_date,
+        ],
+    )
+    rows.reverse()
+    return _trend_bars(rows, "%d %b")
+
+
+def _period_daily_bars(  # noqa: PLR0913
+    db_path: Path,
+    entity_type: str,
+    entity_id: str | None,
+    mode: str | None,
+    selected_date: str | None,
+    window_type: str,
+) -> list[dict[str, Any]]:
+    if window_type == "day":
+        return []
+    rows = fetch_all(
+        db_path,
+        """
+        select service_date as bucket_date, median_delay_seconds as delay
+        from mart_entity_window_daily_summary
+        where entity_type = ?
+          and entity_id = ?
+          and (? is null or mode = ?)
+          and window_type = ?
+          and window_key = ?
+          and source_end_date = cast(? as date)
+        order by service_date
+        """,
+        [
+            entity_type,
+            entity_id,
+            mode,
+            mode,
+            window_type,
+            _window_key(selected_date, window_type),
+            selected_date,
+        ],
+    )
+    return _trend_bars(rows, "%d")
+
+
+def _trend_bars(rows: list[dict[str, Any]], label_format: str) -> list[dict[str, Any]]:
+    bars = []
+    for index, row in enumerate(rows):
+        bucket_date = row["bucket_date"]
+        delay = row.get("delay")
+        bars.append(
+            {
+                "service_date": str(bucket_date),
+                "label": bucket_date.strftime(label_format)
+                if index in {0, len(rows) - 1} or len(rows) <= MAX_TREND_LABELS
+                else "",
+                "delay": delay,
+                "height": 0 if delay is None else max(4, min(38, round(abs(float(delay)) * 0.35))),
+                "selected": index == len(rows) - 1,
+            }
+        )
+    return bars
+
+
+def _comparison_label(window_type: str) -> str:
+    return {
+        "day": "This week · mean",
+        "weekdays": "12-week trend · weekdays",
+        "weekend": "12-week trend · weekends/holidays",
+        "month": "6-month trend",
+    }[window_type]
+
+
+def _window_scope_params(summary: dict[str, Any], selected_date: str | None) -> list[Any]:
+    source_start_date = summary.get("source_start_date") or selected_date
+    source_end_date = summary.get("source_end_date") or selected_date
+    return [source_start_date, source_end_date]
+
+
+def _schedule_day_filter(window_type: str) -> str:
+    if window_type == "weekdays":
+        return "and schedule_day_type in ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'weekday')"
+    if window_type == "weekend":
+        return "and schedule_day_type in ('saturday', 'sunday_holiday')"
+    return ""
+
+
+def _active_schedule_version_filter(window_type: str, schedule_version_column: str) -> str:
+    if window_type not in {"weekdays", "weekend"}:
+        return ""
+    return f"""and exists (
+        select 1
+        from dim_schedule_version as active_version
+        where active_version.schedule_version_id = {schedule_version_column}
+          and cast(? as date) between active_version.valid_from_date
+              and coalesce(active_version.valid_to_date, date '9999-12-31')
+    )"""
+
+
+def _active_schedule_version_params(window_type: str, selected_date: str | None) -> list[Any]:
+    return [selected_date] if window_type in {"weekdays", "weekend"} else []
+
+
 def _timeline(
     db_path: Path, entity_type: str, entity_id: str | None, mode: str | None, selected_date: str | None
 ) -> list[dict[str, Any]]:
@@ -923,22 +1366,40 @@ def _timeline(
     return _timeline_from_rows(rows)
 
 
-def _trip_groups(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_line: str | None, trips: list[dict[str, Any]]
+def _trip_groups(  # noqa: PLR0913
+    db_path: Path,
+    selected_date: str | None,
+    selected_mode: str,
+    selected_line: str | None,
+    trips: list[dict[str, Any]],
+    window_type: str,
+    summary: dict[str, Any],
 ) -> list[dict[str, Any]]:
     if selected_line is None:
         return []
     groups = fetch_all(
         db_path,
-        """
-        select *
-        from mart_line_trip_group_daily
-        where service_date = ?
+        f"""
+        select
+            direction_id,
+            trip_headsign,
+            count(*) as trip_count
+        from mart_trip_daily
+        where service_date between cast(? as date) and cast(? as date)
+          {_schedule_day_filter(window_type)}
+          {_active_schedule_version_filter(window_type, "mart_trip_daily.schedule_version_id")}
           and mode = ?
           and line = ?
-        order by display_rank
+          and trip_quality = 'complete'
+        group by direction_id, trip_headsign
+        order by trip_count desc, direction_id, trip_headsign
         """,
-        [selected_date, selected_mode, selected_line],
+        [
+            *_window_scope_params(summary, selected_date),
+            *_active_schedule_version_params(window_type, selected_date),
+            selected_mode,
+            selected_line,
+        ],
     )
     trips_by_key: dict[tuple[int, str], list[dict[str, Any]]] = {}
     for trip in trips:
@@ -946,6 +1407,13 @@ def _trip_groups(
     for group in groups:
         group["trips"] = trips_by_key.get((group["direction_id"], group["trip_headsign"]), [])
     return [group for group in groups if group["trips"]]
+
+
+def _trip_display_date(row: dict[str, Any], window_type: str) -> str:
+    if window_type == "day":
+        return ""
+    service_date = _as_date(row.get("service_date"))
+    return service_date.strftime("%d %b · ") if service_date else ""
 
 
 def _trip_stops(
@@ -974,21 +1442,27 @@ def _trip_stops(
     return rows
 
 
-def _line_groups_by_post(
-    db_path: Path, selected_date: str | None, selected_mode: str, stop_group_id: str
+def _line_groups_by_post(  # noqa: PLR0913
+    db_path: Path,
+    window_key: str | None,
+    selected_date: str | None,
+    selected_mode: str,
+    stop_group_id: str,
+    window_type: str,
 ) -> dict[str, list[dict[str, Any]]]:
     rows = fetch_all(
         db_path,
         """
         select stop_id, trip_headsign, lines
         from mart_stop_post_line_group_window
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
           and stop_group_id = ?
         order by stop_id, display_rank
         """,
-        [selected_date, selected_mode, stop_group_id],
+        [window_type, window_key, selected_date, selected_mode, stop_group_id],
     )
     result: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -1014,21 +1488,27 @@ def _lines_by_post(line_groups_by_post: dict[str, list[dict[str, Any]]]) -> dict
     return result
 
 
-def _stop_group_line_groups(
-    db_path: Path, selected_date: str | None, selected_mode: str, stop_group_id: str
+def _stop_group_line_groups(  # noqa: PLR0913
+    db_path: Path,
+    window_key: str | None,
+    selected_date: str | None,
+    selected_mode: str,
+    stop_group_id: str,
+    window_type: str,
 ) -> list[dict[str, Any]]:
     rows = fetch_all(
         db_path,
         """
         select line, mode, route_short_name, trip_headsign, posts
         from mart_stop_group_line_group_window
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
           and stop_group_id = ?
         order by line_display_rank, destination_display_rank
         """,
-        [selected_date, selected_mode, stop_group_id],
+        [window_type, window_key, selected_date, selected_mode, stop_group_id],
     )
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
@@ -1177,6 +1657,33 @@ def _reliability_strip_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
     ]
 
 
+def _period_reliability(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for row in rows:
+        key = (row.get("direction_id"), row.get("trip_headsign"))
+        aggregate = grouped.setdefault(
+            key,
+            {
+                "trip_headsign": row.get("trip_headsign"),
+                "clean_count": 0,
+                "partial_count": 0,
+                "broken_count": 0,
+                "outcomes": [],
+            },
+        )
+        for outcome in ("clean", "partial", "broken"):
+            aggregate[f"{outcome}_count"] += row.get(f"{outcome}_count") or 0
+        if len(aggregate["outcomes"]) < MAX_RELIABILITY_OUTCOMES:
+            aggregate["outcomes"].extend(
+                (row.get("outcomes") or [])[: MAX_RELIABILITY_OUTCOMES - len(aggregate["outcomes"])]
+            )
+    aggregates = sorted(
+        grouped.values(),
+        key=lambda row: -(row["clean_count"] + row["partial_count"] + row["broken_count"]),
+    )
+    return _reliability_strip_from_rows(aggregates)
+
+
 def _on_time_segments(
     on_time_rate: float, early_count: int | None = None, on_time_count: int | None = None, late_count: int | None = None
 ) -> dict[str, float]:
@@ -1216,6 +1723,134 @@ def _date_options(db_path: Path) -> list[str]:
         db_path, "select service_date_key as service_date from dim_serving_date order by service_date desc"
     )
     return [row["service_date"] for row in rows]
+
+
+def normalize_window(value: str | None) -> str:
+    """Return a supported aggregate window, defaulting invalid input to day."""
+    return value if value in WINDOW_TYPES else "day"
+
+
+def _available_window(db_path: Path, value: str | None) -> str:
+    window_type = normalize_window(value)
+    if window_type == "day":
+        return window_type
+    return window_type if grouped_windows_available(db_path) else "day"
+
+
+def grouped_windows_available(db_path: Path) -> bool:
+    """Return whether the artifact contains the complete grouped-window contract."""
+    capability = fetch_one(
+        db_path,
+        """
+        select 1 as found
+        from information_schema.tables
+        where table_name in ('dim_serving_window_date', 'dim_schedule_version', 'mart_entity_window_daily_summary')
+        having count(distinct table_name) = 3
+        """,
+    )
+    return capability is not None
+
+
+def _window_context(
+    db_path: Path,
+    window_type: str,
+    selected_date: str | None,
+    summary: dict[str, Any] | None,
+    *,
+    prefer_summary: bool = False,
+) -> dict[str, Any]:
+    summary = summary or {}
+    membership = None
+    has_membership = fetch_one(
+        db_path,
+        "select 1 as found from information_schema.tables where table_name = 'dim_serving_window_date' limit 1",
+    )
+    if has_membership and selected_date:
+        membership = fetch_one(
+            db_path,
+            """
+            select min(service_date) as source_start_date,
+                   max(service_date) as source_observed_end_date,
+                   count(*) as source_day_count
+            from dim_serving_window_date
+            where window_type = ?
+              and window_key = ?
+              and source_end_date = cast(? as date)
+            """,
+            [window_type, _window_key(selected_date, window_type), selected_date],
+        )
+    source_start = (
+        (summary.get("source_start_date") if prefer_summary else (membership or {}).get("source_start_date"))
+        or summary.get("source_start_date")
+        or selected_date
+    )
+    source_end = (membership or {}).get("source_observed_end_date") or summary.get("source_end_date") or selected_date
+    source_day_count = (
+        (summary.get("source_day_count") if prefer_summary else (membership or {}).get("source_day_count"))
+        or summary.get("source_day_count")
+        or (1 if selected_date else 0)
+    )
+    start_day = _as_date(source_start)
+    end_day = _as_date(source_end)
+    if end_day is None:
+        return {"label": "n/a", "source_day_count": 0}
+    if window_type == "day":
+        label = end_day.strftime("%d %b %Y")
+    elif window_type == "month":
+        label = f"{end_day:%B %Y} · through {end_day:%d %b}"
+    else:
+        name = "weekday" if window_type == "weekdays" else "weekend/holiday"
+        date_range = f"{start_day:%d %b}-{end_day:%d %b}" if start_day else f"through {end_day:%d %b}"
+        label = f"{source_day_count} {name} service days · {date_range}"
+    return {
+        "label": label,
+        "source_start_date": source_start,
+        "source_end_date": source_end,
+        "source_day_count": source_day_count,
+    }
+
+
+def _window_date_nav(date_options: list[str], selected_date: str | None, window_type: str) -> dict[str, str | None]:
+    if window_type == "day" or selected_date is None:
+        return _date_nav(date_options, selected_date)
+    selected_day = date.fromisoformat(selected_date)
+    available_days = sorted(date.fromisoformat(value) for value in date_options)
+    if window_type in {"weekdays", "weekend"}:
+        previous_target = selected_day - timedelta(days=7)
+        next_target = selected_day + timedelta(days=7)
+        previous = max((day for day in available_days if day <= previous_target), default=None)
+        next_day = min((day for day in available_days if day >= next_target), default=None)
+        return {
+            "previous": previous.isoformat() if previous else None,
+            "next": next_day.isoformat() if next_day else None,
+        }
+    months = sorted({value[:7] for value in date_options})
+    selected_month = selected_date[:7]
+    if selected_month not in months:
+        return {"previous": None, "next": None}
+    month_index = months.index(selected_month)
+
+    def latest_in_month(month: str) -> str | None:
+        return max((value for value in date_options if value.startswith(month)), default=None)
+
+    return {
+        "previous": latest_in_month(months[month_index - 1]) if month_index > 0 else None,
+        "next": latest_in_month(months[month_index + 1]) if month_index + 1 < len(months) else None,
+    }
+
+
+def _as_date(value: date | str | None) -> date | None:
+    if isinstance(value, date):
+        return value
+    if value is None:
+        return None
+    return date.fromisoformat(str(value))
+
+
+def _window_key(selected_date: str | None, window_type: str) -> str | None:
+    if selected_date is None:
+        return None
+    return selected_date[:7] if window_type == "month" else selected_date
 
 
 def _selected_date(date_options: list[str], selected_date: str | None) -> str | None:

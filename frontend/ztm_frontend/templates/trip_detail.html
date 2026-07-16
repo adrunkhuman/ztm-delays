@@ -12,7 +12,7 @@
           <div class="trip-detail-route">{{ trip.origin_stop_name }} → {{ trip.destination_stop_name }}</div>
           <div class="mono muted">{{ selected_date }} · vehicle {{ trip.vehicle_number }}{% if trip.brigade %} · brigade {{ trip.brigade }}{% endif %}</div>
         </div>
-        <a class="data-link trip-detail-back" href="{{ url_for('schedule', mode=trip.mode, line=trip.line, date=selected_date) }}">back to trips</a>
+        <a class="data-link trip-detail-back" href="{{ url_for('schedule', mode=trip.mode, line=trip.line, date=return_date, window=return_window) }}">back to trips</a>
       </header>
 
       <section class="trip-detail-summary">

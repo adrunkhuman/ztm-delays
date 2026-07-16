@@ -8,6 +8,7 @@
         partitions=["date('" ~ processing_date ~ "')"],
         cluster_by=["mode", "line"],
         require_partition_filter=true,
+        on_schema_change='append_new_columns',
         post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
@@ -28,9 +29,11 @@ with trips as (
 grouped as (
     select
         service_date,
+        any_value(schedule_day_type) as schedule_day_type,
         mode,
         line,
         any_value(route_short_name) as route_short_name,
+        schedule_version_id,
         direction_id,
         trip_headsign,
         countif(outcome = 'clean') as clean_count,
@@ -38,7 +41,7 @@ grouped as (
         countif(outcome = 'broken') as broken_count,
         array_agg(struct(trip_id, vehicle_number, scheduled_start_time, outcome, format_timestamp('%H:%M', scheduled_start_time, 'Europe/Warsaw') as label) order by scheduled_start_time, trip_id, vehicle_number limit 160) as outcomes
     from trips
-    group by service_date, mode, line, direction_id, trip_headsign
+    group by service_date, mode, line, schedule_version_id, direction_id, trip_headsign
 )
 
 select

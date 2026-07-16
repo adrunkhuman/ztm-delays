@@ -8,6 +8,7 @@
         partitions=["date('" ~ processing_date ~ "')"],
         cluster_by=["entity_type", "mode", "entity_id"],
         require_partition_filter=true,
+        on_schema_change='append_new_columns',
         post_hook="alter table {{ this }} set options (require_partition_filter = true)",
     )
 }}
@@ -21,13 +22,13 @@ with base as (
 ),
 
 entities as (
-    select 'mode' as entity_type, mode as entity_id, mode, service_date, delay_seconds from base
+    select 'mode' as entity_type, mode as entity_id, mode, service_date, schedule_day_type, delay_seconds from base
     union all
-    select 'line', line, mode, service_date, delay_seconds from base
+    select 'line', line, mode, service_date, schedule_day_type, delay_seconds from base
     union all
-    select 'stop_group', stop_group_id, mode, service_date, delay_seconds from base
+    select 'stop_group', stop_group_id, mode, service_date, schedule_day_type, delay_seconds from base
     union all
-    select 'stop_post', stop_id, mode, service_date, delay_seconds from base
+    select 'stop_post', stop_id, mode, service_date, schedule_day_type, delay_seconds from base
 ),
 
 keyed as (
@@ -42,6 +43,7 @@ counts as (
         any_value(entity_id) as entity_id,
         any_value(mode) as mode,
         any_value(service_date) as service_date,
+        any_value(schedule_day_type) as schedule_day_type,
         count(*) as arrival_count
     from keyed
     group by grain_key
@@ -59,6 +61,7 @@ select
     counts.entity_id,
     counts.mode,
     counts.service_date,
+    counts.schedule_day_type,
     counts.arrival_count,
     quantiles.median_delay_seconds
 from counts

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% import "_widgets.html" as ui %}
+{% import "_widgets.html" as ui with context %}
 
 {% block title %}stops · ZTM delays{% endblock %}
 
@@ -10,6 +10,7 @@
         <input type="hidden" name="mode" value="{{ selected_mode }}">
         <input type="hidden" name="date" value="{{ selected_date }}">
         <input type="hidden" name="rank" value="{{ selected_rank }}">
+        <input type="hidden" name="window" value="{{ selected_window }}">
         <input
           class="find"
           id="stop-search"
@@ -66,7 +67,7 @@
             <span><b class="{{ (stop_landing_summary.on_time_rate or none)|percent_class }}">{{ (stop_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
             <span><b class="{{ (stop_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (stop_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
           </div>
-          {{ ui.datebox(selected_date, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.previous, picker_page=picker_pagination.page) if date_nav.previous else none, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.next, picker_page=picker_pagination.page) if date_nav.next else none) }}
+          {{ ui.datebox(window_context.label, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.previous, picker_page=picker_pagination.page) if date_nav.previous else none, url_for('stops', mode=selected_mode, q=search, rank=selected_rank, date=date_nav.next, picker_page=picker_pagination.page) if date_nav.next else none, selected_window) }}
         </header>
 
         <div class="landing-rank-switch scope">
@@ -117,7 +118,7 @@
               </div>
             {% endif %}
           </div>
-          {{ ui.datebox(selected_date, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.previous, picker_page=picker_pagination.page) if date_nav.previous else none, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.next, picker_page=picker_pagination.page) if date_nav.next else none) }}
+          {{ ui.datebox(window_context.label, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.previous, picker_page=picker_pagination.page) if date_nav.previous else none, url_for('stops', stop_group_id=selected_stop_group_id, mode=selected_mode, q=search, post=selected_post.display_name if selected_post else none, view=selected_view if not selected_post else none, date=date_nav.next, picker_page=picker_pagination.page) if date_nav.next else none, selected_window) }}
         </header>
 
         {% if not selected_post %}
@@ -209,14 +210,19 @@
               {{ ui.hour_bars(stop_widgets.hours) }}
             </div>
             <div class="widget chart-widget">
-              <div class="label">This week · mean</div>
-              {{ ui.week_bars(stop_widgets.week) }}
+              <div class="label">{{ stop_widgets.comparison_label }}</div>
+              {{ ui.week_bars(stop_widgets.comparison) }}
             </div>
           </section>
 
           <section class="section">
-            <div class="label" style="margin-bottom: .6rem">Every departure</div>
-            {{ ui.timeline(stop_widgets.timeline) }}
+            {% if selected_window == 'day' %}
+              <div class="label" style="margin-bottom: .6rem">Every departure</div>
+              {{ ui.timeline(stop_widgets.timeline) }}
+            {% else %}
+              <div class="label" style="margin-bottom: .6rem">Median delay by service day</div>
+              {{ ui.week_bars(stop_widgets.daily) }}
+            {% endif %}
           </section>
 
           <section class="section">
@@ -264,7 +270,11 @@
           ) }}
         {% endif %}
       {% else %}
-        <div class="section muted">No stop data available.</div>
+        <header class="head">
+          <h1 class="hero-title">{{ selected_stop_group_id }}</h1>
+          {{ ui.datebox(window_context.label, url_for('stops', stop_group_id=selected_stop_group_id, post=requested_stop_id, mode=selected_mode, q=search, view=selected_view if not requested_stop_id else none, date=date_nav.previous, picker_page=picker_pagination.page) if date_nav.previous else none, url_for('stops', stop_group_id=selected_stop_group_id, post=requested_stop_id, mode=selected_mode, q=search, view=selected_view if not requested_stop_id else none, date=date_nav.next, picker_page=picker_pagination.page) if date_nav.next else none, selected_window) }}
+        </header>
+        <div class="section muted">No stop data available for this window.</div>
       {% endif %}
     </main>
   </div>

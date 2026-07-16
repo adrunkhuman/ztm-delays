@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytz
-from flask import Flask, current_app, render_template, request
+from flask import Flask, current_app, render_template, request, url_for
 
 from ztm_frontend import db, queries
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 
-def create_app() -> Flask:
+def create_app() -> Flask:  # noqa: C901
     """Create the Flask app without opening the DuckDB artifact at import time."""
     app = Flask(__name__)
     db_path = Path(os.environ.get("ZTM_DUCKDB_PATH", "ztm/ztm.duckdb"))
@@ -42,17 +42,39 @@ def create_app() -> Flask:
 
     @app.context_processor
     def inject_globals() -> dict[str, Any]:
+        requested_window = queries.normalize_window(request.args.get("window"))
+        grouped_windows_available = queries.grouped_windows_available(current_app.config["ZTM_DUCKDB_PATH"])
+        if requested_window != "day" and not grouped_windows_available:
+            current_app.logger.warning(
+                "Grouped window %s requested before serving artifact rebuild: %s",
+                requested_window,
+                current_app.config["ZTM_DUCKDB_PATH"],
+            )
         return {
             "meta": queries.get_export_metadata(current_app.config["ZTM_DUCKDB_PATH"]),
             "navigation_date": _selected_date_arg(),
+            "grouped_windows_available": grouped_windows_available,
+            "scope_href": _scope_href,
             "stylesheet_version": stylesheet_version,
         }
+
+    @app.url_defaults
+    def preserve_window(endpoint: str, values: dict[str, Any]) -> None:
+        if endpoint not in {"index", "lines", "stops", "schedule"} or "window" in values:
+            return
+        selected_window = queries.normalize_window(request.args.get("window"))
+        if selected_window != "day":
+            values["window"] = selected_window
 
     @app.get("/")
     def index() -> str:
         return render_template(
             "overview.html",
-            **queries.get_overview(current_app.config["ZTM_DUCKDB_PATH"], _selected_date_arg()),
+            **queries.get_overview(
+                current_app.config["ZTM_DUCKDB_PATH"],
+                _selected_date_arg(),
+                request.args.get("window"),
+            ),
         )
 
     @app.get("/lines/")
@@ -67,6 +89,7 @@ def create_app() -> Flask:
                 _selected_date_arg(),
                 request.args.get("rank"),
                 request.args.get("page"),
+                request.args.get("window"),
             ),
         )
 
@@ -87,6 +110,7 @@ def create_app() -> Flask:
                 request.args.get("rank"),
                 request.args.get("page"),
                 request.args.get("picker_page"),
+                request.args.get("window"),
             ),
         )
 
@@ -105,6 +129,7 @@ def create_app() -> Flask:
                 request.args.get("sort"),
                 request.args.get("rank"),
                 request.args.get("page"),
+                request.args.get("window"),
             ),
         )
 
@@ -117,6 +142,8 @@ def create_app() -> Flask:
                 trip_id,
                 _selected_date_arg(),
                 request.args.get("vehicle"),
+                request.args.get("window"),
+                request.args.get("return_date"),
             ),
         )
 
@@ -147,6 +174,14 @@ def _selected_date_arg() -> str | None:
     if request.headers.get("HX-Request") == "true":
         return request.args.get("date")
     return None
+
+
+def _scope_href(window: str) -> str:
+    values = dict(request.view_args or {})
+    values.update(request.args.to_dict())
+    values["window"] = queries.normalize_window(window)
+    values.pop("page", None)
+    return url_for(request.endpoint or "index", **values)
 
 
 def _format_integer(value: float | None) -> str:

@@ -61,9 +61,11 @@ joined as (
 select
     gtfs_snapshot_id,
     service_date,
+    schedule_day_type,
     gps_date,
     trip_id,
     vehicle_number,
+    schedule_version_id,
     line,
     route_short_name,
     mode,

@@ -1,4 +1,5 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
+{% set lookback_days = var("serving_window_lookback_days", 420) %}
 
 {{
     config(
@@ -13,51 +14,15 @@
 }}
 
 with base as (
-    select *
-    from {{ ref('int_serving_stop_arrival') }}
-    where service_date between date_sub(date('{{ processing_date }}'), interval 60 day) and date('{{ processing_date }}')
+    select windows.window_type, windows.window_key, windows.source_end_date, arrivals.*
+    from {{ ref('int_serving_stop_arrival') }} as arrivals
+    inner join {{ ref('dim_serving_window_date') }} as windows
+        on arrivals.service_date = windows.service_date
+        and windows.source_end_date = date('{{ processing_date }}')
+    where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
+        and date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')
-),
-
-windowed as (
-    select
-        'day' as window_type,
-        cast(service_date as string) as window_key,
-        service_date as source_end_date,
-        *
-    from base
-    where service_date = date('{{ processing_date }}')
-
-    union all
-
-    select
-        'month' as window_type,
-        format_date('%Y-%m', date('{{ processing_date }}')) as window_key,
-        date('{{ processing_date }}') as source_end_date,
-        *
-    from base
-    where date_trunc(service_date, month) = date_trunc(date('{{ processing_date }}'), month)
-
-    union all
-
-    select
-        'weekdays' as window_type,
-        cast(date('{{ processing_date }}') as string) as window_key,
-        date('{{ processing_date }}') as source_end_date,
-        *
-    from base
-    where schedule_day_type in ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'weekday')
-
-    union all
-
-    select
-        'weekend' as window_type,
-        cast(date('{{ processing_date }}') as string) as window_key,
-        date('{{ processing_date }}') as source_end_date,
-        *
-    from base
-    where schedule_day_type in ('saturday', 'sunday_holiday')
 ),
 
 keyed as (
@@ -65,7 +30,7 @@ keyed as (
         *,
         to_json_string(struct(mode, window_type, window_key)) as grain_key,
         concat(gtfs_snapshot_id, '|', trip_id, '|', coalesce(vehicle_number, '')) as trip_key
-    from windowed
+    from base
 ),
 
 counts as (

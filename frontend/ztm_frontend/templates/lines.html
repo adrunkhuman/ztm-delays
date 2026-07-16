@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% import "_widgets.html" as ui %}
+{% import "_widgets.html" as ui with context %}
 
 {% block title %}lines · ZTM delays{% endblock %}
 
@@ -24,7 +24,7 @@
             <span><b class="{{ (line_landing_summary.on_time_rate or none)|percent_class }}">{{ (line_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
             <span><b class="{{ (line_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (line_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
           </div>
-          {{ ui.datebox(selected_date, url_for('lines', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('lines', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none) }}
+          {{ ui.datebox(window_context.label, url_for('lines', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('lines', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none, selected_window) }}
         </header>
 
         <div class="landing-rank-switch scope">
@@ -56,7 +56,7 @@
         <header class="head line-headline">
           <h1 class="hero-title mono">{{ summary.route_short_name }}</h1>
           <div class="tag">{{ summary.mode|upper }}</div>
-          {{ ui.datebox(selected_date, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.previous) if date_nav.previous else none, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.next) if date_nav.next else none) }}
+          {{ ui.datebox(window_context.label, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.previous) if date_nav.previous else none, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.next) if date_nav.next else none, selected_window) }}
         </header>
 
         <section class="widgets">
@@ -74,14 +74,19 @@
             {{ ui.hour_bars(line_widgets.hours) }}
           </div>
           <div class="widget chart-widget">
-            <div class="label">This week · mean</div>
-            {{ ui.week_bars(line_widgets.week) }}
+            <div class="label">{{ line_widgets.comparison_label }}</div>
+            {{ ui.week_bars(line_widgets.comparison) }}
           </div>
         </section>
 
         <section class="section">
-          <div class="label" style="margin-bottom: .6rem">Every departure</div>
-          {{ ui.timeline(line_widgets.timeline) }}
+          {% if selected_window == 'day' %}
+            <div class="label" style="margin-bottom: .6rem">Every departure</div>
+            {{ ui.timeline(line_widgets.timeline) }}
+          {% else %}
+            <div class="label" style="margin-bottom: .6rem">Median delay by service day</div>
+            {{ ui.week_bars(line_widgets.daily) }}
+          {% endif %}
         </section>
 
         <section class="dirs">
@@ -139,7 +144,12 @@
           </div>
         </section>
       {% else %}
-        <div class="section muted">No line data available.</div>
+        <header class="head line-headline">
+          <h1 class="hero-title mono">{{ selected_line }}</h1>
+          <div class="tag {{ selected_mode }}">{{ selected_mode|upper }}</div>
+          {{ ui.datebox(window_context.label, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.previous) if date_nav.previous else none, url_for('lines', line=selected_line, mode=selected_mode, date=date_nav.next) if date_nav.next else none, selected_window) }}
+        </header>
+        <div class="section muted">No line data available for this window.</div>
       {% endif %}
     </main>
   </div>

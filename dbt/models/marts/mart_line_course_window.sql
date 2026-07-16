@@ -1,4 +1,5 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
+{% set lookback_days = var("serving_window_lookback_days", 420) %}
 
 {{
     config(
@@ -13,11 +14,25 @@
 }}
 
 with trips as (
-    select *
-    from {{ ref('int_serving_trip_execution') }}
-    where service_date = date('{{ processing_date }}')
+    select windows.window_type, windows.window_key, windows.source_end_date, executions.*
+    from {{ ref('int_serving_trip_execution') }} as executions
+    inner join {{ ref('dim_serving_window_date') }} as windows
+        on executions.service_date = windows.service_date
+        and windows.source_end_date = date('{{ processing_date }}')
+    where executions.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
+        and date('{{ processing_date }}')
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')
+      and (
+          windows.window_type in ('day', 'month')
+          or exists (
+              select 1
+              from {{ ref('dim_schedule_version') }} as anchor_version
+              where anchor_version.schedule_version_id = executions.schedule_version_id
+                and date('{{ processing_date }}') between anchor_version.valid_from_date
+                    and coalesce(anchor_version.valid_to_date, date '9999-12-31')
+          )
+      )
 ),
 
 grouped as (
@@ -28,12 +43,12 @@ grouped as (
         direction_id,
         trip_headsign,
         'all_observed' as universe_type,
-        'day' as window_type,
-        cast(service_date as string) as window_key,
-        service_date as source_end_date,
+        window_type,
+        window_key,
+        source_end_date,
         count(*) as trip_count
     from trips
-    group by line, mode, direction_id, trip_headsign, service_date
+    group by line, mode, direction_id, trip_headsign, window_type, window_key, source_end_date
 )
 
 select
