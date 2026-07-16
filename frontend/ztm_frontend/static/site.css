@@ -633,9 +633,10 @@ td:nth-child(n + 2) {
 }
 
 .pager {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
   align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
   min-height: 42px;
   border-top: 1px solid var(--border);
   font-size: 0.7rem;
@@ -649,7 +650,6 @@ td:nth-child(n + 2) {
 .pager a:last-child {
   color: var(--blue);
   font-size: 1rem;
-  text-align: right;
 }
 
 .pager a:first-child {
