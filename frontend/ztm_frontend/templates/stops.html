@@ -227,7 +227,7 @@
               </div>
               {% for row in stop_widgets.worst %}
                 <div class="stop-departure-run stop-departure-grid">
-                  <span class="trip-dep mono">{{ row.time }}</span>
+                  <time class="trip-dep mono" datetime="{{ selected_date }}T{{ row.time }}">{{ row.time }}</time>
                   <span class="stop-departure-route">
                     <a class="stop-departure-line mono" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">{{ row.line }}</a>
                     <span class="muted">→</span>

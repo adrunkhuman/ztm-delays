@@ -2004,12 +2004,12 @@ td:nth-child(n + 2) {
 }
 
 .stop-departure-table {
-  max-width: 720px;
+  width: 100%;
 }
 
 .stop-departure-grid {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) 54px;
+  grid-template-columns: 40px minmax(0, 1fr) 42px;
   column-gap: 10px;
   align-items: center;
 }
