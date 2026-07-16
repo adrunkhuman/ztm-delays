@@ -83,6 +83,18 @@
   {% if href %}<a href="{{ href }}" class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</a>{% else %}<span class="chip {% if mode == 'tram' %}tram{% endif %} {% if active %}active{% endif %}">{{ line }}</span>{% endif %}
 {% endmacro %}
 
+{% macro line_rail(line_groups, endpoint, selected_line, selected_mode, selected_date, selected_sort=None) %}
+  <div class="line-rail-groups">
+    {% for group in line_groups %}
+      <div class="linegrid">
+        {% for row in group %}
+          <a href="{{ url_for(endpoint, line=row.line, mode=selected_mode, date=selected_date, sort=selected_sort) }}" class="{% if row.line == selected_line %}active{% endif %}">{{ row.route_short_name }}</a>
+        {% endfor %}
+      </div>
+    {% endfor %}
+  </div>
+{% endmacro %}
+
 {% macro pager(pagination, previous_href=None, next_href=None) %}
   {% if pagination.has_previous or pagination.has_next %}
     <nav class="pager" aria-label="Pagination">

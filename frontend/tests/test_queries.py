@@ -120,6 +120,25 @@ def test_page_parameter_defaults_to_first_page() -> None:
     assert queries._selected_page(str(2**128)) == queries.MAX_PAGE  # noqa: SLF001
 
 
+def test_line_rail_groups_regular_replacement_and_night_lines() -> None:
+    rows = [
+        {"line": "N36"},
+        {"line": "Z21"},
+        {"line": "E-1"},
+        {"line": "733"},
+        {"line": "102"},
+        {"line": "Z-8"},
+    ]
+
+    groups = queries._line_rail_groups(rows)  # noqa: SLF001
+
+    assert [[row["line"] for row in group] for group in groups] == [
+        ["102", "733", "E-1"],
+        ["Z-8", "Z21"],
+        ["N36"],
+    ]
+
+
 def test_ranked_entities_apply_limit_and_offset(tmp_path: Path) -> None:
     db_path = tmp_path / "ztm.duckdb"
     with duckdb.connect(str(db_path)) as connection:

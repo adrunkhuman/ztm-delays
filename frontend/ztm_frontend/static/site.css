@@ -226,6 +226,17 @@ td:nth-child(n + 2) {
   margin-right: 0;
 }
 
+.line-rail-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.line-rail-groups .linegrid + .linegrid {
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
 .main {
   min-width: 0;
   min-height: 0;

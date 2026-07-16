@@ -180,6 +180,7 @@ def get_lines(  # noqa: PLR0913
         "selected_date": selected_date,
         "date_nav": _date_nav(date_options, selected_date),
         "line_list": line_list,
+        "line_groups": _line_rail_groups(line_list),
         "selected_line": selected_line,
         "selected_mode": selected_mode,
         "selected_rank": selected_rank,
@@ -421,6 +422,7 @@ def get_schedule(  # noqa: PLR0913
         "selected_sort": selected_sort,
         "selected_rank": selected_rank,
         "line_list": line_list,
+        "line_groups": _line_rail_groups(line_list),
         "trips": trips,
         "trip_groups": _trip_groups(db_path, selected_date, selected_mode, selected_line, trips),
         "trip_landing_summary": trip_landing_summary,
@@ -1234,6 +1236,32 @@ def _by_mode_list(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]
     for row in rows:
         grouped.setdefault(row["mode"], []).append(row)
     return grouped
+
+
+def _line_rail_groups(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    regular: list[dict[str, Any]] = []
+    replacement: list[dict[str, Any]] = []
+    night: list[dict[str, Any]] = []
+    for row in rows:
+        line = str(row["line"]).upper()
+        if line.startswith("Z"):
+            replacement.append(row)
+        elif line.startswith("N"):
+            night.append(row)
+        else:
+            regular.append(row)
+
+    for group in (regular, replacement, night):
+        group.sort(key=_line_rail_sort_key)
+    return [group for group in (regular, replacement, night) if group]
+
+
+def _line_rail_sort_key(row: dict[str, Any]) -> tuple[int, int, str]:
+    line = str(row["line"]).upper()
+    if line.isdigit():
+        return 0, int(line), line
+    number = "".join(character for character in line if character.isdigit())
+    return 1, int(number or 0), line
 
 
 def _trip_trace(delays: list[int]) -> list[dict[str, Any]]:
