@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% import "_widgets.html" as ui %}
+{% import "_widgets.html" as ui with context %}
 
 {% block title %}overview · ZTM delays{% endblock %}
 
@@ -10,7 +10,7 @@
     <main class="main">
       <header class="head">
         <h1 class="hero-title">overview</h1>
-        {{ ui.datebox(selected_date, url_for('index', date=date_nav.previous) if date_nav.previous else none, url_for('index', date=date_nav.next) if date_nav.next else none) }}
+        {{ ui.datebox(selected_date, url_for('index', date=date_nav.previous) if date_nav.previous else none, url_for('index', date=date_nav.next) if date_nav.next else none, selected_window) }}
       </header>
 
       <section class="overview-grid">

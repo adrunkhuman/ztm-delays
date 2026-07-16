@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% import "_widgets.html" as ui %}
+{% import "_widgets.html" as ui with context %}
 
 {% block title %}trips · ZTM delays{% endblock %}
 
@@ -24,7 +24,7 @@
             <span><b class="{{ (trip_landing_summary.on_time_rate or none)|percent_class }}">{{ (trip_landing_summary.on_time_rate or none)|percent }}</b> on time</span>
             <span><b class="{{ (trip_landing_summary.median_delay_seconds or none)|delay_class }}">{{ (trip_landing_summary.median_delay_seconds or none)|delay }}</b> median</span>
           </div>
-          {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none) }}
+          {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, rank=selected_rank, date=date_nav.next) if date_nav.next else none, 'day', false) }}
         </header>
 
         <div class="landing-rank-switch scope">
@@ -66,7 +66,7 @@
         <header class="head line-headline">
           <h1 class="hero-title mono">{{ selected_line }}</h1>
           <div class="tag {{ selected_mode }}">{{ selected_mode|upper }}</div>
-          {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.next) if date_nav.next else none) }}
+          {{ ui.datebox(selected_date, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.previous) if date_nav.previous else none, url_for('schedule', mode=selected_mode, line=selected_line, sort=selected_sort, date=date_nav.next) if date_nav.next else none, 'day', false) }}
         </header>
 
         <div class="trip-sort scope">

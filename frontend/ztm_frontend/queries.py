@@ -42,6 +42,7 @@ TRIP_TRACE_EARLY_MAX_PX = 7
 TIMELINE_MIN_GAP_PERCENT = 0.55
 EXPECTED_STOP_EVENT_TABLE = "fct_expected_stop_event"
 NUMERIC_STOP_POST_SUFFIX_LENGTH = 2
+WINDOW_TYPES = ("day", "weekdays", "weekend", "month")
 
 
 def get_export_metadata(db_path: Path) -> dict[str, Any]:
@@ -70,13 +71,31 @@ def get_export_metadata(db_path: Path) -> dict[str, Any]:
     return metadata
 
 
-def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
+def get_overview(db_path: Path, selected_date: str | None, selected_window: str | None = None) -> dict[str, Any]:
     """Build the network overview page data."""
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
-    mode_stats = _mode_stats(db_path, selected_date)
-    worst_lines = _ranked_entities(db_path, selected_date, "line", "median_delay_seconds", limit=8)
-    worst_stops = _ranked_entities(db_path, selected_date, "stop_post", "median_delay_seconds", limit=8)
+    selected_window = normalize_window(selected_window)
+    window_key = _window_key(selected_date, selected_window)
+    mode_stats = _mode_stats(db_path, window_key, selected_window, selected_date)
+    worst_lines = _ranked_entities(
+        db_path,
+        window_key,
+        "line",
+        "median_delay_seconds",
+        window_type=selected_window,
+        source_end_date=selected_date,
+        limit=8,
+    )
+    worst_stops = _ranked_entities(
+        db_path,
+        window_key,
+        "stop_post",
+        "median_delay_seconds",
+        window_type=selected_window,
+        source_end_date=selected_date,
+        limit=8,
+    )
     for row in worst_lines:
         _attach_shape(row)
     for row in worst_stops:
@@ -87,9 +106,10 @@ def get_overview(db_path: Path, selected_date: str | None) -> dict[str, Any]:
     return {
         "date_options": date_options,
         "selected_date": selected_date,
+        "selected_window": selected_window,
         "date_nav": _date_nav(date_options, selected_date),
         "mode_stats": mode_stats_by_mode,
-        "overview_widgets": _overview_widgets(db_path, mode_stats_by_mode, selected_date),
+        "overview_widgets": _overview_widgets(db_path, mode_stats_by_mode, selected_date, selected_window, window_key),
         "worst_lines": _by_mode_list(worst_lines),
         "worst_stops": _by_mode_list(worst_stops),
         "delay_plots": {"bus": [], "tram": []},
@@ -103,6 +123,7 @@ def get_lines(  # noqa: PLR0913
     selected_date: str | None,
     selected_rank: str | None,
     selected_page: str | None = None,
+    selected_window: str | None = None,
 ) -> dict[str, Any]:
     """Build the line landing or selected-line page data."""
     selected_mode = selected_mode or "bus"
@@ -110,18 +131,21 @@ def get_lines(  # noqa: PLR0913
     page = _selected_page(selected_page)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
+    selected_window = normalize_window(selected_window)
+    window_key = _window_key(selected_date, selected_window)
     line_list = fetch_all(
         db_path,
         """
         select line, mode, route_short_name, trip_count, arrival_count
         from mart_line_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
           and universe_type = 'all_observed'
         order by mode, try_cast(line as integer), line
         """,
-        [selected_date, selected_mode],
+        [selected_window, window_key, selected_date, selected_mode],
     )
     summary = None
     courses: list[dict[str, Any]] = []
@@ -129,22 +153,25 @@ def get_lines(  # noqa: PLR0913
     line_landing_rows: list[dict[str, Any]] = []
     pagination = None
     if selected_line is None:
-        line_landing_summary = _line_landing_summary(db_path, selected_date, selected_mode)
-        line_landing_rows, pagination = _line_landing_rows(db_path, selected_date, selected_mode, selected_rank, page)
+        line_landing_summary = _line_landing_summary(db_path, window_key, selected_mode, selected_window, selected_date)
+        line_landing_rows, pagination = _line_landing_rows(
+            db_path, window_key, selected_mode, selected_rank, page, selected_window, selected_date
+        )
     else:
         summary = fetch_one(
             db_path,
             """
             select *
             from mart_line_window_summary
-            where window_type = 'day'
+            where window_type = ?
               and window_key = ?
+              and source_end_date = cast(? as date)
               and mode = ?
               and line = ?
               and universe_type = 'all_observed'
             limit 1
             """,
-            [selected_date, selected_mode, selected_line],
+            [selected_window, window_key, selected_date, selected_mode, selected_line],
         )
         courses = fetch_all(
             db_path,
@@ -178,6 +205,7 @@ def get_lines(  # noqa: PLR0913
     return {
         "date_options": date_options,
         "selected_date": selected_date,
+        "selected_window": selected_window,
         "date_nav": _date_nav(date_options, selected_date),
         "line_list": line_list,
         "line_groups": _line_rail_groups(line_list),
@@ -186,7 +214,9 @@ def get_lines(  # noqa: PLR0913
         "selected_rank": selected_rank,
         "summary": summary,
         "courses": courses,
-        "line_widgets": _line_widgets(db_path, selected_line, selected_date, summary, courses),
+        "line_widgets": _line_widgets(
+            db_path, selected_line, selected_date, summary, courses, selected_window, window_key
+        ),
         "line_landing_summary": line_landing_summary,
         "line_landing_rows": line_landing_rows,
         "pagination": pagination,
@@ -205,15 +235,19 @@ def get_stops(  # noqa: PLR0913
     selected_rank: str | None = None,
     selected_page: str | None = None,
     selected_picker_page: str | None = None,
+    selected_window: str | None = None,
 ) -> dict[str, Any]:
     """Build the stop landing, group, or selected-post page data."""
     selected_mode = selected_mode or "bus"
     selected_view = selected_view if selected_view in {"post", "line"} else "post"
+    requested_stop_id = selected_stop_id
     selected_rank = _selected_stop_rank(selected_rank)
     page = _selected_page(selected_page)
     picker_page = _selected_page(selected_picker_page)
     date_options = _date_options(db_path)
     selected_date = _selected_date(date_options, selected_date)
+    selected_window = normalize_window(selected_window)
+    window_key = _window_key(selected_date, selected_window)
     search_pattern = f"%{search.strip().lower()}%"
     stop_list = fetch_all(
         db_path,
@@ -244,36 +278,40 @@ def get_stops(  # noqa: PLR0913
     line_stats: list[dict[str, Any]] = []
     stop_line_groups: list[dict[str, Any]] = []
     if selected_stop_group_id is None:
-        stop_landing_summary = _stop_landing_summary(db_path, selected_date, selected_mode)
-        stop_landing_rows, pagination = _stop_landing_rows(db_path, selected_date, selected_mode, selected_rank, page)
+        stop_landing_summary = _stop_landing_summary(db_path, window_key, selected_mode, selected_window, selected_date)
+        stop_landing_rows, pagination = _stop_landing_rows(
+            db_path, window_key, selected_mode, selected_rank, page, selected_window, selected_date
+        )
     else:
         summary = fetch_one(
             db_path,
             """
             select *
             from mart_stop_group_window_summary
-            where window_type = 'day'
+            where window_type = ?
               and window_key = ?
+              and source_end_date = cast(? as date)
               and mode = ?
               and stop_group_id = ?
               and universe_type = 'all_observed'
             limit 1
             """,
-            [selected_date, selected_mode, selected_stop_group_id],
+            [selected_window, window_key, selected_date, selected_mode, selected_stop_group_id],
         )
         stop_posts = fetch_all(
             db_path,
             """
             select *
             from mart_stop_post_window_summary
-            where window_type = 'day'
+            where window_type = ?
               and window_key = ?
+              and source_end_date = cast(? as date)
               and mode = ?
               and stop_group_id = ?
               and universe_type = 'all_observed'
             order by stop_id
             """,
-            [selected_date, selected_mode, selected_stop_group_id],
+            [selected_window, window_key, selected_date, selected_mode, selected_stop_group_id],
         )
         line_groups_by_post = _line_groups_by_post(db_path, selected_date, selected_mode, selected_stop_group_id)
         lines_by_post = _lines_by_post(line_groups_by_post)
@@ -293,14 +331,15 @@ def get_stops(  # noqa: PLR0913
                 """
                 select *
                 from mart_stop_post_window_summary
-                where window_type = 'day'
+                where window_type = ?
                   and window_key = ?
+                  and source_end_date = cast(? as date)
                   and mode = ?
                   and stop_id = ?
                   and universe_type = 'all_observed'
                 limit 1
                 """,
-                [selected_date, selected_mode, selected_stop_id],
+                [selected_window, window_key, selected_date, selected_mode, selected_stop_id],
             )
             if selected_post is not None:
                 selected_post["display_name"] = selected_post.get("stop_post_code") or selected_post["stop_id"]
@@ -310,6 +349,7 @@ def get_stops(  # noqa: PLR0913
     return {
         "date_options": date_options,
         "selected_date": selected_date,
+        "selected_window": selected_window,
         "date_nav": _date_nav(date_options, selected_date),
         "stop_list": stop_list,
         "picker_pagination": picker_pagination,
@@ -319,6 +359,7 @@ def get_stops(  # noqa: PLR0913
         "selected_rank": selected_rank,
         "search": search,
         "selected_stop_id": selected_stop_id,
+        "requested_stop_id": requested_stop_id,
         "summary": summary,
         "stop_posts": stop_posts,
         "stop_post_groups": stop_post_groups,
@@ -330,7 +371,12 @@ def get_stops(  # noqa: PLR0913
             stop_posts,
             selected_post or summary,
             line_stats,
-            {"selected_date": selected_date, "selected_mode": selected_mode},
+            {
+                "selected_date": selected_date,
+                "selected_mode": selected_mode,
+                "selected_window": selected_window,
+                "window_key": window_key,
+            },
         ),
         "stop_landing_summary": stop_landing_summary,
         "stop_landing_rows": stop_landing_rows,
@@ -486,34 +532,49 @@ def get_status(db_path: Path) -> dict[str, Any]:
     }
 
 
-def _line_landing_summary(db_path: Path, selected_date: str | None, selected_mode: str) -> dict[str, Any]:
+def _line_landing_summary(
+    db_path: Path,
+    window_key: str | None,
+    selected_mode: str,
+    window_type: str,
+    source_end_date: str | None,
+) -> dict[str, Any]:
     return (
         fetch_one(
             db_path,
             """
         select line_count, arrival_count, median_delay_seconds, on_time_rate
         from mart_mode_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
         limit 1
         """,
-            [selected_date, selected_mode],
+            [window_type, window_key, source_end_date, selected_mode],
         )
         or {}
     )
 
 
-def _line_landing_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str, page: int
+def _line_landing_rows(  # noqa: PLR0913
+    db_path: Path,
+    window_key: str | None,
+    selected_mode: str,
+    selected_rank: str,
+    page: int,
+    window_type: str,
+    source_end_date: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     metric = {"worst": "median_delay_seconds", "best": "on_time_rate", "erratic": "delay_spread_seconds"}[selected_rank]
     rows = _ranked_entities(
         db_path,
-        selected_date,
+        window_key,
         "line",
         metric,
         selected_mode,
+        window_type=window_type,
+        source_end_date=source_end_date,
         limit=LANDING_PAGE_SIZE + 1,
         offset=(page - 1) * LANDING_PAGE_SIZE,
     )
@@ -523,34 +584,49 @@ def _line_landing_rows(
     return rows, pagination
 
 
-def _stop_landing_summary(db_path: Path, selected_date: str | None, selected_mode: str) -> dict[str, Any]:
+def _stop_landing_summary(
+    db_path: Path,
+    window_key: str | None,
+    selected_mode: str,
+    window_type: str,
+    source_end_date: str | None,
+) -> dict[str, Any]:
     return (
         fetch_one(
             db_path,
             """
         select stop_group_count, arrival_count, median_delay_seconds, on_time_rate
         from mart_mode_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and mode = ?
         limit 1
         """,
-            [selected_date, selected_mode],
+            [window_type, window_key, source_end_date, selected_mode],
         )
         or {}
     )
 
 
-def _stop_landing_rows(
-    db_path: Path, selected_date: str | None, selected_mode: str, selected_rank: str, page: int
+def _stop_landing_rows(  # noqa: PLR0913
+    db_path: Path,
+    window_key: str | None,
+    selected_mode: str,
+    selected_rank: str,
+    page: int,
+    window_type: str,
+    source_end_date: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     metric = {"worst": "median_delay_seconds", "best": "on_time_rate", "busiest": "arrival_count"}[selected_rank]
     rows = _ranked_entities(
         db_path,
-        selected_date,
+        window_key,
         "stop_group",
         metric,
         selected_mode,
+        window_type=window_type,
+        source_end_date=source_end_date,
         limit=LANDING_PAGE_SIZE + 1,
         offset=(page - 1) * LANDING_PAGE_SIZE,
     )
@@ -639,6 +715,8 @@ def _ranked_entities(  # noqa: PLR0913
     metric: str,
     selected_mode: str | None = None,
     *,
+    window_type: str = "day",
+    source_end_date: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -649,7 +727,19 @@ def _ranked_entities(  # noqa: PLR0913
     }[entity_type]
     entity_column = {"line": "line", "stop_group": "stop_group_id", "stop_post": "stop_id"}[entity_type]
     limit_sql = "" if limit is None else "and rankings.rank > ? and rankings.rank <= ?"
-    params: list[Any] = [entity_type, metric, selected_date, selected_date, selected_mode, selected_mode]
+    source_end_date = source_end_date or selected_date
+    params: list[Any] = [
+        entity_type,
+        metric,
+        window_type,
+        selected_date,
+        source_end_date,
+        window_type,
+        selected_date,
+        source_end_date,
+        selected_mode,
+        selected_mode,
+    ]
     if limit is not None:
         params.extend((offset, offset + limit))
     return fetch_all(
@@ -665,10 +755,12 @@ def _ranked_entities(  # noqa: PLR0913
             and summaries.universe_type = 'zone1_public'
         where rankings.entity_type = ?
           and rankings.metric = ?
-          and rankings.window_type = 'day'
+          and rankings.window_type = ?
           and rankings.window_key = ?
-          and summaries.window_type = 'day'
+          and rankings.source_end_date = cast(? as date)
+          and summaries.window_type = ?
           and summaries.window_key = ?
+          and summaries.source_end_date = cast(? as date)
           and (? is null or rankings.mode = ?)
         {limit_sql}
         order by rankings.mode, rankings.rank
@@ -677,22 +769,29 @@ def _ranked_entities(  # noqa: PLR0913
     )
 
 
-def _mode_stats(db_path: Path, selected_date: str | None) -> list[dict[str, Any]]:
+def _mode_stats(
+    db_path: Path, window_key: str | None, window_type: str, source_end_date: str | None
+) -> list[dict[str, Any]]:
     return fetch_all(
         db_path,
         """
         select *
         from mart_mode_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
         order by mode
         """,
-        [selected_date],
+        [window_type, window_key, source_end_date],
     )
 
 
 def _overview_widgets(
-    db_path: Path, mode_stats: dict[str, dict[str, Any]], selected_date: str | None
+    db_path: Path,
+    mode_stats: dict[str, dict[str, Any]],
+    selected_date: str | None,
+    window_type: str,
+    window_key: str | None,
 ) -> dict[str, dict[str, Any]]:
     widgets = {}
     for mode in ("bus", "tram"):
@@ -704,7 +803,7 @@ def _overview_widgets(
                 row.get("delay_histogram"),
                 row.get("p90_delay_seconds"),
             ),
-            "hours": _hour_bars(db_path, "mode", mode, mode, selected_date),
+            "hours": _hour_bars(db_path, "mode", mode, mode, window_key, window_type, selected_date),
             "week": _week_bars(db_path, "mode", mode, mode, selected_date),
             "segments": _on_time_segments(
                 row.get("on_time_rate") or 0, row.get("early_count"), row.get("on_time_count"), row.get("late_count")
@@ -713,12 +812,14 @@ def _overview_widgets(
     return widgets
 
 
-def _line_widgets(
+def _line_widgets(  # noqa: PLR0913
     db_path: Path,
     selected_line: str | None,
     selected_date: str | None,
     summary: dict[str, Any] | None,
     courses: list[dict[str, Any]],
+    window_type: str,
+    window_key: str | None,
 ) -> dict[str, Any]:
     if summary is None or selected_line is None:
         return {}
@@ -759,7 +860,9 @@ def _line_widgets(
             summary.get("delay_histogram"),
             summary.get("p90_delay_seconds"),
         ),
-        "hours": _hour_bars(db_path, "line", selected_line, summary.get("mode"), selected_date),
+        "hours": _hour_bars(
+            db_path, "line", selected_line, summary.get("mode"), window_key, window_type, selected_date
+        ),
         "week": _week_bars(db_path, "line", selected_line, summary.get("mode"), selected_date),
         "timeline": _timeline(db_path, "line", selected_line, summary.get("mode"), selected_date),
         "segments": _on_time_segments(
@@ -784,10 +887,14 @@ def _stop_widgets(
         return {"posts": [], "worst": [], "line_rows": []}
     selected_date = context["selected_date"]
     selected_mode = context["selected_mode"] or "bus"
+    window_type = context["selected_window"] or "day"
+    window_key = context["window_key"]
     posts = []
     for post in stop_posts:
         _attach_shape(post)
-        post["hours"] = _hour_bars(db_path, "stop_post", post["stop_id"], selected_mode, selected_date)
+        post["hours"] = _hour_bars(
+            db_path, "stop_post", post["stop_id"], selected_mode, window_key, window_type, selected_date
+        )
         posts.append(post)
     line_rows = []
     for row in line_stats:
@@ -819,7 +926,7 @@ def _stop_widgets(
             summary.get("delay_histogram"),
             summary.get("p90_delay_seconds"),
         ),
-        "hours": _hour_bars(db_path, entity_type, entity_id, selected_mode, selected_date),
+        "hours": _hour_bars(db_path, entity_type, entity_id, selected_mode, window_key, window_type, selected_date),
         "week": _week_bars(db_path, entity_type, entity_id, selected_mode, selected_date),
         "timeline": _timeline(db_path, entity_type, entity_id, selected_mode, selected_date),
         "segments": _on_time_segments(
@@ -833,22 +940,30 @@ def _stop_widgets(
     }
 
 
-def _hour_bars(
-    db_path: Path, entity_type: str, entity_id: str | None, mode: str | None, selected_date: str | None
+def _hour_bars(  # noqa: PLR0913
+    db_path: Path,
+    entity_type: str,
+    entity_id: str | None,
+    mode: str | None,
+    window_key: str | None,
+    window_type: str = "day",
+    source_end_date: str | None = None,
 ) -> list[dict[str, Any]]:
+    source_end_date = source_end_date or window_key
     rows = fetch_all(
         db_path,
         """
         select local_hour, median_delay_seconds, has_min_sample
         from mart_hour_window_summary
-        where window_type = 'day'
+        where window_type = ?
           and window_key = ?
+          and source_end_date = cast(? as date)
           and entity_type = ?
           and entity_id = ?
           and (? is null or mode = ?)
         order by service_hour_index
         """,
-        [selected_date, entity_type, entity_id, mode, mode],
+        [window_type, window_key, source_end_date, entity_type, entity_id, mode, mode],
     )
     delays_by_hour = {
         int(row["local_hour"]): row.get("median_delay_seconds") for row in rows if row.get("has_min_sample")
@@ -1216,6 +1331,17 @@ def _date_options(db_path: Path) -> list[str]:
         db_path, "select service_date_key as service_date from dim_serving_date order by service_date desc"
     )
     return [row["service_date"] for row in rows]
+
+
+def normalize_window(value: str | None) -> str:
+    """Return a supported aggregate window, defaulting invalid input to day."""
+    return value if value in WINDOW_TYPES else "day"
+
+
+def _window_key(selected_date: str | None, window_type: str) -> str | None:
+    if selected_date is None:
+        return None
+    return selected_date[:7] if window_type == "month" else selected_date
 
 
 def _selected_date(date_options: list[str], selected_date: str | None) -> str | None:

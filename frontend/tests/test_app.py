@@ -73,14 +73,16 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
     captured: dict[str, object] = {}
 
     def fake_get_stops(*args: object) -> dict[str, object]:
-        captured["page"] = args[-2]
-        captured["picker_page"] = args[-1]
+        captured["page"] = args[-3]
+        captured["picker_page"] = args[-2]
+        captured["window"] = args[-1]
         captured["date"] = args[5]
         return {
             "selected_stop_group_id": None,
             "selected_mode": "bus",
             "selected_rank": "worst",
             "selected_date": "2026-06-30",
+            "selected_window": queries.normalize_window(args[-1] if isinstance(args[-1], str) else None),
             "search": "central",
             "date_nav": {"previous": None, "next": None},
             "stop_list": [{"stop_group_id": "1001", "stop_group_name": "Central", "modes_served": "bus"}],
@@ -95,14 +97,16 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
 
     client = create_app().test_client()
     response = client.get(
-        "/stops/?q=central&page=2&picker_page=3&date=2026-06-30",
+        "/stops/?q=central&page=2&picker_page=3&date=2026-06-30&window=month",
         headers={"HX-Request": "true"},
     )
 
     assert response.status_code == HTTPStatus.OK
     assert re.search(rb'href="/static/site\.css\?v=[0-9a-f]{12}"', response.data)
-    assert captured == {"page": "2", "picker_page": "3", "date": "2026-06-30"}
-    assert b'href="/lines/?date=2026-06-30"' in response.data
+    assert captured == {"page": "2", "picker_page": "3", "window": "month", "date": "2026-06-30"}
+    assert b'href="/lines/?date=2026-06-30&amp;window=month"' in response.data
+    assert re.search(rb'class="active" href="[^"]*window=month[^"]*">month</a>', response.data)
+    assert b'<input type="hidden" name="window" value="month">' in response.data
     assert b"picker_page=3" in response.data
     assert b'rel="prev">&lt;</a>' in response.data
     assert b'rel="next">&gt;</a>' in response.data
@@ -113,4 +117,5 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
 
     assert refreshed_response.status_code == HTTPStatus.OK
     assert captured["date"] is None
+    assert captured["window"] is None
     assert b'href="/lines/"' in refreshed_response.data

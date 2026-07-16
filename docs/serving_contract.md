@@ -163,7 +163,7 @@ array; checked dates, total warning count, and truncation state are sidecar-only
 
 | Widget | Source |
 | --- | --- |
-| Bus/tram on-time cards | `mart_mode_window_summary`, `window_type = 'day'`. |
+| Bus/tram on-time cards | `mart_mode_window_summary`, selected `window_type`. |
 | Bus/tram histograms | `mart_mode_window_summary`. |
 | Bus/tram median by hour | `mart_hour_window_summary`, `entity_type = 'mode'`. |
 | This week network bars | `mart_entity_daily_summary`, `entity_type = 'mode'`; current template renders bus only. |

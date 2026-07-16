@@ -27,6 +27,19 @@ def test_get_lines_keeps_same_line_bus_and_tram_separate(tmp_path: Path) -> None
     assert result["line_widgets"]["worst"][0]["direction"] == "Bus destination"
 
 
+def test_get_lines_reads_month_summary_and_hour_aggregates(tmp_path: Path) -> None:
+    expected_month_delay = 90.0
+    db_path = tmp_path / "ztm.duckdb"
+    _create_line_smoke_db(db_path)
+
+    result = queries.get_lines(db_path, "1", "bus", "2026-06-30", None, None, "month")
+
+    assert result["selected_window"] == "month"
+    assert result["summary"]["window_key"] == "2026-06"
+    assert result["summary"]["median_delay_seconds"] == expected_month_delay
+    assert result["line_widgets"]["hours"][4]["delay"] == expected_month_delay
+
+
 def test_get_export_metadata_ignores_stale_sidecar(tmp_path: Path) -> None:
     """A failed metadata write must not pair old sidecar status with a newer DuckDB file."""
     db_path = tmp_path / "ztm.duckdb"
@@ -151,7 +164,8 @@ def test_ranked_entities_apply_limit_and_offset(tmp_path: Path) -> None:
                 'bus' as mode,
                 'zone1_public' as universe_type,
                 'day' as window_type,
-                '2026-06-30' as window_key
+                '2026-06-30' as window_key,
+                date '2026-06-30' as source_end_date
             from range(6);
 
             create table mart_entity_rankings as
@@ -162,6 +176,7 @@ def test_ranked_entities_apply_limit_and_offset(tmp_path: Path) -> None:
                 'median_delay_seconds' as metric,
                 'day' as window_type,
                 '2026-06-30' as window_key,
+                date '2026-06-30' as source_end_date,
                 range + 1 as rank,
                 6 as n_entities,
                 range::double as value
@@ -187,7 +202,8 @@ def test_ranked_entity_limit_applies_per_mode(tmp_path: Path) -> None:
                 mode,
                 'zone1_public' as universe_type,
                 'day' as window_type,
-                '2026-06-30' as window_key
+                '2026-06-30' as window_key,
+                date '2026-06-30' as source_end_date
             from (values ('bus'), ('tram')) as modes(mode)
             cross join range(3);
 
@@ -199,6 +215,7 @@ def test_ranked_entity_limit_applies_per_mode(tmp_path: Path) -> None:
                 'median_delay_seconds' as metric,
                 'day' as window_type,
                 '2026-06-30' as window_key,
+                date '2026-06-30' as source_end_date,
                 range + 1 as rank,
                 3 as n_entities,
                 range::double as value
@@ -345,10 +362,12 @@ def _line_window_summary_sql() -> str:
         create table mart_line_window_summary as
         select * from (
             values
-                ('1', 'bus', '1', 'Bus route', 'all_observed', 'day', '2026-06-30', 1, 10, 20.0, 30.0, 60.0, 90.0, 1, 8, 1, 0.1, 0.8, 0.1, []),
-                ('1', 'tram', '1', 'Tram route', 'all_observed', 'day', '2026-06-30', 1, 10, 200.0, 220.0, 300.0, 100.0, 0, 2, 8, 0.0, 0.2, 0.8, [])
+                ('1', 'bus', '1', 'Bus route', 'all_observed', 'day', '2026-06-30', date '2026-06-30', 1, 10, 20.0, 30.0, 60.0, 90.0, 1, 8, 1, 0.1, 0.8, 0.1, []),
+                ('1', 'tram', '1', 'Tram route', 'all_observed', 'day', '2026-06-30', date '2026-06-30', 1, 10, 200.0, 220.0, 300.0, 100.0, 0, 2, 8, 0.0, 0.2, 0.8, []),
+                ('1', 'bus', '1', 'Bus route', 'all_observed', 'month', '2026-06', date '2026-06-30', 20, 200, 80.0, 90.0, 180.0, 90.0, 10, 150, 40, 0.05, 0.75, 0.2, []),
+                ('1', 'bus', '1', 'Stale route', 'all_observed', 'month', '2026-06', date '2026-06-29', 19, 190, 900.0, 999.0, 1200.0, 201.0, 0, 0, 190, 0.0, 0.0, 1.0, [])
         ) as rows(
-            line, mode, route_short_name, route_label, universe_type, window_type, window_key, trip_count,
+            line, mode, route_short_name, route_label, universe_type, window_type, window_key, source_end_date, trip_count,
             arrival_count, mean_delay_seconds, median_delay_seconds, p90_delay_seconds, delay_spread_seconds,
             early_count, on_time_count, late_count, early_rate, on_time_rate, late_rate, delay_histogram
         )
@@ -411,7 +430,12 @@ def _hour_window_summary_sql() -> str:
     return """
         create table mart_hour_window_summary as
         select 'line' as entity_type, '1' as entity_id, 'bus' as mode, 'day' as window_type, '2026-06-30' as window_key,
-            8 as local_hour, 4 as service_hour_index, 30.0 as median_delay_seconds, true as has_min_sample
+            date '2026-06-30' as source_end_date, 8 as local_hour, 4 as service_hour_index,
+            30.0 as median_delay_seconds, true as has_min_sample
+        union all
+        select 'line', '1', 'bus', 'month', '2026-06', date '2026-06-30', 8, 4, 90.0, true
+        union all
+        select 'line', '1', 'bus', 'month', '2026-06', date '2026-06-29', 8, 4, 999.0, true
     """
 
 
