@@ -633,18 +633,24 @@ td:nth-child(n + 2) {
 }
 
 .pager {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1rem 8ch 1rem;
   align-items: center;
   justify-content: center;
-  gap: 0.65rem;
+  column-gap: 0.65rem;
   min-height: 42px;
   border-top: 1px solid var(--border);
   font-size: 0.7rem;
 }
 
+.pager > span {
+  text-align: center;
+}
+
 .pager a {
   color: var(--fg2);
   font-family: var(--mono);
+  text-align: center;
 }
 
 .pager a:last-child {
