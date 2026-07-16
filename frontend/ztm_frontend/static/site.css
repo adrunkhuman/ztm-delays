@@ -2008,10 +2008,10 @@ td:nth-child(n + 2) {
 }
 
 .stop-departure-grid {
-  grid-template-columns: 44px 42px minmax(0, 1fr) 52px;
+  grid-template-columns: 24px 44px 42px minmax(0, 1fr) 52px;
 }
 
-.stop-departure-grid.landing-rank-head > :nth-child(3) {
+.stop-departure-grid.landing-rank-head > :nth-child(4) {
   text-align: left;
 }
 

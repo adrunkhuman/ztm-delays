@@ -223,10 +223,11 @@
             <div class="label" style="margin-bottom: .8rem">Worst departures</div>
             <div class="stop-departure-table">
               <div class="landing-rank-head stop-departure-grid">
-                <div>Time</div><div>Line</div><div>Route</div><div>Delay</div>
+                <div>#</div><div>Time</div><div>Line</div><div>Route</div><div>Delay</div>
               </div>
               {% for row in stop_widgets.worst %}
                 <div class="landing-rank-row stop-departure-grid">
+                  <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
                   <time class="mono muted" datetime="{{ selected_date }}T{{ row.time }}">{{ row.time }}</time>
                   <a class="landing-line-pill mono {% if row.mode == 'tram' %}tram{% endif %}" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">{{ row.line }}</a>
                   <span class="landing-route" title="{{ row.headsign }}">{{ row.headsign }}</span>
