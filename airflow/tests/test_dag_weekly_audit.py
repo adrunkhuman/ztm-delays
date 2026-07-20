@@ -13,11 +13,13 @@ def test_weekly_audit_dag_runs_audit_tag() -> None:
 
     assert dag.dag.kwargs["schedule"] == "0 7 * * 0"
     assert dag.dbt_test_weekly_audits.kwargs["task_id"] == "dbt_test_weekly_audits"
+    assert dag.dbt_run_weekly_audit_models.kwargs["task_id"] == "dbt_run_weekly_audit_models"
+    assert "dbt run --select tag:audit" in dag.dbt_run_weekly_audit_models.kwargs["bash_command"]
     assert "dbt test --select tag:audit" in dag.dbt_test_weekly_audits.kwargs["bash_command"]
     assert "--indirect-selection eager" in dag.dbt_test_weekly_audits.kwargs["bash_command"]
     assert "--exclude test_type:unit" in dag.dbt_test_weekly_audits.kwargs["bash_command"]
-    assert "run_" not in dag.dbt_test_weekly_audits.kwargs["bash_command"]
-    assert dag.dbt_test_weekly_audits in dag.selected_gtfs_snapshot.downstream
+    assert dag.dbt_run_weekly_audit_models in dag.selected_gtfs_snapshot.downstream
+    assert dag.dbt_test_weekly_audits in dag.dbt_run_weekly_audit_models.downstream
 
 
 def test_selected_gtfs_snapshot_id_uses_processing_date_filter(monkeypatch: Any) -> None:
@@ -140,6 +142,10 @@ class FakeOperator:
         if hasattr(upstream, "downstream"):
             cast("FakeTask", upstream).downstream.append(self)
         return self
+
+    def __rshift__(self, downstream: object) -> object:
+        self.downstream.append(downstream)
+        return downstream
 
 
 class FakeAsset:

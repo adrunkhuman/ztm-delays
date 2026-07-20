@@ -73,10 +73,11 @@ DAY_COMPLETENESS_MODEL = "mart_day_completeness"
 SERVICE_COVERAGE_MODEL = "agg_service_coverage"
 PIPELINE_STATUS_MODEL = "mart_pipeline_status"
 COVERAGE_SCHEDULE_MODELS = "int_gtfs_trip_schedule int_gtfs_duty_chain"
-SERVING_UNIVERSE_MODEL = "int_serving_trip_universe"
+SERVING_UNIVERSE_MODELS = "int_serving_trip_stop_profile int_serving_trip_universe"
 SERVING_TRIP_EXECUTION_MODEL = "int_serving_trip_execution"
 SERVING_MODELS = (
-    "int_serving_trip_execution int_serving_stop_arrival dim_serving_window_date "
+    "int_serving_trip_execution int_serving_stop_arrival int_serving_observed_date dim_serving_window_date "
+    "int_serving_entity_window_summary "
     "dim_serving_date "
     "mart_mode_window_summary mart_entity_daily_summary mart_entity_window_daily_summary mart_line_window_summary "
     "mart_stop_group_window_summary mart_stop_post_window_summary mart_hour_window_summary "
@@ -84,11 +85,11 @@ SERVING_MODELS = (
     "mart_line_reliability_daily mart_trip_daily mart_trip_mode_daily_summary "
     "mart_trip_line_daily mart_line_trip_group_daily mart_line_course_window "
     "mart_line_course_stop_window mart_stop_line_window_summary "
-    "mart_stop_post_line_group_window mart_stop_group_line_group_window "
-    "mart_pipeline_status_recent_summary rpt_schedule_day_mapping_evidence rpt_ranking_universe_evidence"
+    "mart_stop_post_line_group_window mart_stop_group_line_group_window mart_pipeline_status_recent_summary"
 )
 PRIOR_SERVING_MODELS = (
-    "int_serving_trip_execution int_serving_stop_arrival dim_serving_window_date "
+    "int_serving_trip_execution int_serving_stop_arrival int_serving_observed_date dim_serving_window_date "
+    "int_serving_entity_window_summary "
     "mart_mode_window_summary mart_entity_daily_summary mart_entity_window_daily_summary mart_line_window_summary "
     "mart_stop_group_window_summary mart_stop_post_window_summary mart_hour_window_summary "
     "mart_entity_rankings mart_entity_timeline_daily mart_worst_delay_event "
@@ -612,10 +613,17 @@ with DAG(
         )
 
     with TaskGroup("serving_marts", group_display_name="Serving marts", prefix_group_id=False) as serving_group:
+        dbt_run_serving_universe_prior, dbt_test_serving_universe_prior = _prior_publication_dbt_run_test_pair(
+            "serving_universe_prior",
+            SERVING_UNIVERSE_MODELS,
+            SERVING_UNIVERSE_MODELS,
+            PRIOR_SCHEDULE_DBT_VARS,
+            "--indirect-selection cautious --exclude test_type:generic",
+        )
         dbt_run_serving_universe, dbt_test_serving_universe = _dbt_run_test_pair(
             "serving_universe",
-            SERVING_UNIVERSE_MODEL,
-            SERVING_UNIVERSE_MODEL,
+            SERVING_UNIVERSE_MODELS,
+            SERVING_UNIVERSE_MODELS,
             MART_DBT_VARS,
             "--indirect-selection cautious --exclude test_type:generic",
         )
@@ -719,10 +727,11 @@ with DAG(
     dbt_test_pipeline_status >> dbt_run_prior_coverage_schedule
     dbt_run_prior_coverage_schedule >> dbt_run_completeness_and_coverage_prior
     dbt_run_completeness_and_coverage_prior >> dbt_test_completeness_and_coverage_prior >> dbt_run_pipeline_status_prior
-    dbt_run_pipeline_status_prior >> dbt_test_pipeline_status_prior >> dbt_restore_current_coverage_schedule
-    dbt_test_pipeline_status_prior >> dbt_run_serving_universe
+    dbt_run_pipeline_status_prior >> dbt_test_pipeline_status_prior >> dbt_run_serving_universe_prior
+    dbt_test_serving_universe_prior >> dbt_restore_current_coverage_schedule
     dbt_restore_current_coverage_schedule >> dbt_run_serving_universe >> dbt_test_serving_universe
-    dbt_test_serving_universe >> dbt_run_serving_marts_prior >> dbt_test_serving_marts_prior
+    [dbt_test_serving_universe_prior, dbt_test_serving_universe] >> dbt_run_serving_marts_prior
+    dbt_run_serving_marts_prior >> dbt_test_serving_marts_prior
     dbt_test_serving_marts_prior >> dbt_run_serving_marts >> dbt_test_serving_marts
     gps_models_date = emit_gps_models_date_asset(PROCESSING_DATE, prior_publication_guard)
     if LOG_BIGQUERY_DBT_JOB_COSTS:

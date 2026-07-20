@@ -18,7 +18,7 @@ with observed_dates as (
     select
         service_date,
         any_value(schedule_day_type) as schedule_day_type
-    from {{ ref('int_serving_stop_arrival') }}
+    from {{ ref('int_serving_observed_date') }}
     where service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
         and date('{{ processing_date }}')
     group by service_date

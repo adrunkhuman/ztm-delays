@@ -1,6 +1,75 @@
 version: 2
 
 models:
+  - name: int_serving_trip_stop_profile
+    description: Materialized per-processing-date stop profiles reused by the serving ranking classifier.
+    columns:
+      - name: processing_date
+        tests:
+          - not_null:
+              config:
+                where: "processing_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+      - name: trip_id
+        tests:
+          - not_null:
+              config:
+                where: "processing_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+
+  - name: int_serving_trip_universe
+    description: Schedule-derived ranking eligibility classified from the materialized trip stop profile.
+    columns:
+      - name: processing_date
+        tests:
+          - not_null:
+              config:
+                where: "processing_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+      - name: trip_id
+        tests:
+          - not_null:
+              config:
+                where: "processing_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+      - name: is_zone1_public_ranking_trip
+        tests:
+          - not_null:
+              config:
+                where: "processing_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+
+  - name: int_serving_observed_date
+    description: Narrow observed-service-date index used to construct serving window membership without rescanning arrivals.
+    columns:
+      - name: service_date
+        tests:
+          - not_null:
+              config:
+                where: "service_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+          - unique:
+              config:
+                where: "service_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+
+  - name: int_serving_entity_window_summary
+    description: Shared mode, line, stop-group, and stop-post window aggregate built from one arrival-history scan.
+    columns:
+      - name: entity_type
+        tests:
+          - not_null:
+              config:
+                where: "source_end_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+          - accepted_values:
+              arguments:
+                values: ['mode', 'line', 'stop_group', 'stop_post']
+              config:
+                where: "source_end_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+      - name: entity_id
+        tests:
+          - not_null:
+              config:
+                where: "source_end_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+      - name: source_end_date
+        tests:
+          - not_null:
+              config:
+                where: "source_end_date = date('{{ var(\"processing_date\", \"1970-01-01\") }}')"
+
   - name: dim_serving_date
     description: Frontend date-navigation dimension for service dates available in the serving marts.
     columns:

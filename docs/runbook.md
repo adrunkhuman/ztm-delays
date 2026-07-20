@@ -247,8 +247,9 @@ Normal Airflow cadence must stay bounded and deliberate:
 Expensive tests are audit jobs until operational maturity is higher. Do not add them back to default Airflow DAG paths.
 
 Audit-tagged tests are real tests, not vacuous pass-through SQL. Normal Airflow DAG tests exclude `tag:audit`;
-`dag_weekly_audit` runs `dbt test --select tag:audit` weekly. Manual recovery/backfill procedures that need lineage
-assurance must run the same selector and stop on failure before continuing to later dates.
+`dag_weekly_audit` refreshes audit-tagged evidence models, then runs `dbt test --select tag:audit` weekly. Manual
+recovery/backfill procedures that need lineage assurance must run the tagged models before the same test selector and
+stop on failure before continuing to later dates.
 
 Nightly Airflow tests `mart_day_completeness`, `agg_service_coverage`, `mart_pipeline_status`, and the serving marts.
 Retired serving aggregate tests stay out of the default path.
