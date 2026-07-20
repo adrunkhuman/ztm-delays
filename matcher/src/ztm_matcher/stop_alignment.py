@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from ztm_matcher.policy import IMPOSSIBLE_SPEED_MPS
 from ztm_matcher.time import warsaw_scheduled_time
 
 REGULAR_RADIUS_METERS = 75.0
@@ -109,11 +110,25 @@ def _missing_cost(stop: dict[str, Any]) -> float:
     return 3.0
 
 
+def _segment_speed_mps(start: dict[str, Any], end: dict[str, Any]) -> float:
+    duration = (end["gps_time"] - start["gps_time"]).total_seconds()
+    latitude_delta = math.radians(float(end["lat"]) - float(start["lat"]))
+    longitude_delta = math.radians(float(end["lon"]) - float(start["lon"]))
+    start_latitude = math.radians(float(start["lat"]))
+    end_latitude = math.radians(float(end["lat"]))
+    haversine = (
+        math.sin(latitude_delta / 2) ** 2
+        + math.cos(start_latitude) * math.cos(end_latitude) * math.sin(longitude_delta / 2) ** 2
+    )
+    return 12_742_000 * math.asin(math.sqrt(haversine)) / duration
+
+
 def _segments(pings: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any], dict[str, Any]]]:
     return [
         (index, start, end)
         for index, (start, end) in enumerate(zip(pings, pings[1:], strict=False))
         if 1 <= (end["gps_time"] - start["gps_time"]).total_seconds() <= MAX_SEGMENT_GAP_SECONDS
+        and _segment_speed_mps(start, end) <= IMPOSSIBLE_SPEED_MPS
     ]
 
 

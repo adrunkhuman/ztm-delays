@@ -9,6 +9,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from ztm_matcher.policy import IMPOSSIBLE_SPEED_MPS, MAX_TOLERATED_SPEED_EVENTS, MAX_TOLERATED_SPEED_SEGMENTS
 from ztm_matcher.schemas import (
     RECONSTRUCTION_EXPECTED_STOP_EVENT_SCHEMA,
     RECONSTRUCTION_STOP_ARRIVAL_SCHEMA,
@@ -21,7 +22,6 @@ LARGE_PING_GAP_SECONDS = 900
 TERMINAL_STOP_TOLERANCE = 2
 TERMINAL_PROGRESS_LAG_SECONDS = 120
 LARGE_STOP_SEQUENCE_GAP = 4
-IMPOSSIBLE_SPEED_MPS = 50.0
 EXTREME_DELAY_SECONDS = 3600
 FACT_ROW_GROUP_ROWS = 25_000
 
@@ -60,6 +60,11 @@ def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
         and end_delay >= -TERMINAL_PROGRESS_LAG_SECONDS
     )
     impossible_speed = max_speed > IMPOSSIBLE_SPEED_MPS
+    impossible_speed_events = int(metrics.get("impossible_speed_event_count", int(impossible_speed)))
+    impossible_speed_segments = int(metrics.get("impossible_speed_segment_count", int(impossible_speed)))
+    speed_assignment_failure = (
+        impossible_speed_events > MAX_TOLERATED_SPEED_EVENTS or impossible_speed_segments > MAX_TOLERATED_SPEED_SEGMENTS
+    )
     flags = [
         *(["unsettled_passenger_boundaries"] if passenger_boundaries_unsettled else []),
         *([] if first_observed else ["missing_first_stop"]),
@@ -88,7 +93,7 @@ def classify_trip(metrics: dict[str, Any]) -> dict[str, Any]:
         (ratio is not None and ratio < BROKEN_STOP_RATIO)
         or max_ping_gap > LARGE_PING_GAP_SECONDS * 2
         or non_monotonic
-        or impossible_speed
+        or speed_assignment_failure
     )
     service_flags = [
         *(["unsettled_passenger_boundaries"] if passenger_boundaries_unsettled else []),
@@ -261,13 +266,16 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
             from regular_arrivals group by all
         ), ping_segments as (
             select accepted.gtfs_snapshot_id, accepted.processing_date, accepted.service_date, accepted.trip_id,
-                accepted.vehicle_number,
+                accepted.vehicle_number, gps.gps_time,
                 date_diff('second', lag(gps.gps_time) over trip_window, gps.gps_time)::bigint ping_gap_seconds,
                 12742000 * asin(sqrt(
                     pow(sin(radians(gps.lat - lag(gps.lat) over trip_window) / 2), 2)
                     + cos(radians(lag(gps.lat) over trip_window)) * cos(radians(gps.lat))
                     * pow(sin(radians(gps.lon - lag(gps.lon) over trip_window) / 2), 2)
-                )) / nullif(date_diff('second', lag(gps.gps_time) over trip_window, gps.gps_time), 0) speed_mps
+                )) / nullif(
+                    date_diff('microsecond', lag(gps.gps_time) over trip_window, gps.gps_time) / 1000000.0,
+                    0
+                ) speed_mps
             from accepted inner join read_parquet('{_quoted(gps)}') gps
                 on accepted.vehicle_number = gps.vehicle_number
                 and accepted.vehicle_type = gps.vehicle_type
@@ -276,11 +284,25 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
                 partition by accepted.gtfs_snapshot_id, accepted.processing_date, accepted.service_date,
                     accepted.trip_id, accepted.vehicle_number order by gps.gps_time
             )
+        ), ping_segment_events as (
+            select *, case
+                when speed_mps > {IMPOSSIBLE_SPEED_MPS}
+                 and not coalesce(lag(speed_mps > {IMPOSSIBLE_SPEED_MPS}) over trip_window, false)
+                    then 1
+                else 0
+            end impossible_speed_event_start
+            from ping_segments
+            window trip_window as (
+                partition by gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number
+                order by gps_time
+            )
         ), ping_metrics as (
             select gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number,
                 coalesce(max(ping_gap_seconds), 0)::bigint max_ping_gap_seconds,
-                coalesce(max(speed_mps), 0.0)::double max_speed_mps
-            from ping_segments where ping_gap_seconds is not null group by all
+                coalesce(max(speed_mps), 0.0)::double max_speed_mps,
+                coalesce(sum(impossible_speed_event_start), 0)::bigint impossible_speed_event_count,
+                countif(speed_mps > {IMPOSSIBLE_SPEED_MPS})::bigint impossible_speed_segment_count
+            from ping_segment_events where ping_gap_seconds is not null group by all
         ), regular_stop_metrics as (
             select gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number,
                 count(*)::bigint passenger_stops_expected, min(stop_sequence)::bigint first_required_stop_sequence,
@@ -318,6 +340,8 @@ def _trip_input_query(executions: Path, semantics: Path, arrivals: Path, gps: Pa
             coalesce(regular_metrics.max_stop_sequence_gap, 0)::bigint max_stop_sequence_gap,
             coalesce(ping_metrics.max_ping_gap_seconds, 0)::bigint max_ping_gap_seconds,
             coalesce(ping_metrics.max_speed_mps, 0.0)::double max_speed_mps,
+            coalesce(ping_metrics.impossible_speed_event_count, 0)::bigint impossible_speed_event_count,
+            coalesce(ping_metrics.impossible_speed_segment_count, 0)::bigint impossible_speed_segment_count,
             coalesce(regular_metrics.has_non_monotonic_stop_progression, false) has_non_monotonic_stop_progression
         from accepted
         left join regular_stop_metrics using (gtfs_snapshot_id, processing_date, service_date, trip_id, vehicle_number)

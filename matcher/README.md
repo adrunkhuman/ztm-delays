@@ -27,6 +27,11 @@ those duties. Vehicle selection then narrows GPS observations.
 Diagnostic outputs are investigation artifacts, not complete daily publication
 partitions. Omitting all selectors preserves the production full-day behavior.
 
+Same-terminal handoffs use exact adjacent-duty and stop-group evidence without
+an arbitrary distance cutoff. One contiguous GPS anomaly of at most three
+segments over 50 m/s is tolerated for trip classification, but those segments
+cannot produce stop-arrival candidates and the trip keeps its quality flag.
+
 GPS partitions are `vehicle_type={bus,tram}/date=YYYY-MM-DD/hour=HH/*.parquet`.
 Normal processing date `D` reads both `D-1` and `D` so one matcher run can
 reconstruct a trip across local midnight. `--no-include-prior-gps` explicitly

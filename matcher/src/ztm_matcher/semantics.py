@@ -1,22 +1,13 @@
 """Ports of dbt duty-chain and stop-boundary semantics."""
 
-import math
 from collections.abc import Iterator
 from typing import Any
 
-from ztm_matcher.gtfs import Snapshot, StopInfo, StopTime, chain_id
+from ztm_matcher.gtfs import Snapshot, StopTime, chain_id
 
 
 def _is_technical_trip(passenger_stop_count: int) -> bool:
     return passenger_stop_count == 0
-
-
-def _distance(left: StopInfo | None, right: StopInfo | None) -> float | None:
-    if not left or not right:
-        return None
-    lat1, lon1, lat2, lon2 = map(math.radians, (left.stop_lat, left.stop_lon, right.stop_lat, right.stop_lon))
-    a = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
-    return 12_742_000 * math.asin(math.sqrt(a))
 
 
 def duties(schedule: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str, Any]]:
@@ -135,14 +126,10 @@ def iter_stop_semantics(duty_rows: list[dict[str, Any]], snapshot: Snapshot) -> 
                 prefix
                 and current["duty_chain_source"] == "block_id"
                 and (current["layover_from_previous_seconds"] or 0) >= 0
-                and (_distance(snapshot.stops.get(row.stop_id), snapshot.stops.get(after.stop_id)) or math.inf) <= 250
             ):
                 kind, reason = "technical_prefix", "adjacent_duty_origin_handoff"
             elif (
-                suffix
-                and current["duty_chain_source"] == "block_id"
-                and (current["layover_to_next_seconds"] or 0) >= 0
-                and (_distance(snapshot.stops.get(before.stop_id), snapshot.stops.get(row.stop_id)) or math.inf) <= 250
+                suffix and current["duty_chain_source"] == "block_id" and (current["layover_to_next_seconds"] or 0) >= 0
             ):
                 kind, reason = "technical_suffix", "adjacent_duty_destination_handoff"
             elif prefix or suffix:
@@ -211,7 +198,6 @@ def _classification_evidence(current: dict[str, Any], row: StopTime, kind: str) 
                 "block_id_duty_chain",
                 "non_negative_layover",
                 "same_stop_group_terminal_movement",
-                "short_terminal_movement",
             ]
         )
     if kind == "unknown":

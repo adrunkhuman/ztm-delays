@@ -75,7 +75,7 @@ def _metrics(**changes: object) -> dict[str, Any]:
         ("large_ping_gap", {"max_ping_gap_seconds": 901}, "partial", "regular", {"large_ping_gap"}),
         (
             "impossible_speed",
-            {"max_speed_mps": 50.1},
+            {"max_speed_mps": 50.1, "impossible_speed_event_count": 2, "impossible_speed_segment_count": 2},
             "broken",
             "matching_failure",
             {"impossible_speed_jump"},
@@ -156,3 +156,33 @@ def test_overnight_quality_fixture_is_independent_of_service_date() -> None:
 
     assert result["trip_quality"] == "complete"
     assert "extreme_delay" not in result["quality_flags"]
+
+
+def test_speed_outlier_tolerance_keeps_flag_without_failing_assignment() -> None:
+    result = classify_trip(
+        _metrics(max_speed_mps=80.0, impossible_speed_event_count=1, impossible_speed_segment_count=2)
+    )
+
+    assert result["trip_quality"] == "complete"
+    assert result["service_observation_class"] == "regular"
+    assert result["has_impossible_speed_jump"]
+    assert "impossible_speed_jump" in result["quality_flags"]
+    assert "bad_assignment_evidence" not in result["service_observation_flags"]
+
+
+def test_speed_outlier_tolerance_does_not_hide_repeated_events() -> None:
+    result = classify_trip(
+        _metrics(max_speed_mps=80.0, impossible_speed_event_count=2, impossible_speed_segment_count=2)
+    )
+
+    assert result["trip_quality"] == "broken"
+    assert result["service_observation_class"] == "matching_failure"
+
+
+def test_speed_outlier_tolerance_does_not_hide_long_bursts() -> None:
+    result = classify_trip(
+        _metrics(max_speed_mps=80.0, impossible_speed_event_count=1, impossible_speed_segment_count=4)
+    )
+
+    assert result["trip_quality"] == "broken"
+    assert result["service_observation_class"] == "matching_failure"

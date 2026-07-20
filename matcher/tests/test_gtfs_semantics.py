@@ -10,7 +10,7 @@ from ztm_matcher.gtfs import Snapshot, StopTime, Trip, load, select
 from ztm_matcher.semantics import _is_technical_trip, duties, stop_semantics
 
 
-def _zip(path: Path, block: str = "block-a", *, include_zone_id: bool = True) -> None:
+def _zip(path: Path, block: str = "block-a", *, include_zone_id: bool = True, handoff_stop_lat: str = "52.202") -> None:
     tables = {
         "trips.txt": [
             [
@@ -37,7 +37,7 @@ def _zip(path: Path, block: str = "block-a", *, include_zone_id: bool = True) ->
             ["stop_id", "stop_name", "stop_code", "stop_lat", "stop_lon", "zone_id", "stop_name_stem", "town_name"],
             ["200001", "A", "1", "52.20", "21.00", "1", "A", "Warszawa"],
             ["200002", "B", "2", "52.201", "21.001", "1", "B", "Warszawa"],
-            ["200003", "C", "3", "52.202", "21.002", "1", "C", "Warszawa"],
+            ["200003", "C", "3", handoff_stop_lat, "21.002", "1", "C", "Warszawa"],
         ],
         "shapes.txt": [["shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"], ["s", "52.2", "21", "1"]],
         "routes.txt": [["route_id", "route_short_name", "route_type"], ["r", "1", "3"]],
@@ -72,6 +72,18 @@ def test_exact_block_handoff_is_technical_and_fallback_is_unknown(tmp_path: Path
     boundary = next(row for row in fallback_rows if row["trip_id"] == "two" and row["stop_sequence"] == 1)
     assert boundary["stop_execution_class"] == "unknown"
     assert not boundary["is_passenger_stop"]
+
+
+def test_same_group_terminal_handoff_is_not_limited_by_distance(tmp_path: Path) -> None:
+    path = tmp_path / "schedule.zip"
+    _zip(path, handoff_stop_lat="52.212")
+    snapshot = load(path, "synthetic")
+    duty_rows = duties(select(snapshot, date(2026, 1, 15)), snapshot)
+
+    boundary = next(
+        row for row in stop_semantics(duty_rows, snapshot) if row["trip_id"] == "two" and row["stop_sequence"] == 1
+    )
+    assert boundary["stop_execution_class"] == "technical_prefix"
 
 
 def test_stop_times_are_compact_records_indexed_by_trip(tmp_path: Path) -> None:
