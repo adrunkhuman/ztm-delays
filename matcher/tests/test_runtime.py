@@ -641,7 +641,7 @@ def test_stop_alignment_inputs_are_removed_after_failure(tmp_path: Path, monkeyp
         allow_missing_hours=True,
     )
 
-    def fail_after_materialization(*_: object) -> None:
+    def fail_after_materialization(*_: object, **__: object) -> None:
         inputs = run._work() / ".stop_alignment_inputs.parquet"
         assert inputs.is_file()
         assert "semantic_stop_id" in pq.read_schema(inputs).names
@@ -887,6 +887,49 @@ def test_fact_speed_metrics_ignore_same_number_from_other_vehicle_type(tmp_path:
 
     assert trip["trip_quality"] == "complete"
     assert not trip["has_impossible_speed_jump"]
+
+
+def test_fact_speed_tolerance_counts_one_contiguous_outlier_event(tmp_path: Path) -> None:
+    zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"
+    _gtfs(zip_path)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        tmp_path / "gps",
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+    with ReconstructionRun(config) as run:
+        _write_stop_alignment_fixture(run, ("4244",))
+        run.align_stops()
+        normalized = pq.read_table(run.normalized_path).to_pylist()
+        start = datetime(2026, 1, 15, 1, 0, tzinfo=UTC)
+        normalized.extend(
+            [
+                {
+                    "line": "187",
+                    "brigade": "0012",
+                    "lat": lat,
+                    "lon": lon,
+                    "gps_time": start + timedelta(seconds=seconds),
+                    "vehicle_number": "4244",
+                    "vehicle_type": 1,
+                    "ingested_at": start + timedelta(seconds=seconds),
+                    "gps_date": date(2026, 1, 15),
+                }
+                for seconds, lat, lon in ((30, 52.5, 21.5), (31, 52.2015, 21.0015))
+            ]
+        )
+        normalized.sort(key=lambda row: row["gps_time"])
+        pq.write_table(pa.Table.from_pylist(normalized, schema=NORMALIZED_GPS_SCHEMA), run.normalized_path)
+
+        run.build_facts()
+        trip = pq.read_table(run._work() / "reconstruction_trip_facts.parquet").to_pylist()[0]
+
+    assert trip["trip_quality"] == "complete"
+    assert trip["has_impossible_speed_jump"]
 
 
 def test_schedule_trip_universe_classifies_zone_depot_technical_and_short_turns(tmp_path: Path) -> None:

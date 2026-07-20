@@ -113,6 +113,15 @@ def _candidate(stop_index: int, segment_index: int, distance_m: float = 0.0) -> 
     )
 
 
+def test_impossible_speed_segments_are_excluded_from_stop_candidates() -> None:
+    stops = [_stop(1, 0.005)]
+    pings = [_ping(0, 0.0), _ping(10, 0.01)]
+
+    candidates = crossing_candidates(_execution(), stops, pings)
+
+    assert not candidates[0]
+
+
 def _signature(selected: tuple[CrossingCandidate | None, ...]) -> tuple[tuple[int, int], ...]:
     return tuple(
         (-1, -1) if candidate is None else (candidate.segment_index, int(candidate.actual_time.timestamp()))

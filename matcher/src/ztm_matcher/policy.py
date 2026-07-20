@@ -1,0 +1,5 @@
+"""Shared matcher policy thresholds."""
+
+IMPOSSIBLE_SPEED_MPS = 50.0
+MAX_TOLERATED_SPEED_EVENTS = 1
+MAX_TOLERATED_SPEED_SEGMENTS = 3
