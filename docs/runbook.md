@@ -124,7 +124,7 @@ Matcher runs require `MATCHER_ENABLED=true`, isolated staging and matcher-input 
 
 For each processing date, the DAG reads immutable GPS inputs and the pinned GTFS snapshot, then runs the bounded matcher.
 Before publication, it verifies non-empty artifacts, exact schemas and snapshot lineage, unique grains, accepted-execution
-counts, complete mode coverage, RSS no greater than the configured limit, and zero swap.
+counts, complete mode coverage, and peak RSS and current process swap no greater than their configured limits.
 
 After validation, the DAG idempotently creates the stable matcher-input dataset and tables when absent, then atomically
 replaces the three fact partitions at `gps_date = processing_date` plus the stop-semantics `processing_date` partition. It
