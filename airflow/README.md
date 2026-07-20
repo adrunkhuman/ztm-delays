@@ -32,6 +32,7 @@ Runtime env defaults match the current VPS:
 | `MATCHER_MIN_FREE_DISK_BYTES` | `5368709120` (5 GiB) |
 | `MATCHER_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
 | `MATCHER_MAX_RSS_BYTES` | `3221225472` (3 GiB) |
+| `MATCHER_MAX_SWAP_BYTES` | `2147483648` (2 GiB; `0` requires zero current swap) |
 | `MATCHER_MAX_PUBLICATION_BYTES` | `5368709120` (5 GiB) |
 | `MATCHER_STAGING_RETENTION_DAYS` | `3` |
 | `MATCHER_INTERMEDIATE_MARKER_RETENTION_DAYS` | `3` |
@@ -70,7 +71,7 @@ Runtime env defaults match the current VPS:
 
 Production requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, the matcher source mount, and writable workspace and `uv` environment paths.
 
-Before publication, Airflow verifies artifact schemas, hashes, snapshot lineage, row grains, processing dates, non-empty outputs, bus/tram coverage, accepted-execution counts, peak RSS, and zero swap. It then replaces the four stable `ztm_matcher_input` partitions in one BigQuery transaction. The stable dataset and tables are created idempotently on first publication.
+Before publication, Airflow verifies artifact schemas, hashes, snapshot lineage, row grains, processing dates, non-empty outputs, bus/tram coverage, accepted-execution counts, peak RSS, and current process swap measured at matcher completion. The swap bound defaults to 2 GiB, can be set with `MATCHER_MAX_SWAP_BYTES`, and accepts `0` for strict zero-swap validation. It then replaces the four stable `ztm_matcher_input` partitions in one BigQuery transaction. The stable dataset and tables are created idempotently on first publication.
 
 Run-scoped BigQuery load and publication tables expire after three days. Publication staging tables are also deleted
 best-effort after the published marker exists and post-validation succeeds. Pending and validated GCS markers are kept

@@ -54,6 +54,7 @@ DEFAULT_MAX_GPS_BYTES = 20 * 1024**3
 DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024**3
 DEFAULT_MAX_MARKER_BYTES = 20 * 1024**2
 DEFAULT_MAX_RSS_BYTES = 3 * 1024**3
+DEFAULT_MAX_CURRENT_SWAP_BYTES = 2 * 1024**3
 DEFAULT_MAX_PUBLICATION_BYTES = 5 * 1024**3
 DEFAULT_STAGING_RETENTION_DAYS = 3
 DEFAULT_INTERMEDIATE_MARKER_RETENTION_DAYS = 3
@@ -311,6 +312,7 @@ class MatcherConfig:
     min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
     max_marker_bytes: int = DEFAULT_MAX_MARKER_BYTES
     max_rss_bytes: int = DEFAULT_MAX_RSS_BYTES
+    max_current_swap_bytes: int = DEFAULT_MAX_CURRENT_SWAP_BYTES
     max_publication_bytes: int = DEFAULT_MAX_PUBLICATION_BYTES
     staging_retention_days: int = DEFAULT_STAGING_RETENTION_DAYS
     intermediate_marker_retention_days: int = DEFAULT_INTERMEDIATE_MARKER_RETENTION_DAYS
@@ -342,6 +344,7 @@ class MatcherConfig:
             min_free_disk_bytes=_env_positive_int("MATCHER_MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES),
             max_marker_bytes=_env_positive_int("MATCHER_MAX_MARKER_BYTES", DEFAULT_MAX_MARKER_BYTES),
             max_rss_bytes=_env_positive_int("MATCHER_MAX_RSS_BYTES", DEFAULT_MAX_RSS_BYTES),
+            max_current_swap_bytes=_env_nonnegative_int("MATCHER_MAX_SWAP_BYTES", DEFAULT_MAX_CURRENT_SWAP_BYTES),
             max_publication_bytes=_env_positive_int("MATCHER_MAX_PUBLICATION_BYTES", DEFAULT_MAX_PUBLICATION_BYTES),
             staging_retention_days=_env_positive_int("MATCHER_STAGING_RETENTION_DAYS", DEFAULT_STAGING_RETENTION_DAYS),
             intermediate_marker_retention_days=_env_positive_int(
@@ -394,6 +397,8 @@ class MatcherConfig:
         ):
             if value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.max_current_swap_bytes < 0:
+            raise ValueError("MATCHER_MAX_SWAP_BYTES must be a nonnegative integer")
 
 
 @dataclass(frozen=True)
@@ -450,6 +455,17 @@ def _env_positive_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be a positive integer") from exc
     if parsed < 1:
         raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _env_nonnegative_int(name: str, default: int) -> int:
+    value = os.getenv(name, str(default)).strip()
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a nonnegative integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
     return parsed
 
 
@@ -2334,7 +2350,7 @@ def _validate_publication_invariants(pending: dict[str, object], config: Matcher
         )
 
     peak_rss = metrics.get("peak_rss_bytes")
-    swapping = metrics.get("swapping_observed")
+    current_swap = metrics.get("current_swap_bytes")
     if not isinstance(peak_rss, int) or peak_rss > config.max_rss_bytes:
         issues.append(
             _validation_issue(
@@ -2345,18 +2361,24 @@ def _validate_publication_invariants(pending: dict[str, object], config: Matcher
                 peak_rss_bytes_max=config.max_rss_bytes,
             )
         )
-    if swapping is not False:
+    if type(current_swap) is not int or current_swap < 0 or current_swap > config.max_current_swap_bytes:
         issues.append(
-            _validation_issue("fail", "resource", "swapping was observed or not measured", swapping_observed=swapping)
+            _validation_issue(
+                "fail",
+                "resource",
+                "current swap is missing or exceeds configured bound",
+                current_swap_bytes=current_swap,
+                current_swap_bytes_max=config.max_current_swap_bytes,
+            )
         )
     return {
         "status": "fail" if issues else "pass",
-        "validation_contract_version": "matcher-invariants-v1",
+        "validation_contract_version": "matcher-invariants-v2",
         "resource_bounds": {
             "peak_rss_bytes": peak_rss,
             "peak_rss_bytes_max": config.max_rss_bytes,
-            "swapping_observed": swapping,
-            "swapping_observed_must_be": False,
+            "current_swap_bytes": current_swap,
+            "current_swap_bytes_max": config.max_current_swap_bytes,
         },
         "issues": issues,
     }
@@ -2377,21 +2399,21 @@ def publish_matcher_artifacts(
     if pending.get("processing_date") != processing_date or pending.get("run_id") != run_id:
         raise RuntimeError("Matcher pending metadata does not match this DAG run")
     _pending_tables(config, run_id, pending)
+    validation = _validate_publication_invariants(pending, config)
+    if validation["status"] != "pass":
+        raise RuntimeError(f"Matcher publication invariants failed: {validation['issues']}")
     existing_marker = _read_validated_marker(storage_client, config, processing_date, run_id)
     if existing_marker is not None:
         if _validated_marker_identity(existing_marker) != _immutable_matcher_run_identity(pending):
             raise RuntimeError("Matcher validated marker already exists with different immutable run content")
-        validation = existing_marker.get("validation")
-        if not isinstance(validation, dict) or validation.get("status") != "pass":
+        existing_validation = existing_marker.get("validation")
+        if not isinstance(existing_validation, dict) or existing_validation.get("status") != "pass":
             raise RuntimeError("Matcher validated marker does not record a passing validation")
         marker_uri = f"gs://{GCS_BUCKET}/{_validated_name(config, processing_date, run_id)}"
     else:
-        validation = _validate_publication_invariants(pending, config)
-        if validation["status"] != "pass":
-            raise RuntimeError(f"Matcher publication invariants failed: {validation['issues']}")
         marker = pending | {
             "immutable_run_identity": _immutable_matcher_run_identity(pending),
-            "validation_contract_version": "matcher-invariants-v1",
+            "validation_contract_version": "matcher-invariants-v2",
             "validation": validation,
             "diagnostics": _marker_diagnostics(cast("dict[str, object]", pending["metrics"])),
         }

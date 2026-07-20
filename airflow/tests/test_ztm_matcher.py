@@ -26,9 +26,25 @@ def test_config_uses_only_matcher_environment_contract(monkeypatch: pytest.Monke
     assert config.max_publication_bytes == matcher.DEFAULT_MAX_PUBLICATION_BYTES
     assert config.max_rss_bytes == matcher.DEFAULT_MAX_RSS_BYTES
     assert config.max_rss_bytes == 3 * 1024**3
+    assert config.max_current_swap_bytes == matcher.DEFAULT_MAX_CURRENT_SWAP_BYTES
+    assert config.max_current_swap_bytes == 2 * 1024**3
     assert config.staging_retention_days == 3
     assert config.intermediate_marker_retention_days == 3
     assert config.published_marker_retention_days == 30
+
+
+def test_config_accepts_strict_zero_current_swap_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MATCHER_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_STAGING_DATASET", "matcher_stage")
+    monkeypatch.setenv("BIGQUERY_MATCHER_INPUT_DATASET", "matcher_input")
+    monkeypatch.setenv("MATCHER_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("MATCHER_MAX_SWAP_BYTES", "0")
+    matcher = _load_matcher()
+
+    config = matcher.MatcherConfig.from_env()
+
+    config.validate()
+    assert config.max_current_swap_bytes == 0
 
 
 @pytest.mark.parametrize("dataset", ["", "project.dataset", "bad-dataset"])
@@ -171,9 +187,49 @@ def test_publication_invariants_reject_missing_mode_and_resource_evidence(tmp_pa
     assert matcher._validate_publication_invariants(pending, config)["status"] == "pass"
     pending["artifacts"]["trip"]["modes"] = ["bus"]
     pending["metrics"]["peak_rss_bytes"] = config.max_rss_bytes + 1
+    pending["metrics"]["current_swap_bytes"] = config.max_current_swap_bytes + 1
     result = matcher._validate_publication_invariants(pending, config)
     assert result["status"] == "fail"
-    assert len(result["issues"]) >= 2
+    assert len(result["issues"]) >= 3
+
+
+def test_publication_invariants_bound_current_swap_inclusively(tmp_path: Path) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path, max_current_swap_bytes=10)
+    pending = _pending(matcher)
+    pending["metrics"]["current_swap_bytes"] = 10
+
+    assert matcher._validate_publication_invariants(pending, config)["status"] == "pass"
+
+    del pending["metrics"]["current_swap_bytes"]
+    result = matcher._validate_publication_invariants(pending, config)
+    assert result["status"] == "fail"
+    assert any(issue["category"] == "resource" for issue in result["issues"])
+
+    for invalid in (-1, False):
+        pending["metrics"]["current_swap_bytes"] = invalid
+        assert matcher._validate_publication_invariants(pending, config)["status"] == "fail"
+
+
+def test_existing_validated_marker_does_not_bypass_current_resource_bounds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    matcher = _load_matcher()
+    config = _config(matcher, tmp_path, max_current_swap_bytes=0)
+    pending = _pending(matcher)
+    pending["metrics"]["current_swap_bytes"] = 1
+    marker = pending | {
+        "immutable_run_identity": matcher._immutable_matcher_run_identity(pending),
+        "validation": {"status": "pass"},
+    }
+    monkeypatch.setattr(matcher.MatcherConfig, "from_env", lambda: config)
+    monkeypatch.setattr(matcher.storage, "Client", lambda **_kwargs: object())
+    monkeypatch.setattr(matcher, "_read_pending", lambda *_args: pending)
+    monkeypatch.setattr(matcher, "_pending_tables", lambda *_args: {})
+    monkeypatch.setattr(matcher, "_read_validated_marker", lambda *_args: marker)
+
+    with pytest.raises(RuntimeError, match="publication invariants failed"):
+        matcher.publish_matcher_artifacts("2026-07-09", "run", {"status": "loaded_pending", **pending})
 
 
 def test_marker_writes_are_create_only_and_idempotent(tmp_path: Path) -> None:
@@ -1386,7 +1442,12 @@ def _pending(matcher: types.ModuleType) -> dict[str, Any]:
         "tables": {
             spec.key: matcher._table_identity("matcher_stage", "run", spec, "a" * 64) for spec in matcher.ARTIFACTS
         },
-        "metrics": {"peak_rss_bytes": 1, "swapping_observed": False, "accepted_fact_executions": 1},
+        "metrics": {
+            "peak_rss_bytes": 1,
+            "current_swap_bytes": 0,
+            "swapping_observed": False,
+            "accepted_fact_executions": 1,
+        },
     }
 
 
