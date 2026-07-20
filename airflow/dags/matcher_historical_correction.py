@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 from datetime import date, timedelta
 from pathlib import Path
 from time import monotonic, sleep
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 DEFAULT_MAX_DAYS = 31
+MAX_SERVING_REFRESH_DAYS = 32
 DEFAULT_MAX_QUERY_BYTES = 5 * 1024**3
 DEFAULT_RUN_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_RUN_POLL_INTERVAL_SECONDS = 15
@@ -185,11 +187,12 @@ def _historical_run_id(plan_id: str, processing_date: str) -> str:
     return f"matcher-historical-correction__{plan_id}__{processing_date}"
 
 
-def _execution_command(
+def _execution_command(  # noqa: PLR0913
     plan_id: str,
     processing_date: str,
     gtfs_snapshot_id: str,
     expected_input_inventory_digest: str,
+    maximum_bytes_billed: int,
     *,
     skip_prior_publication: bool,
 ) -> str:
@@ -197,6 +200,9 @@ def _execution_command(
         "processing_date": processing_date,
         "expected_gtfs_snapshot_id": gtfs_snapshot_id,
         "expected_input_inventory_digest": expected_input_inventory_digest,
+        "historical_correction": True,
+        "historical_plan_id": plan_id,
+        "maximum_bytes_billed": maximum_bytes_billed,
     }
     if skip_prior_publication:
         conf["skip_prior_publication"] = True
@@ -204,6 +210,26 @@ def _execution_command(
         [
             "airflow dags trigger dag_daily_gps",
             f"--run-id {shlex.quote(_historical_run_id(plan_id, processing_date))}",
+            f"--conf {shlex.quote(json.dumps(conf, sort_keys=True))}",
+        ]
+    )
+
+
+def _serving_refresh_run_id(plan_id: str) -> str:
+    return f"matcher-historical-serving-refresh__{plan_id}"
+
+
+def _serving_refresh_command(plan_id: str, days: list[dict[str, str]], maximum_bytes_billed: int) -> str:
+    conf = {
+        "days": days,
+        "restore_day": days[-1],
+        "maximum_bytes_billed": maximum_bytes_billed,
+        "historical_plan_id": plan_id,
+    }
+    return " ".join(
+        [
+            "airflow dags trigger dag_historical_serving_refresh",
+            f"--run-id {shlex.quote(_serving_refresh_run_id(plan_id))}",
             f"--conf {shlex.quote(json.dumps(conf, sort_keys=True))}",
         ]
     )
@@ -311,11 +337,74 @@ def wait_for_dag_run(  # noqa: PLR0913
         sleep_for(min(poll_interval_seconds, remaining))
 
 
-def build_historical_correction_plan(
+def _run_command(command: str) -> None:
+    subprocess.run(shlex.split(command), check=True)  # noqa: S603
+
+
+def execute_historical_correction_plan(  # noqa: C901
+    plan: dict[str, object],
+    *,
+    get_state: Callable[[str, str], str | None] = _dag_run_state,
+    run_command: Callable[[str], None] = _run_command,
+    wait_for_run: Callable[[str, str], None] | None = None,
+) -> None:
+    """Run an approved plan sequentially, skipping already successful deterministic runs."""
+    if plan.get("plan_version") != "matcher-historical-correction-v6" or plan.get("read_only") is not True:
+        raise ValueError("Historical correction execution requires an approved v6 plan")
+    bounds = cast("dict[str, int]", plan["bounds"])
+    timeout_seconds = int(bounds["run_timeout_seconds"])
+    poll_interval_seconds = int(bounds["run_poll_interval_seconds"])
+
+    def wait(dag_id: str, run_id: str) -> None:
+        if wait_for_run is not None:
+            wait_for_run(dag_id, run_id)
+            return
+        wait_for_dag_run(
+            dag_id,
+            run_id,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+    commands = cast("list[str]", plan["sequential_commands"])
+    days = cast("list[dict[str, object]]", plan["days"])
+    for index, day in enumerate(days):
+        run_id = _historical_run_id(str(plan["plan_id"]), str(day["processing_date"]))
+        state = get_state("dag_daily_gps", run_id)
+        if state == "success":
+            continue
+        if state in {"queued", "running"}:
+            wait("dag_daily_gps", run_id)
+            continue
+        if state is not None:
+            raise RuntimeError(
+                f"Historical correction run must be cleared before resume: run_id={run_id} state={state}"
+            )
+        run_command(commands[index * 4 + 2])
+        wait("dag_daily_gps", run_id)
+
+    refresh = cast("dict[str, object]", plan["serving_refresh"])
+    refresh_run_id = str(refresh["run_id"])
+    refresh_state = get_state("dag_historical_serving_refresh", refresh_run_id)
+    if refresh_state == "success":
+        return
+    if refresh_state in {"queued", "running"}:
+        wait("dag_historical_serving_refresh", refresh_run_id)
+        return
+    if refresh_state is not None:
+        raise RuntimeError(
+            f"Historical serving refresh must be cleared before resume: run_id={refresh_run_id} state={refresh_state}"
+        )
+    run_command(commands[-2])
+    wait("dag_historical_serving_refresh", refresh_run_id)
+
+
+def build_historical_correction_plan(  # noqa: C901, PLR0913
     start_date: str | None = None,
     end_date: str | None = None,
     *,
     plan_id: str,
+    refresh_through_date: str | None = None,
     bq_client: Any | None = None,
     storage_client: Any | None = None,
 ) -> dict[str, object]:
@@ -324,20 +413,28 @@ def build_historical_correction_plan(
         raise ValueError("Historical correction planning requires explicit start_date and end_date")
     plan_id = _validated_plan_id(plan_id)
     start, end = date.fromisoformat(start_date), date.fromisoformat(end_date)
+    if refresh_through_date is None:
+        raise ValueError("Historical correction planning requires explicit refresh_through_date")
+    refresh_end = date.fromisoformat(refresh_through_date)
     max_days = _positive_env("MATCHER_HISTORICAL_MAX_DAYS", DEFAULT_MAX_DAYS)
     maximum_bytes_billed = _positive_env("MATCHER_HISTORICAL_MAX_QUERY_BYTES", DEFAULT_MAX_QUERY_BYTES)
     run_timeout_seconds = _positive_env("MATCHER_HISTORICAL_RUN_TIMEOUT_SECONDS", DEFAULT_RUN_TIMEOUT_SECONDS)
     run_poll_interval_seconds = _positive_env(
         "MATCHER_HISTORICAL_RUN_POLL_INTERVAL_SECONDS", DEFAULT_RUN_POLL_INTERVAL_SECONDS
     )
-    if start > end or start < HISTORICAL_DAILY_ELIGIBLE_START_DATE or (end - start).days + 1 > max_days:
+    if (
+        start > end
+        or refresh_end < end
+        or start < HISTORICAL_DAILY_ELIGIBLE_START_DATE
+        or (end - start).days + 1 > max_days
+    ):
         raise ValueError("Historical correction date range is outside its allowed bounded window")
     planned_dates, skipped_processing_dates = _eligible_processing_dates(start, end)
     if not planned_dates:
         raise ValueError("Historical correction date range has no eligible processing dates")
     bq_client = bq_client or bigquery.Client(project=GCP_PROJECT)
     storage_client = storage_client or storage.Client(project=GCP_PROJECT)
-    mappings = _snapshot_rows(bq_client, start, end, maximum_bytes_billed)
+    mappings = _snapshot_rows(bq_client, start - timedelta(days=1), refresh_end, maximum_bytes_billed)
     missing = [item.isoformat() for item in planned_dates if item.isoformat() not in mappings]
     if missing:
         raise RuntimeError(f"No exact GTFS snapshot mapping for: {', '.join(missing)}")
@@ -385,6 +482,25 @@ def build_historical_correction_plan(
         )
     gps_bytes = sum(int(gps_object["bytes"]) for planned_day in days for gps_object in planned_day["gps_inventory"])
     gtfs_bytes = sum(int(planned_day["gtfs_snapshot"]["bytes"]) for planned_day in days)
+    first_affected_date = min(
+        date.fromisoformat(str(service_date))
+        for planned_day in days
+        for service_date in cast("dict[str, str]", planned_day["affected_partitions"]).values()
+    )
+    affected_service_dates = [
+        item.isoformat()
+        for index in range((refresh_end - first_affected_date).days + 1)
+        if not historical_daily_exclusion_reason(item := first_affected_date + timedelta(days=index))
+    ]
+    if len(affected_service_dates) > MAX_SERVING_REFRESH_DAYS:
+        raise ValueError(f"Historical serving refresh exceeds its bounded {MAX_SERVING_REFRESH_DAYS}-day window")
+    missing_refresh_mappings = [service_date for service_date in affected_service_dates if service_date not in mappings]
+    if missing_refresh_mappings:
+        raise RuntimeError(f"No exact GTFS snapshot mapping for serving refresh: {', '.join(missing_refresh_mappings)}")
+    serving_refresh_days = [
+        {"processing_date": service_date, "gtfs_snapshot_id": mappings[service_date]["gtfs_snapshot_id"]}
+        for service_date in affected_service_dates
+    ]
     sequential_commands: list[str] = []
     for planned_day in days:
         sequential_commands.extend(
@@ -400,6 +516,7 @@ def build_historical_correction_plan(
                     str(planned_day["processing_date"]),
                     str(planned_day["gtfs_snapshot_id"]),
                     str(planned_day["expected_input_inventory_digest"]),
+                    maximum_bytes_billed,
                     skip_prior_publication=planned_day["prior_publication_boundary"] is not None,
                 ),
                 _wait_command(
@@ -410,8 +527,21 @@ def build_historical_correction_plan(
                 ),
             ]
         )
+    sequential_commands.extend(
+        [
+            _serving_refresh_command(plan_id, serving_refresh_days, maximum_bytes_billed),
+            _wait_command(
+                plan_id,
+                affected_service_dates[-1],
+                run_timeout_seconds,
+                run_poll_interval_seconds,
+            )
+            .replace("dag_daily_gps", "dag_historical_serving_refresh")
+            .replace(_historical_run_id(plan_id, affected_service_dates[-1]), _serving_refresh_run_id(plan_id)),
+        ]
+    )
     return {
-        "plan_version": "matcher-historical-correction-v5",
+        "plan_version": "matcher-historical-correction-v6",
         "plan_id": plan_id,
         "read_only": True,
         "date_range": {
@@ -435,6 +565,12 @@ def build_historical_correction_plan(
             "total_bytes": gps_bytes + gtfs_bytes,
         },
         "days": days,
+        "serving_refresh": {
+            "days": serving_refresh_days,
+            "affected_service_dates": affected_service_dates,
+            "run_id": _serving_refresh_run_id(plan_id),
+            "runs_after_all_corrections": True,
+        },
         "eligible_processing_segments": _processing_date_segments(planned_dates),
         "skipped_processing_dates": skipped_processing_dates,
         "sequential_commands": sequential_commands,
@@ -470,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--plan-id", required=True)
     plan_parser.add_argument("--start-date", required=True)
     plan_parser.add_argument("--end-date", required=True)
+    plan_parser.add_argument("--refresh-through-date")
     plan_parser.add_argument("--report-json", type=Path)
     plan_parser.add_argument("--gcs-report-uri")
     wait_parser = subparsers.add_parser("wait-for-dag-run")
@@ -477,6 +614,8 @@ def main(argv: list[str] | None = None) -> int:
     wait_parser.add_argument("--run-id", required=True)
     wait_parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_RUN_TIMEOUT_SECONDS)
     wait_parser.add_argument("--poll-interval-seconds", type=int, default=DEFAULT_RUN_POLL_INTERVAL_SECONDS)
+    execute_parser = subparsers.add_parser("execute")
+    execute_parser.add_argument("--plan-json", required=True, type=Path)
     args = parser.parse_args(argv)
     if args.mode == "wait-for-dag-run":
         wait_for_dag_run(
@@ -486,7 +625,18 @@ def main(argv: list[str] | None = None) -> int:
             poll_interval_seconds=args.poll_interval_seconds,
         )
         return 0
-    plan = build_historical_correction_plan(args.start_date, args.end_date, plan_id=args.plan_id)
+    if args.mode == "execute":
+        plan = json.loads(args.plan_json.read_text(encoding="utf-8"))
+        if not isinstance(plan, dict):
+            raise ValueError("Historical correction plan JSON must contain an object")
+        execute_historical_correction_plan(plan)
+        return 0
+    plan = build_historical_correction_plan(
+        args.start_date,
+        args.end_date,
+        plan_id=args.plan_id,
+        refresh_through_date=args.refresh_through_date,
+    )
     if args.report_json:
         write_plan_report(plan, args.report_json)
     if args.gcs_report_uri:

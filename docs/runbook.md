@@ -56,20 +56,28 @@ recovery manually, run the audit selector explicitly rather than relying on defa
 
 ## Date-Range Backfill
 
-Generate a read-only plan with `matcher_historical_correction.py`, review its exact snapshot and GCS inventories, then
-run only the emitted dates in order. The retained eligible range starts on `2026-06-27`. Dates `2026-07-05` through
+Generate an immutable plan with `matcher_historical_correction.py plan --plan-id ID --start-date YYYY-MM-DD
+--end-date YYYY-MM-DD --refresh-through-date LATEST_PUBLISHED_DATE --report-json PLAN.json`, then review its exact snapshot, GCS inventory, affected partitions,
+and final serving-refresh dates before execution. The retained eligible range starts on `2026-06-27`. Dates `2026-07-05` through
 `2026-07-07` are excluded because of the confirmed GPS outage; `2026-06-26` is also excluded because collection began
 mid-day. July 12 remains eligible because lower Sunday tram volume is expected service, not an outage.
 
 Each run uses the persisted governing snapshot from `int_gtfs_processing_snapshot`. Do not substitute the newest loaded
-snapshot. Wait for each date to finish and pass its checks before triggering the next date; queued historical runs are
-not an ordering guarantee.
+snapshot. Execute the reviewed plan inside the Airflow container with `matcher_historical_correction.py execute
+--plan-json PLAN.json`. The controller uses deterministic run IDs, skips successful dates on resume, stops on the first
+non-successful existing run, and never queues a later date before the current date succeeds. Clear only the failed child
+run after diagnosis, then execute the same plan again.
 
-For each GPS processing date, rerun the matcher publication, then publish facts for the current service date and
-the prior service date. Boundary plans explicitly use current-only input and omit the excluded prior partition.
-Normal prior publication incorporates after-midnight observations without relabeling prior-day rows to the current
-processing date's snapshot. After detail exists, rebuild completeness, coverage, aggregate, and pipeline-status marts
-over the collected-history window.
+For each GPS processing date, correction mode reruns matcher publication, current/prior facts, completeness, coverage,
+and pipeline status. It skips the archive-wide matcher schedule dependencies, serving marts, and per-date asset event.
+Boundary plans explicitly use current-only input and omit the excluded prior partition. Normal prior publication
+incorporates after-midnight observations without relabeling prior-day rows to the current processing date's snapshot.
+Every dbt command uses the plan's `maximum_bytes_billed` guard.
+
+After every correction date succeeds, the controller triggers `dag_historical_serving_refresh` once. That DAG rebuilds
+each deduplicated serving date once, restores the final schedule view, rebuilds full serving dimensions once, and emits
+one asset event so `dag_serving_export` publishes one consolidated DuckDB generation. If correction fails, serving and
+export do not run. If only serving refresh fails, clear that refresh run and resume the same plan without rerunning facts.
 
 After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each processing batch and that
 `schedule_version_id` resolves to a version covering the row's GPS processing date. Stop-arrival facts carry both

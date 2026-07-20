@@ -65,7 +65,7 @@ jobs:
         run: uvx ruff check airflow
 
       - name: Test Airflow DAG boundaries
-        run: uvx --with pytest --with tzdata --with duckdb --with pyarrow pytest airflow/tests
+        run: uvx --with pytest --with tzdata --with duckdb --with pyarrow --with jinja2 pytest airflow/tests
 
   matcher:
     name: Matcher
