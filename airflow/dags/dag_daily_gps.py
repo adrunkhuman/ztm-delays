@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha1
 from typing import TYPE_CHECKING, cast
@@ -62,8 +63,7 @@ INT_GTFS_PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_
 DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
 MATCHER_FACT_DEPENDENCY_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__routes stg_gtfs__calendar_dates"
-    " int_gtfs_trip_schedule_history int_gtfs_trip_schedule int_gtfs_duty_chain"
-    " int_schedule_version dim_schedule_version"
+    " int_gtfs_trip_schedule_history int_schedule_version dim_schedule_version"
 )
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 TRIP_FACT_MODEL = "fct_trip"
@@ -265,6 +265,26 @@ def _configured_skip_prior_publication() -> bool:
     return skip_prior_publication
 
 
+def _validate_historical_correction_config(processing_date: str) -> None:
+    context = get_current_context()
+    dag_run = context.get("dag_run")
+    conf = getattr(dag_run, "conf", {})
+    if not isinstance(conf, dict) or conf.get("historical_correction") is not True:
+        return
+    plan_id = conf.get("historical_plan_id")
+    maximum_bytes = conf.get("maximum_bytes_billed")
+    expected_run_id = f"matcher-historical-correction__{plan_id}__{processing_date}"
+    if not isinstance(plan_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", plan_id):
+        raise AirflowException("Historical correction requires a valid historical_plan_id")
+    if getattr(dag_run, "run_id", None) != expected_run_id:
+        raise AirflowException("Historical correction run ID does not match its plan and processing date")
+    if type(maximum_bytes) is not int or not 1 <= maximum_bytes <= 100 * 1024**3:
+        raise AirflowException("Historical correction requires a bounded integer maximum_bytes_billed")
+    for name in ("expected_gtfs_snapshot_id", "expected_input_inventory_digest"):
+        if not isinstance(conf.get(name), str) or not conf[name]:
+            raise AirflowException(f"Historical correction requires {name}")
+
+
 def _guard_prior_publication(processing_date: str, skip_prior_publication: bool) -> bool:
     prior_service_date = date.fromisoformat(processing_date) - timedelta(days=1)
     prior_reason = historical_daily_exclusion_reason(prior_service_date)
@@ -328,13 +348,58 @@ def _bigquery_dbt_job_cost_summary(started_at: datetime) -> dict[str, object]:
 
 
 def _dbt_task(task_id: str, command: str, selector: str, vars_json: str, extra_args: str = "") -> BashOperator:
-    return BashOperator(task_id=task_id, bash_command=dbt_command(command, selector, vars_json, extra_args))
+    return BashOperator(
+        task_id=task_id,
+        bash_command=_historical_bounded_command(dbt_command(command, selector, vars_json, extra_args)),
+    )
+
+
+def _historical_bounded_command(command: str) -> str:
+    return (
+        "{% if dag_run.conf.get('historical_correction') is true %}\n"
+        "export DBT_BIGQUERY_MAXIMUM_BYTES_BILLED=\"{{ dag_run.conf['maximum_bytes_billed'] }}\"\n"
+        "{% endif %}\n"
+        f"{command}"
+    )
+
+
+def _validated_historical_restore_command(command: str) -> str:
+    return (
+        "{% if dag_run.conf.get('historical_correction') is true "
+        "and ti.xcom_pull(task_ids='guard_prior_publication') is none %}\n"
+        "echo 'Historical correction configuration was not validated; refusing schedule restoration'\n"
+        "exit 1\n"
+        "{% else %}\n"
+        f"{_historical_bounded_command(command)}\n"
+        "{% endif %}"
+    )
+
+
+def _skip_historical_correction(task_id: str, command: str) -> str:
+    return (
+        "{% if dag_run.conf.get('historical_correction') is true %}\n"
+        f"echo 'Skipping historical correction task: {task_id}'\n"
+        "{% else %}\n"
+        f"{command}\n"
+        "{% endif %}"
+    )
+
+
+def _historical_skippable_dbt_task(
+    task_id: str, command: str, selector: str, vars_json: str, extra_args: str = ""
+) -> BashOperator:
+    return BashOperator(
+        task_id=task_id,
+        bash_command=_skip_historical_correction(
+            task_id, _historical_bounded_command(dbt_command(command, selector, vars_json, extra_args))
+        ),
+    )
 
 
 def _prior_publication_dbt_task(
     task_id: str, command: str, selector: str, vars_json: str, extra_args: str = ""
 ) -> BashOperator:
-    dbt_task_command = dbt_command(command, selector, vars_json, extra_args)
+    dbt_task_command = _historical_bounded_command(dbt_command(command, selector, vars_json, extra_args))
     bash_command = (
         "{% if dag_run.conf.get('skip_prior_publication') is true %}\n"
         f"echo 'Skipping prior publication task: {task_id}'\n"
@@ -355,6 +420,48 @@ def _dbt_run_test_pair(
     run_task = _dbt_task(f"dbt_run_{task_name}", "run", run_selector, vars_json)
     audit_excluded_args = f"{test_extra_args} --exclude tag:audit".strip()
     test_task = _dbt_task(f"dbt_test_{task_name}", "test", test_selector, vars_json, audit_excluded_args)
+    run_task >> test_task
+    return run_task, test_task
+
+
+def _historical_skippable_dbt_run_test_pair(
+    task_name: str,
+    run_selector: str,
+    test_selector: str,
+    vars_json: str,
+    test_extra_args: str = "",
+) -> tuple[BashOperator, BashOperator]:
+    run_task = _historical_skippable_dbt_task(f"dbt_run_{task_name}", "run", run_selector, vars_json)
+    audit_excluded_args = f"{test_extra_args} --exclude tag:audit".strip()
+    test_task = _historical_skippable_dbt_task(
+        f"dbt_test_{task_name}", "test", test_selector, vars_json, audit_excluded_args
+    )
+    run_task >> test_task
+    return run_task, test_task
+
+
+def _prior_historical_skippable_dbt_run_test_pair(
+    task_name: str,
+    run_selector: str,
+    test_selector: str,
+    vars_json: str,
+    test_extra_args: str = "",
+) -> tuple[BashOperator, BashOperator]:
+    def task(task_id: str, command: str, selector: str, extra_args: str = "") -> BashOperator:
+        dbt_task_command = _historical_bounded_command(dbt_command(command, selector, vars_json, extra_args))
+        bash_command = (
+            "{% if dag_run.conf.get('historical_correction') is true "
+            "or dag_run.conf.get('skip_prior_publication') is true %}\n"
+            f"echo 'Skipping prior publication task (including historical correction): {task_id}'\n"
+            "{% else %}\n"
+            f"{dbt_task_command}\n"
+            "{% endif %}"
+        )
+        return BashOperator(task_id=task_id, bash_command=bash_command)
+
+    run_task = task(f"dbt_run_{task_name}", "run", run_selector)
+    audit_excluded_args = f"{test_extra_args} --exclude tag:audit --exclude test_type:unit".strip()
+    test_task = task(f"dbt_test_{task_name}", "test", test_selector, audit_excluded_args)
     run_task >> test_task
     return run_task, test_task
 
@@ -427,6 +534,7 @@ with DAG(
     @task
     def guard_prior_publication(processing_date: str) -> bool:
         """Require an explicit prior-publication skip for excluded prior service dates."""
+        _validate_historical_correction_config(processing_date)
         return _guard_prior_publication(processing_date, _configured_skip_prior_publication())
 
     prior_publication_guard = guard_prior_publication(PROCESSING_DATE)
@@ -507,11 +615,14 @@ with DAG(
         matcher_load = matcher_load(PROCESSING_DATE, selected_gtfs_snapshot, matcher_input)
         matcher_publish = matcher_publish(PROCESSING_DATE, matcher_load)
 
-    dbt_run_matcher_fact_dependencies = _dbt_task(
+    dbt_run_matcher_fact_dependencies = _historical_skippable_dbt_task(
         "dbt_run_matcher_fact_dependencies",
         "run",
         MATCHER_FACT_DEPENDENCY_MODELS,
         GPS_TRIP_DBT_VARS,
+    )
+    dbt_run_current_fact_schedule = _dbt_task(
+        "dbt_run_current_fact_schedule", "run", COVERAGE_SCHEDULE_MODELS, GPS_TRIP_DBT_VARS
     )
 
     with TaskGroup("current_facts", group_display_name="Current facts", prefix_group_id=False) as current_facts_group:
@@ -594,7 +705,9 @@ with DAG(
         )
         dbt_restore_current_coverage_schedule = BashOperator(
             task_id="dbt_restore_current_coverage_schedule",
-            bash_command=dbt_command("run", COVERAGE_SCHEDULE_MODELS, GPS_TRIP_DBT_VARS),
+            bash_command=_validated_historical_restore_command(
+                dbt_command("run", COVERAGE_SCHEDULE_MODELS, GPS_TRIP_DBT_VARS)
+            ),
             trigger_rule=TriggerRule.ALL_DONE,
         )
 
@@ -613,28 +726,28 @@ with DAG(
         )
 
     with TaskGroup("serving_marts", group_display_name="Serving marts", prefix_group_id=False) as serving_group:
-        dbt_run_serving_universe_prior, dbt_test_serving_universe_prior = _prior_publication_dbt_run_test_pair(
+        dbt_run_serving_universe_prior, dbt_test_serving_universe_prior = _prior_historical_skippable_dbt_run_test_pair(
             "serving_universe_prior",
             SERVING_UNIVERSE_MODELS,
             SERVING_UNIVERSE_MODELS,
             PRIOR_SCHEDULE_DBT_VARS,
             "--indirect-selection cautious --exclude test_type:generic",
         )
-        dbt_run_serving_universe, dbt_test_serving_universe = _dbt_run_test_pair(
+        dbt_run_serving_universe, dbt_test_serving_universe = _historical_skippable_dbt_run_test_pair(
             "serving_universe",
             SERVING_UNIVERSE_MODELS,
             SERVING_UNIVERSE_MODELS,
             MART_DBT_VARS,
             "--indirect-selection cautious --exclude test_type:generic",
         )
-        dbt_run_serving_marts_prior, dbt_test_serving_marts_prior = _prior_publication_dbt_run_test_pair(
+        dbt_run_serving_marts_prior, dbt_test_serving_marts_prior = _prior_historical_skippable_dbt_run_test_pair(
             "serving_marts_prior",
             PRIOR_SERVING_MODELS,
             PRIOR_SERVING_MODELS,
             PRIOR_MART_DBT_VARS,
             "--indirect-selection cautious --exclude test_type:generic",
         )
-        dbt_run_serving_marts, dbt_test_serving_marts = _dbt_run_test_pair(
+        dbt_run_serving_marts, dbt_test_serving_marts = _historical_skippable_dbt_run_test_pair(
             "serving_marts",
             SERVING_MODELS,
             SERVING_MODELS,
@@ -681,6 +794,10 @@ with DAG(
         @task(outlets=[GPS_MODELS_DATE_ASSET])
         def emit_gps_models_date_asset(processing_date: str, skip_prior_publication: bool) -> Iterator[Metadata]:
             """Emit the completed GPS warehouse partition."""
+            dag_run = get_current_context().get("dag_run")
+            conf = getattr(dag_run, "conf", {})
+            if isinstance(conf, dict) and conf.get("historical_correction") is True:
+                return
             changed_partition_dates = [processing_date]
             if not skip_prior_publication:
                 changed_partition_dates.insert(0, (date.fromisoformat(processing_date) - timedelta(days=1)).isoformat())
@@ -703,16 +820,25 @@ with DAG(
     selected_gtfs_snapshot >> dbt_run_stg_gps_pings
     selected_gtfs_snapshot >> matcher_load
     selected_gtfs_snapshot >> dbt_run_matcher_fact_dependencies
+    selected_gtfs_snapshot >> dbt_run_current_fact_schedule
     selected_prior_gtfs_snapshot >> dbt_run_prior_coverage_schedule
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
     dbt_test_stg_gps_pings >> matcher_load
     matcher_load >> matcher_publish
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
-    ([matcher_publish, dbt_run_matcher_fact_dependencies] >> dbt_run_fct_trip_current >> dbt_test_fct_trip_current)
+    (
+        [matcher_publish, dbt_run_matcher_fact_dependencies, dbt_run_current_fact_schedule]
+        >> dbt_run_fct_trip_current
+        >> dbt_test_fct_trip_current
+    )
     dbt_test_fct_trip_current >> dbt_run_fct_stop_arrival_current >> dbt_test_fct_stop_arrival_current
     dbt_test_fct_stop_arrival_current >> dbt_run_fct_expected_stop_event_current
     dbt_run_fct_expected_stop_event_current >> dbt_test_fct_expected_stop_event_current
-    [matcher_publish, dbt_run_matcher_fact_dependencies] >> dbt_run_fct_trip_prior >> dbt_test_fct_trip_prior
+    (
+        [matcher_publish, dbt_run_matcher_fact_dependencies, dbt_run_current_fact_schedule]
+        >> dbt_run_fct_trip_prior
+        >> dbt_test_fct_trip_prior
+    )
     dbt_test_fct_trip_prior >> dbt_run_fct_stop_arrival_prior >> dbt_test_fct_stop_arrival_prior
     dbt_test_fct_stop_arrival_prior >> dbt_run_fct_expected_stop_event_prior
     dbt_run_fct_expected_stop_event_prior >> dbt_test_fct_expected_stop_event_prior

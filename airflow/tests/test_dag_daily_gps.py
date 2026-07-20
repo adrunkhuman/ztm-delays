@@ -338,10 +338,12 @@ def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
         "stg_gtfs__routes",
         "stg_gtfs__calendar_dates",
         "int_gtfs_trip_schedule_history",
-        "int_gtfs_trip_schedule",
-        "int_gtfs_duty_chain",
         "int_schedule_version",
         "dim_schedule_version",
+    }
+    assert _dbt_selected_models(dag.dbt_run_current_fact_schedule) == {
+        "int_gtfs_trip_schedule",
+        "int_gtfs_duty_chain",
     }
     assert _dbt_selected_models(dag.dbt_run_fct_expected_stop_event_current) == {"fct_expected_stop_event"}
     assert _dbt_selected_models(dag.dbt_run_pipeline_status) == {"mart_pipeline_status"}
@@ -533,6 +535,52 @@ def test_prior_publication_dbt_tasks_noop_when_requested() -> None:
     ]:
         assert "skip_prior_publication" in task.kwargs["bash_command"]
         assert "Skipping prior publication task" in task.kwargs["bash_command"]
+
+
+def test_historical_correction_skips_schedule_and_serving_publication() -> None:
+    dag = _load_dag_module()
+
+    for task in [
+        dag.dbt_run_matcher_fact_dependencies,
+        dag.dbt_run_serving_universe_prior,
+        dag.dbt_test_serving_universe_prior,
+        dag.dbt_run_serving_universe,
+        dag.dbt_test_serving_universe,
+        dag.dbt_run_serving_marts_prior,
+        dag.dbt_test_serving_marts_prior,
+        dag.dbt_run_serving_marts,
+        dag.dbt_test_serving_marts,
+    ]:
+        assert "historical_correction" in task.kwargs["bash_command"]
+
+    assert "Skipping historical correction task" not in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
+    assert "Skipping historical correction task" not in dag.dbt_run_completeness_and_coverage.kwargs["bash_command"]
+    assert "DBT_BIGQUERY_MAXIMUM_BYTES_BILLED" in dag.dbt_run_fct_trip_current.kwargs["bash_command"]
+    assert dag.dbt_run_fct_trip_current in dag.dbt_run_current_fact_schedule.downstream
+
+
+def test_historical_correction_requires_plan_scoped_bounded_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dag = _load_dag_module()
+    processing_date = "2026-07-09"
+    conf = {
+        "historical_correction": True,
+        "historical_plan_id": "plan-9",
+        "maximum_bytes_billed": 5 * 1024**3,
+        "expected_gtfs_snapshot_id": "snapshot-9",
+        "expected_input_inventory_digest": "digest-9",
+    }
+    run = types.SimpleNamespace(
+        conf=conf,
+        run_id="matcher-historical-correction__plan-9__2026-07-09",
+    )
+    monkeypatch.setattr(dag, "get_current_context", lambda: {"dag_run": run})
+
+    dag._validate_historical_correction_config(processing_date)
+    run.conf["maximum_bytes_billed"] = '5"; malicious-command'
+    with pytest.raises(dag.AirflowException, match="bounded integer"):
+        dag._validate_historical_correction_config(processing_date)
 
 
 @dataclass
