@@ -1,4 +1,4 @@
-{{ config(materialized='table') }}
+{{ config(materialized='table', tags=['audit']) }}
 
 with service_tokens as (
     select

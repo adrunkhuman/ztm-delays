@@ -901,24 +901,124 @@ unit_tests:
       rows: |
         select date '2026-01-15' as service_date, 'bus' as mode, 4 as trip_count, 0.5 as on_time_rate, 60.0 as median_delay_seconds
 
+  - name: int_serving_observed_date_seeds_all_available_history
+    model: int_serving_observed_date
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+      macros:
+        is_incremental: false
+    given:
+      - input: ref('int_serving_stop_arrival')
+        format: sql
+        rows: |
+          select date '2026-01-13' as service_date, 'tuesday' as schedule_day_type
+          union all select date '2026-01-13', 'tuesday'
+          union all select date '2026-01-14', 'wednesday'
+          union all select date '2026-01-15', 'thursday'
+          union all select date '2026-01-16', 'friday'
+    expect:
+      rows:
+        - {service_date: '2026-01-13', schedule_day_type: tuesday}
+        - {service_date: '2026-01-14', schedule_day_type: wednesday}
+        - {service_date: '2026-01-15', schedule_day_type: thursday}
+
+  - name: int_serving_trip_universe_classifies_short_turns_from_stop_profiles
+    model: int_serving_trip_universe
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+    given:
+      - input: ref('int_serving_trip_stop_profile')
+        format: sql
+        rows: |
+          select date '2026-01-15' as service_date, date '2026-01-15' as processing_date,
+              'weekday' as schedule_day_type, 'snapshot' as gtfs_snapshot_id, '187' as line,
+              '187' as route_short_name, 'bus' as mode, '0' as direction_id, 'full-1' as trip_id,
+              'CENTRUM' as trip_headsign, true as is_public_service_segment, 'A' as origin_stop_id,
+              'C' as destination_stop_id, 3 as stop_count, 'A|B|C' as ordered_stop_ids,
+              0 as non_zone1_stop_count, ['1'] as zone_ids
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'snapshot', '187',
+              '187', 'bus', '0', 'full-2', 'CENTRUM', true, 'A', 'C', 3, 'A|B|C', 0, ['1']
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'snapshot', '187',
+              '187', 'bus', '0', 'short', 'CENTRUM', true, 'A', 'B', 2, 'A|B', 0, ['1']
+    expect:
+      rows:
+        - {trip_id: full-1, terminal_pair_rank: 1, is_short_turn_part_trip: false, is_zone1_public_ranking_trip: true}
+        - {trip_id: full-2, terminal_pair_rank: 1, is_short_turn_part_trip: false, is_zone1_public_ranking_trip: true}
+        - {trip_id: short, terminal_pair_rank: 2, is_short_turn_part_trip: true, is_zone1_public_ranking_trip: false}
+
+  - name: int_serving_entity_window_summary_expands_shared_entity_grains
+    model: int_serving_entity_window_summary
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        max_gps_date: '2026-01-15'
+    given:
+      - input: ref('int_serving_stop_arrival')
+        format: sql
+        rows: |
+          select 'snapshot' as gtfs_snapshot_id, date '2026-01-15' as gps_date,
+              date '2026-01-15' as service_date, 'trip-1' as trip_id, '1001' as vehicle_number,
+              'version-1' as schedule_version_id, 'complete' as trip_quality, 'bus' as mode,
+              '187' as line, '187' as route_short_name, 'CENTRUM' as trip_headsign,
+              'group-1' as stop_group_id, 'Group 1' as stop_group_name,
+              'stop-1' as stop_id, 'Stop 1' as stop_name, 180 as delay_seconds
+      - input: ref('dim_serving_window_date')
+        format: sql
+        rows: |
+          select 'day' as window_type, '2026-01-15' as window_key,
+              date '2026-01-15' as source_end_date, date '2026-01-15' as service_date
+          union all
+          select 'month', '2026-01', date '2026-01-15', date '2026-01-15'
+      - input: ref('int_serving_trip_universe')
+        format: sql
+        rows: |
+          select 'snapshot' as gtfs_snapshot_id, date '2026-01-15' as processing_date,
+              date '2026-01-15' as service_date, 'trip-1' as trip_id,
+              true as is_zone1_public_ranking_trip
+      - input: ref('dim_schedule_version')
+        format: sql
+        rows: |
+          select 'version-1' as schedule_version_id, date '2026-01-01' as valid_from_date,
+              date '2026-01-31' as valid_to_date
+    expect:
+      rows:
+        - {entity_type: mode, entity_id: bus, universe_type: all_observed, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: mode, entity_id: bus, universe_type: all_observed, window_type: month, arrival_count: 1, late_count: 1}
+        - {entity_type: line, entity_id: '187', universe_type: all_observed, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: line, entity_id: '187', universe_type: all_observed, window_type: month, arrival_count: 1, late_count: 1}
+        - {entity_type: line, entity_id: '187', universe_type: zone1_public, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: line, entity_id: '187', universe_type: zone1_public, window_type: month, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_group, entity_id: group-1, universe_type: all_observed, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_group, entity_id: group-1, universe_type: all_observed, window_type: month, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_group, entity_id: group-1, universe_type: zone1_public, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_group, entity_id: group-1, universe_type: zone1_public, window_type: month, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_post, entity_id: stop-1, universe_type: all_observed, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_post, entity_id: stop-1, universe_type: all_observed, window_type: month, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_post, entity_id: stop-1, universe_type: zone1_public, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_post, entity_id: stop-1, universe_type: zone1_public, window_type: month, arrival_count: 1, late_count: 1}
+
   - name: mart_mode_window_summary_uses_ztm_delay_boundaries
     model: mart_mode_window_summary
     overrides:
       vars:
         processing_date: '2026-01-15'
     given:
-      - input: ref('int_serving_stop_arrival')
+      - input: ref('int_serving_entity_window_summary')
         format: sql
         rows: |
-          select date '2026-01-15' as service_date, 'bus' as mode, 'complete' as trip_quality, cast(null as string) as schedule_day_type, 'snapshot' as gtfs_snapshot_id, 'trip-1' as trip_id, '1001' as vehicle_number, '187' as line, 'group-1' as stop_group_id, 'stop-1' as stop_id, -60 as delay_seconds
-          union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-2', '1002', '187', 'group-1', 'stop-1', -59
-          union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-3', '1003', '187', 'group-1', 'stop-1', 179
-           union all select date '2026-01-15', 'bus', 'complete', cast(null as string), 'snapshot', 'trip-4', '1004', '187', 'group-1', 'stop-1', 180
-      - input: ref('dim_serving_window_date')
-        format: sql
-        rows: |
-          select 'day' as window_type, '2026-01-15' as window_key, date '2026-01-15' as source_end_date, date '2026-01-15' as service_date, cast(null as string) as schedule_day_type, 1 as date_rank
-          union all select 'month', '2026-01', date '2026-01-15', date '2026-01-15', cast(null as string), 1
+          select 'mode' as entity_type, 'bus' as entity_id, 'bus' as mode, 'all_observed' as universe_type,
+              'day' as window_type, '2026-01-15' as window_key, date '2026-01-15' as source_start_date,
+              date '2026-01-15' as source_end_date, 1 as source_day_count, 1 as line_count, 1 as stop_group_count,
+              1 as stop_post_count, 4 as arrival_count, 4 as trip_count, 60.0 as mean_delay_seconds,
+              59.5 as median_delay_seconds, 180.0 as p90_delay_seconds, 120.5 as delay_spread_seconds,
+              1 as early_count, 2 as on_time_count, 1 as late_count, 0.25 as early_rate,
+              0.5 as on_time_rate, 0.25 as late_rate,
+              cast([] as array<struct<bucket_label string, min_delay_seconds int64, max_delay_seconds int64, n int64>>) as delay_histogram
+          union all select 'mode', 'bus', 'bus', 'all_observed', 'month', '2026-01', date '2026-01-15',
+              date '2026-01-15', 1, 1, 1, 1, 4, 4, 60.0, 59.5, 180.0, 120.5, 1, 2, 1, 0.25, 0.5, 0.25,
+              cast([] as array<struct<bucket_label string, min_delay_seconds int64, max_delay_seconds int64, n int64>>)
     expect:
       rows:
         - {mode: bus, window_type: day, early_count: 1, on_time_count: 2, late_count: 1, early_rate: 0.25, on_time_rate: 0.5, late_rate: 0.25}
@@ -931,7 +1031,7 @@ unit_tests:
         processing_date: '2026-01-15'
         serving_window_matching_date_count: 2
     given:
-      - input: ref('int_serving_stop_arrival')
+      - input: ref('int_serving_observed_date')
         format: sql
         rows: |
           select date '2026-01-11' as service_date, 'sunday_holiday' as schedule_day_type

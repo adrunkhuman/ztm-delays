@@ -64,7 +64,12 @@ with DAG(
         bash_command=dbt_command("test", "tag:audit", AUDIT_DBT_VARS, "--indirect-selection eager"),
     )
 
-    selected_gtfs_snapshot >> dbt_test_weekly_audits
+    dbt_run_weekly_audit_models = BashOperator(
+        task_id="dbt_run_weekly_audit_models",
+        bash_command=dbt_command("run", "tag:audit", AUDIT_DBT_VARS),
+    )
+
+    selected_gtfs_snapshot >> dbt_run_weekly_audit_models >> dbt_test_weekly_audits
 
 
 if __name__ == "__main__":

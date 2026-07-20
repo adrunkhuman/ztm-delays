@@ -348,6 +348,8 @@ def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
     assert _dbt_selected_models(dag.dbt_run_serving_marts) == {
         "int_serving_trip_execution",
         "int_serving_stop_arrival",
+        "int_serving_observed_date",
+        "int_serving_entity_window_summary",
         "dim_serving_window_date",
         "dim_serving_date",
         "mart_mode_window_summary",
@@ -371,8 +373,6 @@ def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
         "mart_stop_post_line_group_window",
         "mart_stop_group_line_group_window",
         "mart_pipeline_status_recent_summary",
-        "rpt_schedule_day_mapping_evidence",
-        "rpt_ranking_universe_evidence",
     }
     assert "--exclude test_type:unit" in dag.dbt_test_fct_stop_arrival_current.kwargs["bash_command"]
     assert "--exclude test_type:unit" in dag.dbt_test_fct_expected_stop_event_current.kwargs["bash_command"]
@@ -381,6 +381,7 @@ def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
     assert "--exclude tag:audit" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_stg_gps_pings.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_int_gps_hourly_completeness.kwargs["bash_command"]
+    assert "--exclude test_type:generic" in dag.dbt_test_serving_universe_prior.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_serving_universe.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_serving_marts_prior.kwargs["bash_command"]
     assert "--exclude test_type:generic" in dag.dbt_test_serving_marts.kwargs["bash_command"]
@@ -425,11 +426,13 @@ def test_dag_runs_trip_facts_before_serving_publication() -> None:
     assert dag.dbt_run_prior_coverage_schedule in dag.dbt_test_pipeline_status.downstream
     assert dag.dbt_run_completeness_and_coverage_prior in dag.dbt_run_prior_coverage_schedule.downstream
     assert dag.dbt_run_pipeline_status_prior in dag.dbt_test_completeness_and_coverage_prior.downstream
-    assert dag.dbt_restore_current_coverage_schedule in dag.dbt_test_pipeline_status_prior.downstream
-    assert dag.dbt_run_serving_universe in dag.dbt_test_pipeline_status_prior.downstream
+    assert dag.dbt_run_serving_universe_prior in dag.dbt_test_pipeline_status_prior.downstream
+    assert dag.dbt_test_serving_universe_prior in dag.dbt_run_serving_universe_prior.downstream
+    assert dag.dbt_restore_current_coverage_schedule in dag.dbt_test_serving_universe_prior.downstream
     assert dag.dbt_run_serving_universe in dag.dbt_restore_current_coverage_schedule.downstream
     assert dag.dbt_restore_current_coverage_schedule.kwargs["trigger_rule"] == dag.TriggerRule.ALL_DONE
     assert dag.dbt_test_serving_universe in dag.dbt_run_serving_universe.downstream
+    assert dag.dbt_run_serving_marts_prior in dag.dbt_test_serving_universe_prior.downstream
     assert dag.dbt_run_serving_marts_prior in dag.dbt_test_serving_universe.downstream
     assert dag.dbt_test_serving_marts_prior in dag.dbt_run_serving_marts_prior.downstream
     assert dag.dbt_run_serving_marts in dag.dbt_test_serving_marts_prior.downstream
@@ -474,7 +477,9 @@ def test_dag_uses_bounded_mart_windows() -> None:
     assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
     assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_test_serving_marts_prior.kwargs["bash_command"]
     assert '"max_gps_date": "' + dag.PROCESSING_DATE in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
-    assert dag.SERVING_UNIVERSE_MODEL in dag.dbt_run_serving_universe.kwargs["bash_command"]
+    assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_serving_universe_prior.kwargs["bash_command"]
+    assert dag.SELECTED_PRIOR_GTFS_SNAPSHOT_ID in dag.dbt_run_serving_universe_prior.kwargs["bash_command"]
+    assert dag.SERVING_UNIVERSE_MODELS in dag.dbt_run_serving_universe.kwargs["bash_command"]
     assert dag.COVERAGE_SCHEDULE_MODELS in dag.dbt_run_prior_coverage_schedule.kwargs["bash_command"]
     assert dag.SELECTED_PRIOR_GTFS_SNAPSHOT_ID in dag.dbt_run_prior_coverage_schedule.kwargs["bash_command"]
     assert dag.SELECTED_GTFS_SNAPSHOT_ID in dag.dbt_restore_current_coverage_schedule.kwargs["bash_command"]
@@ -521,6 +526,8 @@ def test_prior_publication_dbt_tasks_noop_when_requested() -> None:
         dag.dbt_test_completeness_and_coverage_prior,
         dag.dbt_run_pipeline_status_prior,
         dag.dbt_test_pipeline_status_prior,
+        dag.dbt_run_serving_universe_prior,
+        dag.dbt_test_serving_universe_prior,
         dag.dbt_run_serving_marts_prior,
         dag.dbt_test_serving_marts_prior,
     ]:

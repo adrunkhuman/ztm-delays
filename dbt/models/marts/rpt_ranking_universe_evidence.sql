@@ -1,6 +1,6 @@
 {% set processing_date = var("processing_date", "1970-01-01") %}
 
-{{ config(materialized='table') }}
+{{ config(materialized='table', tags=['audit']) }}
 
 with latest_trip_universe as (
     select *
