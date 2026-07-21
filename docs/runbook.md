@@ -76,7 +76,7 @@ Every dbt command uses the plan's `maximum_bytes_billed` guard.
 
 After every correction date succeeds, the controller triggers `dag_historical_serving_refresh` once. That DAG rebuilds
 each deduplicated serving date once, restores the final schedule view, rebuilds full serving dimensions once, and emits
-one asset event so `dag_serving_export` publishes one consolidated DuckDB generation. If correction fails, serving and
+one explicit `dag_serving_export` run for the consolidated DuckDB generation. If correction fails, serving and
 export do not run. If only serving refresh fails, clear that refresh run and resume the same plan without rerunning facts.
 
 After backfill, verify that facts carry the expected `gtfs_snapshot_id` for each processing batch and that
