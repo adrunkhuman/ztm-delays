@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.sdk import DAG, Metadata, TriggerRule, get_current_context, task
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.sdk import DAG, TriggerRule, get_current_context, task
 from google.cloud import bigquery
-from ztm_airflow_common import BIGQUERY_INT_DATASET, GCP_PROJECT, GPS_MODELS_DATE_ASSET, airflow_failure_alert
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+from ztm_airflow_common import BIGQUERY_INT_DATASET, GCP_PROJECT, airflow_failure_alert
 
 MAX_REFRESH_DAYS = 32
 DEFAULT_MAX_QUERY_BYTES = 5 * 1024**3
@@ -126,6 +124,7 @@ with DAG(
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     catchup=False,
     max_active_runs=1,
+    render_template_as_native_obj=True,
     default_args={"retries": 0},
     on_failure_callback=airflow_failure_alert,
     tags=["ztm", "dbt", "historical", "manual"],
@@ -144,22 +143,24 @@ with DAG(
         task_id="restore_current_schedule", bash_command=RESTORE_COMMAND, trigger_rule=TriggerRule.ALL_DONE
     )
 
-    @task(outlets=[GPS_MODELS_DATE_ASSET])
-    def emit_consolidated_asset() -> Iterator[Metadata]:
-        """Emit one export event after every historical serving partition passes."""
-        dag_run = get_current_context().get("dag_run")
-        config = _validated_refresh_config(dag_run.conf, dag_run.run_id)
-        days = cast("list[dict[str, str]]", config["days"])
-        dates = [item["processing_date"] for item in days]
-        yield Metadata(
-            GPS_MODELS_DATE_ASSET,
-            {"processing_date": dates[-1], "changed_partition_dates": dates, "historical_correction": True},
-        )
+    trigger_serving_export = TriggerDagRunOperator(
+        task_id="trigger_serving_export",
+        trigger_dag_id="dag_serving_export",
+        trigger_run_id="historical-serving-export__{{ dag_run.conf['historical_plan_id'] }}",
+        conf={
+            "export_id": "{{ dag_run.conf['historical_plan_id'] }}",
+            "changed_partition_dates": "{{ dag_run.conf['days'] | map(attribute='processing_date') | list }}",
+        },
+        reset_dag_run=True,
+        wait_for_completion=True,
+        poke_interval=15,
+        allowed_states=["success"],
+        failed_states=["failed"],
+    )
 
     validated = validate_refresh_config()
-    emitted = emit_consolidated_asset()
     validated >> refresh_serving >> restore_current_schedule
-    [refresh_serving, restore_current_schedule] >> emitted
+    [refresh_serving, restore_current_schedule] >> trigger_serving_export
 
 
 if __name__ == "__main__":

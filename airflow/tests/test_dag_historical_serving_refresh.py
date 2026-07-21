@@ -2,21 +2,22 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 
 import pytest
 from jinja2 import Template
 
+from .test_dag_daily_gps import FakeOperator
 from .test_dag_daily_gps import _load_dag_module as _load_daily_dag
-
-if TYPE_CHECKING:
-    import types
 
 
 def _load_refresh_dag() -> types.ModuleType:
     _load_daily_dag()
+    trigger_module = types.ModuleType("airflow.providers.standard.operators.trigger_dagrun")
+    trigger_module.TriggerDagRunOperator = FakeOperator
+    sys.modules["airflow.providers.standard.operators.trigger_dagrun"] = trigger_module
     module_path = Path(__file__).parents[1] / "dags" / "dag_historical_serving_refresh.py"
     spec = importlib.util.spec_from_file_location("dag_historical_serving_refresh", module_path)
     assert spec is not None
@@ -51,11 +52,12 @@ def test_refresh_config_requires_bounded_ascending_days() -> None:
         )
 
 
-def test_refresh_runs_partition_models_once_per_day_then_emits_one_asset() -> None:
+def test_refresh_runs_partition_models_once_per_day_then_exports_once() -> None:
     refresh = _load_refresh_dag()
 
     assert refresh.dag.kwargs["schedule"] is None
     assert refresh.dag.kwargs["max_active_runs"] == 1
+    assert refresh.dag.kwargs["render_template_as_native_obj"] is True
     command = refresh.refresh_serving.kwargs["bash_command"]
     assert "{% for day in dag_run.conf['days'] %}" in command
     assert refresh.SERVING_UNIVERSE_MODELS in command
@@ -81,6 +83,12 @@ def test_refresh_runs_partition_models_once_per_day_then_emits_one_asset() -> No
     assert refresh.refresh_serving in refresh.validate_refresh_config.downstream
     assert refresh.restore_current_schedule in refresh.refresh_serving.downstream
     assert refresh.restore_current_schedule.kwargs["trigger_rule"] == refresh.TriggerRule.ALL_DONE
+    assert refresh.trigger_serving_export in refresh.refresh_serving.downstream
+    assert refresh.trigger_serving_export in refresh.restore_current_schedule.downstream
+    assert refresh.trigger_serving_export.kwargs["trigger_dag_id"] == "dag_serving_export"
+    assert refresh.trigger_serving_export.kwargs["reset_dag_run"] is True
+    assert refresh.trigger_serving_export.kwargs["wait_for_completion"] is True
+    assert "changed_partition_dates" in refresh.trigger_serving_export.kwargs["conf"]
     invalid_restore = Template(refresh.RESTORE_COMMAND).render(ti=SimpleNamespace(xcom_pull=lambda **_kwargs: None))
     assert "refusing schedule restoration" in invalid_restore
     valid_restore = Template(refresh.RESTORE_COMMAND).render(
