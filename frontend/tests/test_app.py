@@ -118,6 +118,6 @@ def test_stop_page_preserves_independent_picker_page(monkeypatch: pytest.MonkeyP
     refreshed_response = client.get("/stops/?q=central&page=2&picker_page=3&date=2026-06-30")
 
     assert refreshed_response.status_code == HTTPStatus.OK
-    assert captured["date"] is None
+    assert captured["date"] == "2026-06-30"
     assert captured["window"] is None
-    assert b'href="/lines/"' in refreshed_response.data
+    assert b'href="/lines/?date=2026-06-30"' in refreshed_response.data

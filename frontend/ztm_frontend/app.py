@@ -171,9 +171,7 @@ def _selected_mode(value: str | None) -> str | None:
 
 
 def _selected_date_arg() -> str | None:
-    if request.headers.get("HX-Request") == "true":
-        return request.args.get("date")
-    return None
+    return request.args.get("date")
 
 
 def _scope_href(window: str) -> str:
