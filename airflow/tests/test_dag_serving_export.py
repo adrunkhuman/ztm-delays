@@ -64,9 +64,9 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.max_duckdb_bytes == 20 * 1024 * 1024 * 1024
     assert config.cleanup_gcs_staging is True
     assert config.changed_partition_dates == ()
-    assert config.validation_timeout_seconds == 120
-    assert config.validation_memory_limit_mb == 1024
-    assert config.validation_temp_limit_mb == 2048
+    assert config.validation_timeout_seconds == 600
+    assert config.validation_memory_limit_mb == 4096
+    assert config.validation_temp_limit_mb == 6144
     assert config.validation_threads == 1
     assert config.staging_retention_days == 3
 
@@ -1166,7 +1166,7 @@ def test_semantic_validation_timeout_fails_closed(tmp_path: Path, monkeypatch: p
 
     monkeypatch.setattr(dag.subprocess, "Popen", lambda *_args, **_kwargs: TimeoutProcess())
 
-    with pytest.raises(RuntimeError, match="timed out after 120 seconds"):
+    with pytest.raises(RuntimeError, match="timed out after 600 seconds"):
         dag._run_semantic_validation(config, tmp_path / "candidate.duckdb", tmp_path / "validation-temp")
 
 
