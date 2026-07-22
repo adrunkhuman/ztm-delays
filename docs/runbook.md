@@ -327,9 +327,9 @@ Useful manual config:
   "changed_partition_dates": ["2026-07-01", "2026-07-02"],
   "max_source_bytes": 21474836480,
   "max_duckdb_bytes": 21474836480,
-  "validation_timeout_seconds": 120,
-  "validation_memory_limit_mb": 1024,
-  "validation_temp_limit_mb": 2048,
+  "validation_timeout_seconds": 600,
+  "validation_memory_limit_mb": 4096,
+  "validation_temp_limit_mb": 6144,
   "validation_threads": 1,
   "cleanup_gcs_staging": false,
   "staging_retention_days": 3
@@ -352,6 +352,12 @@ DuckDB builds run with the current VPS resource profile: `memory_limit='1GB'`, `
 `threads=2`, and `preserve_insertion_order=false`. The DuckDB memory limit is separate from `max_duckdb_bytes`, which
 only guards the final output file size. Resource-pressure failures leave the stable serving file unchanged; free
 disk/memory or reduce the export scope, then rerun with a fresh `export_id`.
+
+Semantic validation defaults to a 4 GiB process/DuckDB limit, 6 GiB spill limit, one thread, and a 10-minute timeout.
+These values were required by the successful 20-date historical export. The current Coolify profile uses no explicit
+memory limit and host swappiness `60`; the application-level validator limit remains the primary guard against memory
+pressure. Verify the effective container memory and swap settings after redeployment with `docker inspect`, because
+editing Coolify's generated Compose file or applying `docker update` is not persistent.
 
 Semantic validation runs in an isolated process against the temporary DuckDB before publication. It applies a hard
 wall-clock timeout plus its own DuckDB memory, spill, and thread limits. Deterministic checks cover serving-date alignment,
