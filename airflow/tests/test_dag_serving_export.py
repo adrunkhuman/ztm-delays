@@ -50,6 +50,20 @@ def test_mart_table_list_exports_frontend_source_tables() -> None:
     }
 
 
+def test_serving_table_groups_partition_export_contract() -> None:
+    dag = _load_dag_module()
+
+    assert set(dag.GLOBAL_EXPORT_TABLES) == {
+        "dim_schedule_version",
+        "dim_serving_date",
+        "dim_stop_group_current",
+        "dim_stop_post_current",
+        "mart_pipeline_status_recent_summary",
+    }
+    assert set(dag.SHARDED_EXPORT_TABLES) == set(dag.MART_TABLES) - set(dag.GLOBAL_EXPORT_TABLES)
+    assert set(dag.SHARDED_EXPORT_TABLES.values()) == {"service_date", "source_end_date"}
+
+
 def test_export_config_uses_safe_defaults() -> None:
     dag = _load_dag_module()
 
@@ -810,6 +824,49 @@ def test_publish_duckdb_removes_temp_file_after_build_failure(tmp_path: Path, mo
     assert list(tmp_path.glob(".*.tmp")) == []
     assert not temp_wal_path.exists()
     assert list(tmp_path.glob(".duckdb-tmp-*")) == []
+
+
+def test_build_partitioned_catalog_materializes_globals_and_exposes_shard_views(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    parquet_paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
+    source_stats = [dag.TableStats(table_name=table_name, row_count=1, size_bytes=10) for table_name in dag.MART_TABLES]
+    config = dag.ExportConfig(
+        export_id="partitioned-1",
+        output_dir=tmp_path,
+        output_filename="catalog.duckdb",
+        gcs_bucket="bucket",
+        gcs_prefix="prefix",
+        max_source_bytes=1000,
+        max_duckdb_bytes=10_000_000,
+        cleanup_gcs_staging=False,
+    )
+    temp_directory = tmp_path / "catalog-temp"
+    temp_directory.mkdir()
+    catalog_path = tmp_path / "catalog.duckdb"
+
+    dag._build_partitioned_catalog_file(
+        duckdb,
+        catalog_path,
+        dag.DuckdbBuildInput(
+            parquet_paths_by_table=parquet_paths_by_table,
+            source_stats=source_stats,
+            config=config,
+            exported_at=datetime(2026, 7, 2, tzinfo=UTC),
+            temp_directory=temp_directory,
+        ),
+    )
+
+    with duckdb.connect(catalog_path, read_only=True) as connection:
+        table_types = dict(
+            connection.execute(
+                "select table_name, table_type from information_schema.tables where table_schema = 'main'"
+            ).fetchall()
+        )
+        assert table_types["dim_serving_date"] == "BASE TABLE"
+        assert table_types["mart_trip_daily"] == "VIEW"
+        assert connection.execute("select count(*) from mart_trip_daily").fetchone()[0] == 1
+        assert connection.execute("select export_id from export_metadata").fetchone()[0] == "partitioned-1"
 
 
 def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> None:

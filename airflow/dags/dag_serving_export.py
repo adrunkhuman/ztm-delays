@@ -49,8 +49,12 @@ if TYPE_CHECKING:
     class DuckdbConnection(Protocol):
         """Minimal DuckDB connection protocol used by build-time settings."""
 
-        def execute(self, query: str) -> DuckdbResult:
+        def execute(self, query: str, parameters: Sequence[Any] | None = None) -> DuckdbResult:
             """DuckDB-compatible execute."""
+            ...
+
+        def executemany(self, query: str, parameters: Sequence[Sequence[Any]]) -> DuckdbResult:
+            """DuckDB-compatible repeated parameter execution."""
             ...
 
 
@@ -106,6 +110,42 @@ MART_TABLES = (
     "mart_trip_mode_daily_summary",
     "mart_worst_delay_event",
 )
+GLOBAL_EXPORT_TABLES = (
+    "dim_schedule_version",
+    "dim_serving_date",
+    "dim_stop_group_current",
+    "dim_stop_post_current",
+    "mart_pipeline_status_recent_summary",
+)
+SHARDED_EXPORT_TABLES = {
+    "dim_serving_window_date": "source_end_date",
+    "fct_expected_stop_event": "service_date",
+    "mart_entity_daily_summary": "service_date",
+    "mart_entity_rankings": "source_end_date",
+    "mart_entity_timeline_daily": "service_date",
+    "mart_entity_window_daily_summary": "source_end_date",
+    "mart_hour_window_summary": "source_end_date",
+    "mart_line_course_stop_window": "source_end_date",
+    "mart_line_course_window": "source_end_date",
+    "mart_line_reliability_daily": "service_date",
+    "mart_line_trip_group_daily": "service_date",
+    "mart_line_window_summary": "source_end_date",
+    "mart_mode_window_summary": "source_end_date",
+    "mart_pipeline_status": "service_date",
+    "mart_stop_group_line_group_window": "source_end_date",
+    "mart_stop_group_window_summary": "source_end_date",
+    "mart_stop_line_window_summary": "source_end_date",
+    "mart_stop_post_line_group_window": "source_end_date",
+    "mart_stop_post_window_summary": "source_end_date",
+    "mart_trip_daily": "service_date",
+    "mart_trip_line_daily": "service_date",
+    "mart_trip_mode_daily_summary": "service_date",
+    "mart_worst_delay_event": "service_date",
+}
+if set(GLOBAL_EXPORT_TABLES) | set(SHARDED_EXPORT_TABLES) != set(MART_TABLES):
+    raise RuntimeError("Global and sharded serving table groups must partition MART_TABLES")
+if set(GLOBAL_EXPORT_TABLES) & set(SHARDED_EXPORT_TABLES):
+    raise RuntimeError("Serving tables cannot be both global and sharded")
 PARTITIONED_EXPORT_TABLES = {
     "dim_serving_window_date": "source_end_date",
     "fct_expected_stop_event": "service_date",
@@ -876,56 +916,79 @@ def _build_duckdb_file(
             connection.execute(
                 f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
-        connection.execute(
-            """
-            create table export_table_stats (
-                table_name varchar,
-                row_count ubigint,
-                source_size_bytes ubigint,
-                min_date varchar,
-                max_date varchar,
-                date_count ubigint
+        _create_export_metadata_tables(connection, build_input)
+
+
+def _build_partitioned_catalog_file(
+    duckdb_module: ModuleType,
+    path: Path,
+    build_input: DuckdbBuildInput,
+) -> None:
+    """Build a small DuckDB catalog over stable, locally cached Parquet shards."""
+    with duckdb_module.connect(str(path)) as connection:
+        _configure_duckdb_build_connection(connection, build_input.temp_directory)
+        for table_name in GLOBAL_EXPORT_TABLES:
+            connection.execute(
+                f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
-            """
-        )
-        connection.executemany(
-            "insert into export_table_stats values (?, ?, ?, ?, ?, ?)",
-            [
-                (stat.table_name, stat.row_count, stat.size_bytes, stat.min_date, stat.max_date, stat.date_count)
-                for stat in build_input.source_stats
-            ],
-        )
-        connection.execute(
-            """
-            create table export_metadata (
-                export_id varchar,
-                export_version varchar,
-                source_mode varchar,
-                exported_at timestamptz,
-                source_project varchar,
-                source_dataset varchar,
-                source_size_bytes ubigint,
-                source_row_count ubigint,
-                exported_table_count ubigint,
-                duckdb_file_size_bytes ubigint
+        for table_name in SHARDED_EXPORT_TABLES:
+            connection.execute(
+                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])}, hive_partitioning = true)"
             )
-            """
+        _create_export_metadata_tables(connection, build_input)
+
+
+def _create_export_metadata_tables(connection: DuckdbConnection, build_input: DuckdbBuildInput) -> None:
+    connection.execute(
+        """
+        create table export_table_stats (
+            table_name varchar,
+            row_count ubigint,
+            source_size_bytes ubigint,
+            min_date varchar,
+            max_date varchar,
+            date_count ubigint
         )
-        connection.execute(
-            "insert into export_metadata values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                build_input.config.export_id,
-                EXPORT_VERSION,
-                EXPORT_SOURCE_MODE,
-                build_input.exported_at,
-                GCP_PROJECT,
-                BIGQUERY_MARTS_DATASET,
-                sum(stat.size_bytes for stat in build_input.source_stats),
-                sum(stat.row_count for stat in build_input.source_stats),
-                len(MART_TABLES),
-                0,
-            ],
+        """
+    )
+    connection.executemany(
+        "insert into export_table_stats values (?, ?, ?, ?, ?, ?)",
+        [
+            (stat.table_name, stat.row_count, stat.size_bytes, stat.min_date, stat.max_date, stat.date_count)
+            for stat in build_input.source_stats
+        ],
+    )
+    connection.execute(
+        """
+        create table export_metadata (
+            export_id varchar,
+            export_version varchar,
+            source_mode varchar,
+            exported_at timestamptz,
+            source_project varchar,
+            source_dataset varchar,
+            source_size_bytes ubigint,
+            source_row_count ubigint,
+            exported_table_count ubigint,
+            duckdb_file_size_bytes ubigint
         )
+        """
+    )
+    connection.execute(
+        "insert into export_metadata values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            build_input.config.export_id,
+            EXPORT_VERSION,
+            EXPORT_SOURCE_MODE,
+            build_input.exported_at,
+            GCP_PROJECT,
+            BIGQUERY_MARTS_DATASET,
+            sum(stat.size_bytes for stat in build_input.source_stats),
+            sum(stat.row_count for stat in build_input.source_stats),
+            len(MART_TABLES),
+            0,
+        ],
+    )
 
 
 def _configure_duckdb_build_connection(connection: DuckdbConnection, temp_directory: Path) -> None:
