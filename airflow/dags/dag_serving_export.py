@@ -610,6 +610,7 @@ def _extract_partitioned_store_inputs(
     config: ExportConfig,
     local_export_dir: Path,
 ) -> dict[str, list[Path]]:
+    _remove_all_incomplete_local_generations(config)
     parquet_paths_by_table = {}
     for table_name in GLOBAL_EXPORT_TABLES:
         _extract_mart_to_gcs(bigquery_client, config, table_name)
@@ -1008,6 +1009,19 @@ def _remove_incomplete_local_generations(
             continue
         shutil.rmtree(generation_dir)
         deleted_count += 1
+    return deleted_count
+
+
+def _remove_all_incomplete_local_generations(config: ExportConfig) -> int:
+    root = config.output_dir / LOCAL_PARTITION_DIRECTORY
+    deleted_count = 0
+    for table_name, date_column in SHARDED_EXPORT_TABLES.items():
+        table_dir = root / table_name
+        if not table_dir.exists():
+            continue
+        for partition_dir in table_dir.glob(f"{date_column}=*"):
+            partition_date = partition_dir.name.removeprefix(f"{date_column}=")
+            deleted_count += _remove_incomplete_local_generations(config, table_name, partition_date)
     return deleted_count
 
 

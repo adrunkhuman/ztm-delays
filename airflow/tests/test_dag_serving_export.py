@@ -1120,6 +1120,24 @@ def test_incomplete_local_generation_is_removed_before_retry(tmp_path: Path) -> 
     assert not incomplete_dir.exists()
 
 
+def test_incomplete_generation_sweep_cleans_all_partitions_before_retry(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    config = _test_export_config(dag, tmp_path)
+    incomplete_dirs = []
+    for partition_date in ("2026-07-01", "2026-07-02"):
+        incomplete_dir = (
+            dag._local_partition_cache_dir(config, "mart_trip_daily", "service_date", partition_date)
+            / f"generation=interrupted-{partition_date}"
+        )
+        incomplete_dir.mkdir(parents=True)
+        (incomplete_dir / dag.LOCAL_GENERATION_PENDING_MARKER).touch()
+        (incomplete_dir / "part.parquet").write_text("partial", encoding="utf-8")
+        incomplete_dirs.append(incomplete_dir)
+
+    assert dag._remove_all_incomplete_local_generations(config) == 2
+    assert not any(path.exists() for path in incomplete_dirs)
+
+
 def test_cleanup_stale_local_generations_preserves_active_and_recent(tmp_path: Path) -> None:
     dag = _load_dag_module()
     config = replace(_test_export_config(dag, tmp_path), staging_retention_days=3)
