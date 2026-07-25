@@ -77,6 +77,7 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.max_source_bytes == 20 * 1024 * 1024 * 1024
     assert config.max_duckdb_bytes == 20 * 1024 * 1024 * 1024
     assert config.cleanup_gcs_staging is True
+    assert config.partitioned_store is False
     assert config.changed_partition_dates == ()
     assert config.validation_timeout_seconds == 600
     assert config.validation_memory_limit_mb == 4096
@@ -192,6 +193,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
                     "max_source_bytes": 123,
                     "max_duckdb_bytes": "456",
                     "cleanup_gcs_staging": False,
+                    "partitioned_store": True,
                     "changed_partition_dates": ["2026-07-06", "2026-07-07", "2026-07-07"],
                     "validation_timeout_seconds": 30,
                     "validation_memory_limit_mb": 512,
@@ -211,6 +213,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
     assert config.max_source_bytes == 123
     assert config.max_duckdb_bytes == 456
     assert config.cleanup_gcs_staging is False
+    assert config.partitioned_store is True
     assert config.changed_partition_dates == ("2026-07-06", "2026-07-07")
     assert config.validation_timeout_seconds == 30
     assert config.validation_memory_limit_mb == 512
@@ -230,6 +233,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
         ("staging_retention_days", True, ValueError),
         ("gcs_prefix", "/", ValueError),
         ("cleanup_gcs_staging", "yes", TypeError),
+        ("partitioned_store", "yes", TypeError),
     ],
 )
 def test_export_config_rejects_unsafe_manual_overrides(key: str, value: object, error: type[Exception]) -> None:
@@ -253,6 +257,13 @@ def test_validate_source_stats_enforces_size_guardrail() -> None:
 
     with pytest.raises(RuntimeError, match="exceeds configured limit"):
         dag._validate_source_stats(stats, 50)
+
+
+def test_validate_source_stats_can_skip_monolithic_size_guardrail() -> None:
+    dag = _load_dag_module()
+    stats = [dag.TableStats(table_name=table_name, row_count=1, size_bytes=10) for table_name in dag.MART_TABLES]
+
+    dag._validate_source_stats(stats, None)
 
 
 def test_source_table_stats_merges_date_ranges() -> None:
@@ -317,6 +328,54 @@ def test_extract_mart_to_gcs_uses_parquet_extract_contract() -> None:
     assert client.extract_call.location == dag.BIGQUERY_LOCATION
     assert client.extract_call.job_config.destination_format == dag.bigquery.DestinationFormat.PARQUET
     assert client.extract_call.job.result_called is True
+
+
+def test_extract_partitioned_store_inputs_refreshes_only_changed_local_partitions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dag = _load_dag_module()
+    config = replace(
+        _test_export_config(dag, tmp_path),
+        partitioned_store=True,
+        changed_partition_dates=("2026-07-02",),
+    )
+    extracted_globals = []
+    synced_tables = []
+    replaced_partitions = []
+    old_path = tmp_path / "old.parquet"
+    new_path = tmp_path / "new.parquet"
+
+    monkeypatch.setattr(dag, "_extract_mart_to_gcs", lambda _client, _config, table: extracted_globals.append(table))
+    monkeypatch.setattr(
+        dag,
+        "_download_mart_parquet",
+        lambda _client, _config, table, _directory: [tmp_path / f"{table}.parquet"],
+    )
+    monkeypatch.setattr(
+        dag,
+        "_sync_partition_cache",
+        lambda _bq, _storage, _config, table: synced_tables.append(table),
+    )
+    monkeypatch.setattr(
+        dag,
+        "_table_partition_dates",
+        lambda _client, _table: [dag.date(2026, 7, 1), dag.date(2026, 7, 2)],
+    )
+    monkeypatch.setattr(dag, "_active_local_partition_paths", lambda *_args: [old_path])
+
+    def replace_partition(_storage: object, _config: object, table: str, partition_date: str) -> list[Path]:
+        replaced_partitions.append((table, partition_date))
+        return [new_path]
+
+    monkeypatch.setattr(dag, "_replace_local_partition_cache", replace_partition)
+
+    paths = dag._extract_partitioned_store_inputs(object(), object(), config, tmp_path / "temp")
+
+    assert extracted_globals == list(dag.GLOBAL_EXPORT_TABLES)
+    assert synced_tables == list(dag.SHARDED_EXPORT_TABLES)
+    assert replaced_partitions == [(table, "2026-07-02") for table in dag.SHARDED_EXPORT_TABLES]
+    assert all(paths[table] == [old_path, new_path] for table in dag.SHARDED_EXPORT_TABLES)
 
 
 def test_extract_mart_to_gcs_rejects_existing_job_after_conflict() -> None:
@@ -869,7 +928,75 @@ def test_build_partitioned_catalog_materializes_globals_and_exposes_shard_views(
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "partitioned-1"
 
 
-def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> None:
+def test_replace_local_partition_cache_atomically_activates_generation(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    config = replace(_test_export_config(dag, tmp_path), export_id="generation-1")
+    cache_prefix = "prefix/partition_cache/mart_trip_daily/service_date=2026-07-02"
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob(
+                f"{cache_prefix}/generation=gcs-1/part-000.parquet",
+                data=b"parquet",
+            ),
+            FakeBlob(
+                f"{cache_prefix}/_MANIFEST.json",
+                data=json.dumps({"parquet_blobs": [f"{cache_prefix}/generation=gcs-1/part-000.parquet"]}).encode(),
+            ),
+        ]
+    )
+
+    paths = dag._replace_local_partition_cache(
+        storage_client,
+        config,
+        "mart_trip_daily",
+        "2026-07-02",
+    )
+
+    assert paths == dag._active_local_partition_paths(config, "mart_trip_daily", "2026-07-02")
+    assert paths[0].read_text(encoding="utf-8") == "downloaded"
+    assert "generation=generation-1" in paths[0].as_posix()
+
+
+def test_replace_local_partition_cache_failure_preserves_active_generation(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    old_config = replace(_test_export_config(dag, tmp_path), export_id="old")
+    old_partition_dir = dag._local_partition_cache_dir(
+        old_config,
+        "mart_trip_daily",
+        "service_date",
+        "2026-07-02",
+    )
+    old_generation_dir = old_partition_dir / "generation=old"
+    old_generation_dir.mkdir(parents=True)
+    old_path = old_generation_dir / "part-000.parquet"
+    old_path.write_text("old", encoding="utf-8")
+    dag._write_metadata_file(
+        old_partition_dir / dag.PARTITION_CACHE_MANIFEST,
+        {"export_id": "old", "parquet_files": [old_path.relative_to(tmp_path).as_posix()]},
+    )
+
+    new_config = replace(_test_export_config(dag, tmp_path), export_id="new")
+    cache_prefix = "prefix/partition_cache/mart_trip_daily/service_date=2026-07-02"
+    new_blob_name = f"{cache_prefix}/generation=gcs-2/part-000.parquet"
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob(new_blob_name, fail_download=True, data=b"parquet"),
+            FakeBlob(
+                f"{cache_prefix}/_MANIFEST.json",
+                data=json.dumps({"parquet_blobs": [new_blob_name]}).encode(),
+            ),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="stale listed blob was downloaded"):
+        dag._replace_local_partition_cache(storage_client, new_config, "mart_trip_daily", "2026-07-02")
+
+    assert dag._active_local_partition_paths(new_config, "mart_trip_daily", "2026-07-02") == [old_path]
+    assert not (old_partition_dir / "generation=new").exists()
+
+
+@pytest.mark.parametrize("partitioned_store", [False, True])
+def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path, *, partitioned_store: bool) -> None:
     duckdb = pytest.importorskip("duckdb")
     dag = _load_dag_module()
     parquet_paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
@@ -893,6 +1020,7 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
         max_source_bytes=1000,
         max_duckdb_bytes=10_000_000,
         cleanup_gcs_staging=False,
+        partitioned_store=partitioned_store,
     )
 
     result = dag._publish_duckdb(config, parquet_paths_by_table, source_stats, datetime(2026, 7, 2, tzinfo=UTC))
@@ -911,6 +1039,13 @@ def test_publish_duckdb_builds_queryable_file_with_metadata(tmp_path: Path) -> N
         assert connection.execute("select count(*) from mart_mode_window_summary").fetchone()[0] == 1
         assert connection.execute("select count(*) from mart_hour_window_summary").fetchone()[0] == 1
         assert connection.execute("select count(*) from mart_worst_delay_event").fetchone()[0] == 1
+        expected_type = "VIEW" if partitioned_store else "BASE TABLE"
+        assert (
+            connection.execute(
+                "select table_type from information_schema.tables where table_name = 'mart_trip_daily'"
+            ).fetchone()[0]
+            == expected_type
+        )
         assert connection.execute(
             "select stop_code, effective_zone_id, town_name from dim_stop_post_current"
         ).fetchone() == (
