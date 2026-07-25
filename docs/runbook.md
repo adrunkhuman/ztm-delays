@@ -364,6 +364,11 @@ After a successful initial run, set `SERVING_EXPORT_PARTITIONED_STORE=true` pers
 mount, not only `ztm.duckdb`: the catalog remains small while `parquet/` grows with retained history. Downloads fail before
 exhausting the filesystem when they would violate `SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES`.
 
+Before enabling it, mount `/home/ubuntu/ztm-pipeline/serving` at one identical container path such as `/serving` in both
+Airflow and frontend, then set `SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT=/serving` in Airflow. Keep the existing
+`SERVING_EXPORT_DIR` and `ZTM_DUCKDB_PATH` values if desired; the additional canonical mount exists for paths persisted in
+DuckDB views. The exporter validates that `/serving` and `SERVING_EXPORT_DIR` are the same mounted directory.
+
 To roll back, unset `SERVING_EXPORT_PARTITIONED_STORE` and trigger a fresh monolithic export with a new `export_id`. Do
 not delete `parquet/` until the monolithic file has passed validation and replaced the catalog. Inactive Parquet
 generations are removed only after successful partitioned publications and the staging-retention interval.

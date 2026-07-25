@@ -22,6 +22,10 @@ The frontend continues to open `ztm.duckdb`. Global reference data is materializ
 are DuckDB views over the active local Parquet generations, so existing frontend SQL and metric definitions do not
 change.
 
+DuckDB persists Parquet paths in view definitions. Airflow and frontend containers must therefore mount the serving host
+directory at one canonical in-container path, configured by `SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT`. Airflow rejects
+partitioned publication unless that path and `SERVING_EXPORT_DIR` resolve to the same mounted directory.
+
 ## Table Boundaries
 
 Global tables are small and replaced with each catalog publication:

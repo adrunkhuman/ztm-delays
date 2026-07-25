@@ -85,6 +85,7 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.cleanup_gcs_staging is True
     assert config.partitioned_store is False
     assert config.partitioned_store_min_free_bytes == 5 * 1024 * 1024 * 1024
+    assert config.partitioned_store_view_root == Path("/serving")
     assert config.changed_partition_dates == ()
     assert config.validation_timeout_seconds == 600
     assert config.validation_memory_limit_mb == 4096
@@ -202,6 +203,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
                     "cleanup_gcs_staging": False,
                     "partitioned_store": True,
                     "partitioned_store_min_free_bytes": 789,
+                    "partitioned_store_view_root": str(tmp_path),
                     "changed_partition_dates": ["2026-07-06", "2026-07-07", "2026-07-07"],
                     "validation_timeout_seconds": 30,
                     "validation_memory_limit_mb": 512,
@@ -223,6 +225,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
     assert config.cleanup_gcs_staging is False
     assert config.partitioned_store is True
     assert config.partitioned_store_min_free_bytes == 789
+    assert config.partitioned_store_view_root == tmp_path
     assert config.changed_partition_dates == ("2026-07-06", "2026-07-07")
     assert config.validation_timeout_seconds == 30
     assert config.validation_memory_limit_mb == 512
@@ -942,6 +945,32 @@ def test_build_partitioned_catalog_materializes_globals_and_exposes_shard_views(
         }
         assert connection.execute("select count(*) from mart_trip_daily").fetchone()[0] == 1
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "partitioned-1"
+
+
+def test_partitioned_catalog_paths_use_canonical_shared_root(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    config = replace(
+        _test_export_config(dag, tmp_path),
+        partitioned_store_view_root=Path("/serving"),
+    )
+    local_path = tmp_path / "parquet" / "mart_trip_daily" / "service_date=2026-07-02" / "part.parquet"
+
+    assert dag._partitioned_catalog_paths(config, [local_path]) == [
+        Path("/serving/parquet/mart_trip_daily/service_date=2026-07-02/part.parquet")
+    ]
+
+
+def test_validate_partitioned_store_view_root_rejects_different_mount(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    different_root = tmp_path / "different"
+    different_root.mkdir()
+    config = replace(
+        _test_export_config(dag, tmp_path),
+        partitioned_store_view_root=different_root,
+    )
+
+    with pytest.raises(RuntimeError, match="must resolve to the same directory"):
+        dag._validate_partitioned_store_view_root(config)
 
 
 def test_replace_local_partition_cache_atomically_activates_generation(tmp_path: Path) -> None:

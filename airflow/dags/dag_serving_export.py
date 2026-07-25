@@ -198,6 +198,7 @@ class ExportConfig:
     cleanup_gcs_staging: bool
     partitioned_store: bool = False
     partitioned_store_min_free_bytes: int = PARTITIONED_STORE_MIN_FREE_BYTES
+    partitioned_store_view_root: Path | None = None
     changed_partition_dates: tuple[str, ...] = ()
     validation_timeout_seconds: int = SEMANTIC_VALIDATION_TIMEOUT_SECONDS
     validation_memory_limit_mb: int = SEMANTIC_VALIDATION_MEMORY_LIMIT_MB
@@ -303,6 +304,13 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
             conf,
             "partitioned_store_min_free_bytes",
             os.getenv("SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES", str(PARTITIONED_STORE_MIN_FREE_BYTES)),
+        ),
+        partitioned_store_view_root=Path(
+            _string_config(
+                conf,
+                "partitioned_store_view_root",
+                os.getenv("SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT", "/serving"),
+            )
         ),
         changed_partition_dates=_changed_partition_dates(context, conf),
         validation_timeout_seconds=_int_config(
@@ -431,6 +439,8 @@ def _date_list_config(conf: dict[str, object], key: str) -> tuple[str, ...]:
 
 
 def _run_serving_export(config: ExportConfig) -> ExportResult:
+    if config.partitioned_store:
+        _validate_partitioned_store_view_root(config)
     bigquery_client = bigquery.Client(project=GCP_PROJECT)
     storage_client = storage.Client(project=GCP_PROJECT)
     exported_at = datetime.now(UTC)
@@ -1137,10 +1147,35 @@ def _build_partitioned_catalog_file(
                 f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
         for table_name in SHARDED_EXPORT_TABLES:
+            catalog_paths = _partitioned_catalog_paths(
+                build_input.config,
+                build_input.parquet_paths_by_table[table_name],
+            )
             connection.execute(
-                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
+                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(catalog_paths)})"
             )
         _create_export_metadata_tables(connection, build_input)
+
+
+def _validate_partitioned_store_view_root(config: ExportConfig) -> None:
+    view_root = config.partitioned_store_view_root or config.output_dir
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    if not view_root.is_absolute() or not view_root.is_dir() or not config.output_dir.samefile(view_root):
+        raise RuntimeError(
+            f"Partitioned serving view root {view_root} must resolve to the same directory as {config.output_dir}"
+        )
+
+
+def _partitioned_catalog_paths(config: ExportConfig, paths: Sequence[Path]) -> list[Path]:
+    output_dir = config.output_dir.resolve()
+    view_root = config.partitioned_store_view_root or output_dir
+    catalog_paths = []
+    for path in paths:
+        resolved_path = path.resolve()
+        if not resolved_path.is_relative_to(output_dir):
+            raise RuntimeError(f"Partitioned serving path is outside the output directory: {path}")
+        catalog_paths.append(view_root / resolved_path.relative_to(output_dir))
+    return catalog_paths
 
 
 def _create_export_metadata_tables(connection: DuckdbConnection, build_input: DuckdbBuildInput) -> None:
