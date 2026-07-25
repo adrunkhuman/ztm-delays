@@ -157,6 +157,7 @@ PARTITIONED_EXPORT_TABLES = {
 PARTITION_CACHE_MANIFEST = "_MANIFEST.json"
 LOCAL_PARTITION_DIRECTORY = "parquet"
 LOCAL_GENERATION_INACTIVE_MARKER = ".inactive"
+LOCAL_GENERATION_PENDING_MARKER = ".pending"
 DATE_RANGE_SQL_BY_TABLE = {
     "dim_serving_date": "service_date",
     "dim_serving_window_date": "source_end_date",
@@ -918,6 +919,7 @@ def _replace_local_partition_cache(
         raise RuntimeError(f"No active GCS partition cache found for {table_name} {partition_date}")
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    _remove_incomplete_local_generations(config, table_name, partition_date)
     blobs_by_name = {blob.name: blob for blob in blobs}
     required_bytes = sum(int(blobs_by_name[name].size or 0) for name in blob_names)
     free_bytes = shutil.disk_usage(config.output_dir).free
@@ -932,6 +934,8 @@ def _replace_local_partition_cache(
     if generation_dir.exists():
         raise RuntimeError(f"Local partition generation already exists: {generation_dir}")
     generation_dir.mkdir(parents=True)
+    pending_marker = generation_dir / LOCAL_GENERATION_PENDING_MARKER
+    pending_marker.touch()
 
     paths = []
     try:
@@ -946,6 +950,7 @@ def _replace_local_partition_cache(
                 "parquet_files": [path.relative_to(config.output_dir).as_posix() for path in paths],
             },
         )
+        pending_marker.unlink()
     except Exception:
         shutil.rmtree(generation_dir, ignore_errors=True)
         raise
@@ -983,6 +988,27 @@ def _active_local_partition_paths(
             raise RuntimeError(f"Missing local partition cache file: {path}")
         paths.append(path)
     return sorted(paths)
+
+
+def _remove_incomplete_local_generations(
+    config: ExportConfig,
+    table_name: str,
+    partition_date: str,
+) -> int:
+    date_column = SHARDED_EXPORT_TABLES[table_name]
+    partition_dir = _local_partition_cache_dir(config, table_name, date_column, partition_date)
+    active_generation_dirs = {path.parent for path in _active_local_partition_paths(config, table_name, partition_date)}
+    deleted_count = 0
+    for generation_dir in partition_dir.glob("generation=*"):
+        pending_marker = generation_dir / LOCAL_GENERATION_PENDING_MARKER
+        if not pending_marker.exists():
+            continue
+        if generation_dir.resolve() in active_generation_dirs:
+            pending_marker.unlink()
+            continue
+        shutil.rmtree(generation_dir)
+        deleted_count += 1
+    return deleted_count
 
 
 def _local_partition_cache_dir(

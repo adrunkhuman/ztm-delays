@@ -1102,6 +1102,24 @@ def test_replace_local_partition_cache_enforces_disk_headroom(
         dag._replace_local_partition_cache(storage_client, config, "mart_trip_daily", "2026-07-02")
 
 
+def test_incomplete_local_generation_is_removed_before_retry(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    config = _test_export_config(dag, tmp_path)
+    partition_dir = dag._local_partition_cache_dir(
+        config,
+        "mart_trip_daily",
+        "service_date",
+        "2026-07-02",
+    )
+    incomplete_dir = partition_dir / "generation=interrupted"
+    incomplete_dir.mkdir(parents=True)
+    (incomplete_dir / dag.LOCAL_GENERATION_PENDING_MARKER).touch()
+    (incomplete_dir / "part.parquet").write_text("partial", encoding="utf-8")
+
+    assert dag._remove_incomplete_local_generations(config, "mart_trip_daily", "2026-07-02") == 1
+    assert not incomplete_dir.exists()
+
+
 def test_cleanup_stale_local_generations_preserves_active_and_recent(tmp_path: Path) -> None:
     dag = _load_dag_module()
     config = replace(_test_export_config(dag, tmp_path), staging_retention_days=3)
