@@ -49,6 +49,9 @@ For each changed date:
 5. Atomically replace the small DuckDB catalog and metadata sidecar.
 6. Retain prior local generations long enough for readers holding the previous catalog snapshot to finish.
 
+Inactive local generations are removed only after a successful publication and the configured staging-retention period.
+The generation selected by a partition manifest is always preserved.
+
 The catalog is the commit point. A failed extraction, download, build, or validation must leave the previous catalog and
 its referenced Parquet generations usable.
 
@@ -68,8 +71,8 @@ data. It changes recurring work from O(all retained history) to O(changed partit
 | Persistent VPS storage | Grows with history | Grows with history |
 
 Disk capacity remains an operational concern, but adding capacity no longer increases nightly publication time. The
-partition store must report total bytes and free-space headroom before publication so capacity can be expanded before it
-becomes an outage.
+exporter refuses a partition download that would leave less than the configured free-space reserve, so capacity can be
+expanded before the filesystem is exhausted.
 
 ## Migration
 

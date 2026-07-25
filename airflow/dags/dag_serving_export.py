@@ -74,6 +74,7 @@ SEMANTIC_VALIDATION_THREADS = 1
 SEMANTIC_VALIDATION_MAX_REPORT_BYTES = 64 * 1024
 SEMANTIC_VALIDATION_MAX_WARNINGS = 100
 STAGING_RETENTION_DAYS = 3
+PARTITIONED_STORE_MIN_FREE_BYTES = 5 * 1024 * 1024 * 1024
 SEMANTIC_WARNING_FIELDS = {
     "serving_date_absent": {"code", "service_date"},
     "pipeline_status_mode_absent": {"code", "service_date", "mode"},
@@ -160,6 +161,7 @@ DATE_RANGE_SQL_BY_TABLE = {
     "dim_serving_window_date": "source_end_date",
     "fct_expected_stop_event": "service_date",
     "mart_entity_daily_summary": "service_date",
+    "mart_entity_window_daily_summary": "source_end_date",
     "mart_entity_rankings": "source_end_date",
     "mart_entity_timeline_daily": "service_date",
     "mart_hour_window_summary": "source_end_date",
@@ -195,6 +197,7 @@ class ExportConfig:
     max_duckdb_bytes: int
     cleanup_gcs_staging: bool
     partitioned_store: bool = False
+    partitioned_store_min_free_bytes: int = PARTITIONED_STORE_MIN_FREE_BYTES
     changed_partition_dates: tuple[str, ...] = ()
     validation_timeout_seconds: int = SEMANTIC_VALIDATION_TIMEOUT_SECONDS
     validation_memory_limit_mb: int = SEMANTIC_VALIDATION_MEMORY_LIMIT_MB
@@ -295,6 +298,11 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
             conf,
             "partitioned_store",
             os.getenv("SERVING_EXPORT_PARTITIONED_STORE", "false").lower() == "true",
+        ),
+        partitioned_store_min_free_bytes=_int_config(
+            conf,
+            "partitioned_store_min_free_bytes",
+            os.getenv("SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES", str(PARTITIONED_STORE_MIN_FREE_BYTES)),
         ),
         changed_partition_dates=_changed_partition_dates(context, conf),
         validation_timeout_seconds=_int_config(
@@ -457,6 +465,8 @@ def _run_serving_export(config: ExportConfig) -> ExportResult:
     if config.cleanup_gcs_staging:
         _cleanup_gcs_staging_best_effort(storage_client, config)
     _cleanup_stale_gcs_staging_best_effort(storage_client, config, exported_at)
+    if config.partitioned_store:
+        _cleanup_stale_local_generations_best_effort(config, exported_at)
 
     return result
 
@@ -890,6 +900,16 @@ def _replace_local_partition_cache(
     if not blob_names:
         raise RuntimeError(f"No active GCS partition cache found for {table_name} {partition_date}")
 
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    blobs_by_name = {blob.name: blob for blob in blobs}
+    required_bytes = sum(int(blobs_by_name[name].size or 0) for name in blob_names)
+    free_bytes = shutil.disk_usage(config.output_dir).free
+    if free_bytes - required_bytes < config.partitioned_store_min_free_bytes:
+        raise RuntimeError(
+            f"Insufficient serving disk headroom for {table_name} {partition_date}: "
+            f"free={free_bytes}, download={required_bytes}, required_free={config.partitioned_store_min_free_bytes}"
+        )
+
     partition_dir = _local_partition_cache_dir(config, table_name, date_column, partition_date)
     generation_dir = partition_dir / f"generation={config.export_id}"
     if generation_dir.exists():
@@ -955,6 +975,43 @@ def _local_partition_cache_dir(
     partition_date: str,
 ) -> Path:
     return config.output_dir / LOCAL_PARTITION_DIRECTORY / table_name / f"{date_column}={partition_date}"
+
+
+def _cleanup_stale_local_generations(config: ExportConfig, now: datetime) -> int:
+    cutoff = now - timedelta(days=config.staging_retention_days)
+    deleted_count = 0
+    root = config.output_dir / LOCAL_PARTITION_DIRECTORY
+    for table_name, date_column in SHARDED_EXPORT_TABLES.items():
+        table_dir = root / table_name
+        if not table_dir.exists():
+            continue
+        for partition_dir in table_dir.glob(f"{date_column}=*"):
+            manifest_path = partition_dir / PARTITION_CACHE_MANIFEST
+            if not manifest_path.is_file():
+                continue
+            partition_date = partition_dir.name.removeprefix(f"{date_column}=")
+            active_generation_dirs = {
+                path.parent for path in _active_local_partition_paths(config, table_name, partition_date)
+            }
+            for generation_dir in partition_dir.glob("generation=*"):
+                if generation_dir.resolve() in active_generation_dirs:
+                    continue
+                modified_at = datetime.fromtimestamp(generation_dir.stat().st_mtime, UTC)
+                if modified_at >= cutoff:
+                    continue
+                shutil.rmtree(generation_dir)
+                deleted_count += 1
+    return deleted_count
+
+
+def _cleanup_stale_local_generations_best_effort(config: ExportConfig, now: datetime) -> None:
+    try:
+        deleted_count = _cleanup_stale_local_generations(config, now)
+    except Exception:  # noqa: BLE001
+        LOGGER.warning("Failed to clean stale local serving generations", exc_info=True)
+        return
+    if deleted_count:
+        LOGGER.info("Deleted %s stale local serving generations", deleted_count)
 
 
 def _publish_duckdb(
@@ -1081,7 +1138,7 @@ def _build_partitioned_catalog_file(
             )
         for table_name in SHARDED_EXPORT_TABLES:
             connection.execute(
-                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])}, hive_partitioning = true)"
+                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
         _create_export_metadata_tables(connection, build_input)
 

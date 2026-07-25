@@ -62,6 +62,12 @@ def test_serving_table_groups_partition_export_contract() -> None:
     }
     assert set(dag.SHARDED_EXPORT_TABLES) == set(dag.MART_TABLES) - set(dag.GLOBAL_EXPORT_TABLES)
     assert set(dag.SHARDED_EXPORT_TABLES.values()) == {"service_date", "source_end_date"}
+    expected_sharded_tables = {
+        table_name: date_column
+        for table_name, date_column in dag.DATE_RANGE_SQL_BY_TABLE.items()
+        if table_name != "dim_serving_date"
+    }
+    assert expected_sharded_tables == dag.SHARDED_EXPORT_TABLES
 
 
 def test_export_config_uses_safe_defaults() -> None:
@@ -78,6 +84,7 @@ def test_export_config_uses_safe_defaults() -> None:
     assert config.max_duckdb_bytes == 20 * 1024 * 1024 * 1024
     assert config.cleanup_gcs_staging is True
     assert config.partitioned_store is False
+    assert config.partitioned_store_min_free_bytes == 5 * 1024 * 1024 * 1024
     assert config.changed_partition_dates == ()
     assert config.validation_timeout_seconds == 600
     assert config.validation_memory_limit_mb == 4096
@@ -194,6 +201,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
                     "max_duckdb_bytes": "456",
                     "cleanup_gcs_staging": False,
                     "partitioned_store": True,
+                    "partitioned_store_min_free_bytes": 789,
                     "changed_partition_dates": ["2026-07-06", "2026-07-07", "2026-07-07"],
                     "validation_timeout_seconds": 30,
                     "validation_memory_limit_mb": 512,
@@ -214,6 +222,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
     assert config.max_duckdb_bytes == 456
     assert config.cleanup_gcs_staging is False
     assert config.partitioned_store is True
+    assert config.partitioned_store_min_free_bytes == 789
     assert config.changed_partition_dates == ("2026-07-06", "2026-07-07")
     assert config.validation_timeout_seconds == 30
     assert config.validation_memory_limit_mb == 512
@@ -234,6 +243,7 @@ def test_export_config_accepts_manual_overrides(tmp_path: Path) -> None:
         ("gcs_prefix", "/", ValueError),
         ("cleanup_gcs_staging", "yes", TypeError),
         ("partitioned_store", "yes", TypeError),
+        ("partitioned_store_min_free_bytes", 0, ValueError),
     ],
 )
 def test_export_config_rejects_unsafe_manual_overrides(key: str, value: object, error: type[Exception]) -> None:
@@ -924,6 +934,12 @@ def test_build_partitioned_catalog_materializes_globals_and_exposes_shard_views(
         )
         assert table_types["dim_serving_date"] == "BASE TABLE"
         assert table_types["mart_trip_daily"] == "VIEW"
+        assert "generation" not in {
+            row[0]
+            for row in connection.execute(
+                "select column_name from information_schema.columns where table_name = 'mart_trip_daily'"
+            ).fetchall()
+        }
         assert connection.execute("select count(*) from mart_trip_daily").fetchone()[0] == 1
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "partitioned-1"
 
@@ -993,6 +1009,65 @@ def test_replace_local_partition_cache_failure_preserves_active_generation(tmp_p
 
     assert dag._active_local_partition_paths(new_config, "mart_trip_daily", "2026-07-02") == [old_path]
     assert not (old_partition_dir / "generation=new").exists()
+
+
+def test_replace_local_partition_cache_enforces_disk_headroom(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dag = _load_dag_module()
+    config = replace(
+        _test_export_config(dag, tmp_path),
+        partitioned_store_min_free_bytes=50,
+    )
+    cache_prefix = "prefix/partition_cache/mart_trip_daily/service_date=2026-07-02"
+    blob_name = f"{cache_prefix}/generation=gcs-1/part-000.parquet"
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob(blob_name, size=60),
+            FakeBlob(
+                f"{cache_prefix}/_MANIFEST.json",
+                data=json.dumps({"parquet_blobs": [blob_name]}).encode(),
+            ),
+        ]
+    )
+    monkeypatch.setattr(dag.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=100))
+
+    with pytest.raises(RuntimeError, match="Insufficient serving disk headroom"):
+        dag._replace_local_partition_cache(storage_client, config, "mart_trip_daily", "2026-07-02")
+
+
+def test_cleanup_stale_local_generations_preserves_active_and_recent(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    config = replace(_test_export_config(dag, tmp_path), staging_retention_days=3)
+    partition_dir = dag._local_partition_cache_dir(
+        config,
+        "mart_trip_daily",
+        "service_date",
+        "2026-07-02",
+    )
+    active_dir = partition_dir / "generation=active"
+    recent_dir = partition_dir / "generation=recent"
+    stale_dir = partition_dir / "generation=stale"
+    for generation_dir in (active_dir, recent_dir, stale_dir):
+        generation_dir.mkdir(parents=True)
+        (generation_dir / "part.parquet").write_text(generation_dir.name, encoding="utf-8")
+    active_path = active_dir / "part.parquet"
+    dag._write_metadata_file(
+        partition_dir / dag.PARTITION_CACHE_MANIFEST,
+        {"export_id": "active", "parquet_files": [active_path.relative_to(tmp_path).as_posix()]},
+    )
+    now = datetime(2026, 7, 10, tzinfo=UTC)
+    stale_timestamp = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+    os.utime(active_dir, (stale_timestamp, stale_timestamp))
+    os.utime(stale_dir, (stale_timestamp, stale_timestamp))
+
+    deleted_count = dag._cleanup_stale_local_generations(config, now)
+
+    assert deleted_count == 1
+    assert active_dir.exists()
+    assert recent_dir.exists()
+    assert not stale_dir.exists()
 
 
 @pytest.mark.parametrize("partitioned_store", [False, True])
