@@ -50,13 +50,14 @@ For each changed date:
 2. Extract only changed or missing serving partitions to Parquet.
 3. Download each new partition under an immutable local generation directory.
 4. Validate the candidate catalog against the complete active partition set.
-5. Atomically replace the small DuckDB catalog and metadata sidecar.
+5. Publish the small DuckDB catalog and metadata sidecar with rollback protection.
 6. Retain prior local generations long enough for readers holding the previous catalog snapshot to finish.
 
 Inactive local generations are removed only after a successful publication and the configured staging-retention period.
 The generation selected by a partition manifest is always preserved.
 
-The catalog is the commit point. A failed extraction, download, build, or validation must leave the previous catalog and
+The catalog is the commit point; the DuckDB file and sidecar are replaced separately with rollback protection. A failed
+extraction, download, build, or validation must leave the previous catalog and
 its referenced Parquet generations usable.
 
 Historical corrections use the same path. Every date reported in `changed_partition_dates` receives a new generation;
