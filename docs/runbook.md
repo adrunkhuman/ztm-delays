@@ -339,6 +339,40 @@ Useful manual config:
 Manual partition-cache exports must list every date changed by the preceding rebuild. Omit `changed_partition_dates` to
 extract complete source tables when the changed set is unknown.
 
+### Partitioned serving migration
+
+The partitioned serving store keeps the same `ztm.duckdb` frontend path, but date-bearing table names become views over
+local Parquet files under `SERVING_EXPORT_DIR/parquet`. Keep that directory on the same persistent shared mount as the
+catalog. Do not copy or restore the catalog without its referenced Parquet generations.
+
+Before initial migration, verify free space on the serving filesystem. The first partitioned run downloads every retained
+partition once and requires a fresh `export_id`:
+
+```json
+{
+  "export_id": "partitioned-initial-YYYYMMDDTHHMMSSZ",
+  "partitioned_store": true,
+  "cleanup_gcs_staging": true
+}
+```
+
+The initial run leaves the existing monolithic `ztm.duckdb` active until the candidate catalog passes structural and
+semantic validation. Later asset-triggered runs refresh only `changed_partition_dates`; missing local partitions are
+recovered automatically from the GCS partition cache. A historical correction must continue to list every affected date.
+
+After a successful initial run, set `SERVING_EXPORT_PARTITIONED_STORE=true` persistently. Monitor the complete serving
+mount, not only `ztm.duckdb`: the catalog remains small while `parquet/` grows with retained history. Downloads fail before
+exhausting the filesystem when they would violate `SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES`.
+
+Before enabling it, mount `/home/ubuntu/ztm-pipeline/serving` at one identical container path such as `/serving` in both
+Airflow and frontend, then set `SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT=/serving` in Airflow. Keep the existing
+`SERVING_EXPORT_DIR` and `ZTM_DUCKDB_PATH` values if desired; the additional canonical mount exists for paths persisted in
+DuckDB views. The exporter validates that `/serving` and `SERVING_EXPORT_DIR` are the same mounted directory.
+
+To roll back, unset `SERVING_EXPORT_PARTITIONED_STORE` and trigger a fresh monolithic export with a new `export_id`. Do
+not delete `parquet/` until the monolithic file has passed validation and replaced the catalog. Inactive Parquet
+generations are removed only after successful partitioned publications and the staging-retention interval.
+
 Deployments that introduce or change canonical serving models must rebuild `int_serving_trip_execution`,
 `int_serving_stop_arrival`, and their dependent serving marts for every retained serving date before unpausing
 `dag_serving_export`. Verify `mart_trip_daily.gtfs_snapshot_id` is non-null across the retained range before

@@ -49,8 +49,12 @@ if TYPE_CHECKING:
     class DuckdbConnection(Protocol):
         """Minimal DuckDB connection protocol used by build-time settings."""
 
-        def execute(self, query: str) -> DuckdbResult:
+        def execute(self, query: str, parameters: Sequence[Any] | None = None) -> DuckdbResult:
             """DuckDB-compatible execute."""
+            ...
+
+        def executemany(self, query: str, parameters: Sequence[Sequence[Any]]) -> DuckdbResult:
+            """DuckDB-compatible repeated parameter execution."""
             ...
 
 
@@ -70,6 +74,7 @@ SEMANTIC_VALIDATION_THREADS = 1
 SEMANTIC_VALIDATION_MAX_REPORT_BYTES = 64 * 1024
 SEMANTIC_VALIDATION_MAX_WARNINGS = 100
 STAGING_RETENTION_DAYS = 3
+PARTITIONED_STORE_MIN_FREE_BYTES = 5 * 1024 * 1024 * 1024
 SEMANTIC_WARNING_FIELDS = {
     "serving_date_absent": {"code", "service_date"},
     "pipeline_status_mode_absent": {"code", "service_date", "mode"},
@@ -106,6 +111,42 @@ MART_TABLES = (
     "mart_trip_mode_daily_summary",
     "mart_worst_delay_event",
 )
+GLOBAL_EXPORT_TABLES = (
+    "dim_schedule_version",
+    "dim_serving_date",
+    "dim_stop_group_current",
+    "dim_stop_post_current",
+    "mart_pipeline_status_recent_summary",
+)
+SHARDED_EXPORT_TABLES = {
+    "dim_serving_window_date": "source_end_date",
+    "fct_expected_stop_event": "service_date",
+    "mart_entity_daily_summary": "service_date",
+    "mart_entity_rankings": "source_end_date",
+    "mart_entity_timeline_daily": "service_date",
+    "mart_entity_window_daily_summary": "source_end_date",
+    "mart_hour_window_summary": "source_end_date",
+    "mart_line_course_stop_window": "source_end_date",
+    "mart_line_course_window": "source_end_date",
+    "mart_line_reliability_daily": "service_date",
+    "mart_line_trip_group_daily": "service_date",
+    "mart_line_window_summary": "source_end_date",
+    "mart_mode_window_summary": "source_end_date",
+    "mart_pipeline_status": "service_date",
+    "mart_stop_group_line_group_window": "source_end_date",
+    "mart_stop_group_window_summary": "source_end_date",
+    "mart_stop_line_window_summary": "source_end_date",
+    "mart_stop_post_line_group_window": "source_end_date",
+    "mart_stop_post_window_summary": "source_end_date",
+    "mart_trip_daily": "service_date",
+    "mart_trip_line_daily": "service_date",
+    "mart_trip_mode_daily_summary": "service_date",
+    "mart_worst_delay_event": "service_date",
+}
+if set(GLOBAL_EXPORT_TABLES) | set(SHARDED_EXPORT_TABLES) != set(MART_TABLES):
+    raise RuntimeError("Global and sharded serving table groups must partition MART_TABLES")
+if set(GLOBAL_EXPORT_TABLES) & set(SHARDED_EXPORT_TABLES):
+    raise RuntimeError("Serving tables cannot be both global and sharded")
 PARTITIONED_EXPORT_TABLES = {
     "dim_serving_window_date": "source_end_date",
     "fct_expected_stop_event": "service_date",
@@ -114,11 +155,15 @@ PARTITIONED_EXPORT_TABLES = {
     "mart_hour_window_summary": "source_end_date",
 }
 PARTITION_CACHE_MANIFEST = "_MANIFEST.json"
+LOCAL_PARTITION_DIRECTORY = "parquet"
+LOCAL_GENERATION_INACTIVE_MARKER = ".inactive"
+LOCAL_GENERATION_PENDING_MARKER = ".pending"
 DATE_RANGE_SQL_BY_TABLE = {
     "dim_serving_date": "service_date",
     "dim_serving_window_date": "source_end_date",
     "fct_expected_stop_event": "service_date",
     "mart_entity_daily_summary": "service_date",
+    "mart_entity_window_daily_summary": "source_end_date",
     "mart_entity_rankings": "source_end_date",
     "mart_entity_timeline_daily": "service_date",
     "mart_hour_window_summary": "source_end_date",
@@ -153,6 +198,9 @@ class ExportConfig:
     max_source_bytes: int
     max_duckdb_bytes: int
     cleanup_gcs_staging: bool
+    partitioned_store: bool = False
+    partitioned_store_min_free_bytes: int = PARTITIONED_STORE_MIN_FREE_BYTES
+    partitioned_store_view_root: Path | None = None
     changed_partition_dates: tuple[str, ...] = ()
     validation_timeout_seconds: int = SEMANTIC_VALIDATION_TIMEOUT_SECONDS
     validation_memory_limit_mb: int = SEMANTIC_VALIDATION_MEMORY_LIMIT_MB
@@ -249,6 +297,23 @@ def _export_config(context: dict[str, object], now: datetime | None = None) -> E
             os.getenv("SERVING_EXPORT_MAX_DUCKDB_BYTES", str(SERVING_EXPORT_MAX_BYTES)),
         ),
         cleanup_gcs_staging=_bool_config(conf, "cleanup_gcs_staging", True),
+        partitioned_store=_bool_config(
+            conf,
+            "partitioned_store",
+            os.getenv("SERVING_EXPORT_PARTITIONED_STORE", "false").lower() == "true",
+        ),
+        partitioned_store_min_free_bytes=_int_config(
+            conf,
+            "partitioned_store_min_free_bytes",
+            os.getenv("SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES", str(PARTITIONED_STORE_MIN_FREE_BYTES)),
+        ),
+        partitioned_store_view_root=Path(
+            _string_config(
+                conf,
+                "partitioned_store_view_root",
+                os.getenv("SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT", "/serving"),
+            )
+        ),
         changed_partition_dates=_changed_partition_dates(context, conf),
         validation_timeout_seconds=_int_config(
             conf,
@@ -376,21 +441,44 @@ def _date_list_config(conf: dict[str, object], key: str) -> tuple[str, ...]:
 
 
 def _run_serving_export(config: ExportConfig) -> ExportResult:
+    if config.partitioned_store:
+        _validate_partitioned_store_view_root(config)
     bigquery_client = bigquery.Client(project=GCP_PROJECT)
     storage_client = storage.Client(project=GCP_PROJECT)
     exported_at = datetime.now(UTC)
     poller_status = _poller_status(storage_client, exported_at, config.gcs_bucket)
     source_stats = _source_table_stats(bigquery_client)
-    _validate_source_stats(source_stats, config.max_source_bytes)
+    _validate_source_stats(source_stats, None if config.partitioned_store else config.max_source_bytes)
 
     with tempfile.TemporaryDirectory(prefix="ztm-serving-export-") as temp_dir:
         local_export_dir = Path(temp_dir)
-        parquet_paths_by_table = _extract_and_download_marts(bigquery_client, storage_client, config, local_export_dir)
-        result = _publish_duckdb(config, parquet_paths_by_table, source_stats, exported_at, poller_status)
+        if config.partitioned_store:
+            parquet_paths_by_table = _extract_partitioned_store_inputs(
+                bigquery_client,
+                storage_client,
+                config,
+                local_export_dir,
+            )
+        else:
+            parquet_paths_by_table = _extract_and_download_marts(
+                bigquery_client,
+                storage_client,
+                config,
+                local_export_dir,
+            )
+        result = _publish_duckdb(
+            config,
+            parquet_paths_by_table,
+            source_stats,
+            exported_at,
+            poller_status,
+        )
 
     if config.cleanup_gcs_staging:
         _cleanup_gcs_staging_best_effort(storage_client, config)
     _cleanup_stale_gcs_staging_best_effort(storage_client, config, exported_at)
+    if config.partitioned_store:
+        _cleanup_stale_local_generations_best_effort(config, exported_at)
 
     return result
 
@@ -461,7 +549,7 @@ def _table_partition_dates(client: bigquery.Client, table_name: str) -> list[dat
     return sorted(partitions)
 
 
-def _validate_source_stats(stats: Sequence[TableStats], max_source_bytes: int) -> None:
+def _validate_source_stats(stats: Sequence[TableStats], max_source_bytes: int | None) -> None:
     found_tables = {stat.table_name for stat in stats}
     missing_tables = sorted(set(MART_TABLES) - found_tables)
     if missing_tables:
@@ -488,7 +576,7 @@ def _validate_source_stats(stats: Sequence[TableStats], max_source_bytes: int) -
         raise RuntimeError(f"Required serving tables are empty: {', '.join(empty_required_tables)}")
 
     source_size_bytes = sum(stat.size_bytes for stat in stats)
-    if source_size_bytes > max_source_bytes:
+    if max_source_bytes is not None and source_size_bytes > max_source_bytes:
         raise RuntimeError(
             f"Serving export source size {source_size_bytes} exceeds configured limit {max_source_bytes}"
         )
@@ -513,6 +601,47 @@ def _extract_and_download_marts(
         parquet_paths_by_table[table_name] = _download_mart_parquet(
             storage_client, config, table_name, local_export_dir
         )
+    return parquet_paths_by_table
+
+
+def _extract_partitioned_store_inputs(
+    bigquery_client: bigquery.Client,
+    storage_client: storage.Client,
+    config: ExportConfig,
+    local_export_dir: Path,
+) -> dict[str, list[Path]]:
+    _remove_all_incomplete_local_generations(config)
+    parquet_paths_by_table = {}
+    for table_name in GLOBAL_EXPORT_TABLES:
+        _extract_mart_to_gcs(bigquery_client, config, table_name)
+        parquet_paths_by_table[table_name] = _download_mart_parquet(
+            storage_client,
+            config,
+            table_name,
+            local_export_dir,
+        )
+
+    for table_name in SHARDED_EXPORT_TABLES:
+        _sync_partition_cache(bigquery_client, storage_client, config, table_name)
+        partition_dates = [
+            partition_date.isoformat() for partition_date in _table_partition_dates(bigquery_client, table_name)
+        ]
+        refresh_dates = set(config.changed_partition_dates or partition_dates)
+        _deactivate_removed_local_partitions(config, table_name, set(partition_dates))
+        paths = []
+        for partition_date in partition_dates:
+            active_paths = _active_local_partition_paths(config, table_name, partition_date)
+            if partition_date in refresh_dates or not active_paths:
+                active_paths = _replace_local_partition_cache(
+                    storage_client,
+                    config,
+                    table_name,
+                    partition_date,
+                )
+            paths.extend(active_paths)
+        if not paths:
+            raise RuntimeError(f"No local Parquet partitions found for {table_name}")
+        parquet_paths_by_table[table_name] = paths
     return parquet_paths_by_table
 
 
@@ -542,17 +671,21 @@ def _sync_partition_cache(
         partition_date.isoformat() for partition_date in _table_partition_dates(bigquery_client, table_name)
     )
     actual_partition_dates = set(partition_dates)
-    date_column = PARTITIONED_EXPORT_TABLES[table_name]
+    date_column = SHARDED_EXPORT_TABLES[table_name]
+    changed_partition_dates = config.changed_partition_dates
+    if config.partitioned_store and not changed_partition_dates:
+        changed_partition_dates = partition_dates
+    changed_partition_date_set = set(changed_partition_dates)
     cached_dates = _cached_partition_dates(storage_client, config, table_name, date_column)
     for partition_date in cached_dates - actual_partition_dates:
         _delete_partition_cache(storage_client, config, table_name, date_column, partition_date)
 
-    for partition_date in config.changed_partition_dates:
+    for partition_date in changed_partition_dates:
         if partition_date in actual_partition_dates:
             _extract_mart_partition_to_cache(bigquery_client, storage_client, config, table_name, partition_date)
 
     for partition_date in partition_dates:
-        if partition_date in cached_dates or partition_date in config.changed_partition_dates:
+        if partition_date in cached_dates or partition_date in changed_partition_date_set:
             continue
         _extract_mart_partition_to_cache(
             bigquery_client,
@@ -583,7 +716,7 @@ def _extract_mart_partition_to_cache(
     table_name: str,
     partition_date: str,
 ) -> None:
-    date_column = PARTITIONED_EXPORT_TABLES[table_name]
+    date_column = SHARDED_EXPORT_TABLES[table_name]
     source_table = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}${partition_date.replace('-', '')}"
     destination_uri = _partition_staging_extract_uri(config, table_name, date_column, partition_date)
     job_config = bigquery.ExtractJobConfig(destination_format=bigquery.DestinationFormat.PARQUET)
@@ -772,6 +905,192 @@ def _download_partitioned_mart_parquet(
     return paths
 
 
+def _replace_local_partition_cache(
+    storage_client: storage.Client,
+    config: ExportConfig,
+    table_name: str,
+    partition_date: str,
+) -> list[Path]:
+    date_column = SHARDED_EXPORT_TABLES[table_name]
+    cache_prefix = _partition_cache_prefix(config, table_name, date_column, partition_date)
+    bucket = storage_client.bucket(config.gcs_bucket)
+    blobs = list(bucket.list_blobs(prefix=f"{cache_prefix}/"))
+    blob_names = _active_partition_blob_names(blobs, cache_prefix)
+    if not blob_names:
+        raise RuntimeError(f"No active GCS partition cache found for {table_name} {partition_date}")
+
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    _remove_incomplete_local_generations(config, table_name, partition_date)
+    blobs_by_name = {blob.name: blob for blob in blobs}
+    required_bytes = sum(int(blobs_by_name[name].size or 0) for name in blob_names)
+    free_bytes = shutil.disk_usage(config.output_dir).free
+    if free_bytes - required_bytes < config.partitioned_store_min_free_bytes:
+        raise RuntimeError(
+            f"Insufficient serving disk headroom for {table_name} {partition_date}: "
+            f"free={free_bytes}, download={required_bytes}, required_free={config.partitioned_store_min_free_bytes}"
+        )
+
+    partition_dir = _local_partition_cache_dir(config, table_name, date_column, partition_date)
+    generation_dir = partition_dir / f"generation={config.export_id}"
+    if generation_dir.exists():
+        raise RuntimeError(f"Local partition generation already exists: {generation_dir}")
+    generation_dir.mkdir(parents=True)
+    pending_marker = generation_dir / LOCAL_GENERATION_PENDING_MARKER
+    pending_marker.touch()
+
+    paths = []
+    try:
+        for blob_name in blob_names:
+            path = generation_dir / Path(blob_name).name
+            bucket.blob(blob_name).download_to_filename(str(path))
+            paths.append(path)
+        _write_metadata_file(
+            partition_dir / PARTITION_CACHE_MANIFEST,
+            {
+                "export_id": config.export_id,
+                "parquet_files": [path.relative_to(config.output_dir).as_posix() for path in paths],
+            },
+        )
+        pending_marker.unlink()
+    except Exception:
+        shutil.rmtree(generation_dir, ignore_errors=True)
+        raise
+    return paths
+
+
+def _active_local_partition_paths(
+    config: ExportConfig,
+    table_name: str,
+    partition_date: str,
+) -> list[Path]:
+    date_column = SHARDED_EXPORT_TABLES[table_name]
+    partition_dir = _local_partition_cache_dir(config, table_name, date_column, partition_date)
+    manifest_path = partition_dir / PARTITION_CACHE_MANIFEST
+    if not manifest_path.exists():
+        return []
+
+    payload = json.loads(manifest_path.read_bytes())
+    relative_paths = payload.get("parquet_files") if isinstance(payload, dict) else None
+    if (
+        not isinstance(relative_paths, list)
+        or not relative_paths
+        or not all(isinstance(path, str) for path in relative_paths)
+    ):
+        raise RuntimeError(f"Invalid local partition cache manifest: {manifest_path}")
+
+    output_dir = config.output_dir.resolve()
+    expected_dir = partition_dir.resolve()
+    paths = []
+    for relative_path in relative_paths:
+        path = (config.output_dir / relative_path).resolve()
+        if not path.is_relative_to(expected_dir) or not path.is_relative_to(output_dir) or path.suffix != ".parquet":
+            raise RuntimeError(f"Unsafe local partition cache path in {manifest_path}: {relative_path}")
+        if not path.is_file():
+            raise RuntimeError(f"Missing local partition cache file: {path}")
+        paths.append(path)
+    return sorted(paths)
+
+
+def _remove_incomplete_local_generations(
+    config: ExportConfig,
+    table_name: str,
+    partition_date: str,
+) -> int:
+    date_column = SHARDED_EXPORT_TABLES[table_name]
+    partition_dir = _local_partition_cache_dir(config, table_name, date_column, partition_date)
+    active_generation_dirs = {path.parent for path in _active_local_partition_paths(config, table_name, partition_date)}
+    deleted_count = 0
+    for generation_dir in partition_dir.glob("generation=*"):
+        pending_marker = generation_dir / LOCAL_GENERATION_PENDING_MARKER
+        if not pending_marker.exists():
+            continue
+        if generation_dir.resolve() in active_generation_dirs:
+            pending_marker.unlink()
+            continue
+        shutil.rmtree(generation_dir)
+        deleted_count += 1
+    return deleted_count
+
+
+def _remove_all_incomplete_local_generations(config: ExportConfig) -> int:
+    root = config.output_dir / LOCAL_PARTITION_DIRECTORY
+    deleted_count = 0
+    for table_name, date_column in SHARDED_EXPORT_TABLES.items():
+        table_dir = root / table_name
+        if not table_dir.exists():
+            continue
+        for partition_dir in table_dir.glob(f"{date_column}=*"):
+            partition_date = partition_dir.name.removeprefix(f"{date_column}=")
+            deleted_count += _remove_incomplete_local_generations(config, table_name, partition_date)
+    return deleted_count
+
+
+def _local_partition_cache_dir(
+    config: ExportConfig,
+    table_name: str,
+    date_column: str,
+    partition_date: str,
+) -> Path:
+    return config.output_dir / LOCAL_PARTITION_DIRECTORY / table_name / f"{date_column}={partition_date}"
+
+
+def _deactivate_removed_local_partitions(
+    config: ExportConfig,
+    table_name: str,
+    actual_partition_dates: set[str],
+) -> None:
+    date_column = SHARDED_EXPORT_TABLES[table_name]
+    table_dir = config.output_dir / LOCAL_PARTITION_DIRECTORY / table_name
+    if not table_dir.exists():
+        return
+    for partition_dir in table_dir.glob(f"{date_column}=*"):
+        partition_date = partition_dir.name.removeprefix(f"{date_column}=")
+        if partition_date not in actual_partition_dates:
+            (partition_dir / PARTITION_CACHE_MANIFEST).unlink(missing_ok=True)
+
+
+def _cleanup_stale_local_generations(config: ExportConfig, now: datetime) -> int:
+    cutoff = now - timedelta(days=config.staging_retention_days)
+    deleted_count = 0
+    root = config.output_dir / LOCAL_PARTITION_DIRECTORY
+    for table_name, date_column in SHARDED_EXPORT_TABLES.items():
+        table_dir = root / table_name
+        if not table_dir.exists():
+            continue
+        for partition_dir in table_dir.glob(f"{date_column}=*"):
+            manifest_path = partition_dir / PARTITION_CACHE_MANIFEST
+            active_generation_dirs = set()
+            if manifest_path.is_file():
+                partition_date = partition_dir.name.removeprefix(f"{date_column}=")
+                active_generation_dirs = {
+                    path.parent for path in _active_local_partition_paths(config, table_name, partition_date)
+                }
+            for generation_dir in partition_dir.glob("generation=*"):
+                if generation_dir.resolve() in active_generation_dirs:
+                    (generation_dir / LOCAL_GENERATION_INACTIVE_MARKER).unlink(missing_ok=True)
+                    continue
+                inactive_marker = generation_dir / LOCAL_GENERATION_INACTIVE_MARKER
+                if not inactive_marker.exists():
+                    inactive_marker.touch()
+                    continue
+                inactive_at = datetime.fromtimestamp(inactive_marker.stat().st_mtime, UTC)
+                if inactive_at >= cutoff:
+                    continue
+                shutil.rmtree(generation_dir)
+                deleted_count += 1
+    return deleted_count
+
+
+def _cleanup_stale_local_generations_best_effort(config: ExportConfig, now: datetime) -> None:
+    try:
+        deleted_count = _cleanup_stale_local_generations(config, now)
+    except (OSError, RuntimeError, ValueError):
+        LOGGER.warning("Failed to clean stale local serving generations", exc_info=True)
+        return
+    if deleted_count:
+        LOGGER.info("Deleted %s stale local serving generations", deleted_count)
+
+
 def _publish_duckdb(
     config: ExportConfig,
     parquet_paths_by_table: dict[str, list[Path]],
@@ -804,7 +1123,10 @@ def _publish_duckdb(
             exported_at=exported_at,
             temp_directory=duckdb_temp_dir,
         )
-        _build_duckdb_file(duckdb_module, temp_path, build_input)
+        if config.partitioned_store:
+            _build_partitioned_catalog_file(duckdb_module, temp_path, build_input)
+        else:
+            _build_duckdb_file(duckdb_module, temp_path, build_input)
         duckdb_size_bytes = temp_path.stat().st_size
         _enforce_duckdb_size(duckdb_size_bytes, config.max_duckdb_bytes)
 
@@ -876,56 +1198,104 @@ def _build_duckdb_file(
             connection.execute(
                 f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
-        connection.execute(
-            """
-            create table export_table_stats (
-                table_name varchar,
-                row_count ubigint,
-                source_size_bytes ubigint,
-                min_date varchar,
-                max_date varchar,
-                date_count ubigint
+        _create_export_metadata_tables(connection, build_input)
+
+
+def _build_partitioned_catalog_file(
+    duckdb_module: ModuleType,
+    path: Path,
+    build_input: DuckdbBuildInput,
+) -> None:
+    """Build a small DuckDB catalog over stable, locally cached Parquet shards."""
+    with duckdb_module.connect(str(path)) as connection:
+        _configure_duckdb_build_connection(connection, build_input.temp_directory)
+        for table_name in GLOBAL_EXPORT_TABLES:
+            connection.execute(
+                f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
-            """
-        )
-        connection.executemany(
-            "insert into export_table_stats values (?, ?, ?, ?, ?, ?)",
-            [
-                (stat.table_name, stat.row_count, stat.size_bytes, stat.min_date, stat.max_date, stat.date_count)
-                for stat in build_input.source_stats
-            ],
-        )
-        connection.execute(
-            """
-            create table export_metadata (
-                export_id varchar,
-                export_version varchar,
-                source_mode varchar,
-                exported_at timestamptz,
-                source_project varchar,
-                source_dataset varchar,
-                source_size_bytes ubigint,
-                source_row_count ubigint,
-                exported_table_count ubigint,
-                duckdb_file_size_bytes ubigint
+        for table_name in SHARDED_EXPORT_TABLES:
+            catalog_paths = _partitioned_catalog_paths(
+                build_input.config,
+                build_input.parquet_paths_by_table[table_name],
             )
-            """
+            connection.execute(
+                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(catalog_paths)}, hive_partitioning = false)"
+            )
+        _create_export_metadata_tables(connection, build_input)
+
+
+def _validate_partitioned_store_view_root(config: ExportConfig) -> None:
+    view_root = config.partitioned_store_view_root or config.output_dir
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    if not view_root.is_absolute() or not view_root.is_dir() or not config.output_dir.samefile(view_root):
+        raise RuntimeError(
+            f"Partitioned serving view root {view_root} must resolve to the same directory as {config.output_dir}"
         )
-        connection.execute(
-            "insert into export_metadata values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                build_input.config.export_id,
-                EXPORT_VERSION,
-                EXPORT_SOURCE_MODE,
-                build_input.exported_at,
-                GCP_PROJECT,
-                BIGQUERY_MARTS_DATASET,
-                sum(stat.size_bytes for stat in build_input.source_stats),
-                sum(stat.row_count for stat in build_input.source_stats),
-                len(MART_TABLES),
-                0,
-            ],
+
+
+def _partitioned_catalog_paths(config: ExportConfig, paths: Sequence[Path]) -> list[Path]:
+    output_dir = config.output_dir.resolve()
+    view_root = config.partitioned_store_view_root or output_dir
+    catalog_paths = []
+    for path in paths:
+        resolved_path = path.resolve()
+        if not resolved_path.is_relative_to(output_dir):
+            raise RuntimeError(f"Partitioned serving path is outside the output directory: {path}")
+        catalog_paths.append(view_root / resolved_path.relative_to(output_dir))
+    return catalog_paths
+
+
+def _create_export_metadata_tables(connection: DuckdbConnection, build_input: DuckdbBuildInput) -> None:
+    connection.execute(
+        """
+        create table export_table_stats (
+            table_name varchar,
+            row_count ubigint,
+            source_size_bytes ubigint,
+            min_date varchar,
+            max_date varchar,
+            date_count ubigint
         )
+        """
+    )
+    connection.executemany(
+        "insert into export_table_stats values (?, ?, ?, ?, ?, ?)",
+        [
+            (stat.table_name, stat.row_count, stat.size_bytes, stat.min_date, stat.max_date, stat.date_count)
+            for stat in build_input.source_stats
+        ],
+    )
+    connection.execute(
+        """
+        create table export_metadata (
+            export_id varchar,
+            export_version varchar,
+            source_mode varchar,
+            exported_at timestamptz,
+            source_project varchar,
+            source_dataset varchar,
+            source_size_bytes ubigint,
+            source_row_count ubigint,
+            exported_table_count ubigint,
+            duckdb_file_size_bytes ubigint
+        )
+        """
+    )
+    connection.execute(
+        "insert into export_metadata values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            build_input.config.export_id,
+            EXPORT_VERSION,
+            EXPORT_SOURCE_MODE,
+            build_input.exported_at,
+            GCP_PROJECT,
+            BIGQUERY_MARTS_DATASET,
+            sum(stat.size_bytes for stat in build_input.source_stats),
+            sum(stat.row_count for stat in build_input.source_stats),
+            len(MART_TABLES),
+            0,
+        ],
+    )
 
 
 def _configure_duckdb_build_connection(connection: DuckdbConnection, temp_directory: Path) -> None:

@@ -97,13 +97,28 @@ SERVING_EXPORT_GCS_PREFIX=serving/duckdb/staging
 SERVING_EXPORT_MAX_BYTES=21474836480
 SERVING_EXPORT_MAX_SOURCE_BYTES=21474836480
 SERVING_EXPORT_MAX_DUCKDB_BYTES=21474836480
+SERVING_EXPORT_PARTITIONED_STORE=false
+SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES=5368709120
+SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT=/serving
 SERVING_EXPORT_STAGING_RETENTION_DAYS=3
 ```
 
 `SERVING_EXPORT_MAX_SOURCE_BYTES` and `SERVING_EXPORT_MAX_DUCKDB_BYTES` default to `SERVING_EXPORT_MAX_BYTES`.
+The source-size guard applies to the monolithic exporter. Partitioned mode replaces it with per-download free-space
+headroom because total retained source data is expected to exceed the monolithic limit.
 
 Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`,
-`max_source_bytes`, `max_duckdb_bytes`, `cleanup_gcs_staging`, and `staging_retention_days`.
+`max_source_bytes`, `max_duckdb_bytes`, `partitioned_store`, `partitioned_store_min_free_bytes`,
+`partitioned_store_view_root`, `cleanup_gcs_staging`, and `staging_retention_days`.
+
+`SERVING_EXPORT_PARTITIONED_STORE=true` keeps date-bearing tables as local Parquet partitions and publishes a small
+DuckDB catalog containing views over those files. The first run downloads every retained partition; later runs refresh
+only dates from `changed_partition_dates`. The frontend continues to open `SERVING_EXPORT_FILENAME` and uses the same
+table names. Keep the complete `SERVING_EXPORT_DIR`, including its `parquet/` directory, on persistent shared storage.
+Each partition download must leave at least `SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES` free on that filesystem.
+Parquet paths are persisted inside the catalog. Mount the serving host directory at the identical
+`SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT` path in both Airflow and frontend containers. Airflow verifies that its view
+root and `SERVING_EXPORT_DIR` resolve to the same directory before doing any cloud work.
 
 Use one shared host directory for Airflow and frontend serving mounts. Airflow needs write access; frontend should only need read access. On the current VPS the bind-mounted host directory should be writable by the Airflow container user:
 
@@ -114,6 +129,8 @@ sudo install -d -o 50000 -g 0 -m 0775 /home/ubuntu/ztm-pipeline/serving
 Successful exports delete their own temporary GCS objects by default. After every successful publication, the exporter
 also deletes temporary objects from failed or debug exports older than `staging_retention_days` (three days by default).
 The sweep only covers `export_id=...` and `partition_staging/export_id=...`; it never deletes `partition_cache`.
+Partitioned exports also delete inactive local Parquet generations after the same retention period. The generation
+selected by each local partition manifest is never deleted.
 
 Remove a failed export manually before retention expires when it is no longer needed:
 

@@ -19,7 +19,9 @@ convention = "google"
 # The GPS daily DAG queries GTFS metadata using module-level BigQuery table constants, not user input.
 "dags/dag_daily_gps.py" = ["S608"]
 # The serving export DAG queries fixed mart table names and metadata constants, not user input.
-"dags/dag_serving_export.py" = ["S608"]
+"dags/dag_serving_export.py" = ["PLR0917", "S608"]
+# Validation configuration is passed explicitly to an isolated process boundary.
+"dags/serving_export_validator.py" = ["PLR0917"]
 # Cloud clients are intentionally duck-typed and query identifiers are constrained by local matcher contracts.
-"dags/ztm_matcher.py" = ["ANN401", "C901", "PLR0912", "PLR0913", "S608"]
+"dags/ztm_matcher.py" = ["ANN401", "C901", "ISC004", "PLR0912", "PLR0913", "PLR0917", "S608"]
 "dags/matcher_historical_correction.py" = ["ANN401", "S608"]
