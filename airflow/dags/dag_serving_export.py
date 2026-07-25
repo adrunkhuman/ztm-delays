@@ -156,6 +156,7 @@ PARTITIONED_EXPORT_TABLES = {
 }
 PARTITION_CACHE_MANIFEST = "_MANIFEST.json"
 LOCAL_PARTITION_DIRECTORY = "parquet"
+LOCAL_GENERATION_INACTIVE_MARKER = ".inactive"
 DATE_RANGE_SQL_BY_TABLE = {
     "dim_serving_date": "service_date",
     "dim_serving_window_date": "source_end_date",
@@ -623,10 +624,12 @@ def _extract_partitioned_store_inputs(
         partition_dates = [
             partition_date.isoformat() for partition_date in _table_partition_dates(bigquery_client, table_name)
         ]
+        refresh_dates = set(config.changed_partition_dates or partition_dates)
+        _deactivate_removed_local_partitions(config, table_name, set(partition_dates))
         paths = []
         for partition_date in partition_dates:
             active_paths = _active_local_partition_paths(config, table_name, partition_date)
-            if partition_date in config.changed_partition_dates or not active_paths:
+            if partition_date in refresh_dates or not active_paths:
                 active_paths = _replace_local_partition_cache(
                     storage_client,
                     config,
@@ -667,16 +670,20 @@ def _sync_partition_cache(
     )
     actual_partition_dates = set(partition_dates)
     date_column = SHARDED_EXPORT_TABLES[table_name]
+    changed_partition_dates = config.changed_partition_dates
+    if config.partitioned_store and not changed_partition_dates:
+        changed_partition_dates = partition_dates
+    changed_partition_date_set = set(changed_partition_dates)
     cached_dates = _cached_partition_dates(storage_client, config, table_name, date_column)
     for partition_date in cached_dates - actual_partition_dates:
         _delete_partition_cache(storage_client, config, table_name, date_column, partition_date)
 
-    for partition_date in config.changed_partition_dates:
+    for partition_date in changed_partition_dates:
         if partition_date in actual_partition_dates:
             _extract_mart_partition_to_cache(bigquery_client, storage_client, config, table_name, partition_date)
 
     for partition_date in partition_dates:
-        if partition_date in cached_dates or partition_date in config.changed_partition_dates:
+        if partition_date in cached_dates or partition_date in changed_partition_date_set:
             continue
         _extract_mart_partition_to_cache(
             bigquery_client,
@@ -987,6 +994,21 @@ def _local_partition_cache_dir(
     return config.output_dir / LOCAL_PARTITION_DIRECTORY / table_name / f"{date_column}={partition_date}"
 
 
+def _deactivate_removed_local_partitions(
+    config: ExportConfig,
+    table_name: str,
+    actual_partition_dates: set[str],
+) -> None:
+    date_column = SHARDED_EXPORT_TABLES[table_name]
+    table_dir = config.output_dir / LOCAL_PARTITION_DIRECTORY / table_name
+    if not table_dir.exists():
+        return
+    for partition_dir in table_dir.glob(f"{date_column}=*"):
+        partition_date = partition_dir.name.removeprefix(f"{date_column}=")
+        if partition_date not in actual_partition_dates:
+            (partition_dir / PARTITION_CACHE_MANIFEST).unlink(missing_ok=True)
+
+
 def _cleanup_stale_local_generations(config: ExportConfig, now: datetime) -> int:
     cutoff = now - timedelta(days=config.staging_retention_days)
     deleted_count = 0
@@ -997,17 +1019,22 @@ def _cleanup_stale_local_generations(config: ExportConfig, now: datetime) -> int
             continue
         for partition_dir in table_dir.glob(f"{date_column}=*"):
             manifest_path = partition_dir / PARTITION_CACHE_MANIFEST
-            if not manifest_path.is_file():
-                continue
-            partition_date = partition_dir.name.removeprefix(f"{date_column}=")
-            active_generation_dirs = {
-                path.parent for path in _active_local_partition_paths(config, table_name, partition_date)
-            }
+            active_generation_dirs = set()
+            if manifest_path.is_file():
+                partition_date = partition_dir.name.removeprefix(f"{date_column}=")
+                active_generation_dirs = {
+                    path.parent for path in _active_local_partition_paths(config, table_name, partition_date)
+                }
             for generation_dir in partition_dir.glob("generation=*"):
                 if generation_dir.resolve() in active_generation_dirs:
+                    (generation_dir / LOCAL_GENERATION_INACTIVE_MARKER).unlink(missing_ok=True)
                     continue
-                modified_at = datetime.fromtimestamp(generation_dir.stat().st_mtime, UTC)
-                if modified_at >= cutoff:
+                inactive_marker = generation_dir / LOCAL_GENERATION_INACTIVE_MARKER
+                if not inactive_marker.exists():
+                    inactive_marker.touch()
+                    continue
+                inactive_at = datetime.fromtimestamp(inactive_marker.stat().st_mtime, UTC)
+                if inactive_at >= cutoff:
                     continue
                 shutil.rmtree(generation_dir)
                 deleted_count += 1
@@ -1152,7 +1179,7 @@ def _build_partitioned_catalog_file(
                 build_input.parquet_paths_by_table[table_name],
             )
             connection.execute(
-                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(catalog_paths)})"
+                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(catalog_paths)}, hive_partitioning = false)"
             )
         _create_export_metadata_tables(connection, build_input)
 

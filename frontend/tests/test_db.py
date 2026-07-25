@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -74,6 +75,28 @@ def test_query_outside_request_closes_its_connection(monkeypatch: pytest.MonkeyP
 
     assert db.fetch_one(Path("serving.duckdb"), "select generation") == {"generation": "current"}
     assert connection.closed is True
+
+
+def test_frontend_reads_partitioned_catalog_view(tmp_path: Path) -> None:
+    parquet_dir = tmp_path / "parquet" / "mart_trip_daily" / "service_date=2026-07-02" / "generation=test"
+    parquet_dir.mkdir(parents=True)
+    parquet_path = parquet_dir / "part.parquet"
+    db_path = tmp_path / "serving.duckdb"
+    escaped_parquet_path = parquet_path.as_posix().replace("'", "''")
+    with duckdb.connect() as connection:
+        connection.execute(
+            f"copy (select date '2026-07-02' as service_date, 'trip-1' as trip_id) "
+            f"to '{escaped_parquet_path}' (format parquet)"
+        )
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            f"create view mart_trip_daily as select * from read_parquet('{escaped_parquet_path}', hive_partitioning=false)"  # noqa: S608
+        )
+
+    assert db.fetch_one(db_path, "select service_date, trip_id from mart_trip_daily") == {
+        "service_date": date(2026, 7, 2),
+        "trip_id": "trip-1",
+    }
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows cannot replace an open DuckDB file")

@@ -512,6 +512,35 @@ def test_sync_partition_cache_extracts_missing_partitions() -> None:
     ]
 
 
+def test_partitioned_sync_without_changed_dates_refreshes_all_partitions() -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient(partition_ids=["20260701", "20260702"])
+    storage_client = FakeStorageClient(
+        [
+            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-01/old.parquet"),
+            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet"),
+            FakeBlob(
+                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-01/part.parquet"
+            ),
+            FakeBlob(
+                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part.parquet"
+            ),
+        ]
+    )
+    config = replace(
+        _test_export_config(dag, Path("export")),
+        partitioned_store=True,
+        changed_partition_dates=(),
+    )
+
+    dag._sync_partition_cache(client, storage_client, config, "fct_expected_stop_event")
+
+    assert [call.source_table for call in client.extract_calls] == [
+        "ztm-data.ztm_marts.fct_expected_stop_event$20260701",
+        "ztm-data.ztm_marts.fct_expected_stop_event$20260702",
+    ]
+
+
 def test_sync_partition_cache_skips_changed_dates_absent_from_source() -> None:
     dag = _load_dag_module()
     client = FakeBigQueryClient(partition_ids=["20260701"])
@@ -902,6 +931,12 @@ def test_build_partitioned_catalog_materializes_globals_and_exposes_shard_views(
     duckdb = pytest.importorskip("duckdb")
     dag = _load_dag_module()
     parquet_paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
+    original_path = parquet_paths_by_table["mart_trip_daily"][0]
+    generation_dir = tmp_path / "parquet" / "mart_trip_daily" / "service_date=2026-07-02" / "generation=test"
+    generation_dir.mkdir(parents=True)
+    generation_path = generation_dir / "part.parquet"
+    original_path.replace(generation_path)
+    parquet_paths_by_table["mart_trip_daily"] = [generation_path]
     source_stats = [dag.TableStats(table_name=table_name, row_count=1, size_bytes=10) for table_name in dag.MART_TABLES]
     config = dag.ExportConfig(
         export_id="partitioned-1",
@@ -912,6 +947,7 @@ def test_build_partitioned_catalog_materializes_globals_and_exposes_shard_views(
         max_source_bytes=1000,
         max_duckdb_bytes=10_000_000,
         cleanup_gcs_staging=False,
+        partitioned_store_min_free_bytes=1,
     )
     temp_directory = tmp_path / "catalog-temp"
     temp_directory.mkdir()
@@ -1082,6 +1118,9 @@ def test_cleanup_stale_local_generations_preserves_active_and_recent(tmp_path: P
         generation_dir.mkdir(parents=True)
         (generation_dir / "part.parquet").write_text(generation_dir.name, encoding="utf-8")
     active_path = active_dir / "part.parquet"
+    (recent_dir / dag.LOCAL_GENERATION_INACTIVE_MARKER).touch()
+    stale_marker = stale_dir / dag.LOCAL_GENERATION_INACTIVE_MARKER
+    stale_marker.touch()
     dag._write_metadata_file(
         partition_dir / dag.PARTITION_CACHE_MANIFEST,
         {"export_id": "active", "parquet_files": [active_path.relative_to(tmp_path).as_posix()]},
@@ -1089,7 +1128,7 @@ def test_cleanup_stale_local_generations_preserves_active_and_recent(tmp_path: P
     now = datetime(2026, 7, 10, tzinfo=UTC)
     stale_timestamp = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
     os.utime(active_dir, (stale_timestamp, stale_timestamp))
-    os.utime(stale_dir, (stale_timestamp, stale_timestamp))
+    os.utime(stale_marker, (stale_timestamp, stale_timestamp))
 
     deleted_count = dag._cleanup_stale_local_generations(config, now)
 
@@ -1097,6 +1136,43 @@ def test_cleanup_stale_local_generations_preserves_active_and_recent(tmp_path: P
     assert active_dir.exists()
     assert recent_dir.exists()
     assert not stale_dir.exists()
+
+
+def test_cleanup_marks_unmanifested_generation_before_deleting_it(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    config = replace(_test_export_config(dag, tmp_path), staging_retention_days=3)
+    orphan_dir = (
+        dag._local_partition_cache_dir(config, "mart_trip_daily", "service_date", "2026-07-02") / "generation=orphan"
+    )
+    orphan_dir.mkdir(parents=True)
+    (orphan_dir / "part.parquet").write_text("orphan", encoding="utf-8")
+
+    assert dag._cleanup_stale_local_generations(config, datetime(2026, 7, 10, tzinfo=UTC)) == 0
+    marker = orphan_dir / dag.LOCAL_GENERATION_INACTIVE_MARKER
+    assert marker.exists()
+    old_timestamp = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+    os.utime(marker, (old_timestamp, old_timestamp))
+
+    assert dag._cleanup_stale_local_generations(config, datetime(2026, 7, 10, tzinfo=UTC)) == 1
+    assert not orphan_dir.exists()
+
+
+def test_removed_source_partition_deactivates_local_manifest(tmp_path: Path) -> None:
+    dag = _load_dag_module()
+    config = _test_export_config(dag, tmp_path)
+    removed_dir = dag._local_partition_cache_dir(
+        config,
+        "mart_trip_daily",
+        "service_date",
+        "2026-07-01",
+    )
+    removed_dir.mkdir(parents=True)
+    manifest_path = removed_dir / dag.PARTITION_CACHE_MANIFEST
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    dag._deactivate_removed_local_partitions(config, "mart_trip_daily", {"2026-07-02"})
+
+    assert not manifest_path.exists()
 
 
 @pytest.mark.parametrize("partitioned_store", [False, True])
@@ -1310,6 +1386,7 @@ def test_publish_duckdb_keeps_previous_file_when_validation_fails(tmp_path: Path
         max_source_bytes=1000,
         max_duckdb_bytes=10_000_000,
         cleanup_gcs_staging=False,
+        partitioned_store_min_free_bytes=1,
     )
 
     with pytest.raises(RuntimeError, match="row count mismatch"):
@@ -1320,6 +1397,37 @@ def test_publish_duckdb_keeps_previous_file_when_validation_fails(tmp_path: Path
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
     assert list(tmp_path.glob(".duckdb-tmp-*")) == []
+
+
+def test_failed_partitioned_publication_keeps_previous_catalog_queryable(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    old_inputs = _write_minimal_parquet_files(tmp_path / "old", dag.MART_TABLES, duckdb)
+    old_stats = [
+        dag.TableStats(
+            table_name=table_name,
+            row_count=2 if table_name == "mart_pipeline_status" else 1,
+            size_bytes=10,
+        )
+        for table_name in dag.MART_TABLES
+    ]
+    old_config = replace(
+        _test_export_config(dag, tmp_path),
+        export_id="old",
+        partitioned_store=True,
+    )
+    dag._publish_duckdb(old_config, old_inputs, old_stats, datetime(2026, 7, 2, tzinfo=UTC))
+
+    new_inputs = _write_minimal_parquet_files(tmp_path / "new", dag.MART_TABLES, duckdb)
+    invalid_stats = [replace(stat, row_count=stat.row_count + 1) for stat in old_stats]
+    new_config = replace(old_config, export_id="new")
+
+    with pytest.raises(RuntimeError, match="row count mismatch"):
+        dag._publish_duckdb(new_config, new_inputs, invalid_stats, datetime(2026, 7, 3, tzinfo=UTC))
+
+    with duckdb.connect(tmp_path / "ztm.duckdb", read_only=True) as connection:
+        assert connection.execute("select export_id from export_metadata").fetchone()[0] == "old"
+        assert connection.execute("select count(*) from mart_trip_daily").fetchone()[0] == 1
 
 
 def test_publish_duckdb_blocks_semantic_failure_and_keeps_previous_artifact(tmp_path: Path) -> None:
@@ -2065,6 +2173,7 @@ def _test_export_config(dag: Any, tmp_path: Path) -> Any:
         max_source_bytes=1000,
         max_duckdb_bytes=10_000_000,
         cleanup_gcs_staging=False,
+        partitioned_store_min_free_bytes=1,
     )
 
 
