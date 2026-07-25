@@ -1084,7 +1084,7 @@ def _cleanup_stale_local_generations(config: ExportConfig, now: datetime) -> int
 def _cleanup_stale_local_generations_best_effort(config: ExportConfig, now: datetime) -> None:
     try:
         deleted_count = _cleanup_stale_local_generations(config, now)
-    except Exception:  # noqa: BLE001
+    except (OSError, RuntimeError, ValueError):
         LOGGER.warning("Failed to clean stale local serving generations", exc_info=True)
         return
     if deleted_count:
