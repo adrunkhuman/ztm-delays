@@ -168,7 +168,7 @@ jobs:
         run: >-
           uv run dbt compile --profiles-dir .
           --select stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__shapes stg_gtfs__routes stg_gtfs__calendar_dates int_gtfs_trip_schedule int_gtfs_duty_chain int_schedule_version int_serving_trip_stop_profile int_serving_trip_universe int_serving_observed_date int_serving_entity_window_summary dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date dim_schedule_version dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current dim_serving_date dim_serving_window_date fct_trip fct_stop_arrival fct_expected_stop_event mart_day_completeness agg_service_coverage mart_pipeline_status mart_pipeline_status_recent_summary mart_mode_window_summary mart_line_window_summary mart_stop_group_window_summary mart_stop_post_window_summary mart_entity_rankings mart_entity_daily_summary mart_entity_window_daily_summary mart_entity_timeline_daily mart_hour_window_summary mart_worst_delay_event mart_line_reliability_daily mart_trip_daily mart_trip_mode_daily_summary mart_trip_line_daily mart_line_trip_group_daily mart_line_course_window mart_line_course_stop_window mart_stop_line_window_summary mart_stop_post_line_group_window mart_stop_group_line_group_window rpt_schedule_day_mapping_evidence rpt_ranking_universe_evidence
-          --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
+          --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid", "schedule_ledger_plan": []}'
         working-directory: dbt
 
       - name: Check raw GPS schema contract
@@ -178,8 +178,29 @@ jobs:
         run: >-
           uv run dbt test --profiles-dir .
           --select test_type:unit
-          --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid"}'
+          --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid", "schedule_ledger_plan": []}'
         working-directory: dbt
+
+  deployment-checks:
+    name: Schedule and deploy checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Test deployment
+        run: uvx --with pyyaml pytest .github/tests
+      - name: Lint deployment tests
+        run: uvx ruff check --isolated .github/tests
+      - name: Check deployment shell syntax
+        run: bash -n .github/scripts/deploy_vps.sh
+      - name: Compile pinned-date and no-change ledger plans offline
+        run: |
+          for plan in .github/fixtures/schedule-*.json; do
+            uv run --no-project --python 3.13 --with dbt-core==1.11.11 --with dbt-bigquery==1.11.3 python dbt/tools/compile_schedule.py --vars-file "$plan"
+          done
 
   deploy-vps:
     name: Deploy VPS
@@ -190,6 +211,7 @@ jobs:
       - matcher
       - frontend
       - dbt
+      - deployment-checks
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     concurrency:
       group: deploy-vps
@@ -226,10 +248,11 @@ jobs:
           DEPLOY_USER: ${{ vars.VPS_DEPLOY_USER || 'ubuntu' }}
           DEPLOY_REPO_DIR: ${{ vars.VPS_REPO_DIR || '/home/ubuntu/ztm-pipeline' }}
           DEPLOY_BRANCH: master
+          DEPLOY_SHA: ${{ github.sha }}
           AIRFLOW_CONTAINER_PREFIX: ${{ vars.AIRFLOW_CONTAINER_PREFIX || 'l11t1z4fvjlunhohvau5w8gc' }}
         run: |
           set -euo pipefail
           ssh_args=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
           ssh "${ssh_args[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "bash -s -- '$DEPLOY_REPO_DIR' '$DEPLOY_BRANCH' '$AIRFLOW_CONTAINER_PREFIX'" \
+            "bash -s -- '$DEPLOY_REPO_DIR' '$DEPLOY_BRANCH' '$AIRFLOW_CONTAINER_PREFIX' '$DEPLOY_SHA'" \
             < .github/scripts/deploy_vps.sh

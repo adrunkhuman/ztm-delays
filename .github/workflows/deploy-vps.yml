@@ -13,6 +13,7 @@ concurrency:
 jobs:
   deploy:
     name: Sync Airflow/dbt to VPS
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -46,10 +47,11 @@ jobs:
           DEPLOY_USER: ${{ vars.VPS_DEPLOY_USER || 'ubuntu' }}
           DEPLOY_REPO_DIR: ${{ vars.VPS_REPO_DIR || '/home/ubuntu/ztm-pipeline' }}
           DEPLOY_BRANCH: master
+          DEPLOY_SHA: ${{ github.sha }}
           AIRFLOW_CONTAINER_PREFIX: ${{ vars.AIRFLOW_CONTAINER_PREFIX || 'l11t1z4fvjlunhohvau5w8gc' }}
         run: |
           set -euo pipefail
           ssh_args=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
           ssh "${ssh_args[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "bash -s -- '$DEPLOY_REPO_DIR' '$DEPLOY_BRANCH' '$AIRFLOW_CONTAINER_PREFIX'" \
+            "bash -s -- '$DEPLOY_REPO_DIR' '$DEPLOY_BRANCH' '$AIRFLOW_CONTAINER_PREFIX' '$DEPLOY_SHA'" \
             < .github/scripts/deploy_vps.sh
