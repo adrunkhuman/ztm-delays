@@ -2,7 +2,7 @@
 
 The warehouse turns immutable ZTM inputs into an archive that can be rebuilt, audited, and exported for the frontend. Keep it boring: raw data stays recoverable, historical labels are baked at build time, and expensive work is explicit.
 
-Schedule version windows are rebuilt over a small persistent, date-partitioned fingerprint ledger, not repeatedly expanded raw GTFS history. See the [runbook](runbook.md#schedule-ledger-migration) for bootstrap, equivalence checks, and rollback, and [dbt documentation](../dbt/README.md#schedule-ledger) for reconciliation contracts, flags, and estimation tools.
+Schedule version windows are rebuilt over a small persistent, date-partitioned fingerprint ledger, not repeatedly expanded raw GTFS history. See [dbt documentation](../dbt/README.md#schedule-ledger) for reconciliation contracts, bootstrap flags, and estimation tools.
 
 ## Current Shape
 

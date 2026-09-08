@@ -2,7 +2,7 @@
 
 This dbt project transforms BigQuery raw tables for the ZTM pipeline.
 
-Schedule versions now read a persistent daily fingerprint ledger. **Bootstrap is explicit and bounded; `--full-refresh` is forbidden for the ledger.** See the [migration and rollback procedure](../docs/runbook.md#schedule-ledger-migration) before deploying or rebuilding schedules; flags and local tools are below.
+Schedule versions now read a persistent daily fingerprint ledger. **Bootstrap is explicit and bounded; `--full-refresh` is forbidden for the ledger.** Flags and local tools are below; see the [rebuild order](../docs/runbook.md#from-scratch-rebuild) for a fresh warehouse.
 
 Use Python `3.13` for local dbt commands. The current dbt stack is verified with `dbt-core 1.11.11` and `dbt-bigquery 1.11.3`.
 
@@ -73,11 +73,11 @@ uv run --no-project --with google-cloud-bigquery python dbt/tools/estimate_sched
   --manifest dbt/target/manifest.json --output dbt/target/schedule_estimate
 ```
 
-Compilation uses real dbt, anonymous credentials, and blocked sockets; only local target/log files are written. Select `schedule_ledger_baseline` for batch raw-equivalence SQL or `int_schedule_version schedule_version_baseline` for frozen-dimension comparison. These analyses are not automatic hooks.
+Compilation uses real dbt, anonymous credentials, and blocked sockets; only local target/log files are written.
 
 The estimator requires Google Cloud credentials with metadata and query permissions and uses metadata APIs plus `dry_run=True, use_query_cache=False`; it has no execution mode or table/load destinations. It saves SQL, SHA-256 hashes, and reports. To avoid script dry runs skipping work after CREATE TEMP TABLE, it estimates expansion separately and a MERGE with the source inlined (counting expansion again). This proxy includes pinned target partitions but is **not an upper bound** for temp reads, new ledger bytes, rounding, or retries. Mapping reconstruction and small planner/readiness/version reads are estimated separately when possible; absent-ledger dependencies are missing, not zero.
 
-Compile every bootstrap batch separately and save each report before the manifest is overwritten. Sum batch and comparison estimates with a retry allowance; dry-run dependent comparisons once the ledger exists. Cluster pruning is not a scan cap. These reports exclude storage, transfers, recovery, and other DAG models; missing relations leave the estimate incomplete. Follow the [migration procedure](../docs/runbook.md#schedule-ledger-migration) for cutover.
+Compile each planned batch separately and save each report before the manifest is overwritten. Sum the estimates with a retry allowance. Cluster pruning is not a scan cap. These reports exclude storage, transfers, recovery, and other DAG models; missing relations leave the estimate incomplete.
 
 ## Test Tiers
 

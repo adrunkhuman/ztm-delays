@@ -1,27 +1,5 @@
 # Pipeline Runbook
 
-## Schedule Ledger Migration
-
-Seed the daily fingerprint ledger before switching schedule versions to it. Existing GPS facts do not need rebuilding if schedule IDs and intervals remain identical. See [dbt flags and estimation tools](../dbt/README.md#schedule-ledger).
-
-1. **Before merging changes that trigger automatic deployment**, pause `dag_gtfs_load` and `dag_daily_gps`, drain their active tasks, and exclude direct CLI/other schedule writers. Keep the GPS poller collecting raw data. Create the Airflow `schedule_ledger_writer` pool with **one slot**; CLI commands bypass it. Keep writers paused through cutover.
-2. Preserve rollback copies of `int_gtfs_processing_snapshot`, `dim_schedule_version`, deployed view SQL, and code revision. Freeze and inventory **all past and future mapping dates**; the old dimension cannot reconstruct daily gaps/counts/lineage. Confirm the old dimension agrees with the frozen mapping; pre-existing drift needs separate correction.
-3. Compile and dry-run each planned batch and check the combined estimate and per-query cap before deployment/bootstrap. Re-inventory if code or mapping changes. After deployment, retain staging and the frozen mapping; build **only the ledger**, in inclusive batches of **at most 31 dates**, until the entire mapping is seeded. From `dbt/`, for example:
-
-   ```sh
-   dbt run --profiles-dir . --select int_schedule_fingerprint_daily \
-     --vars '{"schedule_ledger_bootstrap":true,"schedule_ledger_start_date":"2026-08-01","schedule_ledger_end_date":"2026-08-31"}'
-   ```
-
-   Do not select descendants or use `--full-refresh`. Retries replace the same partitions. Reconciliation over the limit requires further reviewed batches, not a blanket refresh.
-4. Once the ledger exists, dry-run dependent validation queries before execution. For each batch, compile `schedule_ledger_baseline` with its mapping pins and require zero differences against bounded raw expansion. Run `assert_schedule_ledger_contract` and, after all batches, `assert_schedule_ledger_mapping_complete`; require zero failures, including markers for empty schedules.
-5. Replace **only** `int_schedule_version`, then compile `--select int_schedule_version schedule_version_baseline`. Require zero two-way differences and equal row counts against the **still-frozen old `dim_schedule_version`**, covering every ID, validity bound, and lineage column. Run the explicit [version audits](../dbt/README.md#test-tiers). Stop on differences: comparing against an already-rebuilt dimension is circular evidence.
-6. Only after equivalence passes, publish `dim_schedule_version`, run ledger/dimension tests and serving checks, then resume both DAGs with their explicit new selections. Verify a no-change retry does no raw expansion and a changed snapshot reconciles every differing mapping date. Retain frozen copies until checks pass. Equivalent migration requires no replay of successful historical GPS/matcher/fact/serving partitions.
-
-**Rollback:** before publication, leave the old dimension intact and restore the prior version view/code. After publication, pause/drain writers and restore captured mapping/dimension, prior view SQL/code, and both DAG selections together. Retain the ledger for diagnosis. If facts were rebuilt under changed IDs, restore or rebuild the affected partitions too. Restoring the old dimension from raw history requires another full-history scan; prefer the saved copy.
-
-**Historical corrections:** estimate recovery separately from ledger bootstrap. For raw corrections with unchanged snapshot IDs, freeze affected ledger partitions and the dimension, use `schedule_ledger_repair_dates`, then diff all version rows: earlier changes can alter later version IDs. Rebuild affected facts/serving through the [historical correction workflow](#date-range-backfill).
-
 ## From-Scratch Rebuild
 
 Raw BigQuery tables are rebuildable from immutable GCS inputs:
@@ -38,8 +16,8 @@ Rebuild order:
 1. Run GTFS staging, then rebuild archive-safe dimensions: `dim_line`, `dim_stop_post`, `dim_stop_group`, `dim_date`,
    and `dim_schedule_date`.
 1. Build `int_gtfs_processing_snapshot`, inventory all past/future governing dates, then explicitly bootstrap
-   `int_schedule_fingerprint_daily` in batches of at most 31 dates using the [ledger procedure](#schedule-ledger-migration).
-   Validate bounded raw equivalence and ledger contracts/completeness before publication; a fresh warehouse has no old dimension to compare.
+   `int_schedule_fingerprint_daily` in batches of at most 31 dates using the [bootstrap flags](../dbt/README.md#schedule-ledger).
+   Run `assert_schedule_ledger_contract` and `assert_schedule_ledger_mapping_complete` before publishing schedule versions.
 1. Build `int_gtfs_trip_schedule` for the selected snapshot, then `int_schedule_version` and `dim_schedule_version`.
    Never use ledger `--full-refresh` or publish versions from a partial bootstrap.
 1. Build `_current` lookup tables only for the selected serving snapshot.

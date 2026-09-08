@@ -2,7 +2,7 @@
 
 DAG files in this directory are mounted into the Airflow container. DAG IDs are stable operational IDs; use `dag_display_name` for UI wording instead of renaming IDs and splitting history.
 
-Schedule writer tasks in `dag_gtfs_load` and `dag_daily_gps` share the **one-slot `schedule_ledger_writer` pool**. Create the pool and bootstrap the daily fingerprint ledger before enabling these tasks. For the initial cutover, follow the [migration procedure](../docs/runbook.md#schedule-ledger-migration); ordinary deployments do not require another bootstrap.
+Schedule writer tasks in `dag_gtfs_load` and `dag_daily_gps` share the **one-slot `schedule_ledger_writer` pool**. Create the pool and bootstrap the daily fingerprint ledger before enabling these tasks. See [ledger configuration](../dbt/README.md#schedule-ledger); ordinary deployments do not require another bootstrap.
 
 ## Runtime Contract
 
