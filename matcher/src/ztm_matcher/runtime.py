@@ -6,8 +6,9 @@ import os
 import shutil
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import date
 from itertools import groupby
@@ -111,7 +112,7 @@ class StopAlignmentWorker:
 
 
 class OrderedArrowRows:
-    """Incrementally consume rows ordered by vehicle_number."""
+    """Incrementally consume ordered rows."""
 
     def __init__(self, reader: pa.RecordBatchReader) -> None:
         self._rows = (row for batch in reader for row in batch.to_pylist())
@@ -937,10 +938,9 @@ class ReconstructionRun:
         counts: dict[str, int] = {}
         all_outcomes: list[dict[str, Any]] = []
         try:
-            for service_date, snapshot_id, duty_id in self._duty_keys():
-                courses = self._schedule_rows_for_duty(service_date, snapshot_id, duty_id)
-                evidence = self._evidence_for_duty(evidence_path, service_date, snapshot_id, duty_id)
-                all_outcomes.extend(settle_duty(courses, evidence))
+            with closing(self._iter_duty_inputs(evidence_path)) as duty_inputs:
+                for courses, evidence in duty_inputs:
+                    all_outcomes.extend(settle_duty(courses, evidence))
             all_outcomes = resolve_competing_ownership(all_outcomes)
             for start in range(0, len(all_outcomes), SEMANTICS_BATCH_ROWS):
                 output_writer.write_table(
@@ -1076,50 +1076,42 @@ class ReconstructionRun:
         finally:
             connection.unregister("alignment_stream")
 
-    def _duty_keys(self) -> list[tuple[object, str, str]]:
+    def _iter_duty_inputs(self, evidence_path: Path) -> Generator[tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+        """Scan each input once, retaining only one duty and Arrow batches in Python."""
+        key_columns = ("service_date", "gtfs_snapshot_id", "duty_chain_id")
+        key_order = ", ".join(key_columns)
         schedule = _quoted_path(self._work() / "duty_schedule.parquet")
-        return [
-            (row[0], str(row[1]), str(row[2]))
-            for row in self._connection()
-            .execute(
-                f"select distinct service_date, gtfs_snapshot_id, duty_chain_id from read_parquet('{schedule}') "
-                "order by service_date, gtfs_snapshot_id, duty_chain_id"
-            )
-            .fetchall()
-        ]
+        courses = _quoted_path(self._work() / ".terminal_courses.parquet")
 
-    def _schedule_rows_for_duty(self, service_date: object, snapshot_id: str, duty_id: str) -> list[dict[str, Any]]:
-        courses = self._work() / ".terminal_courses.parquet"
-        return (
-            self._connection()
-            .execute(
-                f"""
-            select * from read_parquet('{_quoted_path(courses)}')
-            where service_date = ? and gtfs_snapshot_id = ? and duty_chain_id = ?
-            order by trip_order, trip_id
-            """,
-                [service_date, snapshot_id, duty_id],
-            )
-            .to_arrow_table()
-            .to_pylist()
-        )
+        def key(row: dict[str, Any]) -> tuple[Any, ...]:
+            return tuple(row[column] for column in key_columns)
 
-    def _evidence_for_duty(
-        self, path: Path, service_date: object, snapshot_id: str, duty_id: str
-    ) -> list[dict[str, Any]]:
-        return (
-            self._connection()
-            .execute(
-                f"""
-            select * from read_parquet('{_quoted_path(path)}')
-            where service_date = ? and gtfs_snapshot_id = ? and duty_chain_id = ?
-            order by trip_id, vehicle_type, vehicle_number, candidate_kind, origin_event_time, traversal_id
-            """,
-                [service_date, snapshot_id, duty_id],
+        def take(rows: OrderedArrowRows, duty: tuple[Any, ...]) -> list[dict[str, Any]]:
+            while rows.current is not None and key(rows.current) < duty:
+                rows.pop()
+            group = []
+            while rows.current is not None and key(rows.current) == duty:
+                group.append(rows.pop())
+            return group
+
+        with ExitStack() as stack:
+
+            def reader(sql: str) -> OrderedArrowRows:
+                # Cursors have independent results but share this instance's memory, temp and thread limits.
+                cursor = stack.enter_context(closing(self._connection().cursor()))
+                batches = stack.enter_context(closing(cursor.execute(sql).to_arrow_reader(SEMANTICS_BATCH_ROWS)))
+                return OrderedArrowRows(batches)
+
+            # Terminal courses can omit duties with no matching stop semantics.
+            duties = reader(f"select distinct {key_order} from read_parquet('{schedule}') order by {key_order}")
+            course_rows = reader(f"select * from read_parquet('{courses}') order by {key_order}, trip_order, trip_id")
+            evidence_rows = reader(
+                f"select * from read_parquet('{_quoted_path(evidence_path)}') order by {key_order}, "
+                "trip_id, vehicle_type, vehicle_number, candidate_kind, origin_event_time, traversal_id"
             )
-            .to_arrow_table()
-            .to_pylist()
-        )
+            while duties.current is not None:
+                duty = key(duties.pop())
+                yield take(course_rows, duty), take(evidence_rows, duty)
 
     def iter_vehicle_streams(self) -> Iterator[VehicleStream]:
         """Fetch exactly one vehicle group per query, in deterministic order."""
