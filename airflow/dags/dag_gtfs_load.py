@@ -35,12 +35,13 @@ GTFS_STAGING_MODELS = (
 )
 GTFS_DIMENSION_MODELS = (
     "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_trip_schedule int_gtfs_duty_chain "
-    "int_gtfs_processing_snapshot int_gtfs_trip_schedule_history int_schedule_version "
+    "int_gtfs_processing_snapshot int_schedule_fingerprint_daily int_schedule_version "
     "dim_schedule_version "
     "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
 )
 GTFS_DAILY_DIMENSION_TEST_MODELS = (
-    "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_processing_snapshot dim_schedule_version "
+    "dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_processing_snapshot "
+    "int_schedule_fingerprint_daily dim_schedule_version "
     "dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current"
 )
 GTFS_RAW_SOURCES = (
@@ -348,6 +349,7 @@ with DAG(
 
     dbt_run_gtfs_dimensions = BashOperator(
         task_id="dbt_run_gtfs_dimensions",
+        pool="schedule_ledger_writer",
         bash_command=dbt_command("run", GTFS_DIMENSION_MODELS, GTFS_DBT_VARS),
     )
 

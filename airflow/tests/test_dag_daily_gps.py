@@ -330,6 +330,7 @@ def test_dag_schedules_partitioned_ingest_and_warehouse_runs() -> None:
 
 def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
     dag = _load_dag_module()
+    assert dag.dbt_run_matcher_fact_dependencies.kwargs["pool"] == "schedule_ledger_writer"
 
     assert _dbt_selected_models(dag.dbt_run_matcher_fact_dependencies) == {
         "stg_gtfs__trips",
@@ -337,7 +338,7 @@ def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
         "stg_gtfs__stops",
         "stg_gtfs__routes",
         "stg_gtfs__calendar_dates",
-        "int_gtfs_trip_schedule_history",
+        "int_schedule_fingerprint_daily",
         "int_schedule_version",
         "dim_schedule_version",
     }

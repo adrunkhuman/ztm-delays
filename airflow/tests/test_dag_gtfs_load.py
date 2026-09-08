@@ -371,6 +371,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert dag.dbt_run_gtfs_staging.task_id == "dbt_run_gtfs_staging"
     assert dag.dbt_test_gtfs_staging.task_id == "dbt_test_gtfs_staging"
     assert dag.dbt_run_gtfs_dimensions.task_id == "dbt_run_gtfs_dimensions"
+    assert dag.dbt_run_gtfs_dimensions.pool == "schedule_ledger_writer"
     assert dag.dbt_test_gtfs_dimensions.task_id == "dbt_test_gtfs_dimensions"
     expected_dimension_models = {
         "dim_line",
@@ -380,7 +381,7 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
         "dim_schedule_date",
         "int_gtfs_processing_snapshot",
         "int_gtfs_trip_schedule",
-        "int_gtfs_trip_schedule_history",
+        "int_schedule_fingerprint_daily",
         "int_gtfs_duty_chain",
         "int_schedule_version",
         "dim_schedule_version",
@@ -392,7 +393,6 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert set(dag.GTFS_DIMENSION_MODELS.split()) == expected_dimension_models
     assert set(dag.GTFS_DAILY_DIMENSION_TEST_MODELS.split()) == expected_dimension_models - {
         "int_gtfs_trip_schedule",
-        "int_gtfs_trip_schedule_history",
         "int_gtfs_duty_chain",
         "int_schedule_version",
     }
@@ -410,7 +410,6 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
         assert model_name in dag.dbt_run_gtfs_dimensions.bash_command
     for model_name in expected_dimension_models - {
         "int_gtfs_trip_schedule",
-        "int_gtfs_trip_schedule_history",
         "int_gtfs_duty_chain",
         "int_schedule_version",
     }:
@@ -550,9 +549,10 @@ class FakeTask:
 
 
 class FakeBashOperator:
-    def __init__(self, *, task_id: str, bash_command: str) -> None:
+    def __init__(self, *, task_id: str, bash_command: str, pool: str = "default_pool") -> None:
         self.task_id = task_id
         self.bash_command = bash_command
+        self.pool = pool
         self.downstream: list[object] = []
 
     def __rshift__(self, downstream: object) -> object:
