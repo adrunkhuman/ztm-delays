@@ -63,8 +63,19 @@ Errors use stable codes: `missing_input`, `schema_drift`, `invalid_data`,
 DuckDB defaults to two threads, 384 MB of managed memory, and 20 GB of
 temporary disk. The loader additionally rejects GTFS archives above 640 MB
 uncompressed or 1,800,000 selected stop rows. It streams the rolling feed and
-retains only services active on the required current/prior dates so Python
-schedule preparation remains bounded outside DuckDB; stop semantics are written
+first validates stop times for services active on the required current/prior
+dates, retaining only per-trip minimum/maximum arrival/departure seconds. A
+second sequential pass allocates stops only for trips overlapping the processing
+day on either active service date. Overlap uses Warsaw wall-clock conversion
+(including DST), with an inclusive end at day start and an exclusive start at
+day end. All stops of each retained trip remain available, including stops
+outside the day; shared trip IDs retain both service-day instances. The
+1,800,000-stop cap applies to these materialized rows, not the first-pass scan.
+Malformed active rows still fail even when their trip does not overlap.
+`load(..., processing_date=D)` is scoped to selection for `D`; callers needing
+arbitrary dates must use undated `load()`, which retains all active stop rows
+and applies the same cap. The extra ZIP scan trades read/CPU time for bounded
+Python schedule memory outside DuckDB; stop semantics are written
 in 10,000-row Parquet batches. Metrics include wall and CPU time,
 peak RSS and swap where the OS exposes them, temporary and artifact disk use,
 and vehicle-group sizes plus execution-status counts. Terminal visits use a
