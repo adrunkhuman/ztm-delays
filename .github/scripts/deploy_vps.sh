@@ -4,6 +4,12 @@ set -euo pipefail
 repo_dir="${1:-/home/ubuntu/ztm-pipeline}"
 branch="${2:-master}"
 airflow_container_prefix="${3:-l11t1z4fvjlunhohvau5w8gc}"
+expected_sha="${4:-}"
+
+if [[ ! "$expected_sha" =~ ^[0-9a-f]{40}$ || "$branch" != master ]]; then
+  echo "Deployment requires a full lowercase commit SHA and branch master" >&2
+  exit 1
+fi
 
 if [[ ! -d "$repo_dir/.git" ]]; then
   echo "Repo not found: $repo_dir" >&2
@@ -23,7 +29,25 @@ if [[ -n "$tracked_changes" ]]; then
   exit 1
 fi
 
-git -C "$repo_dir" pull --ff-only --quiet origin "$branch"
+git -C "$repo_dir" fetch --quiet origin "refs/heads/master:refs/remotes/origin/master"
+resolved_sha="$(git -C "$repo_dir" rev-parse --verify "${expected_sha}^{commit}")"
+if [[ "$resolved_sha" != "$expected_sha" ]]; then
+  echo "Expected SHA does not resolve to the vetted commit" >&2
+  exit 1
+fi
+git -C "$repo_dir" merge-base --is-ancestor "$expected_sha" origin/master || {
+  echo "Vetted commit is not on origin/master" >&2
+  exit 1
+}
+git -C "$repo_dir" merge-base --is-ancestor HEAD "$expected_sha" || {
+  echo "Refusing stale or non-fast-forward deployment" >&2
+  exit 1
+}
+if [[ "$(git -C "$repo_dir" rev-parse HEAD)" == "$expected_sha" ]]; then
+  echo "Already at vetted SHA $expected_sha; no checkout update"
+else
+  git -C "$repo_dir" merge --ff-only "$expected_sha"
+fi
 
 airflow_container="$(sudo -n docker ps --format '{{.Names}}' | grep "^${airflow_container_prefix}-" | head -n1 || true)"
 if [[ -z "$airflow_container" ]]; then

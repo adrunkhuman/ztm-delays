@@ -200,6 +200,51 @@ def _read_trips(archive: zipfile.ZipFile, active_service_ids: set[str]) -> list[
         raise fail("missing_input", "GTFS ZIP missing required member: trips.txt", 10) from exc
 
 
+def _read_trip_bounds(archive: zipfile.ZipFile, active_trip_ids: set[str]) -> dict[str, tuple[int, int]]:
+    """Validate active stop rows without allocating StopTime objects; retain only extrema."""
+    try:
+        with archive.open("stop_times.txt") as member:
+            reader = csv.DictReader(io.TextIOWrapper(member, encoding="utf-8-sig", newline=""))
+            missing = REQUIRED["stop_times.txt"] - set(reader.fieldnames or [])
+            if missing:
+                raise fail("schema_drift", f"stop_times.txt missing columns: {', '.join(sorted(missing))}", 11)
+            bounds: dict[str, tuple[int, int]] = {}
+            for row in reader:
+                trip_id = _string(row["trip_id"])
+                if trip_id not in active_trip_ids:
+                    continue
+                # Excluded trips must still pass the same field validation as materialized trips.
+                _integer(row["pickup_type"] or "0", "pickup_type")
+                _integer(row["drop_off_type"] or "0", "drop_off_type")
+                _integer(row["stop_sequence"], "stop_sequence")
+                arrival = _seconds(row["arrival_time"], "arrival_time")
+                departure = _seconds(row["departure_time"], "departure_time")
+                start, end = bounds.get(trip_id, (arrival, arrival))
+                bounds[trip_id] = (min(start, arrival, departure), max(end, arrival, departure))
+            return bounds
+    except KeyError as exc:
+        raise fail("missing_input", "GTFS ZIP missing required member: stop_times.txt", 10) from exc
+
+
+def _day_window(processing_date: date) -> tuple[datetime, datetime]:
+    return (
+        datetime.combine(processing_date, time.min, WARSAW).astimezone(UTC),
+        datetime.combine(processing_date + timedelta(days=1), time.min, WARSAW).astimezone(UTC),
+    )
+
+
+def _overlapping_times(
+    service_date: date, start: int, end: int, day_start: datetime, day_end: datetime
+) -> tuple[datetime, datetime] | None:
+    # Convert extrema, not individual stops: preserve select's wall-clock/DST contract exactly.
+    scheduled_start = warsaw_scheduled_time(service_date, start)
+    scheduled_end = warsaw_scheduled_time(service_date, end)
+    assert scheduled_start is not None and scheduled_end is not None
+    if scheduled_end >= day_start and scheduled_start < day_end:
+        return scheduled_start, scheduled_end
+    return None
+
+
 def _read_stop_times(archive: zipfile.ZipFile, selected_trip_ids: set[str]) -> dict[str, list[StopTime]]:
     """Stream selected stop times into compact, trip-indexed records."""
     try:
@@ -276,7 +321,25 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
             }
             trips = _read_trips(archive, active_service_ids)
             selected_trip_ids = {trip.trip_id for trip in trips}
+            has_active_stop_times = False
+            if processing_date is not None:
+                bounds = _read_trip_bounds(archive, selected_trip_ids)
+                has_active_stop_times = bool(bounds)
+                day_start, day_end = _day_window(processing_date)
+                dates = (processing_date - timedelta(days=1), processing_date)
+                selected_trip_ids = {
+                    trip.trip_id
+                    for trip in trips
+                    if trip.trip_id in bounds
+                    and any(
+                        (trip.service_id, service_date) in active
+                        and _overlapping_times(service_date, *bounds[trip.trip_id], day_start, day_end) is not None
+                        for service_date in dates
+                    )
+                }
+                del bounds
             stop_times = _read_stop_times(archive, selected_trip_ids)
+            has_active_stop_times = has_active_stop_times or bool(stop_times)
             stop_rows = _read_member(archive, "stops.txt", MAX_GTFS_ROWS)
             route_rows = _read_member(archive, "routes.txt", MAX_GTFS_ROWS)
             # Shapes are not needed for runtime preparation, but their header remains an input gate.
@@ -305,7 +368,7 @@ def load(path: Path, snapshot_id: str, processing_date: date | None = None) -> S
                 zone_id=zone_id,
                 effective_zone_id="1" if zone_id == "1+2" else zone_id,
             )
-    if not trips or not stop_times or not active:
+    if not trips or not has_active_stop_times or not active:
         raise fail("invalid_data", "GTFS snapshot has no trips, stop times, or active dates", 12)
     return Snapshot(snapshot_id, digest, trips, stop_times, stops, routes, active)
 
@@ -316,8 +379,7 @@ def select(snapshot: Snapshot, processing_date: date) -> list[dict[str, Any]]:
     for service_date in dates:
         if not any(active_date == service_date for _, active_date in snapshot.active):
             raise fail("snapshot_mismatch", f"no active GTFS service on required date {service_date}", 13)
-    day_start = datetime.combine(processing_date, time.min, WARSAW).astimezone(UTC)
-    day_end = datetime.combine(processing_date + timedelta(days=1), time.min, WARSAW).astimezone(UTC)
+    day_start, day_end = _day_window(processing_date)
     selected: list[dict[str, Any]] = []
     for trip in snapshot.trips:
         times = snapshot.stop_times.get(trip.trip_id, [])
@@ -328,10 +390,9 @@ def select(snapshot: Snapshot, processing_date: date) -> list[dict[str, Any]]:
         for service_date in dates:
             if (trip.service_id, service_date) not in snapshot.active:
                 continue
-            scheduled_start = warsaw_scheduled_time(service_date, start)
-            scheduled_end = warsaw_scheduled_time(service_date, end)
-            assert scheduled_start is not None and scheduled_end is not None
-            if scheduled_end >= day_start and scheduled_start < day_end:
+            overlapping = _overlapping_times(service_date, start, end, day_start, day_end)
+            if overlapping is not None:
+                scheduled_start, scheduled_end = overlapping
                 route = snapshot.routes.get(trip.line, {})
                 selected.append(
                     {

@@ -15,8 +15,11 @@ Rebuild order:
 1. Reload each GTFS ZIP into `ztm_raw.raw_gtfs_*` with deterministic load job IDs.
 1. Run GTFS staging, then rebuild archive-safe dimensions: `dim_line`, `dim_stop_post`, `dim_stop_group`, `dim_date`,
    and `dim_schedule_date`.
-1. Rebuild schedule-version models from loaded GTFS history: `int_gtfs_trip_schedule`, `int_schedule_version`, and
-   `dim_schedule_version`.
+1. Build `int_gtfs_processing_snapshot`, inventory all past/future governing dates, then explicitly bootstrap
+   `int_schedule_fingerprint_daily` in batches of at most 31 dates using the [bootstrap flags](../dbt/README.md#schedule-ledger).
+   Run `assert_schedule_ledger_contract` and `assert_schedule_ledger_mapping_complete` before publishing schedule versions.
+1. Build `int_gtfs_trip_schedule` for the selected snapshot, then `int_schedule_version` and `dim_schedule_version`.
+   Never use ledger `--full-refresh` or publish versions from a partial bootstrap.
 1. Build `_current` lookup tables only for the selected serving snapshot.
 1. Reload GPS Parquet files into `ztm_raw.raw_gps_pings` with deterministic per-URI load job IDs.
 1. Build dbt models by processing date and selected GTFS snapshot.
@@ -196,15 +199,16 @@ order by tables.table_schema;
 
 ## Deployment Sync
 
-Deploy steps:
+After a push to `master` passes CI, GitHub Actions updates the Airflow bind-mounted source automatically:
 
-- join the Tailnet as `tag:github-actions`;
-- SSH to `ubuntu@vps`;
-- fail on tracked VPS worktree changes;
-- run `git -C /home/ubuntu/ztm-pipeline pull --ff-only origin master`;
+- join the Tailnet as `tag:github-actions` and SSH to `ubuntu@vps`;
+- require a clean tracked worktree on `master`;
+- fetch `master`, verify the tested commit belongs to it, and fast-forward `/home/ubuntu/ztm-pipeline` to that exact SHA; reject stale or divergent revisions;
 - verify host/container matcher hashes, canonical matcher environment and mounts, Airflow DAG parsing, `airflow dags list`, and `dbt parse` inside the Airflow container.
 
-It does not rebuild containers or run dbt models. If the matcher bind hash is stale, redeploy Airflow in Coolify and rerun the workflow.
+For a manual retry, run **Deploy VPS** from `master` after checking CI for that revision. It deploys the workflow run's SHA; the manual path does not check CI status automatically.
+
+The checkout sync does not rebuild containers or run dbt models. Coolify manages the separate service deployments; its webhook is not gated by this Actions job. If the matcher bind hash is stale, redeploy Airflow in Coolify and rerun the workflow.
 
 Required GitHub secrets:
 

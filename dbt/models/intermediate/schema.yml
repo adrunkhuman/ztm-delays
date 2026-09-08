@@ -287,8 +287,18 @@ models:
           - not_null:
               config: *int_gtfs_duty_chain_processing_date_filter
 
+  - name: int_schedule_fingerprint_daily
+    description: Persistent processing-date-partitioned fingerprint ledger. One row per line/direction/day type plus one date marker; null-snapshot markers represent removed mappings. Only explicitly planned dates are replaced. Bootstrap and repair flags are documented in dbt/README.md under Schedule Ledger.
+    columns:
+      - name: processing_date
+        tests: [not_null]
+      - name: is_date_marker
+        tests: [not_null]
+      - name: gtfs_snapshot_id
+        description: Governing snapshot pinned when this date was expanded; null only for removed-mapping markers.
+
   - name: int_schedule_version
-    description: Per-line timetable fingerprint history. Consecutive selected-snapshot processing dates with the same timetable fingerprint collapse into one schedule version for line, direction_id, and schedule_day_type.
+    description: Per-line timetable fingerprint history over the small persistent daily ledger. Consecutive selected-snapshot processing dates with the same timetable fingerprint collapse into one schedule version for line, direction_id, and schedule_day_type.
     columns:
       - name: schedule_version_id
         description: Stable identifier for one consecutive timetable version period. Includes valid_from_date so a timetable that returns after a change becomes a new version period.
@@ -677,15 +687,17 @@ unit_tests:
   - name: int_schedule_version_collapses_republish_and_opens_changed_version
     model: int_schedule_version
     given:
-      - input: ref('int_gtfs_trip_schedule_history')
+      - input: ref('int_schedule_fingerprint_daily')
         format: sql
         rows: |
-          select date '2026-01-02' as service_date, date '2026-01-02' as processing_date, 'weekday' as schedule_day_type, 'svc-1' as schedule_service_ids, 'snapshot-1' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'trip-b-unstable-1' as trip_id, 'svc-1' as service_id, 'Head B' as trip_headsign, 'shape-b-1' as shape_id, 40000 as trip_start_seconds, 40600 as trip_end_seconds, 2 as stop_count, '200101 | 200102' as ordered_stop_ids, '40000 | 40600' as ordered_arrival_time_seconds, '000001:200101:00040000 | 000002:200102:00040600' as trip_timetable_signature
-          union all select date '2026-01-02', date '2026-01-02', 'weekday', 'svc-1', 'snapshot-1', '187', 0, 'trip-a-unstable-1', 'svc-1', 'Head A', 'shape-a-1', 36000, 36600, 2, '100101 | 100102', '36000 | 36600', '000001:100101:00036000 | 000002:100102:00036600'
-          union all select date '2026-01-03', date '2026-01-03', 'weekday', 'svc-2', 'snapshot-2', '187', 0, 'trip-a-unstable-2', 'svc-2', 'Renamed Head A', 'shape-a-2', 36000, 36600, 2, '100101 | 100102', '36000 | 36600', '000001:100101:00036000 | 000002:100102:00036600'
-          union all select date '2026-01-03', date '2026-01-03', 'weekday', 'svc-2', 'snapshot-2', '187', 0, 'trip-b-unstable-2', 'svc-2', 'Renamed Head B', 'shape-b-2', 40000, 40600, 2, '200101 | 200102', '40000 | 40600', '000001:200101:00040000 | 000002:200102:00040600'
-          union all select date '2026-01-04', date '2026-01-04', 'weekday', 'svc-3', 'snapshot-3', '187', 0, 'trip-a-unstable-3', 'svc-3', 'Renamed Head A', 'shape-a-3', 36000, 36600, 2, '100101 | 100102', '36000 | 36600', '000001:100101:00036000 | 000002:100102:00036600'
-          union all select date '2026-01-04', date '2026-01-04', 'weekday', 'svc-3', 'snapshot-3', '187', 0, 'trip-b-unstable-3', 'svc-3', 'Renamed Head B', 'shape-b-3', 40120, 40720, 2, '200101 | 200102', '40120 | 40720', '000001:200101:00040120 | 000002:200102:00040720'
+          select date '2026-01-04' as processing_date, 'snapshot-3' as gtfs_snapshot_id, '187' as line, 0 as direction_id, 'weekday' as schedule_day_type,
+            to_hex(md5('000001:100101:00036000 | 000002:100102:00036600' || '\n' || '000001:200101:00040120 | 000002:200102:00040720')) as timetable_fingerprint,
+            2 as scheduled_trip_count, false as is_date_marker
+          union all select date '2026-01-02', 'snapshot-1', '187', 0, 'weekday',
+            to_hex(md5('000001:100101:00036000 | 000002:100102:00036600' || '\n' || '000001:200101:00040000 | 000002:200102:00040600')), 2, false
+          union all select date '2026-01-03', 'snapshot-2', '187', 0, 'weekday',
+            to_hex(md5('000001:100101:00036000 | 000002:100102:00036600' || '\n' || '000001:200101:00040000 | 000002:200102:00040600')), 2, false
+          union all select date '2026-01-05', 'snapshot-empty', null, null, null, null, null, true
     expect:
       format: sql
       rows: |

@@ -1,3 +1,7 @@
+-- depends_on: {{ ref('int_schedule_fingerprint_daily') }}
+-- depends_on: {{ ref('int_gtfs_processing_snapshot') }}
+{{ config(pre_hook="{{ schedule_ledger_assert_complete() }}") }}
+
 select
     schedule_version_id,
     line,

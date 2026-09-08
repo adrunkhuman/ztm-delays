@@ -63,7 +63,7 @@ INT_GTFS_PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_
 DIM_SCHEDULE_DATE_TABLE = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.dim_schedule_date"
 MATCHER_FACT_DEPENDENCY_MODELS = (
     "stg_gtfs__trips stg_gtfs__stop_times stg_gtfs__stops stg_gtfs__routes stg_gtfs__calendar_dates"
-    " int_gtfs_trip_schedule_history int_schedule_version dim_schedule_version"
+    " int_schedule_fingerprint_daily int_schedule_version dim_schedule_version"
 )
 GPS_COMPLETENESS_MODEL = "int_gps_hourly_completeness"
 TRIP_FACT_MODEL = "fct_trip"
@@ -390,6 +390,7 @@ def _historical_skippable_dbt_task(
 ) -> BashOperator:
     return BashOperator(
         task_id=task_id,
+        pool="schedule_ledger_writer" if selector == MATCHER_FACT_DEPENDENCY_MODELS else "default_pool",
         bash_command=_skip_historical_correction(
             task_id, _historical_bounded_command(dbt_command(command, selector, vars_json, extra_args))
         ),
