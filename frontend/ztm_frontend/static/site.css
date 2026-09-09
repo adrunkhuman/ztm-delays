@@ -2542,3 +2542,37 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   .trip-stop-head, .trip-stop-row { grid-template-columns: 14px minmax(0, 1fr) 58px 68px; gap: 6px; font-size: .72rem; }
   .foot { height: auto; min-height: var(--footer-height); overflow-wrap: anywhere; }
 }
+
+.status-page .main { max-width: 1048px; }
+.status-page .status-mode { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .7rem; }
+.status-page .status-mode .tag { margin-top: 0; }
+.status-page .problem { color: var(--red); }
+.status-page dl { margin: 0; }
+.status-page .status-range { color: var(--muted); }
+.status-page dd { margin: 0; font-family: var(--mono); font-weight: 500; }
+.status-page .status-ops { padding: 1.1rem 0 1.3rem; border-top: 1px solid var(--border); font-size: .72rem; }
+.status-page .status-ops dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem 2rem; }
+.status-page .status-ops dl > div { display: flex; align-items: baseline; flex-wrap: wrap; justify-content: space-between; gap: .3rem .6rem; }
+.status-page .status-summary { padding-block: 1.1rem 1.3rem; column-gap: 1.5rem; }
+.status-page .status-range { font-family: var(--mono); font-size: .72rem; }
+.status-page .status-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; }
+.status-page .status-counts dt { margin-bottom: .32rem; }
+.status-page .status-counts dd { font-size: .85rem; }
+.status-page .status-history > .label { margin: 0 0 .6rem; font-weight: 400; }
+.status-page .status-scroll { max-width: 100%; overflow-x: auto; }
+.status-page .status-scroll:focus-visible { outline: 1px solid var(--blue); outline-offset: 3px; }
+.status-page table { min-width: 690px; font-variant-numeric: tabular-nums; }
+.status-page .status-table-caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.status-page th, .status-page td { padding: .42rem .55rem; text-align: right; white-space: nowrap; }
+.status-page thead th { border-bottom-color: var(--border); }
+.status-page tbody th { font-size: .78rem; font-weight: 400; letter-spacing: 0; }
+.status-page thead tr:first-child th[colspan] { text-align: center; }
+.status-page tbody th, .status-page thead tr:first-child th:first-child { text-align: left; }
+.status-page colgroup + colgroup { border-left: 1px solid var(--hair); }
+.status-page tbody a { color: var(--fg2); }
+.status-page tbody a:hover { color: var(--blue); }
+@media (max-width: 700px) {
+  .status-page .main { padding-inline: 1rem; }
+  .status-page .status-ops dl, .status-page .status-summary { grid-template-columns: 1fr; }
+  .status-page .status-summary { row-gap: 1.1rem; }
+}

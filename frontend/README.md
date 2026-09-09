@@ -15,9 +15,10 @@ Required data:
 
 Important quirks:
 
-- DuckDB timestamps from BigQuery are treated as UTC and displayed in `Europe/Warsaw`.
+- DuckDB timestamps from BigQuery are treated as UTC. Trip times display in `Europe/Warsaw`; status timestamps display in UTC, with original values in hover titles.
 - Widgets are backed by exported DuckDB rows or derived frontend-serving tables; some presentation transforms still reshape those rows for compact charts.
 - Historical quality remains date-dependent and is exposed through the status and quality fields in the serving contract.
+- Status shows the exported poller snapshot, not live health. Summary coverage is observed/expected service minutes; daily coverage is observed/expected trips. Clean/partial/broken counts map to the exported trip-quality categories. Summary partial counts are summed from daily rows only when the complete summary window is available; otherwise they show `n/a`.
 
 ## Environment Variables
 

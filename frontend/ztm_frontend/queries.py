@@ -614,11 +614,25 @@ def get_status(db_path: Path) -> dict[str, Any]:
         """,
     )
     pipeline_by_mode = _by_mode_list(pipeline_status)
+    summary = _status_summary_by_mode(db_path)
+    for mode, row in summary.items():
+        summary_days = [
+            day
+            for day in pipeline_by_mode.get(mode, [])
+            if row["first_date"] <= day["service_date"] <= row["last_date"]
+        ]
+        # The summary artifact omits partial counts. Never mix its window with other days.
+        row["trips_partial"] = (
+            sum(day["trips_partial"] for day in summary_days)
+            if len(summary_days) == row["day_count"]
+            and all(day.get("trips_partial") is not None for day in summary_days)
+            else None
+        )
     return {
         "metadata": get_export_metadata(db_path),
         "pipeline_status": pipeline_by_mode,
         "latest_status": {mode: rows[0] for mode, rows in pipeline_by_mode.items() if rows},
-        "status_summary": _status_summary_by_mode(db_path),
+        "status_summary": summary,
         "status_days": _status_days(pipeline_status),
     }
 
