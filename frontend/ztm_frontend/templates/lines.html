@@ -89,13 +89,15 @@
           {% endif %}
         </section>
 
-        <section class="dirs">
+        <nav class="route-nav" aria-label="Line detail sections"><a href="#patterns">Route patterns · {{ courses|length }}</a><a href="#departures">Worst departures</a><a href="{{ url_for('schedule', line=selected_line, mode=selected_mode, date=selected_date) }}">Browse trips →</a></nav>
+        <section class="dirs" id="patterns">
           {% for course in courses %}
-            <div>
-              <div class="dirhead">
-                <h2>→ {{ course.trip_headsign }}</h2>
-                <div class="dirstats"><span>trips <b>{{ course.trip_count|integer }}</b></span></div>
-              </div>
+            <details class="route-pattern" {% if loop.index <= 2 %}open{% endif %}>
+              <summary class="dirhead">
+                <span>→ {{ course.trip_headsign }}</span>
+                <span class="dirstats">{{ course.stops|length }} stops · {{ course.trip_count|integer }} trips</span>
+              </summary>
+              <div class="route-columns label"><span>Stop</span><span>Distribution</span><span>Mean</span><span>On time</span></div>
               {% for stop in course.stops %}
                 <div class="stop-row">
                   <div class="route">
@@ -108,18 +110,18 @@
                   <div class="spct {{ stop.on_time_rate|percent_class }}">{{ stop.on_time_rate|percent }}</div>
                 </div>
               {% endfor %}
-            </div>
+            </details>
           {% endfor %}
         </section>
 
-        <section class="bottom">
+        <section class="bottom" id="departures">
           <div>
             <div class="label" style="margin-bottom: .6rem">Worst departures</div>
             <div class="line-worst-table">
               <div class="table-head line-worst-row"><div>Time</div><div>Stop</div><div>Towards</div><div style="text-align:right">Delay</div></div>
               {% for row in line_widgets.worst %}
                 <div class="worst-row line-worst-row">
-                  <span class="mono muted">{{ row.time }}</span>
+                  {{ ui.exact_trip_link(row) }}
                   <a class="data-link" href="{{ url_for('stops', stop_group_id=row.stop_group_id, mode=summary.mode, date=selected_date) }}" title="{{ row.stop_name }}">{{ row.stop_name }}</a>
                   <span class="line-worst-direction muted" title="{{ row.direction }}">{{ row.direction }}</span>
                   <span class="sval {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>
@@ -136,7 +138,7 @@
                   <span class="mono muted">{{ row.counts.clean }} clean · {{ row.counts.partial }} partial · {{ row.counts.broken }} broken</span>
                 </div>
                 <div class="reliability-squares" aria-label="trip outcomes">
-                  {% for trip in row.outcomes %}<span class="reliability-square {{ trip.outcome }}" title="{{ trip.label }}"></span>{% endfor %}
+                  {% for trip in row.outcomes %}{{ ui.exact_trip_link(trip, square=True) }}{% endfor %}
                 </div>
               </div>
             {% endfor %}

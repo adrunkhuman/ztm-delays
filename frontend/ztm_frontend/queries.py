@@ -43,7 +43,7 @@ TIMELINE_MIN_GAP_PERCENT = 0.55
 EXPECTED_STOP_EVENT_TABLE = "fct_expected_stop_event"
 NUMERIC_STOP_POST_SUFFIX_LENGTH = 2
 WINDOW_TYPES = ("day", "weekdays", "weekend", "month")
-MAX_TREND_LABELS = 12
+MAX_TREND_LABELS = 6
 MAX_RELIABILITY_OUTCOMES = 160
 
 
@@ -973,6 +973,7 @@ def _line_widgets(  # noqa: PLR0913
         f"""
         select
             case when ? = 'day' then time_label else strftime(service_date, '%d %b') || ' · ' || time_label end as time,
+            service_date, trip_id, vehicle_number,
             trip_headsign as direction,
             stop_name,
             stop_group_id,
@@ -998,7 +999,7 @@ def _line_widgets(  # noqa: PLR0913
     reliability_rows = fetch_all(
         db_path,
         f"""
-        select direction_id, trip_headsign, clean_count, partial_count, broken_count, outcomes
+        select service_date, direction_id, trip_headsign, clean_count, partial_count, broken_count, outcomes
         from mart_line_reliability_daily
         where service_date between cast(? as date) and cast(? as date)
           {_schedule_day_filter(window_type)}
@@ -1014,6 +1015,8 @@ def _line_widgets(  # noqa: PLR0913
             selected_line,
         ],
     )
+    for row in reliability_rows:
+        row["outcomes"] = [{**trip, "service_date": row["service_date"]} for trip in row.get("outcomes") or []]
     return {
         "shape": _delay_shape(
             summary.get("median_delay_seconds"),
@@ -1078,6 +1081,7 @@ def _stop_widgets(
             line,
             mode,
             trip_headsign as headsign,
+            service_date, trip_id, vehicle_number,
             delay_seconds
         from mart_worst_delay_event
         where service_date between cast(? as date) and cast(? as date)
@@ -1207,27 +1211,10 @@ def _comparison_bars(  # noqa: PLR0913
         return _week_bars(db_path, entity_type, entity_id, mode, selected_date)
     if selected_date is None:
         return []
-    if window_type == "month":
-        rows = fetch_all(
-            db_path,
-            """
-            select date_trunc('month', service_date) as bucket_date, median(median_delay_seconds) as delay
-            from mart_entity_daily_summary
-            where entity_type = ?
-              and entity_id = ?
-              and (? is null or mode = ?)
-              and service_date between date_trunc('month', cast(? as date)) - interval '5 months'
-                  and cast(? as date)
-            group by bucket_date
-            order by bucket_date
-            """,
-            [entity_type, entity_id, mode, mode, selected_date, selected_date],
-        )
-        return _trend_bars(rows, "%b")
     rows = fetch_all(
         db_path,
         """
-        select date_trunc('week', service_date) as bucket_date, median(median_delay_seconds) as delay
+        select service_date as bucket_date, median_delay_seconds as delay
         from mart_entity_window_daily_summary
         where entity_type = ?
           and entity_id = ?
@@ -1235,8 +1222,7 @@ def _comparison_bars(  # noqa: PLR0913
           and window_type = ?
           and window_key = ?
           and source_end_date = cast(? as date)
-        group by bucket_date
-        order by bucket_date desc
+        order by service_date desc
         limit 12
         """,
         [
@@ -1286,11 +1272,12 @@ def _period_daily_bars(  # noqa: PLR0913
             selected_date,
         ],
     )
-    return _trend_bars(rows, "%d")
+    return _trend_bars(rows, "%d %b")
 
 
 def _trend_bars(rows: list[dict[str, Any]], label_format: str) -> list[dict[str, Any]]:
     bars = []
+    scale = max((abs(float(row["delay"])) for row in rows if row.get("delay") is not None), default=1) or 1
     for index, row in enumerate(rows):
         bucket_date = row["bucket_date"]
         delay = row.get("delay")
@@ -1298,10 +1285,14 @@ def _trend_bars(rows: list[dict[str, Any]], label_format: str) -> list[dict[str,
             {
                 "service_date": str(bucket_date),
                 "label": bucket_date.strftime(label_format)
-                if index in {0, len(rows) - 1} or len(rows) <= MAX_TREND_LABELS
+                if index in {0, len(rows) - 1}
+                or (index % max(3, len(rows) // MAX_TREND_LABELS) == 0 and index < len(rows) - 3)
                 else "",
                 "delay": delay,
-                "height": 0 if delay is None else max(4, min(38, round(abs(float(delay)) * 0.35))),
+                "height": 0 if delay is None else max(1, round(abs(float(delay)) / scale * 45)),
+                "tone": "missing" if delay is None else ("early" if delay < 0 else "late" if delay > 0 else "zero"),
+                "daily": True,
+                "scale": scale,
                 "selected": index == len(rows) - 1,
             }
         )
@@ -1311,9 +1302,9 @@ def _trend_bars(rows: list[dict[str, Any]], label_format: str) -> list[dict[str,
 def _comparison_label(window_type: str) -> str:
     return {
         "day": "This week · mean",
-        "weekdays": "12-week trend · weekdays",
-        "weekend": "12-week trend · weekends/holidays",
-        "month": "6-month trend",
+        "weekdays": "12 service days · median",
+        "weekend": "12 service days · median",
+        "month": "12 service days · median",
     }[window_type]
 
 
@@ -1788,7 +1779,7 @@ def _window_context(
     source_day_count = (
         (summary.get("source_day_count") if prefer_summary else (membership or {}).get("source_day_count"))
         or summary.get("source_day_count")
-        or (1 if selected_date else 0)
+        or (1 if selected_date and window_type == "day" else 0)
     )
     start_day = _as_date(source_start)
     end_day = _as_date(source_end)
@@ -1797,11 +1788,10 @@ def _window_context(
     if window_type == "day":
         label = end_day.strftime("%d %b %Y")
     elif window_type == "month":
-        label = f"{end_day:%B %Y} · through {end_day:%d %b}"
+        label = end_day.strftime("%b %Y")
     else:
-        name = "weekday" if window_type == "weekdays" else "weekend/holiday"
-        date_range = f"{start_day:%d %b}-{end_day:%d %b}" if start_day else f"through {end_day:%d %b}"
-        label = f"{source_day_count} {name} service days · {date_range}"
+        date_range = f"{start_day:%d %b}–{end_day:%d %b}" if start_day else f"through {end_day:%d %b}"  # noqa: RUF001
+        label = f"{date_range} · {source_day_count}d"
     return {
         "label": label,
         "source_start_date": source_start,

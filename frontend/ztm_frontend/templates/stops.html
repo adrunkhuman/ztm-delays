@@ -234,7 +234,7 @@
               {% for row in stop_widgets.worst %}
                 <div class="landing-rank-row stop-departure-grid">
                   <span class="landing-rank-index mono">{{ '%02d'|format(loop.index) }}</span>
-                  <time class="mono muted" datetime="{{ selected_date }}T{{ row.time }}">{{ row.time }}</time>
+                  {{ ui.exact_trip_link(row) }}
                   <a class="landing-line-pill mono {% if row.mode == 'tram' %}tram{% endif %}" href="{{ url_for('lines', line=row.line, mode=row.mode, date=selected_date) }}">{{ row.line }}</a>
                   <span class="landing-route" title="{{ row.headsign }}">{{ row.headsign }}</span>
                   <span class="landing-value mono {{ row.delay_seconds|delay_class }}">{{ row.delay_seconds|delay }}</span>

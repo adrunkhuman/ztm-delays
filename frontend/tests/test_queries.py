@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from ztm_frontend import queries
 
@@ -435,7 +436,7 @@ def test_weekday_comparison_excludes_weekend_service(tmp_path: Path) -> None:
         "weekdays",
     )
 
-    assert [row["delay"] for row in bars] == [30.0, 60.0]
+    assert [row["delay"] for row in bars] == [20.0, 40.0, 60.0]
 
 
 def test_window_context_describes_matching_service_dates(tmp_path: Path) -> None:
@@ -453,7 +454,7 @@ def test_window_context_describes_matching_service_dates(tmp_path: Path) -> None
         },
     )
 
-    assert context["label"] == "60 weekend/holiday service days · 03 Jan-13 Jul"
+    assert context["label"] == "03 Jan–13 Jul · 60d"  # noqa: RUF001
 
 
 def _create_line_smoke_db(db_path: Path) -> None:
@@ -544,7 +545,7 @@ def _line_course_stop_window_sql() -> str:
 def _worst_delay_event_sql() -> str:
     return """
         create table mart_worst_delay_event as
-        select * from (
+        select *, 'trip-1' as trip_id, '1001' as vehicle_number, '1' as line from (
             values
                 (date '2026-06-30', 'weekday', timestamp '2026-06-30 08:00:00', 'bus', 'line', '1', 1, '08:00', 'Bus destination', 'Bus Stop', '7002', 60.0),
                 (date '2026-06-30', 'weekday', timestamp '2026-06-30 08:00:00', 'tram', 'line', '1', 1, '08:00', 'Tram destination', 'Tram Stop', '8002', 300.0)
@@ -599,3 +600,76 @@ def _entity_timeline_daily_sql() -> str:
         select date '2026-06-30' as service_date, 'line' as entity_type, '1' as entity_id, 'bus' as mode,
             50.0 as x_percent, 30.0 as delay_seconds, 1 as point_rank
     """
+
+
+@pytest.mark.parametrize("window", ["weekdays", "weekend", "month"])
+@pytest.mark.parametrize(
+    ("entity_type", "entity_id", "mode"), [("mode", "bus", None), ("line", "1", "bus"), ("stop_post", "100102", "bus")]
+)
+def test_grouped_charts_keep_exact_daily_values(
+    tmp_path: Path, window: str, entity_type: str, entity_id: str, mode: str | None
+) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    key = "2026-07" if window == "month" else "2026-07-31"
+    day_count = 31 if window == "month" else 60
+    with duckdb.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            create table mart_entity_window_daily_summary as
+            select ? as entity_type, ? as entity_id, 'bus' as mode, ? as window_type,
+                   ? as window_key, date '2026-07-31' as source_end_date,
+                   date '2026-07-31' - range::integer as service_date,
+                   case when range = 0 then null when range = 1 then -120
+                        when range = 2 then 0 else range * 10 end as median_delay_seconds
+            from range(?)
+            """,
+            [entity_type, entity_id, window, key, day_count],
+        )
+        connection.execute(
+            """
+            insert into mart_entity_window_daily_summary
+            select entity_type, entity_id, 'tram', window_type, window_key,
+                   source_end_date, service_date, 9999 from mart_entity_window_daily_summary;
+            insert into mart_entity_window_daily_summary
+            select entity_type, entity_id, mode, window_type, window_key,
+                   date '2026-07-30', service_date, 9999 from mart_entity_window_daily_summary
+            """
+        )
+    # Mode entities are already identified by entity_id; use the fixture's mode
+    # predicate here to also verify mode isolation at every display grain.
+    selected_mode = mode or "bus"
+    recent = queries._comparison_bars(db_path, entity_type, entity_id, selected_mode, "2026-07-31", window)  # noqa: SLF001
+    daily = queries._period_daily_bars(db_path, entity_type, entity_id, selected_mode, "2026-07-31", window)  # noqa: SLF001
+    assert [row["delay"] for row in recent] == [*range(110, 20, -10), 0, -120, None]
+    assert len(daily) == day_count
+    assert [row["service_date"] for row in recent] == [row["service_date"] for row in daily[-12:]]
+    assert [row["tone"] for row in recent[-3:]] == ["zero", "early", "missing"]
+    assert recent[-1]["height"] == 0
+    max_bar_height = 45
+    assert all(0 <= row["height"] <= max_bar_height for row in daily)
+    assert sum(bool(row["label"]) for row in daily) < len(daily)
+    assert "median" in queries._comparison_label(window)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("window", "label"),
+    [
+        ("day", "07 Sep 2026"),
+        ("month", "Sep 2026"),
+        ("weekdays", "29 Jun–07 Sep · 49d"),  # noqa: RUF001
+        ("weekend", "29 Jun–07 Sep · 49d"),  # noqa: RUF001
+    ],
+)
+def test_compact_period_labels(tmp_path: Path, window: str, label: str) -> None:
+    db_path = tmp_path / "ztm.duckdb"
+    with duckdb.connect(str(db_path)):
+        pass
+    context = queries._window_context(  # noqa: SLF001
+        db_path,
+        window,
+        "2026-09-07",
+        {"source_start_date": date(2026, 6, 29), "source_end_date": date(2026, 9, 7), "source_day_count": 49},
+    )
+    assert context["label"] == label
+    if window != "day":
+        assert queries._comparison_label(window) == "12 service days · median"  # noqa: SLF001

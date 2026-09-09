@@ -39,7 +39,7 @@
           {% for trip in trip_landing_rows %}
             <a class="landing-rank-row trip-rank-grid" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=trip.service_date, vehicle=trip.vehicle_number, window=selected_window, return_date=selected_date) }}">
               <span class="landing-rank-index mono">{{ '%02d'|format(pagination.first_item + loop.index0) }}</span>
-              <span class="mono muted">{{ trip.display_date }}{{ trip.scheduled_start_time|time }}</span>
+              {{ ui.trip_time(trip) }}
               <span class="landing-line-pill mono {% if trip.mode == 'tram' %}tram{% endif %}">{{ trip.route_short_name }}</span>
               <span class="landing-route" title="{{ trip.route_label }}">{{ trip.route_label }}</span>
               <span class="trip-trace" aria-label="per-stop delay trace">
@@ -91,7 +91,7 @@
               </div>
               {% for trip in group.trips %}
                 <a class="trip-run" href="{{ url_for('trip_detail', trip_id=trip.trip_id, date=trip.service_date, vehicle=trip.vehicle_number, window=selected_window, return_date=selected_date) }}">
-                  <span class="trip-dep mono">{{ trip.display_date }}{{ trip.scheduled_start_time|time }}</span>
+                  {{ ui.trip_time(trip) }}
                   <span class="trip-trace" aria-label="per-stop delay trace">
                     <span class="trip-trace-base"></span>
                     <span class="trip-trace-stops">
