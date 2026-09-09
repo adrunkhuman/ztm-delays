@@ -672,4 +672,4 @@ def test_compact_period_labels(tmp_path: Path, window: str, label: str) -> None:
     )
     assert context["label"] == label
     if window != "day":
-        assert queries._comparison_label(window) == "12 service days · median"  # noqa: SLF001
+        assert queries._comparison_label(window) == "median by day"  # noqa: SLF001

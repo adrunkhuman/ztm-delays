@@ -101,10 +101,11 @@ use timetable versions active at the anchor.
 Grouped comparison charts show up to 12 recent **exact daily medians** from
 `mart_entity_window_daily_summary`. They do not combine daily medians into weekly
 or monthly statistics. Detail timelines retain every exported member date in a
-bounded horizontal strip, with sparse date labels. Each strip plots delay magnitude on a linear scale available in the chart tooltip,
-using the same bottom baseline as the other charts. Early values are blue and
-retain their sign in tooltips and the accessible table; nulls use an ×, and zero
-is a baseline mark. Hover a point for its date and value;
+bounded horizontal strip, with sparse date labels. Each strip plots delay magnitude on its own linear scale,
+using the same bottom baseline as the other charts. Bars are gray, with the
+selected date in blue, matching the weekly charts. Signed values remain in native
+tooltips and the accessible table; nulls use an ×, and zero is a baseline mark.
+Hover a point for its date and value;
 a visually hidden date-and-median table provides screen-reader access without
 adding layout height. The chart has one keyboard stop for scrolling, not one per point. Day scope retains its seven-day mean comparison and departure timeline.
 

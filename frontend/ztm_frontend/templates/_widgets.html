@@ -55,13 +55,12 @@
 
 {% macro week_bars(week) %}
   {% if week and week[0].daily %}
-    <div class="daily-chart" tabindex="0" role="region" aria-label="Daily median delay" title="Scale ±{{ week[0].scale|round|int }}s">
+    <div class="daily-chart" tabindex="0" role="region" aria-label="Daily median delay">
       <div class="daily-strip" style="--points: {{ week|length }}">
         {% for row in week %}
-          <div class="daily-point {{ row.tone }}" aria-label="{{ row.service_date }} · {{ row.delay|delay }}" title="{{ row.service_date }} · {{ row.delay|delay }}">
+          <div class="daily-point {{ row.tone }}{% if row.selected %} selected{% endif %}" aria-label="{{ row.service_date }} · {{ row.delay|delay }}" title="{{ row.service_date }} · {{ row.delay|delay }}">
             <span class="daily-mark" style="--bar-height: {{ row.height }}px"></span>
             <span class="daily-label">{{ row.label }}</span>
-            <span class="daily-value">{{ row.service_date }} · {{ row.delay|delay }}</span>
           </div>
         {% endfor %}
       </div>

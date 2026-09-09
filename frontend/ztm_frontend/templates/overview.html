@@ -40,11 +40,11 @@
           {{ ui.hour_bars(overview_widgets.tram.hours) }}
         </div>
         <div class="widget chart-widget">
-          <div class="label">Bus · {{ overview_widgets.bus.comparison_label }}</div>
+          <div class="label">Bus{% if selected_window == 'day' %} ·{% endif %} {{ overview_widgets.bus.comparison_label }}</div>
           {{ ui.week_bars(overview_widgets.bus.comparison) }}
         </div>
         <div class="widget chart-widget">
-          <div class="label">Tram · {{ overview_widgets.tram.comparison_label }}</div>
+          <div class="label">Tram{% if selected_window == 'day' %} ·{% endif %} {{ overview_widgets.tram.comparison_label }}</div>
           {{ ui.week_bars(overview_widgets.tram.comparison) }}
         </div>
       </section>

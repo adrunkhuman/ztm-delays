@@ -136,6 +136,9 @@ def test_period_layout_renders_across_views(window: str, view: str, monkeypatch:
         assert "Destination 2" in html
         assert 'href="#departures"' in html
     if window != "day":
+        if view == "overview":
+            assert all(f"{mode} median by day" in html for mode in ["Bus", "Tram"])
+        assert not any(text in html for text in ['class="daily-value"', "Scale ±"])
         assert f"window={window}" in html
         if view in {"line", "post"}:
             assert f"--points: {count}" in html
@@ -251,7 +254,8 @@ def test_daily_values_table_replaces_per_point_keyboard_stops() -> None:
         html = str(widgets.week_bars(bars))
     assert html.count('tabindex="0"') == 1
     assert 'class="daily-chart" tabindex="0" role="region"' in html
-    assert 'title="Scale ±57s"' in html
+    assert 'title="2026-07-30 · -1s"' in html
+    assert 'class="daily-point missing selected"' in html
     assert '<div class="sr-only">\n      <table>' in html
     assert '<table class="sr-only">' not in html
     assert "daily-key" not in html

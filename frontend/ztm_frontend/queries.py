@@ -1316,9 +1316,9 @@ def _trend_bars(rows: list[dict[str, Any]], label_format: str) -> list[dict[str,
 def _comparison_label(window_type: str) -> str:
     return {
         "day": "This week · mean",
-        "weekdays": "12 service days · median",
-        "weekend": "12 service days · median",
-        "month": "12 service days · median",
+        "weekdays": "median by day",
+        "weekend": "median by day",
+        "month": "median by day",
     }[window_type]
 
 
