@@ -64,8 +64,19 @@ def test_status_page_renders_current_pipeline_contract(tmp_path: Path, monkeypat
     assert len(status["pipeline_status"]["bus"]) == recent_day_count
     assert str(status["pipeline_status"]["bus"][-1]["service_date"]) == "2026-07-06"
     assert response.status_code == HTTPStatus.OK
-    assert b"observed minutes" in response.data
-    assert b"Bus partial" in response.data
+    assert b"observed minutes" not in response.data
+    assert b"service-minute coverage" in response.data
+    assert b"Trip coverage &amp; quality counts" in response.data
+    assert b'<th colspan="4" scope="colgroup">Bus</th>' in response.data
+    assert b'<th scope="col">Clean</th>' in response.data
+    assert b'<th scope="col">Partial</th>' in response.data
+    assert b'<th scope="col">Broken</th>' in response.data
+    assert b"/?date=2026-07-13&amp;window=day" in response.data
+    assert b"2026-07-14 03:12:00 UTC" in response.data
+    assert b"poller snapshot" in response.data
+    assert b"no recent data" in response.data
+    expected_partial = 2
+    assert status["status_summary"]["bus"]["trips_partial"] == expected_partial
     assert b"matched" not in response.data
 
 

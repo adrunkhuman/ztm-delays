@@ -1,9 +1,9 @@
 {% macro datebox(display_label, previous_href=None, next_href=None, selected_window='day', show_scopes=True) %}
   <div class="datebox">
     <div class="date">
-      <a href="{{ previous_href or '#' }}" class="{% if not previous_href %}disabled{% endif %}">‹</a>
+      {% if previous_href %}<a aria-label="Previous period anchor" href="{{ previous_href }}">‹</a>{% else %}<span class="disabled" aria-label="Previous period anchor" aria-disabled="true">‹</span>{% endif %}
       <b>{{ display_label or "n/a" }}</b>
-      <a href="{{ next_href or '#' }}" class="{% if not next_href %}disabled{% endif %}">›</a>
+      {% if next_href %}<a aria-label="Next period anchor" href="{{ next_href }}">›</a>{% else %}<span class="disabled" aria-label="Next period anchor" aria-disabled="true">›</span>{% endif %}
     </div>
     {% if show_scopes %}
       <div class="scope">{% for window in ['day', 'weekdays', 'weekend', 'month'] %}{% if window == 'day' or grouped_windows_available %}<a class="{% if selected_window == window %}active{% endif %}" href="{{ scope_href(window) }}">{{ window }}</a>{% else %}<span title="Serving rebuild pending">{{ window }}</span>{% endif %}{% endfor %}</div>
@@ -54,6 +54,25 @@
 {% endmacro %}
 
 {% macro week_bars(week) %}
+  {% if week and week[0].daily %}
+    <div class="daily-chart" tabindex="0" role="region" aria-label="Daily median delay">
+      <div class="daily-strip" style="--points: {{ week|length }}">
+        {% for row in week %}
+          <div class="daily-point {{ row.tone }}{% if row.selected %} selected{% endif %}" aria-label="{{ row.service_date }} · {{ row.delay|delay }}" title="{{ row.service_date }} · {{ row.delay|delay }}">
+            <span class="daily-mark" style="--bar-height: {{ row.height }}px"></span>
+            <span class="daily-label">{{ row.label }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="sr-only">
+      <table>
+        <caption>Daily median delay by service date</caption>
+        <thead><tr><th scope="col">Date</th><th scope="col">Median</th></tr></thead>
+        <tbody>{% for row in week %}<tr><td>{{ row.service_date }}</td><td>{{ row.delay|delay }}</td></tr>{% endfor %}</tbody>
+      </table>
+    </div>
+  {% elif week %}
   <div class="week">
     <div class="plot week-plot">
       {% for row in week %}
@@ -66,6 +85,25 @@
       {% endfor %}
     </div>
   </div>
+  {% else %}<div class="muted">No service-day data in this window.</div>{% endif %}
+{% endmacro %}
+
+{% macro event_time(value) %}
+  {% set parts = value.split(' · ') %}
+  <span class="event-time mono">{% if parts|length > 1 %}<span class="event-date">{{ parts[0] }}</span>{% endif %}<span>{{ parts[-1] }}</span></span>
+{% endmacro %}
+
+{% macro exact_trip_link(trip, square=False) %}
+  {% set href = url_for('trip_detail', trip_id=trip.trip_id, date=trip.service_date, vehicle=trip.vehicle_number, window=selected_window, return_date=selected_date) if trip.service_date and trip.trip_id and trip.vehicle_number else none %}
+  {% if square %}
+    {% if href %}<a href="{{ href }}" class="reliability-square {{ trip.outcome }}" title="{{ trip.label }}" aria-label="{{ trip.label }}"></a>{% else %}<span class="reliability-square {{ trip.outcome }}" title="{{ trip.label }}"></span>{% endif %}
+  {% else %}
+    {% if href %}<a class="departure-time" href="{{ href }}">{{ event_time(trip.time) }}</a>{% else %}{{ event_time(trip.time) }}{% endif %}
+  {% endif %}
+{% endmacro %}
+
+{% macro trip_time(trip) %}
+  <span class="event-time mono" title="Service date {{ trip.service_date }}">{% if trip.display_date %}<span class="event-date">{{ trip.display_date|replace(' · ', '') }}</span>{% endif %}<span>{{ trip.scheduled_start_time|time }}</span></span>
 {% endmacro %}
 
 {% macro timeline(points) %}

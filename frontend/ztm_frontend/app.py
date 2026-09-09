@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytz
 from flask import Flask, current_app, render_template, request, url_for
@@ -16,9 +16,6 @@ EARLY_DELAY_SECONDS = -60
 LATE_DELAY_SECONDS = 180
 LOW_ON_TIME_RATE = 0.6
 WARSAW = pytz.timezone("Europe/Warsaw")
-
-if TYPE_CHECKING:
-    from datetime import datetime
 
 
 def create_app() -> Flask:  # noqa: C901
@@ -36,6 +33,7 @@ def create_app() -> Flask:  # noqa: C901
     app.add_template_filter(_format_integer, "integer")
     app.add_template_filter(_format_percent, "percent")
     app.add_template_filter(_format_time, "time")
+    app.add_template_filter(_format_utc_timestamp, "utc_timestamp")
     app.add_template_filter(_delay_class, "delay_class")
     app.add_template_filter(_percent_class, "percent_class")
     app.add_template_filter(lambda value: json.dumps(value, separators=(",", ":")), "to_json")
@@ -152,6 +150,19 @@ def create_app() -> Flask:  # noqa: C901
         return render_template("status.html", **queries.get_status(current_app.config["ZTM_DUCKDB_PATH"]))
 
     return app
+
+
+def _format_utc_timestamp(value: object) -> str:
+    """Format export timestamps; naive warehouse timestamps are UTC."""
+    if not value:
+        return "unknown"
+    try:
+        timestamp = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    except ValueError:
+        return "unknown"
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    return timestamp.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _format_delay(value: float | None) -> str:

@@ -28,7 +28,7 @@
       {% block body %}{% endblock %}
 
       <footer class="foot">
-        <span>archive · {{ meta.source_row_count|integer if meta.source_row_count else "n/a" }} rows · built {{ meta.exported_at or "n/a" }}</span>
+        {% block footer %}<span>archive · {{ meta.source_row_count|integer if meta.source_row_count else "n/a" }} rows · built {{ meta.exported_at or "n/a" }}</span>{% endblock %}
       </footer>
     </div>
     {% block scripts %}{% endblock %}

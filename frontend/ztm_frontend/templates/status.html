@@ -1,94 +1,83 @@
 {% extends "base.html" %}
-
 {% block title %}status · ZTM delays{% endblock %}
-
+{% macro timestamp(value) -%}
+  <span title="{{ value or '' }}">{{ value|utc_timestamp }}</span>
+{%- endmacro %}
+{% block footer %}<span>archive · {{ meta.source_row_count|integer if meta.source_row_count else 'n/a' }} rows · built {{ timestamp(meta.exported_at) }}</span>{% endblock %}
 {% block body %}
-  <div class="body">
-    <aside class="rail"></aside>
-
-    <main class="main">
-      <header class="head">
-        <h1 class="hero-title">status</h1>
-        <div class="landing-meta">
-          <span>coverage</span>
-          <span>trip quality</span>
-          <span>recent days</span>
-        </div>
-      </header>
-
-      {% set poller = metadata.get("poller_status", {}) %}
-      <section class="status-panel">
-        <div class="status-panel-head">
-          <div>
-            <div class="tag">POLLER</div>
-            <div class="mono muted">last export {{ metadata.get("last_export_at") or metadata.get("exported_at") or "unknown" }}</div>
+<div class="body status-page">
+  <aside class="rail"></aside>
+  <main class="main">
+    <header class="head"><h1 class="hero-title">status</h1></header>
+    {% set poller = metadata.get('poller_status') or {} %}
+    <section class="status-ops" aria-label="Export and poller snapshot">
+      <dl>
+        <div><dt class="label">last export</dt><dd>{{ timestamp(metadata.get('last_export_at') or metadata.get('exported_at')) }}</dd></div>
+        <div><dt class="label">poller snapshot</dt><dd class="{{ 'problem' if poller.get('status') in ['degraded', 'down', 'stale'] else '' }}">{{ poller.get('status') or 'unknown' }}</dd></div>
+        <div><dt class="label">heartbeat</dt><dd>{{ timestamp(poller.get('updated_at')) }}</dd></div>
+        <div><dt class="label">last success</dt><dd>{{ timestamp(poller.get('last_success_at')) }}</dd></div>
+        {% for mode in ['bus', 'tram'] %}
+          {% set vehicle = (poller.get('vehicle_types') or {}).get(mode) or {} %}
+          {% set failures = vehicle.get('consecutive_failures') %}
+          <div><dt class="label">{{ mode }} consecutive failures</dt><dd class="{{ 'problem' if failures else '' }}">{{ failures if failures is not none else 'n/a' }}</dd></div>
+        {% endfor %}
+      </dl>
+    </section>
+    <section class="two-up status-summary" aria-label="Recent coverage and trip quality">
+      {% for mode in ['bus', 'tram'] %}
+        {% set row = status_summary.get(mode) %}
+        <section class="widget" id="{{ mode }}">
+          <div class="status-mode">
+            <span class="tag {{ mode }}">{{ mode|upper }}</span>
+            {% if row %}<span class="status-range">{{ row.first_date }} → {{ row.last_date }} · {{ row.day_count }} days</span>{% endif %}
           </div>
-          <div class="status-label {{ 'good' if poller.get('status') == 'ok' else 'usable' if poller.get('status') in ['starting', 'degraded'] else 'patchy' if poller.get('status') == 'stale' else 'muted' }}">{{ poller.get("status", "unknown") }}</div>
-        </div>
-        <div class="status-mini-grid">
-          <div><span class="label">heartbeat</span><b class="mono">{{ poller.get("updated_at") or "unknown" }}</b></div>
-          <div><span class="label">last success</span><b class="mono">{{ poller.get("last_success_at") or "unknown" }}</b></div>
-          {% for mode in ["bus", "tram"] %}
-            {% set vehicle = poller.get("vehicle_types", {}).get(mode, {}) %}
-            <div><span class="label">{{ mode }} failures</span><b class="mono {% if vehicle.get('consecutive_failures') %}late-text{% else %}muted{% endif %}">{{ vehicle.get("consecutive_failures", "n/a") }}</b></div>
-          {% endfor %}
-        </div>
-      </section>
-
-      <section class="status-panels">
-        {% for mode in ["bus", "tram"] %}
-          {% set row = status_summary.get(mode) %}
-          <div class="status-panel" id="{{ mode }}">
-            <div class="status-panel-head">
-              <div>
-                <div class="tag {{ mode }}">{{ mode|upper }}</div>
-                <div class="mono muted">{{ row.first_date if row else "no data" }} → {{ row.last_date if row else "" }} · {{ row.day_count if row else 0 }} days</div>
-              </div>
-              <div class="status-label {{ row.health_ratio|percent_class if row else 'muted' }}">{{ row.health_label if row else "missing" }}</div>
+          {% if row %}
+            <div class="widget">
+              <div class="label">service-minute coverage</div>
+              <div class="metric-line"><span class="big">{{ row.service_coverage_ratio|percent }}</span></div>
             </div>
-            {% if row %}
-              <div class="status-main-metric">
-                <span class="big {{ row.service_coverage_ratio|percent_class }}">{{ row.service_coverage_ratio|percent }}</span>
-                <span>service covered</span>
-              </div>
-              <div class="status-meter" aria-label="service coverage"><span style="width: {{ (row.service_coverage_ratio * 100)|round(1) if row.service_coverage_ratio is not none else 0 }}%"></span></div>
-              <div class="status-mini-grid">
-                <div><span class="label">raw day</span><b class="mono {{ row.completeness_ratio|percent_class }}">{{ row.completeness_ratio|percent }}</b></div>
-                <div><span class="label">observed minutes</span><b class="mono">{{ row.observed_service_minutes|integer }}</b></div>
-                <div><span class="label">clean trips</span><b class="mono">{{ row.trips_complete|integer }}</b></div>
-                <div><span class="label">issues</span><b class="mono {% if row.trips_broken %}late-text{% else %}muted{% endif %}">{{ row.trips_broken|integer }}</b></div>
-              </div>
-            {% else %}
-              <div class="section muted">No recent status for {{ mode }}.</div>
-            {% endif %}
-          </div>
-        {% endfor %}
-      </section>
-
-      <section class="status-history">
-        <div class="dirhead">
-          <h2>recent days</h2>
-          <div class="dirstats"><span>latest first</span></div>
+            <dl class="status-counts">
+              {% for key, label in [('trips_complete', 'clean trips'), ('trips_partial', 'partial trips'), ('trips_broken', 'broken trips')] %}
+                <div><dt class="label">{{ label }}</dt><dd class="mono {{ 'problem' if key == 'trips_broken' and row.get(key) else '' }}">{{ row.get(key)|integer }}</dd></div>
+              {% endfor %}
+            </dl>
+          {% else %}
+            <p class="status-range">no recent data</p>
+          {% endif %}
+        </section>
+      {% endfor %}
+    </section>
+    <section class="status-history">
+      <h2 class="label">recent days</h2>
+      {% if status_days %}
+        <div class="status-scroll" role="region" aria-label="Daily coverage and trip quality" tabindex="0">
+          <table class="mono">
+            <caption class="status-table-caption">Trip coverage &amp; quality counts</caption>
+            <colgroup><col></colgroup><colgroup span="4"></colgroup><colgroup span="4"></colgroup>
+            <thead>
+              <tr><th rowspan="2" scope="col">Date</th><th colspan="4" scope="colgroup">Bus</th><th colspan="4" scope="colgroup">Tram</th></tr>
+              <tr>{% for mode in ['bus', 'tram'] %}<th scope="col">Trip cover</th><th scope="col">Clean</th><th scope="col">Partial</th><th scope="col">Broken</th>{% endfor %}</tr>
+            </thead>
+            <tbody>
+              {% for day in status_days[:8] %}
+                <tr>
+                  <th scope="row"><a href="{{ url_for('index', date=day.service_date, window='day') }}">{{ day.service_date }}</a></th>
+                  {% for mode in ['bus', 'tram'] %}
+                    {% set row = day.get(mode) %}
+                    <td class="spct">{{ row.service_coverage_ratio|percent if row else 'n/a' }}</td>
+                    {% for key in ['trips_complete', 'trips_partial', 'trips_broken'] %}
+                      <td class="sval {{ 'problem' if key == 'trips_broken' and row and row.get(key) else '' }}">{{ row.get(key)|integer if row else 'n/a' }}</td>
+                    {% endfor %}
+                  {% endfor %}
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
-        <div class="status-table-head status-table-row">
-          <div>Date</div><div>Bus cover</div><div>Bus partial</div><div>Bus trips</div><div>Bus issues</div><div>Tram cover</div><div>Tram partial</div><div>Tram trips</div><div>Tram issues</div>
-        </div>
-        {% for day in status_days[:8] %}
-          {% set bus = day.bus %}
-          {% set tram = day.tram %}
-          <div class="status-table-row">
-            <span class="mono status-date">{{ day.service_date }}</span>
-            <span class="mono {{ bus.service_coverage_ratio|percent_class if bus else 'muted' }}">{{ bus.service_coverage_ratio|percent if bus else "n/a" }}</span>
-            <span class="mono neutral-text">{{ bus.trips_partial|integer if bus else "n/a" }}</span>
-            <span class="mono neutral-text">{{ bus.trips_complete|integer if bus else "n/a" }}</span>
-            <span class="mono {% if bus and bus.trips_broken %}late-text{% else %}muted{% endif %}">{{ bus.trips_broken|integer if bus else "n/a" }}</span>
-            <span class="mono {{ tram.service_coverage_ratio|percent_class if tram else 'muted' }}">{{ tram.service_coverage_ratio|percent if tram else "n/a" }}</span>
-            <span class="mono neutral-text">{{ tram.trips_partial|integer if tram else "n/a" }}</span>
-            <span class="mono neutral-text">{{ tram.trips_complete|integer if tram else "n/a" }}</span>
-            <span class="mono {% if tram and tram.trips_broken %}late-text{% else %}muted{% endif %}">{{ tram.trips_broken|integer if tram else "n/a" }}</span>
-          </div>
-        {% endfor %}
-      </section>
-    </main>
-  </div>
+      {% else %}
+        <p class="status-range">no recent data</p>
+      {% endif %}
+    </section>
+  </main>
+</div>
 {% endblock %}
