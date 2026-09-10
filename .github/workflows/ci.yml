@@ -40,6 +40,19 @@ jobs:
         run: uv run pytest
         working-directory: poller
 
+  poller-image:
+    name: Poller image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build image
+        run: docker build -t ztm-poller:ci poller
+      - name: Check image offline
+        run: >-
+          docker run --rm --network none --entrypoint /app/.venv/bin/python
+          -v "$PWD/.github/scripts/smoke_poller_image.py:/tmp/smoke_poller_image.py:ro"
+          ztm-poller:ci /tmp/smoke_poller_image.py
+
   airflow:
     name: Airflow
     runs-on: ubuntu-latest
@@ -183,6 +196,33 @@ jobs:
         run: uv run pytest tests
         working-directory: frontend
 
+  frontend-image:
+    name: Frontend image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build image
+        run: docker build -t ztm-frontend:ci frontend
+      - name: Start and check default server offline
+        run: |
+          volume="ztm-frontend-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container=""
+          cleanup() {
+            if [ -n "$container" ]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
+            docker volume rm -f "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume"
+          docker run --rm --network none --user root --entrypoint python \
+            -v "$PWD/.github/scripts/smoke_frontend_image.py:/tmp/smoke_frontend_image.py:ro" \
+            -v "$volume:/app/serving" \
+            ztm-frontend:ci /tmp/smoke_frontend_image.py create
+          container=$(docker run --rm -d --network none \
+            -v "$PWD/.github/scripts/smoke_frontend_image.py:/tmp/smoke_frontend_image.py:ro" \
+            -v "$volume:/app/serving" \
+            ztm-frontend:ci)
+          docker exec "$container" python /tmp/smoke_frontend_image.py check
+
   dbt:
     name: dbt
     # Fork PRs cannot access the cloud key; internal PRs retain full warehouse checks.
@@ -246,7 +286,11 @@ jobs:
       - name: Test deployment
         run: uvx --with pyyaml==6.0.3 pytest==9.1.1 .github/tests
       - name: Lint deployment tests
-        run: uvx ruff==0.15.21 check --isolated .github/tests .github/scripts/smoke_airflow_image.py
+        run: >-
+          uvx ruff==0.15.21 check --isolated .github/tests
+          .github/scripts/smoke_airflow_image.py
+          .github/scripts/smoke_frontend_image.py
+          .github/scripts/smoke_poller_image.py
       - name: Compile pinned-date and no-change ledger plans offline
         run: |
           for plan in .github/fixtures/schedule-*.json; do
