@@ -62,10 +62,12 @@ jobs:
         run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/ztm_matcher.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py airflow/dags/dag_serving_export.py
 
       - name: Lint Airflow
-        run: uvx ruff check airflow
+        run: uvx ruff==0.15.21 check airflow
 
       - name: Test Airflow DAG boundaries
-        run: uvx --with pytest --with tzdata --with duckdb --with pyarrow --with jinja2 pytest airflow/tests
+        run: >-
+          uvx --with tzdata==2026.3 --with duckdb==1.5.4 --with pyarrow==25.0.0
+          --with jinja2==3.1.6 pytest==9.1.1 airflow/tests
 
   matcher:
     name: Matcher
@@ -166,7 +168,7 @@ jobs:
       - name: Install dbt
         run: |
           uv venv
-          uv pip install dbt-core dbt-bigquery
+          uv pip install dbt-core==1.11.11 dbt-bigquery==1.11.3
 
       - name: Compile dbt warehouse models
         run: >-
@@ -192,9 +194,9 @@ jobs:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v8.2.0
       - name: Test deployment
-        run: uvx --with pyyaml pytest .github/tests
+        run: uvx --with pyyaml==6.0.3 pytest==9.1.1 .github/tests
       - name: Lint deployment tests
-        run: uvx ruff check --isolated .github/tests
+        run: uvx ruff==0.15.21 check --isolated .github/tests
       - name: Check deployment shell syntax
         run: bash -n .github/scripts/deploy_vps.sh
       - name: Compile pinned-date and no-change ledger plans offline
