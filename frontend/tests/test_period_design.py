@@ -173,7 +173,21 @@ def test_compact_times_and_missing_chart_values() -> None:
 
 
 @pytest.mark.parametrize("window", ["day", "weekdays", "weekend", "month"])
-def test_trip_detail_retains_run_date_and_return_period(window: str, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [
+        ("missed", "Not observed"),
+        ("skipped_optional", "Not observed · request stop"),
+        ("uncertain", "uncertain"),
+        ("observed", "+15s"),
+    ],
+)
+def test_trip_detail_retains_run_date_and_return_period(
+    window: str,
+    status: str,
+    label: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(queries, "get_export_metadata", lambda _path: {})
     monkeypatch.setattr(queries, "grouped_windows_available", lambda _path: True)
     trip = {
@@ -194,7 +208,8 @@ def test_trip_detail_retains_run_date_and_return_period(window: str, monkeypatch
         "post_label": "02",
         "stop_name": "Central",
         "scheduled_arrival_time": datetime(2026, 7, 15, 10, 30, tzinfo=UTC),
-        "observation_status": "unobserved",
+        "observation_status": status,
+        "delay_seconds": 15,
     }
     app = create_app()
     with app.test_request_context(f"/trips/run?window={window}&date=2026-07-15&return_date=2026-07-31"):
@@ -209,7 +224,14 @@ def test_trip_detail_retains_run_date_and_return_period(window: str, monkeypatch
     assert "2026-07-15 · vehicle 1234" in html
     assert "Single run" not in html
     assert "trip-detail-key" not in html
-    assert "unobserved" in html
+    assert label in html
+    if status in {"missed", "skipped_optional"}:
+        assert 'title="No sufficiently confident GPS observation at this stop. ' in html
+        assert "This does not establish that the vehicle skipped it." in html
+        assert f">{status}</abbr>" not in html
+        assert ">skipped</abbr>" not in html
+    else:
+        assert "Not observed" not in html
     assert f"window={window}" in html
     assert "date=2026-07-31" in html
     assert "-30s" in html
