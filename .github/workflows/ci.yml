@@ -122,7 +122,7 @@ jobs:
         working-directory: matcher
 
   offline-pipeline:
-    name: Offline pipeline integration
+    name: Pipeline test
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
