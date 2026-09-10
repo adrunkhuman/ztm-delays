@@ -9,17 +9,17 @@ Use Python `3.13` for local dbt commands. The current dbt stack is verified with
 GPS staging and completeness models require `processing_date`. The Python matcher owns trip and arrival reconstruction; dbt enriches its stable inputs and publishes current/prior service-date facts:
 
 ```bash
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select stg_gps__pings --vars '{"processing_date": "YYYY-MM-DD"}'
+uvx --python 3.13 --from dbt-core==1.11.11 --with dbt-bigquery==1.11.3 dbt run --select stg_gps__pings --vars '{"processing_date": "YYYY-MM-DD"}'
 
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select fct_trip fct_stop_arrival fct_expected_stop_event --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID", "publish_service_date": "SERVICE_DATE"}'
+uvx --python 3.13 --from dbt-core==1.11.11 --with dbt-bigquery==1.11.3 dbt run --select fct_trip fct_stop_arrival fct_expected_stop_event --vars '{"processing_date": "YYYY-MM-DD", "gtfs_snapshot_id": "SNAPSHOT_ID", "publish_service_date": "SERVICE_DATE"}'
 
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select mart_day_completeness agg_service_coverage mart_pipeline_status --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD"}'
+uvx --python 3.13 --from dbt-core==1.11.11 --with dbt-bigquery==1.11.3 dbt run --select mart_day_completeness agg_service_coverage mart_pipeline_status --vars '{"processing_date": "YYYY-MM-DD", "aggregation_start_date": "YYYY-MM-DD"}'
 ```
 
 Archive-safe dimensions rebuild across loaded GTFS snapshots. The following normal refresh requires an already bootstrapped ledger; for a fresh warehouse use the [rebuild order](../docs/runbook.md#from-scratch-rebuild). Current convenience lookups also require the selected `gtfs_snapshot_id`:
 
 ```bash
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt run --select dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_processing_snapshot int_schedule_fingerprint_daily int_gtfs_trip_schedule int_schedule_version dim_schedule_version dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current --vars '{"gtfs_snapshot_id": "SNAPSHOT_ID"}'
+uvx --python 3.13 --from dbt-core==1.11.11 --with dbt-bigquery==1.11.3 dbt run --select dim_line dim_stop_post dim_stop_group dim_date dim_schedule_date int_gtfs_processing_snapshot int_schedule_fingerprint_daily int_gtfs_trip_schedule int_schedule_version dim_schedule_version dim_line_current dim_stop_post_current dim_stop_group_current dim_schedule_date_current --vars '{"gtfs_snapshot_id": "SNAPSHOT_ID"}'
 ```
 
 Historical facts bake labels from the selected snapshot used for their rebuild. `_current` dimensions are present-day convenience surfaces only and must not be used to relabel historical facts.
@@ -84,7 +84,7 @@ Compile each planned batch separately and save each report before the manifest i
 Default Airflow runs exclude the full-history audit tests on `int_gtfs_trip_schedule` and `int_schedule_version`. Version audits now read the small ledger; raw trip-history audits remain expensive. Run them explicitly before schedule/matcher/audit-sensitive releases, after ledger bootstrap:
 
 ```bash
-uvx --python 3.13 --from dbt-core --with dbt-bigquery dbt test --select int_gtfs_trip_schedule int_schedule_version --indirect-selection cautious --exclude test_type:unit --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
+uvx --python 3.13 --from dbt-core==1.11.11 --with dbt-bigquery==1.11.3 dbt test --select int_gtfs_trip_schedule int_schedule_version --indirect-selection cautious --exclude test_type:unit --vars '{"processing_date":"YYYY-MM-DD","gtfs_snapshot_id":"SNAPSHOT_ID"}'
 ```
 
 That manual selector uses singular contract tests for required fields and accepted values instead of repeated generic column tests over the expensive schedule views.

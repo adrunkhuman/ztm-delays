@@ -75,6 +75,28 @@ exit 0
         assert "pull " not in commands
 
 
+@pytest.mark.parametrize(
+    ("job", "step_name", "packages"),
+    [
+        ("airflow", "Lint Airflow", ["ruff"]),
+        ("airflow", "Test Airflow DAG boundaries", ["pytest", "tzdata", "duckdb", "pyarrow", "jinja2"]),
+        ("dbt", "Install dbt", ["dbt-core", "dbt-bigquery"]),
+        ("deployment-checks", "Test deployment", ["pyyaml", "pytest"]),
+        ("deployment-checks", "Lint deployment tests", ["ruff"]),
+        ("deployment-checks", "Compile pinned-date and no-change ledger plans offline", ["dbt-core", "dbt-bigquery"]),
+    ],
+)
+def test_standalone_ci_dependencies_are_pinned(job, step_name, packages):
+    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    step = next(step for step in ci["jobs"][job]["steps"] if step.get("name") == step_name)
+    tokens = step["run"].split()
+    for package in packages:
+        versions = [token.removeprefix(f"{package}==") for token in tokens if token.startswith(f"{package}==")]
+        assert versions and all(part.isdigit() for version in versions for part in version.split(".")), (
+            step_name, package,
+        )
+
+
 def test_workflow_wiring():
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     manual = yaml.safe_load((ROOT / ".github/workflows/deploy-vps.yml").read_text())
