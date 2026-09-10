@@ -1,0 +1,23 @@
+# Scoped to the Airflow Dockerfile; other service build contexts are unaffected.
+# Include files, not directories: directory exceptions also include their contents.
+**
+!airflow/dags/*.py
+!dbt/dbt_project.yml
+!dbt/profiles.yml
+!dbt/models/**/*.sql
+!dbt/models/**/*.yml
+!dbt/macros/**/*.sql
+!dbt/tests/**/*.sql
+!matcher/pyproject.toml
+!matcher/uv.lock
+!matcher/README.md
+!matcher/src/**/*.py
+# Defense in depth within allowed source trees.
+**/.env*
+**/*key*.json
+**/credentials*
+**/__pycache__/
+**/.venv/
+**/.git/
+**/.pytest_cache/
+**/.ruff_cache/

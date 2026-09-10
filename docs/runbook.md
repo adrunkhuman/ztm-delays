@@ -129,9 +129,11 @@ failure.
 
 `dag_daily_gps` uses the Python matcher as its sole reconstruction path.
 
-Matcher runs require `MATCHER_ENABLED=true`, isolated staging and matcher-input datasets, the read-only matcher source at
-`/opt/airflow/matcher`, a writable `MATCHER_WORKSPACE_ROOT`, and a separate
-`UV_PROJECT_ENVIRONMENT` so `uv` never writes to the matcher mount.
+Matcher runs require `MATCHER_ENABLED=true`, isolated staging and matcher-input datasets, and writable
+`MATCHER_WORKSPACE_ROOT` storage. The image contains the source at `/opt/airflow/matcher` and installs locked runtime
+dependencies into `/opt/airflow/matcher-venv`, separate from Airflow Python. Keep the image's `MATCHER_COMMAND` default;
+it uses `uv run --no-sync --project /opt/airflow/matcher ztm-matcher` with the baked `UV_PROJECT_ENVIRONMENT`,
+without runtime dependency downloads or editable reinstalls. The lock is enforced during the image build.
 
 For each processing date, the DAG reads immutable GPS inputs and the pinned GTFS snapshot, then runs the bounded matcher.
 Before publication, it verifies non-empty artifacts, exact schemas and snapshot lineage, unique grains, accepted-execution
@@ -197,32 +199,43 @@ group by tables.table_schema
 order by tables.table_schema;
 ```
 
-## Deployment Sync
+## Manual Airflow Deployment
 
-After a push to `master` passes CI, GitHub Actions updates the Airflow bind-mounted source automatically:
+Airflow runs a repository-built image using `airflow standalone`. Configure Coolify with repository branch `master`,
+Dockerfile build pack, base directory `/`, and Dockerfile `/airflow/Dockerfile`. Keep automatic/webhook deployment disabled.
+GitHub Actions validates changes, including a credential-free image build/smoke check, but does not deploy or synchronize
+VPS files. CI is an operator-enforced prerequisite, not a Coolify webhook gate. Poller and frontend deploy separately.
 
-- join the Tailnet as `tag:github-actions` and SSH to `ubuntu@vps`;
-- require a clean tracked worktree on `master`;
-- fetch `master`, verify the tested commit belongs to it, and fast-forward `/home/ubuntu/ztm-pipeline` to that exact SHA; reject stale or divergent revisions;
-- verify host/container matcher hashes, canonical matcher environment and mounts, Airflow DAG parsing, `airflow dags list`, and `dbt parse` inside the Airflow container.
+Required Coolify runtime configuration (not applied by repository changes):
 
-For a manual retry, run **Deploy VPS** from `master` after checking CI for that revision. It deploys the workflow run's SHA; the manual path does not check CI status automatically.
+| Setting or path | Contract |
+| --- | --- |
+| `/opt/airflow/dags`, `/opt/airflow/dbt`, `/opt/airflow/matcher`, `/opt/airflow/matcher-venv` | Image-owned code/environment. Remove source mounts and any parent mount such as `/opt/airflow` that would shadow image contents. |
+| `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` | Preserve the existing external PostgreSQL connection and its persistent database volume; do not fall back to SQLite. |
+| `AIRFLOW__CORE__FERNET_KEY` | Preserve the existing secret in Coolify so stored connections remain decryptable. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Preserve the Coolify-managed key file mounted at `/opt/airflow/gcp-key.json`; keep credentials out of builds. |
+| Shared serving storage | Mount the same persistent host directory writable at both `/opt/airflow/serving` and `/serving` in Airflow, and read-only at `/serving` in frontend. Keep the complete catalog, sidecar, and Parquet tree. |
+| `/opt/airflow/matcher-work` | Writable working storage with capacity for input downloads and spill. Configure a dedicated Coolify volume if failed-run work must survive replacement; it is not a recovery source. |
+| `/opt/airflow/dbt/target`, `/opt/airflow/dbt/logs` | Writable image directories; generated parse/compile output is disposable. Do not mount the whole dbt source tree. |
+| `/opt/airflow/logs` | Configure persistent Coolify storage for task logs. |
+| `/opt/airflow/auth` | Configure persistent Coolify storage and set `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE=/opt/airflow/auth/passwords.json`; securely retain existing password state there if retaining logins. |
+| Airflow configuration | Store required settings in Coolify environment variables rather than relying on generated container-local `airflow.cfg`. Keep the image's matcher command/environment defaults. |
 
-The checkout sync does not rebuild containers or run dbt models. Coolify manages the separate service deployments; its webhook is not gated by this Actions job. If the matcher bind hash is stale, redeploy Airflow in Coolify and rerun the workflow.
+Mounted writable directories must permit the Airflow user (UID `50000`, group `0`) to write; image ownership does not
+fix host-volume permissions. Keep `SERVING_EXPORT_DIR=/opt/airflow/serving` and
+`SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT=/serving`; both paths must expose the same directory for partitioned catalogs.
 
-Required GitHub secrets:
+1. Require all applicable CI checks to pass for the exact `master` revision selected in Coolify, including **Airflow image**.
+   Fork PRs run offline checks; internal PRs and `master` also run credentialed dbt checks.
+2. Verify the runtime configuration above, back up PostgreSQL, and retain the previous image and settings.
+   Pause scheduling and let active tasks finish before replacing the standalone container.
+3. Manually build/deploy that revision in Coolify. Verify the deployed revision, effective mounts, external metadata
+   connection, DAG import errors, `airflow dags list`, `dbt parse --profiles-dir /opt/airflow/dbt --project-dir /opt/airflow/dbt`,
+   UI login, and serving-path permissions before resuming scheduling. Deployment does not run warehouse models.
 
-- `TS_OAUTH_CLIENT_ID`
-- `TS_OAUTH_SECRET`
-- `VPS_DEPLOY_SSH_KEY`
-- `VPS_DEPLOY_KNOWN_HOSTS`
-
-Optional GitHub vars override defaults: `VPS_DEPLOY_HOST`, `VPS_DEPLOY_USER`, `VPS_REPO_DIR`, and
-`AIRFLOW_CONTAINER_PREFIX`.
-
-Keep SSH Tailscale-only. The workflow reaches the VPS through a tagged ephemeral Tailscale node.
-
-Emergency hotfixes must be committed and pushed, or reverted intentionally, before automated deploys can resume.
+For rollback, select the retained image with the same runtime settings/storage. Do not assume an older image can use
+metadata after an Airflow schema upgrade; restore a compatible metadata backup when required. Never roll back by
+reintroducing host source mounts.
 
 ## Airflow Cadence And Asset Graph
 

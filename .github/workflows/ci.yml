@@ -69,6 +69,24 @@ jobs:
           uvx --with tzdata==2026.3 --with duckdb==1.5.4 --with pyarrow==25.0.0
           --with jinja2==3.1.6 pytest==9.1.1 airflow/tests
 
+  airflow-image:
+    name: Airflow image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build repository image
+        run: |
+          # Harmless canaries verify exclusions inside otherwise included source trees.
+          for dir in airflow/dags dbt/models matcher/src/ztm_matcher; do
+            touch "$dir/.env.image-smoke" "$dir/image-smoke.parquet"
+          done
+          docker build --platform linux/amd64 -f airflow/Dockerfile -t ztm-airflow:ci .
+      - name: Smoke-test image offline
+        run: >-
+          docker run --rm --network none --entrypoint python
+          -v "$PWD/.github/scripts/smoke_airflow_image.py:/tmp/smoke_airflow_image.py:ro"
+          ztm-airflow:ci /tmp/smoke_airflow_image.py
+
   matcher:
     name: Matcher
     runs-on: ubuntu-latest
@@ -185,7 +203,7 @@ jobs:
         working-directory: dbt
 
   deployment-checks:
-    name: Schedule and deploy checks
+    name: Schedule and deployment contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -196,9 +214,7 @@ jobs:
       - name: Test deployment
         run: uvx --with pyyaml==6.0.3 pytest==9.1.1 .github/tests
       - name: Lint deployment tests
-        run: uvx ruff==0.15.21 check --isolated .github/tests
-      - name: Check deployment shell syntax
-        run: bash -n .github/scripts/deploy_vps.sh
+        run: uvx ruff==0.15.21 check --isolated .github/tests .github/scripts/smoke_airflow_image.py
       - name: Compile pinned-date and no-change ledger plans offline
         run: |
           for plan in .github/fixtures/schedule-*.json; do
@@ -206,58 +222,3 @@ jobs:
           done
       - name: Check raw GPS schema contract
         run: python .github/scripts/check_raw_gps_contract.py
-
-  deploy-vps:
-    name: Deploy VPS
-    runs-on: ubuntu-latest
-    needs:
-      - poller
-      - airflow
-      - matcher
-      - frontend
-      - dbt
-      - deployment-checks
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    concurrency:
-      group: deploy-vps
-      cancel-in-progress: false
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Join tailnet
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:github-actions
-          ping: ${{ vars.VPS_DEPLOY_HOST || 'vps' }}
-
-      - name: Configure SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.VPS_DEPLOY_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          test -n "$DEPLOY_SSH_KEY"
-          test -n "$DEPLOY_KNOWN_HOSTS"
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Pull and smoke-check VPS repo
-        env:
-          DEPLOY_HOST: ${{ vars.VPS_DEPLOY_HOST || 'vps' }}
-          DEPLOY_USER: ${{ vars.VPS_DEPLOY_USER || 'ubuntu' }}
-          DEPLOY_REPO_DIR: ${{ vars.VPS_REPO_DIR || '/home/ubuntu/ztm-pipeline' }}
-          DEPLOY_BRANCH: master
-          DEPLOY_SHA: ${{ github.sha }}
-          AIRFLOW_CONTAINER_PREFIX: ${{ vars.AIRFLOW_CONTAINER_PREFIX || 'l11t1z4fvjlunhohvau5w8gc' }}
-        run: |
-          set -euo pipefail
-          ssh_args=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
-          ssh "${ssh_args[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "bash -s -- '$DEPLOY_REPO_DIR' '$DEPLOY_BRANCH' '$AIRFLOW_CONTAINER_PREFIX' '$DEPLOY_SHA'" \
-            < .github/scripts/deploy_vps.sh
