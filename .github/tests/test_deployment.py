@@ -70,3 +70,5 @@ def test_image_runtime_contract():
     assert "!matcher/uv.lock" in rules
     assert "!dbt/profiles.yml" in rules
     assert not any(rule in rules for rule in ("!dbt/**", "!matcher/**", "!airflow/**"))
+    # Re-including a directory also admits artifacts beneath it.
+    assert not any(rule.startswith("!") and rule.endswith("/") for rule in rules)
