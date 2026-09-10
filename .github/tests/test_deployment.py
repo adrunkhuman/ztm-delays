@@ -78,6 +78,18 @@ exit 0
 def test_workflow_wiring():
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     manual = yaml.safe_load((ROOT / ".github/workflows/deploy-vps.yml").read_text())
+    cloud_checks = ci["jobs"]["dbt"]
+    assert cloud_checks["if"] == (
+        "github.event_name == 'push' || "
+        "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)"
+    )
+    offline_checks = ci["jobs"]["deployment-checks"]
+    assert "if" not in offline_checks
+    offline_commands = [step.get("run", "") for step in offline_checks["steps"]]
+    compile_index = next(i for i, command in enumerate(offline_commands) if "compile_schedule.py" in command)
+    contract_index = offline_commands.index("python .github/scripts/check_raw_gps_contract.py")
+    assert contract_index > compile_index
+    assert all("check_raw_gps_contract.py" not in step.get("run", "") for step in cloud_checks["steps"])
     auto = ci["jobs"]["deploy-vps"]
     assert auto["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/master'"
     assert manual["jobs"]["deploy"]["if"] == "github.ref == 'refs/heads/master'"

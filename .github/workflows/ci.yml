@@ -133,6 +133,10 @@ jobs:
 
   dbt:
     name: dbt
+    # Fork PRs cannot access the cloud key; internal PRs retain full warehouse checks.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -171,9 +175,6 @@ jobs:
           --vars '{"processing_date": "2026-01-15", "gtfs_snapshot_id": "snapshot-valid", "schedule_ledger_plan": []}'
         working-directory: dbt
 
-      - name: Check raw GPS schema contract
-        run: python .github/scripts/check_raw_gps_contract.py
-
       - name: Run dbt unit tests
         run: >-
           uv run dbt test --profiles-dir .
@@ -201,6 +202,8 @@ jobs:
           for plan in .github/fixtures/schedule-*.json; do
             uv run --no-project --python 3.13 --with dbt-core==1.11.11 --with dbt-bigquery==1.11.3 python dbt/tools/compile_schedule.py --vars-file "$plan"
           done
+      - name: Check raw GPS schema contract
+        run: python .github/scripts/check_raw_gps_contract.py
 
   deploy-vps:
     name: Deploy VPS
