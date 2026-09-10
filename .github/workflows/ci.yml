@@ -121,6 +121,38 @@ jobs:
         run: uv run pytest
         working-directory: matcher
 
+  offline-pipeline:
+    name: Pipeline test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: integration_tests/uv.lock
+
+      - name: Install locked integration dependencies
+        run: uv sync --locked
+        working-directory: integration_tests
+
+      - name: Lint integration fixture
+        run: uv run ruff check .
+        working-directory: integration_tests
+
+      - name: Test pipeline with networking disabled
+        run: >-
+          sudo -n unshare --net -- env PYTHONDONTWRITEBYTECODE=1
+          "$PWD/integration_tests/.venv/bin/python" -m pytest -q -p no:cacheprovider
+          integration_tests/test_offline_pipeline.py
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

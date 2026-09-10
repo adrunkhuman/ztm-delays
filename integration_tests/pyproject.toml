@@ -1,0 +1,29 @@
+[project]
+name = "ztm-offline-integration-tests"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb==1.5.4",
+    "numpy==2.5.1",
+    "pyarrow==25.0.0",
+    "pytest==9.1.1",
+    "pytz==2026.2",
+    "ruff==0.15.21",
+    "tzdata==2026.3",
+    "ztm-frontend",
+    "ztm-matcher",
+]
+
+[tool.uv.sources]
+ztm-frontend = { path = "../frontend", editable = true }
+ztm-matcher = { path = "../matcher" }
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
