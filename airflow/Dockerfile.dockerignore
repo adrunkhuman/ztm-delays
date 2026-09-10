@@ -1,0 +1,30 @@
+# Scoped to the Airflow Dockerfile; other service build contexts are unaffected.
+**
+!airflow/
+!airflow/dags/
+!airflow/dags/*.py
+!dbt/
+!dbt/dbt_project.yml
+!dbt/profiles.yml
+!dbt/models/
+!dbt/models/**/*.sql
+!dbt/models/**/*.yml
+!dbt/macros/
+!dbt/macros/**/*.sql
+!dbt/tests/
+!dbt/tests/**/*.sql
+!matcher/
+!matcher/pyproject.toml
+!matcher/uv.lock
+!matcher/README.md
+!matcher/src/
+!matcher/src/**/*.py
+# Defense in depth within allowed source trees.
+**/.env*
+**/*key*.json
+**/credentials*
+**/__pycache__/
+**/.venv/
+**/.git/
+**/.pytest_cache/
+**/.ruff_cache/

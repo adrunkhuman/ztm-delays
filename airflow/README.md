@@ -1,8 +1,31 @@
 # Airflow DAGs
 
-DAG files in this directory are mounted into the Airflow container. DAG IDs are stable operational IDs; use `dag_display_name` for UI wording instead of renaming IDs and splitting history.
+DAG files in this directory are baked into the Airflow image. DAG IDs are stable operational IDs; use `dag_display_name` for UI wording instead of renaming IDs and splitting history.
 
 Schedule writer tasks in `dag_gtfs_load` and `dag_daily_gps` share the **one-slot `schedule_ledger_writer` pool**. Create the pool and bootstrap the daily fingerprint ledger before enabling these tasks. See [ledger configuration](../dbt/README.md#schedule-ledger); ordinary deployments do not require another bootstrap.
+
+## Container Image
+
+[`Dockerfile`](Dockerfile) defines the repository-backed Airflow image with **manual Coolify deployment** and `airflow standalone`. DAGs, dbt, and matcher source are image contents at `/opt/airflow/dags`, `/opt/airflow/dbt`, and `/opt/airflow/matcher`. Remove source mounts at these paths (and any parent mount that shadows them); otherwise the selected image revision is not the running code.
+
+The base digest pins the Linux amd64 image matching the deployed base layers. The added packages use the observed production versions. The explicit `apache-airflow` pin prevents pip from changing Airflow when resolving extensions. These are direct dependency pins, not a complete transitive lock.
+
+Configure Coolify to build this repository's `master` branch using the **Dockerfile** build pack, base directory `/` (repository-root context), and Dockerfile location `/airflow/Dockerfile`. Disable automatic/webhook deployments. Require CI to pass for the exact revision before manually deploying it; merging code does not deploy Airflow. These are required settings, not configuration applied by this repository.
+
+When upgrading Airflow, update both the base image digest/tag and the `apache-airflow` package pin. Build and check the candidate image before deployment. Pause scheduling and let active tasks finish before replacing the container; check DAG imports and UI access before resuming.
+
+Keep metadata in the existing external PostgreSQL service with persistent storage. Preserve `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` and `AIRFLOW__CORE__FERNET_KEY` in Coolify; never bake secrets into the image. Coolify owns credentials, shared serving storage, logs, and authentication persistence; see the [deployment contract](../docs/runbook.md#manual-airflow-deployment). Back up metadata and retain the previous image before upgrades.
+
+GitHub Actions only validates code and builds/smokes an ephemeral image; it does not sync host source, push an image, or deploy. Poller and frontend have separate images. The Dockerfile-specific allowlist excludes credentials, local environments, caches, and generated artifacts without changing their build contexts.
+
+For an isolated local build and package check (no production mounts or credentials):
+
+```bash
+docker build --platform linux/amd64 -f airflow/Dockerfile -t ztm-airflow:local .
+docker run --rm --network none --entrypoint python \
+  -v "$PWD/.github/scripts/smoke_airflow_image.py:/tmp/smoke_airflow_image.py:ro" \
+  ztm-airflow:local /tmp/smoke_airflow_image.py
+```
 
 ## Runtime Contract
 
@@ -24,7 +47,7 @@ Runtime env defaults match the current VPS:
 | `MATCHER_ENABLED` | `false` |
 | `BIGQUERY_MATCHER_STAGING_DATASET` | Required when enabled; no default |
 | `MATCHER_WORKSPACE_ROOT` | `/opt/airflow/matcher-work` |
-| `MATCHER_COMMAND` | `uv run --locked --project /opt/airflow/matcher ztm-matcher` |
+| `MATCHER_COMMAND` | Image: `uv run --no-sync --project /opt/airflow/matcher ztm-matcher`; source-only fallback: `uv run --locked --project /opt/airflow/matcher ztm-matcher` |
 | `MATCHER_PROJECT_DIR` | `/opt/airflow/matcher` |
 | `MATCHER_TIMEOUT_SECONDS` | `2700` |
 | `MATCHER_GCS_PREFIX` | `matcher/runs` |
@@ -41,13 +64,13 @@ Runtime env defaults match the current VPS:
 | `MATCHER_PUBLISHED_MARKER_RETENTION_DAYS` | `30` |
 
 - Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
-- `dbt/` is mounted at `DBT_PROJECT_DIR`.
+- `dbt/` is baked at `DBT_PROJECT_DIR`, with writable `target/` and `logs/`.
 - `/opt/airflow/serving` is writable by Airflow when serving exports are enabled.
 - The frontend reads the same serving host directory as DuckDB plus `.meta.json`; it does not read BigQuery or GCS.
 - `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
 - The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, `duckdb`, `numpy`, `pyarrow`, `pytz`, `uv`, and Python 3.13.
 - The service account can read/write the configured GCS bucket and load/query the configured BigQuery datasets.
-- Mount the matcher source read-only at `/opt/airflow/matcher`. Set `UV_PROJECT_ENVIRONMENT` to a writable path outside that mount, and keep `MATCHER_WORKSPACE_ROOT` writable.
+- The image installs `matcher/uv.lock` runtime dependencies and the matcher package into `/opt/airflow/matcher-venv`, isolated from Airflow Python. `MATCHER_COMMAND` uses `uv run --no-sync --project` with the baked `UV_PROJECT_ENVIRONMENT`: no runtime sync, dependency downloads, or editable reinstall. The lock is enforced at image build time. Do not override it or mount over the environment. Keep `MATCHER_WORKSPACE_ROOT` writable.
 
 ## DAG Boundaries
 
@@ -71,7 +94,7 @@ Runtime env defaults match the current VPS:
 
 `dag_daily_gps` runs the Python matcher as its only reconstruction path. It starts after snapshot selection and GPS staging validation, downloads immutable GPS/GTFS inputs, invokes the bounded matcher, validates the outputs, and loads content-addressed run tables. Normal processing date `D` explicitly downloads input dates `D-1` and `D` so cross-midnight trips are reconstructed once; `skip_prior_publication=true` explicitly passes a current-only matcher policy at the known archive boundaries.
 
-Production requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, the matcher source mount, and writable workspace and `uv` environment paths.
+Production requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, the image's matcher environment, and writable workspace storage.
 
 Before publication, Airflow verifies artifact schemas, hashes, snapshot lineage, row grains, processing dates, non-empty outputs, bus/tram coverage, accepted-execution counts, peak RSS, and current process swap measured at matcher completion. The swap bound defaults to 2 GiB, can be set with `MATCHER_MAX_SWAP_BYTES`, and accepts `0` for strict zero-swap validation. It then replaces the four stable `ztm_matcher_input` partitions in one BigQuery transaction. The stable dataset and tables are created idempotently on first publication.
 

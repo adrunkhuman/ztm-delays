@@ -33,6 +33,22 @@ def test_config_uses_only_matcher_environment_contract(monkeypatch: pytest.Monke
     assert config.published_marker_retention_days == 30
 
 
+def test_image_matcher_command_passes_runtime_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+    command = dockerfile.read_text().split('MATCHER_COMMAND="', 1)[1].split('"', 1)[0]
+    monkeypatch.setenv("MATCHER_COMMAND", command)
+    monkeypatch.setenv("MATCHER_PROJECT_DIR", "/opt/airflow/matcher")
+    monkeypatch.setenv("MATCHER_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_MATCHER_STAGING_DATASET", "image_smoke_stage")
+    monkeypatch.setenv("BIGQUERY_MATCHER_INPUT_DATASET", "image_smoke_input")
+    matcher = _load_matcher()
+
+    config = matcher.MatcherConfig.from_env()
+
+    config.validate()
+    assert "--no-sync" in config.command
+
+
 def test_config_accepts_strict_zero_current_swap_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MATCHER_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_MATCHER_STAGING_DATASET", "matcher_stage")
