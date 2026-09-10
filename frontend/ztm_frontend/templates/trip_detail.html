@@ -53,7 +53,13 @@
             <a class="trip-stop-name" href="{{ url_for('stops', stop_group_id=stop.stop_group_id, post=stop.post_label, mode=trip.mode, date=selected_date) }}">{{ stop.stop_name }} <span class="post-suffix">[{{ stop.post_label }}]</span></a>
             <div class="mono muted">{{ stop.scheduled_arrival_time|time }}</div>
             <div class="mono trip-stop-delay {% if stop.observation_status == 'observed' %}{{ stop.delay_seconds|delay_class }}{% else %}muted{% endif %}">
-              {% if stop.observation_status == 'observed' %}{{ stop.delay_seconds|delay }}{% else %}<abbr class="trip-stop-status" title="{{ stop.observation_status }}">{{ 'skipped' if stop.observation_status == 'skipped_optional' else stop.observation_status }}</abbr>{% endif %}
+              {% if stop.observation_status == 'observed' %}
+                {{ stop.delay_seconds|delay }}
+              {% elif stop.observation_status in ['missed', 'skipped_optional'] %}
+                <abbr class="trip-stop-status" title="Not observed{% if stop.observation_status == 'skipped_optional' %} · request stop{% endif %}. GPS evidence insufficient.">No obs.</abbr>
+              {% else %}
+                <abbr class="trip-stop-status" title="{{ stop.observation_status }}">{{ stop.observation_status }}</abbr>
+              {% endif %}
             </div>
           </div>
         {% endfor %}
