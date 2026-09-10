@@ -226,9 +226,7 @@ def test_trip_detail_retains_run_date_and_return_period(
     assert "trip-detail-key" not in html
     assert label in html
     if status in {"missed", "skipped_optional"}:
-        assert f'title="{label}. No sufficiently confident GPS observation at this stop. ' in html
-        assert ">No obs.</abbr>" in html
-        assert "This does not establish that the vehicle skipped it." in html
+        assert f'title="{label}. GPS evidence insufficient.">No obs.</abbr>' in html
         assert f">{status}</abbr>" not in html
         assert ">skipped</abbr>" not in html
     else:

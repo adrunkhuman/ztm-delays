@@ -56,7 +56,7 @@
               {% if stop.observation_status == 'observed' %}
                 {{ stop.delay_seconds|delay }}
               {% elif stop.observation_status in ['missed', 'skipped_optional'] %}
-                <abbr class="trip-stop-status" title="Not observed{% if stop.observation_status == 'skipped_optional' %} · request stop{% endif %}. No sufficiently confident GPS observation at this stop. This does not establish that the vehicle skipped it.">No obs.</abbr>
+                <abbr class="trip-stop-status" title="Not observed{% if stop.observation_status == 'skipped_optional' %} · request stop{% endif %}. GPS evidence insufficient.">No obs.</abbr>
               {% else %}
                 <abbr class="trip-stop-status" title="{{ stop.observation_status }}">{{ stop.observation_status }}</abbr>
               {% endif %}
