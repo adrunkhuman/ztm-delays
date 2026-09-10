@@ -2489,7 +2489,7 @@ td:nth-child(n + 2) {
 .reliability-head, .trip-dirhead { flex-wrap: wrap; gap: .35rem; }
 .stop-departure-table { width: min(640px, 100%); }
 .trip-stop-delay { min-width: 0; }
-.trip-stop-status { font-size: .6rem; font-weight: 400; text-decoration: none; }
+.trip-stop-status { font-size: .6rem; font-weight: 400; text-decoration: none; white-space: nowrap; }
 .trip-stop-name { white-space: normal; padding: .4rem 0; }
 a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px solid var(--blue); outline-offset: 2px; }
 @media (max-width: 1100px) {
