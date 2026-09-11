@@ -1,121 +1,54 @@
-# ZTM Frontend
+# Frontend
 
-Server-rendered Flask frontend for the ZTM DuckDB serving artifact.
+Server-rendered Flask app for the transit archive. Overview, line, stop, and trip views expose delays and reconstructed service; the status page shows archive coverage and export freshness.
 
-This is an archive prototype backed by the DuckDB serving artifact produced from the nightly Python reconstruction path.
+The app reads a local DuckDB serving artifact in read-only mode. It does not refresh data or connect to BigQuery, GCS, or the city API.
 
-## Runtime Contract
+## Run
 
-The app reads one DuckDB file in read-only mode. It does not build or refresh the export.
+From `frontend/`, with an existing serving export:
 
-Required data:
+```sh
+uv sync --locked
+ZTM_DUCKDB_PATH=/absolute/path/to/ztm.duckdb \
+  uv run flask --app ztm_frontend.app run --debug
+```
 
-- `ztm.duckdb`: serving database produced by the pipeline export job.
-- The database must contain `export_metadata`, `mart_trip_daily`, `fct_expected_stop_event`, entity timeline and window marts, stop/line dimensions, and status marts documented in `docs/serving_contract.md`.
+The local default is `ztm/ztm.duckdb`. A partitioned export also requires its referenced Parquet files at the paths stored in the catalog; copying only the DuckDB file is insufficient.
 
-Important quirks:
+The [container](Dockerfile) uses Waitress on port 5000. Mount serving storage read-only and set `ZTM_DUCKDB_PATH` to the catalog. Connections last for one request, so later requests see refreshed data without restarting the app. The [publication procedure](../docs/operations.md#serving-publication) covers shared paths and export replacement.
 
-- DuckDB timestamps from BigQuery are treated as UTC. Trip times display in `Europe/Warsaw`; status timestamps display in UTC, with original values in hover titles.
-- Widgets are backed by exported DuckDB rows or derived frontend-serving tables; some presentation transforms still reshape those rows for compact charts.
-- Historical quality remains date-dependent and is exposed through the status and quality fields in the serving contract.
-- Status shows the exported poller snapshot, not live health. Summary coverage is observed/expected service minutes; daily coverage is observed/expected trips. Clean/partial/broken counts map to the exported trip-quality categories. Summary partial counts are summed from daily rows only when the complete summary window is available; otherwise they show `n/a`.
+## Reading the archive
 
-## Environment Variables
+Trip times display in `Europe/Warsaw`; status timestamps use UTC. Delay is actual minus scheduled arrival time.
 
-- `ZTM_DUCKDB_PATH`: path to the serving DuckDB file. Defaults to `ztm/ztm.duckdb` relative to `frontend/`.
-- `FLASK_DEBUG`: optional Flask debug flag for local development.
-- `FLASK_RUN_HOST`: optional local bind host, for example `0.0.0.0`.
-- `FLASK_RUN_PORT`: optional local port, for example `5000`.
+| Classification | Delay |
+| --- | --- |
+| Early | At least 60 seconds early. |
+| On time | Strictly between 60 seconds early and 180 seconds late. |
+| Late | At least 180 seconds late. |
 
-No GCP, ZTM API, or Tailscale secrets are needed by the frontend process.
+Delay summaries use complete trips. Detail pages retain lower-quality evidence and distinguish observed, uncertain, and unobserved stops. “No obs.” means insufficient GPS evidence, not a confirmed skipped stop. Request stops are marked separately.
 
-## Local Development
+| Period | Included dates |
+| --- | --- |
+| Day | Selected service date. |
+| Weekdays / weekend | Up to 60 observed dates of the corresponding GTFS service type, through the selected date. |
+| Month | Observed dates in the selected calendar month, through the selected date. |
+
+Weekday/weekend classification follows timetable service, not a calendar-only filter. Line comparisons in those windows use timetable versions active at the selected anchor; month views retain the whole observed month. Daily chart medians are not recombined into aggregate medians.
+
+Entity rankings use qualifying zone-1 public-service trips and minimum observation counts. They are not rankings of every scheduled line or stop. [Architecture](../docs/architecture.md#interpreting-the-results) explains the wider coverage limitations.
+
+Status coverage uses observed/expected service minutes in the summary and observed/expected trips in daily rows. Poller status is captured at export time, not live. Sidecar metadata is accepted only when its export ID matches the database.
+
+## Checks
 
 From `frontend/`:
 
-```powershell
-uv sync
-uv run flask --app ztm_frontend.app run --debug
-```
-
-With an explicit export path:
-
-```powershell
-$env:ZTM_DUCKDB_PATH = "C:\path\to\ztm.duckdb"
-uv run flask --app ztm_frontend.app run --debug
-```
-
-Useful checks:
-
-```powershell
+```sh
+uv run pytest tests
 uv run ruff check .
-uv run ruff format --check .
-uv run ty check .
 ```
 
-Basic render smoke test:
-
-```powershell
-uv run python -c 'from ztm_frontend.app import create_app; app=create_app(); client=app.test_client(); urls=["/", "/lines/", "/stops/", "/trips/", "/status"]; [print(url, client.get(url).status_code) for url in urls]; assert all(client.get(url).status_code == 200 for url in urls)'
-```
-
-## Production
-
-Production should mount the serving DuckDB file read-only and set `ZTM_DUCKDB_PATH` to that mounted path.
-
-The pipeline/export side owns refresh:
-
-1. Build a new DuckDB file at a temporary path.
-2. Validate it.
-3. Atomically swap it into the stable `ztm.duckdb` path.
-
-The frontend opens DuckDB connections per query, so new requests observe the refreshed file without a frontend container restart once the stable path changes.
-
-Do not bake `ztm.duckdb` into the image. Treat it as runtime data.
-
-## Pages
-
-- `/`: overview.
-- `/lines/`: line ranking landing page.
-- `/lines/<line>`: line detail.
-- `/stops/`: stop ranking landing page.
-- `/stops/<stop_group_id>`: stop-group/post selector.
-- `/stops/<stop_group_id>/<post>`: stop-post detail.
-- `/trips/`: trip ranking landing page.
-- `/trips/?line=<line>`: per-line trip browser.
-- `/trips/<trip_id>?date=<service_date>&vehicle=<vehicle_number>`: trip detail.
-- `/status`: archive coverage/status.
-
-## Period display
-
-The compact top-right date selector shows a date, month/year, or observed range
-and count (`29 Jun–07 Sep · 49d`). Underlined scope tabs establish the service type.
-Desktop metrics use four columns, reducing to two and then one on smaller screens.
-Weekday and weekend/holiday scopes are rolling
-samples of up to 60 observed GTFS-classified service dates, not calendar-day
-filters. Month is the observed portion of the anchor's calendar month. Scope
-links keep the current navigation filters; the arrows move the anchor (weekly
-for weekday/weekend scopes). Holidays belong to weekend service; line statistics
-use timetable versions active at the anchor.
-
-Grouped comparison charts show up to 12 recent **exact daily medians** from
-`mart_entity_window_daily_summary`. They do not combine daily medians into weekly
-or monthly statistics. Detail timelines retain every exported member date in a
-bounded horizontal strip, with sparse date labels. Each strip plots delay magnitude on its own linear scale,
-using the same bottom baseline as the other charts. Bars are gray, with the
-selected date in blue, matching the weekly charts. Signed values remain in native
-tooltips and the accessible table; nulls use an ×, and zero is a baseline mark.
-Hover a point for its date and value;
-a visually hidden date-and-median table provides screen-reader access without
-adding layout height. The chart has one keyboard stop for scrolling, not one per point. Day scope retains its seven-day mean comparison and departure timeline.
-
-Route patterns have native expand/collapse controls; the first two published
-patterns start open, with other patterns' destinations and trip counts always
-visible. Date and time use separate, non-wrapping lines for grouped departures.
-Trip detail remains a single dated run and links back to the originating period.
-
-Validate locally with `uv run pytest`, `uv run ruff check .` and `uv run ty check`.
-The period tests cover all four scopes and the overview, line, stop and trip
-views; browser checks should additionally cover 390px, 768px and desktop widths,
-60-date strips, long stop names, and expanding minor route patterns against a
-real serving export.
+Tests create their own DuckDB fixtures; no serving download is needed. [queries.py](ztm_frontend/queries.py) defines page queries; the export's [source allowlist](../airflow/dags/dag_serving_export.py) defines available tables.
