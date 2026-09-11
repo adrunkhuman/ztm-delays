@@ -1,187 +1,43 @@
-# Airflow DAGs
+# Airflow
 
-DAG files in this directory are baked into the Airflow image. DAG IDs are stable operational IDs; use `dag_display_name` for UI wording instead of renaming IDs and splitting history.
+Orchestrates collection, reconstruction, warehouse modelling, and serving publication. Raw ingestion and nightly processing have separate schedules; an hourly load does not imply a complete GPS day.
 
-Schedule writer tasks in `dag_gtfs_load` and `dag_daily_gps` share the **one-slot `schedule_ledger_writer` pool**. Create the pool and bootstrap the daily fingerprint ledger before enabling these tasks. See [ledger configuration](../dbt/README.md#schedule-ledger); ordinary deployments do not require another bootstrap.
+## DAGs
 
-## Container Image
+| DAG | Trigger | Work |
+| --- | --- | --- |
+| `dag_gtfs_poll` | Hourly | Store changed GTFS ZIPs; emit `gtfs_snapshot`. |
+| `dag_gtfs_load` | `gtfs_snapshot` | Load the exact snapshot; rebuild staging, dimensions, and schedule versions. |
+| `dag_gps_raw_load` | Hourly | Load available GPS parts; emit `raw_gps_date`. |
+| `dag_daily_gps` | Nightly, 04:00 Warsaw | Reconstruct the previous GPS date; publish facts, coverage, and marts; emit `gps_models_date`. |
+| `dag_serving_export` | `gps_models_date` or manual | Validate and publish the frontend export. |
+| `dag_weekly_audit` | Weekly | Refresh audit evidence and run audit-tagged dbt tests. |
+| `dag_historical_serving_refresh` | Historical correction controller | Consolidate serving rebuilds and trigger one export after corrections. |
 
-[`Dockerfile`](Dockerfile) defines the repository-backed Airflow image with **manual Coolify deployment** and `airflow standalone`. DAGs, dbt, and matcher source are image contents at `/opt/airflow/dags`, `/opt/airflow/dbt`, and `/opt/airflow/matcher`. Remove source mounts at these paths (and any parent mount that shadows them); otherwise the selected image revision is not the running code.
+The nightly DAG selects the persisted GTFS snapshot, validates staging, invokes the matcher, and promotes its outputs before dbt publishes service-date facts. Airflow checks schemas, hashes, lineage, row uniqueness, mode coverage, and resource use. The four stable matcher-input partitions are replaced in one BigQuery transaction; downstream fact and mart rebuilds are separate steps.
 
-The base digest pins the Linux amd64 image matching the deployed base layers. The added packages use the observed production versions. The explicit `apache-airflow` pin prevents pip from changing Airflow when resolving extensions. These are direct dependency pins, not a complete transitive lock.
+Schedule-writing tasks share the one-slot `schedule_ledger_writer` pool. Reconstruction requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, and a writable matcher workspace. [Operations](../docs/operations.md) covers initial setup, deployment, and recovery.
 
-Configure Coolify to build this repository's `master` branch using the **Dockerfile** build pack, base directory `/` (repository-root context), and Dockerfile location `/airflow/Dockerfile`. Disable automatic/webhook deployments. Require CI to pass for the exact revision before manually deploying it; merging code does not deploy Airflow. These are required settings, not configuration applied by this repository.
+## Image
 
-When upgrading Airflow, update both the base image digest/tag and the `apache-airflow` package pin. Build and check the candidate image before deployment. Pause scheduling and let active tasks finish before replacing the container; check DAG imports and UI access before resuming.
+The [Dockerfile](Dockerfile) builds from the repository root and runs `airflow standalone` with external PostgreSQL metadata. DAGs, dbt, and matcher code are baked into the image. Matcher dependencies use a separate locked environment; tasks do not download packages at runtime.
 
-Keep metadata in the existing external PostgreSQL service with persistent storage. Preserve `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` and `AIRFLOW__CORE__FERNET_KEY` in Coolify; never bake secrets into the image. Coolify owns credentials, shared serving storage, logs, and authentication persistence; see the [deployment contract](../docs/runbook.md#manual-airflow-deployment). Back up metadata and retain the previous image before upgrades.
+CI builds and checks the image. Deployment is manual and does not run warehouse models. Do not mount host source over image-owned directories.
 
-GitHub Actions only validates code and builds/smokes an ephemeral image; it does not sync host source, push an image, or deploy. Poller and frontend have separate images. The Dockerfile-specific allowlist excludes credentials, local environments, caches, and generated artifacts without changing their build contexts.
+## Checks
 
-For an isolated local build and package check (no production mounts or credentials):
+From the repository root, without cloud credentials:
 
-```bash
+```sh
+uvx --with tzdata==2026.3 --with duckdb==1.5.4 --with pyarrow==25.0.0 \
+  --with jinja2==3.1.6 pytest==9.1.1 airflow/tests
+```
+
+The tests exercise DAG boundaries and helpers, not a running scheduler. To check the image:
+
+```sh
 docker build --platform linux/amd64 -f airflow/Dockerfile -t ztm-airflow:local .
 docker run --rm --network none --entrypoint python \
   -v "$PWD/.github/scripts/smoke_airflow_image.py:/tmp/smoke_airflow_image.py:ro" \
   ztm-airflow:local /tmp/smoke_airflow_image.py
-```
-
-## Runtime Contract
-
-Runtime env defaults match the current VPS:
-
-| Env var | Default |
-| --- | --- |
-| `GCP_PROJECT` | `ztm-data` |
-| `BIGQUERY_RAW_DATASET` | `ztm_raw` |
-| `BIGQUERY_STG_DATASET` | `ztm_stg` |
-| `BIGQUERY_INT_DATASET` | `ztm_int` |
-| `BIGQUERY_MARTS_DATASET` | `ztm_marts` |
-| `BIGQUERY_MATCHER_INPUT_DATASET` | `ztm_matcher_input` |
-| `BIGQUERY_LOCATION` | `europe-north1` |
-| `GCS_BUCKET` | `ztm-analytics-bucket` |
-| `DBT_PROJECT_DIR` | `/opt/airflow/dbt` |
-| `RAW_GPS_PREFIX` | `raw/gps` |
-| `RAW_GTFS_PREFIX` | `raw/gtfs` |
-| `MATCHER_ENABLED` | `false` |
-| `BIGQUERY_MATCHER_STAGING_DATASET` | Required when enabled; no default |
-| `MATCHER_WORKSPACE_ROOT` | `/opt/airflow/matcher-work` |
-| `MATCHER_COMMAND` | Image: `uv run --no-sync --project /opt/airflow/matcher ztm-matcher`; source-only fallback: `uv run --locked --project /opt/airflow/matcher ztm-matcher` |
-| `MATCHER_PROJECT_DIR` | `/opt/airflow/matcher` |
-| `MATCHER_TIMEOUT_SECONDS` | `2700` |
-| `MATCHER_GCS_PREFIX` | `matcher/runs` |
-| `MATCHER_KEEP_WORKSPACE` | `false` |
-| `MATCHER_MAX_GPS_OBJECTS` | `5000` |
-| `MATCHER_MAX_GPS_BYTES` | `21474836480` (20 GiB) |
-| `MATCHER_MIN_FREE_DISK_BYTES` | `5368709120` (5 GiB) |
-| `MATCHER_MAX_MARKER_BYTES` | `20971520` (20 MiB) |
-| `MATCHER_MAX_RSS_BYTES` | `3221225472` (3 GiB) |
-| `MATCHER_MAX_SWAP_BYTES` | `2147483648` (2 GiB; `0` requires zero current swap) |
-| `MATCHER_MAX_PUBLICATION_BYTES` | `5368709120` (5 GiB) |
-| `MATCHER_STAGING_RETENTION_DAYS` | `3` |
-| `MATCHER_INTERMEDIATE_MARKER_RETENTION_DAYS` | `3` |
-| `MATCHER_PUBLISHED_MARKER_RETENTION_DAYS` | `30` |
-
-- Airflow and dbt use the same `GCP_PROJECT` / `BIGQUERY_*` env names.
-- `dbt/` is baked at `DBT_PROJECT_DIR`, with writable `target/` and `logs/`.
-- `/opt/airflow/serving` is writable by Airflow when serving exports are enabled.
-- The frontend reads the same serving host directory as DuckDB plus `.meta.json`; it does not read BigQuery or GCS.
-- `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted GCP service account key.
-- The Airflow image includes `dbt`, `dbt-bigquery`, `google-cloud-bigquery`, `google-cloud-storage`, `duckdb`, `numpy`, `pyarrow`, `pytz`, `uv`, and Python 3.13.
-- The service account can read/write the configured GCS bucket and load/query the configured BigQuery datasets.
-- The image installs `matcher/uv.lock` runtime dependencies and the matcher package into `/opt/airflow/matcher-venv`, isolated from Airflow Python. `MATCHER_COMMAND` uses `uv run --no-sync --project` with the baked `UV_PROJECT_ENVIRONMENT`: no runtime sync, dependency downloads, or editable reinstall. The lock is enforced at image build time. Do not override it or mount over the environment. Keep `MATCHER_WORKSPACE_ROOT` writable.
-
-## DAG Boundaries
-
-| DAG ID | UI name | Trigger | Owns | Does not own |
-| --- | --- | --- | --- | --- |
-| `dag_gtfs_poll` | GTFS snapshot poll | Hourly cron | Download GTFS ZIP, hash it, store changed snapshots, emit `gtfs_snapshot`. | GTFS raw loading or dbt models. |
-| `dag_gtfs_load` | GTFS snapshot load | `gtfs_snapshot` asset | Load GTFS raw tables, run GTFS staging, rebuild dimensions and schedule-version models. | GPS processing or broad manual schedule audits. |
-| `dag_gps_raw_load` | GPS raw ingest | Hourly cron | Load available poller Parquet parts into raw BigQuery, emit `raw_gps_date`. | Completeness judgment or warehouse modeling. |
-| `dag_daily_gps` | GPS nightly warehouse | Nightly cron | Rebuild one GPS processing date, publish current/prior facts, run bounded marts/status, emit `gps_models_date`. | Hourly raw ingestion or full-history audit tests. |
-| `dag_serving_export` | Serving DuckDB export | `gps_models_date` asset or manual recovery | Export the fixed frontend source allowlist, build DuckDB, write `.meta.json`, atomically publish the serving artifact. | Warehouse rebuilds or live poller streaming. |
-
-## Normal Runs
-
-- `dag_gtfs_poll` and `dag_gps_raw_load` are frequent ingestion DAGs.
-- `dag_gtfs_load` runs only when a changed GTFS snapshot is emitted.
-- `dag_daily_gps` runs once per night, uses the persisted governing snapshot for its processing date, republishes the current and prior service dates, and accepts a manual `processing_date` for targeted recovery.
-- `dag_serving_export` runs from the partitioned GPS-model asset; manual recovery runs use a fresh `export_id`.
-- Default dbt tests stay bounded. Full-history schedule/version and broad aggregate audits are manual jobs.
-
-## Python Matcher
-
-`dag_daily_gps` runs the Python matcher as its only reconstruction path. It starts after snapshot selection and GPS staging validation, downloads immutable GPS/GTFS inputs, invokes the bounded matcher, validates the outputs, and loads content-addressed run tables. Normal processing date `D` explicitly downloads input dates `D-1` and `D` so cross-midnight trips are reconstructed once; `skip_prior_publication=true` explicitly passes a current-only matcher policy at the known archive boundaries.
-
-Production requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, the image's matcher environment, and writable workspace storage.
-
-Before publication, Airflow verifies artifact schemas, hashes, snapshot lineage, row grains, processing dates, non-empty outputs, bus/tram coverage, accepted-execution counts, peak RSS, and current process swap measured at matcher completion. The swap bound defaults to 2 GiB, can be set with `MATCHER_MAX_SWAP_BYTES`, and accepts `0` for strict zero-swap validation. It then replaces the four stable `ztm_matcher_input` partitions in one BigQuery transaction. The stable dataset and tables are created idempotently on first publication.
-
-Run-scoped BigQuery load and publication tables expire after three days. Publication staging tables are also deleted
-best-effort after the published marker exists and post-validation succeeds. Pending and validated GCS markers are kept
-for three days; published markers are kept for 30 days. Stable matcher-input tables never match the transient cleanup
-prefixes.
-
-The three fact artifacts remain partitioned by `gps_date`, which is always the matcher processing date. `source_gps_date` carries the actual raw GPS date for each direct stop observation, while dbt selects the one processing-date artifact that already contains both sides of a normal overnight trip. Stop semantics remains partitioned by `processing_date`. dbt then publishes `fct_trip`, `fct_stop_arrival`, and `fct_expected_stop_event` for current and prior service dates before rebuilding coverage, status, and serving marts.
-
-Minimal recovery is to fix the matcher/configuration and rerun the processing date. Raw GPS and GTFS remain immutable, stable input replacement is atomic, fact publication uses partition overwrite, and serving export keeps its previous artifact until a new export succeeds.
-
-`matcher_historical_correction.py plan` produces bounded, read-only plans for explicitly approved historical corrections.
-The retained service range starts on `2026-06-27`; raw processing dates `2026-06-26` and `2026-07-05` through `2026-07-07` are excluded. The valid boundary runs on `2026-06-27` and `2026-07-08` set `skip_prior_publication=true`, so they use only current-date GPS and do not replace the excluded prior partition.
-Plans require a validated `--plan-id`; use a new ID for a retry. They emit plan-ID-scoped deterministic Airflow 3 run IDs, the expected GTFS snapshot and immutable input-inventory digest in each trigger configuration, and a bounded `wait-for-dag-run` command after every trigger. A legacy single-date validated marker is not retryable under the two-date input policy; start controlled recovery with a new Airflow run ID.
-
-## Serving Export
-
-Default settings:
-
-```text
-SERVING_EXPORT_DIR=/opt/airflow/serving
-SERVING_EXPORT_FILENAME=ztm.duckdb
-SERVING_EXPORT_GCS_PREFIX=serving/duckdb/staging
-SERVING_EXPORT_MAX_BYTES=21474836480
-SERVING_EXPORT_MAX_SOURCE_BYTES=21474836480
-SERVING_EXPORT_MAX_DUCKDB_BYTES=21474836480
-SERVING_EXPORT_PARTITIONED_STORE=false
-SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES=5368709120
-SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT=/serving
-SERVING_EXPORT_STAGING_RETENTION_DAYS=3
-```
-
-`SERVING_EXPORT_MAX_SOURCE_BYTES` and `SERVING_EXPORT_MAX_DUCKDB_BYTES` default to `SERVING_EXPORT_MAX_BYTES`.
-The source-size guard applies to the monolithic exporter. Partitioned mode replaces it with per-download free-space
-headroom because total retained source data is expected to exceed the monolithic limit.
-
-Manual `dag_run.conf` may override `export_id`, `output_dir`, `output_filename`, `gcs_bucket`, `gcs_prefix`,
-`max_source_bytes`, `max_duckdb_bytes`, `partitioned_store`, `partitioned_store_min_free_bytes`,
-`partitioned_store_view_root`, `cleanup_gcs_staging`, and `staging_retention_days`.
-
-`SERVING_EXPORT_PARTITIONED_STORE=true` keeps date-bearing tables as local Parquet partitions and publishes a small
-DuckDB catalog containing views over those files. The first run downloads every retained partition; later runs refresh
-only dates from `changed_partition_dates`. The frontend continues to open `SERVING_EXPORT_FILENAME` and uses the same
-table names. Keep the complete `SERVING_EXPORT_DIR`, including its `parquet/` directory, on persistent shared storage.
-Each partition download must leave at least `SERVING_EXPORT_PARTITIONED_STORE_MIN_FREE_BYTES` free on that filesystem.
-Parquet paths are persisted inside the catalog. Mount the serving host directory at the identical
-`SERVING_EXPORT_PARTITIONED_STORE_VIEW_ROOT` path in both Airflow and frontend containers. Airflow verifies that its view
-root and `SERVING_EXPORT_DIR` resolve to the same directory before doing any cloud work.
-
-Use one shared host directory for Airflow and frontend serving mounts. Airflow needs write access; frontend should only need read access. On the current VPS the bind-mounted host directory should be writable by the Airflow container user:
-
-```bash
-sudo install -d -o 50000 -g 0 -m 0775 /home/ubuntu/ztm-pipeline/serving
-```
-
-Successful exports delete their own temporary GCS objects by default. After every successful publication, the exporter
-also deletes temporary objects from failed or debug exports older than `staging_retention_days` (three days by default).
-The sweep only covers `export_id=...` and `partition_staging/export_id=...`; it never deletes `partition_cache`.
-Partitioned exports also delete inactive local Parquet generations after the same retention period. The generation
-selected by each local partition manifest is never deleted.
-
-Remove a failed export manually before retention expires when it is no longer needed:
-
-```bash
-gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/export_id=EXPORT_ID/
-gcloud storage rm --recursive gs://ztm-analytics-bucket/serving/duckdb/staging/partition_staging/export_id=EXPORT_ID/
-```
-
-## Manual Recovery
-
-Trigger `dag_gtfs_load` manually only with explicit snapshot context:
-
-```json
-{
-  "snapshot_id": "YYYY-MM-DDTHH:MM:SSZ_<12 hex>",
-  "gcs_path": "gs://ztm-analytics-bucket/raw/gtfs/{snapshot_id}.zip",
-  "processing_date": "YYYY-MM-DD"
-}
-```
-
-Trigger `dag_daily_gps` manually with one `processing_date`. Do not clear or backfill broad date ranges without a fresh byte estimate.
-
-## Local Tests
-
-Local Windows/minimal-Python environments need `tzdata` for `ZoneInfo("Europe/Warsaw")`:
-
-```bash
-uv run --with pytest --with duckdb --with tzdata pytest airflow/tests
 ```

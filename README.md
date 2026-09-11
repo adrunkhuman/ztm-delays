@@ -1,11 +1,32 @@
 # ZTM Warsaw Pipeline
 
-Data pipeline for collecting Warsaw ZTM GPS pings, loading raw data into GCS/BigQuery, transforming with dbt, and orchestrating downstream jobs with Airflow.
+A data pipeline for analysing Warsaw bus and tram service. It collects vehicle GPS positions, reconstructs trips and stop arrivals against archived timetables, and publishes delay, coverage, and reliability views in a Flask frontend.
 
-The poller lives in `poller/` as part of this pipeline repo. It should not have its own Git repo unless it gets a separate release lifecycle from the rest of the pipeline.
+```mermaid
+flowchart LR
+    GPS[Warsaw GPS API] --> Poller --> GCS["GCS · raw Parquet + GTFS ZIPs"]
+    GTFS[GTFS feed] --> GCS
+    GCS --> Matcher["Python matcher"]
+    GCS --> BQ["BigQuery · raw + staging"]
+    Matcher --> BQ
+    BQ --> dbt["dbt · facts + marts"]
+    dbt --> Serving["DuckDB + Parquet"] --> Flask
+```
 
-The dbt project lives in `dbt/`. Date-partitioned GPS models require `processing_date`; trip and arrival matching use the governing GTFS snapshot persisted for that processing date and passed by Airflow. Nightly rebuilds republish the current and prior service dates.
+Airflow coordinates ingestion, nightly processing, validation, and publication. The frontend reads a local export; page requests do not query BigQuery.
 
-Airflow DAGs live in `airflow/dags/`. The current DAG scope covers GPS raw loading, GTFS snapshot loading, staging, intermediate GPS/trip/arrival reconstruction, and serving trip/stop-arrival facts.
+Raw inputs are retained for replay. Each processing date uses a pinned timetable snapshot, and historical results keep the labels and schedule lineage used to build them. Overnight trips are completed when the following day's GPS becomes available.
 
-CI runs on pull requests and pushes to `master`. The dbt job requires the `GCP_SERVICE_ACCOUNT_JSON` GitHub Actions secret containing the service account key JSON used by `profiles.yml`.
+These are reconstructed observations, not an official record of operated service. Missing GPS or an uncertain match can leave a trip or stop unobserved; neither proves a cancellation.
+
+## Implementation
+
+| Component | Responsibility |
+| --- | --- |
+| [Poller](poller/) | GPS collection, durable buffering, hourly Parquet partitions. |
+| [Airflow](airflow/) | Scheduling, retries, warehouse jobs, export publication. |
+| [Matcher](matcher/) | Vehicle-to-duty assignment and stop-arrival reconstruction in DuckDB/Arrow. |
+| [dbt](dbt/) | Historical dimensions, partitioned facts, schedule versions, serving marts. |
+| [Frontend](frontend/) | Server-rendered archive, rankings, trip detail, and data status. |
+
+[Architecture](docs/architecture.md) covers the data model and its limits. [Local checks](docs/development.md) exercise the code without cloud credentials. [Operations](docs/operations.md) covers deployment and recovery; the full pipeline requires a Warsaw API token, GCS, and BigQuery.
