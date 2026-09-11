@@ -31,3 +31,11 @@ Ingestion completeness and observed-service coverage are separate measures. Miss
 | [Frontend](frontend/) | Flask archive, rankings, trip detail, and data status. |
 
 [Architecture](docs/architecture.md) explains date semantics, the data model, and publication. [Local checks](docs/development.md) exercise the code without cloud credentials. [Operations](docs/operations.md) covers deployment and recovery; the full pipeline requires a Warsaw API token, GCS, and BigQuery.
+
+## Trip detail
+
+![Line 711 trip detail showing scheduled stop times, observed delays, and a stop without sufficient GPS evidence.](docs/assets/trip-detail.png)
+
+## Stop detail
+
+![Saska stop detail showing punctuality, departure delays, and line comparisons.](docs/assets/stop-detail.png)
