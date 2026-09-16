@@ -187,7 +187,8 @@ td:nth-child(n + 2) {
   color: var(--fg);
 }
 
-.status-link {
+.nav-actions {
+  display: flex;
   margin-left: auto;
   margin-right: 1.5rem;
   font-size: 0.8rem;
@@ -2329,7 +2330,7 @@ td:nth-child(n + 2) {
     padding-left: 0;
   }
 
-  .status-link {
+  .nav-actions {
     margin-right: 0;
   }
 
@@ -2514,7 +2515,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 @media (max-width: 600px) {
   .nav { height: auto; flex-wrap: wrap; }
   .brand { flex-basis: auto; min-height: var(--nav-height); padding: 0 .8rem; }
-  .status-link { margin-left: auto; min-height: var(--nav-height); }
+  .nav-actions { margin-left: auto; min-height: var(--nav-height); }
   .nav-links { order: 1; flex: 0 0 100%; justify-content: space-around; padding-left: 0; min-height: 40px; }
   .trip-detail-head .head-meta { flex: 0 0 100%; font-size: .75rem; line-height: 1.5; }
   .trip-detail-back { flex-basis: 100%; }
