@@ -12,6 +12,7 @@ Orchestrates collection, reconstruction, warehouse modelling, and serving public
 | `dag_daily_gps` | Nightly, 04:00 Warsaw | Reconstruct the previous GPS date; publish facts, coverage, and marts; emit `gps_models_date`. |
 | `dag_serving_export` | `gps_models_date` or manual | Validate and publish the frontend export. |
 | `dag_weekly_audit` | Weekly | Refresh audit evidence and run audit-tagged dbt tests. |
+| `dag_monthly_route_map` | Monthly, 2nd at 12:00 Warsaw, or manual | Build the previous month's route delay map beside the export. |
 | `dag_historical_serving_refresh` | Historical correction controller | Consolidate serving rebuilds and trigger one export after corrections. |
 
 The nightly DAG selects the persisted GTFS snapshot, validates staging, invokes the matcher, and promotes its outputs before dbt publishes service-date facts. Airflow checks schemas, hashes, lineage, row uniqueness, mode coverage, and resource use. The four stable matcher-input partitions are replaced in one BigQuery transaction; downstream fact and mart rebuilds are separate steps.

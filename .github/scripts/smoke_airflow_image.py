@@ -41,6 +41,9 @@ def main():
             assert not (home / directory / filename).exists(), (directory, filename)
     assert (home / "matcher/uv.lock").is_file()
     assert (home / "matcher/src/ztm_matcher/cli.py").is_file()
+    for asset in ("route_map_sql/segment_statistics.sql", "route_map_sql/pooled_routes.sql",
+                  "route_map_assets/mini-background-bus.svg", "route_map_assets/mini-background-tram.svg"):
+        assert (home / "dags" / asset).is_file(), asset
     sys.path.insert(0, str(home / "dags"))
     with patch.dict(os.environ, {
         "MATCHER_ENABLED": "true",
