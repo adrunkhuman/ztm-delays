@@ -17,6 +17,7 @@ def test_dag_runs_on_the_second_after_the_month_is_final() -> None:
     dag = _load_dag_module()
 
     assert dag.dag.kwargs["schedule"].cron == "0 12 2 * *"
+    assert dag.dag.kwargs["schedule"].timezone == "Europe/Warsaw"
     assert dag.dag.kwargs["catchup"] is False
     assert dag.dag.kwargs["max_active_runs"] == 1
     # A late nightly run delays the readiness check for up to 12 hours instead of skipping the month.
