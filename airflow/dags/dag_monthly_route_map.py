@@ -182,7 +182,8 @@ with DAG(
     dag_display_name="Monthly route delay map",
     description="Build last month's route delay map from published facts and publish it beside the serving export.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
-    schedule=CronTriggerTimetable(ROUTE_MAP_CRON, timezone=WARSAW),
+    # Airflow serializes only pendulum timezones or names, not zoneinfo objects.
+    schedule=CronTriggerTimetable(ROUTE_MAP_CRON, timezone="Europe/Warsaw"),
     catchup=False,
     max_active_runs=1,
     default_args=AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,

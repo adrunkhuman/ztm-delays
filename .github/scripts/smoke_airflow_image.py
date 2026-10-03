@@ -53,6 +53,15 @@ def main():
         from ztm_matcher import MatcherConfig
 
         MatcherConfig.from_env().validate()
+    # Importing is not enough: the scheduler also serializes each DAG and rejects some valid Python.
+    from airflow.dag_processing.dagbag import DagBag
+    from airflow.serialization.serialized_objects import DagSerialization
+
+    bag = DagBag(str(home / "dags"), include_examples=False)
+    assert not bag.import_errors, bag.import_errors
+    assert bag.dags
+    for dag in bag.dags.values():
+        DagSerialization.to_dict(dag)
     run(*shlex.split(os.environ["MATCHER_COMMAND"]), "--help")
     run(
         str(home / "matcher-venv/bin/python"), "-c",
