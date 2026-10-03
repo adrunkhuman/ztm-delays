@@ -107,6 +107,7 @@ def test_publish_replaces_month_atomically(tmp_path: Path) -> None:
     assert (target / "segments.json").read_text() == "segments.json"
     assert oct(target.stat().st_mode & 0o777) == "0o755"
 
+    (tmp_path / ".2026-09.staging-crashed").mkdir()
     build.publish(tmp_path, "2026-09", {**files, "segments.json": "new"})
     assert (target / "segments.json").read_text() == "new"
     assert [path.name for path in tmp_path.iterdir()] == ["2026-09"]

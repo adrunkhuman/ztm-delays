@@ -106,7 +106,7 @@ Monitor the whole serving filesystem, not just the DuckDB file. Downloads enforc
 
 ## Route maps
 
-`dag_monthly_route_map` runs at 12:00 Warsaw time on the 2nd and builds the previous month. It first checks that `fct_expected_stop_event` has every expected service date of that month, plus the 1st of the next month. That last date is published by the nightly run that completes the month's final overnight trips. Dates before the archive start, and known excluded dates, are not expected. If dates are missing, the task fails and lists them.
+`dag_monthly_route_map` runs at 12:00 Warsaw time on the 2nd and builds the previous month. `check_month_final` first requires `fct_expected_stop_event` for every expected service date of that month. Dates before the archive start, and known excluded dates, are not expected. It also requires `mart_pipeline_status` for the 1st of the next month, which the nightly run writes only after republishing the month's last day. While anything is missing, the check retries hourly for 12 hours and then fails, listing what is missing.
 
 To backfill or rebuild a month, trigger the DAG with:
 
@@ -114,7 +114,7 @@ To backfill or rebuild a month, trigger the DAG with:
 {"month": "2026-07"}
 ```
 
-A rebuild replaces the month directory in one rename, so readers see either the old map or the new one. Historical corrections do not update published maps; rebuild the affected months.
+A rebuild never exposes a partial month. It swaps directories with two renames, so the month is briefly absent between them, and the frontend returns 404 for that instant. Open map pages then ask for a reload rather than show stale corridors. Historical corrections do not update published maps; rebuild the affected months.
 
 | Item | Value |
 | --- | --- |

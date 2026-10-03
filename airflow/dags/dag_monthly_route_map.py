@@ -44,9 +44,13 @@ RAW_GTFS_SHAPES_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_shapes"
 STATISTICS_MAX_BYTES_BILLED = 10 * 1024**3
 POOLED_MAX_BYTES_BILLED = 10 * 1024**3
 SNAPSHOT_IDS_MAX_BYTES_BILLED = 2 * 1024**3
-# The nightly run for D republishes D-1, completing D-1's overnight trips.
-# A month is final once the 1st of the next month has been published.
+# The nightly run for D republishes D-1, completing D-1's overnight trips. Its pipeline-status
+# partition for D is written only after both the D and D-1 fact rebuilds pass their tests, so that
+# partition for the 1st of the next month marks the month as final.
 ROUTE_MAP_CRON = "0 12 2 * *"
+# A late nightly run should delay the map, not skip it: catchup is off, so a failed run never recurs.
+READINESS_RETRIES = 12
+READINESS_RETRY_DELAY = timedelta(hours=1)
 WARSAW = ZoneInfo("Europe/Warsaw")
 
 
@@ -72,24 +76,26 @@ def _expected_dates(month: str) -> list[date]:
 
 
 def _check_month_published(client: bigquery.Client, month: str) -> None:
-    """Every expected service date, and the next month's first day, must have published facts."""
-    required = [*_expected_dates(month), month_dates(month)[-1] + timedelta(days=1)]
+    """Every expected service date needs facts, and the next month's 1st a completed nightly run."""
+    next_day = month_dates(month)[-1] + timedelta(days=1)
+    required = [("fct_expected_stop_event", day) for day in _expected_dates(month)]
+    required.append(("mart_pipeline_status", next_day))
     query = "\n".join(
         (
-            "select partition_id",
+            "select table_name, partition_id",
             f"from `{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.INFORMATION_SCHEMA.PARTITIONS`",
-            "where table_name = 'fct_expected_stop_event' and total_rows > 0",
+            "where table_name in ('fct_expected_stop_event', 'mart_pipeline_status') and total_rows > 0",
             "  and partition_id in unnest(@partition_ids)",
         )
     )
-    partition_ids = [day.strftime("%Y%m%d") for day in required]
+    partition_ids = sorted({day.strftime("%Y%m%d") for _, day in required})
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ArrayQueryParameter("partition_ids", "STRING", partition_ids)]
     )
-    published = {row.partition_id for row in client.query(query, job_config=job_config).result()}
-    missing = [day.isoformat() for day, partition_id in zip(required, partition_ids, strict=True) if partition_id not in published]
+    published = {(row.table_name, row.partition_id) for row in client.query(query, job_config=job_config).result()}
+    missing = [f"{table} {day}" for table, day in required if (table, day.strftime("%Y%m%d")) not in published]
     if missing:
-        raise RuntimeError(f"Route map for {month} needs published fct_expected_stop_event dates: {missing}")
+        raise RuntimeError(f"Route map for {month} is not final; missing partitions: {missing}")
 
 
 def _sql(name: str, **tables: str) -> str:
@@ -152,7 +158,6 @@ def _extract_rows(client: bigquery.Client, month: str) -> Iterator[tuple[str, st
 
 def _build_route_map(month: str) -> dict[str, Any]:
     client = bigquery.Client(project=GCP_PROJECT)
-    _check_month_published(client, month)
     data = parse_extract(_extract_rows(client, month))
     validate_extract(data, _expected_dates(month))
     geojson, report = process(data, month)
@@ -185,12 +190,19 @@ with DAG(
     tags=["ztm", "serving", "map"],
 ) as dag:
 
-    @task
-    def build_route_map() -> dict[str, Any]:
-        """Extract, map, and publish one month; trigger with {"month": "YYYY-MM"} to rebuild or backfill."""
-        return _build_route_map(_selected_month())
+    @task(retries=READINESS_RETRIES, retry_delay=READINESS_RETRY_DELAY)
+    def check_month_final() -> str:
+        """Wait for the month's facts; trigger with {"month": "YYYY-MM"} to rebuild or backfill."""
+        month = _selected_month()
+        _check_month_published(bigquery.Client(project=GCP_PROJECT), month)
+        return month
 
-    build_route_map()
+    @task
+    def build_route_map(month: str) -> dict[str, Any]:
+        """Extract, map, and publish one month."""
+        return _build_route_map(month)
+
+    build_route_map(check_month_final())
 
 
 if __name__ == "__main__":

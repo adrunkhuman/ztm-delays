@@ -2,7 +2,7 @@
 
 Standard library only, so the DAG's BigQuery boundary and these rules can be tested separately.
 The frontend reads <maps_dir>/<YYYY-MM>/ (see frontend/ztm_frontend/app.py); a month is visible once
-its directory holds segments.json, which publish() guarantees happens in one rename.
+its directory holds segments.json, and publish() only ever renames a complete directory into place.
 """
 
 from __future__ import annotations
@@ -190,10 +190,16 @@ def site_files(geojson: Mapping[str, Any], report: Mapping[str, Any], month: str
 
 
 def publish(maps_dir: Path, month: str, files: Mapping[str, str]) -> Path:
-    """Replace <maps_dir>/<month> with files; readers see the old or the new month, never a partial one."""
+    """Replace <maps_dir>/<month> with files; readers never see a partial month.
+
+    A rebuild is two renames, so the month is absent for an instant between them (the frontend
+    answers 404). The DAG allows one active run, so leftovers from a crashed run are safe to remove.
+    """
     if not MONTH_PATTERN.fullmatch(month) or set(files) != set(PUBLISHED_FILES):
         raise ValueError(f"Refusing to publish {month!r} with files {sorted(files)}")
     maps_dir.mkdir(parents=True, exist_ok=True)
+    for leftover in maps_dir.glob(f".{month}.*"):
+        shutil.rmtree(leftover, ignore_errors=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{month}.staging-", dir=maps_dir))
     try:
         for name, content in files.items():

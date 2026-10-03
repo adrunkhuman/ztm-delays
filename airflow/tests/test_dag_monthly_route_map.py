@@ -19,6 +19,8 @@ def test_dag_runs_on_the_second_after_the_month_is_final() -> None:
     assert dag.dag.kwargs["schedule"].cron == "0 12 2 * *"
     assert dag.dag.kwargs["catchup"] is False
     assert dag.dag.kwargs["max_active_runs"] == 1
+    # A late nightly run delays the readiness check for up to 12 hours instead of skipping the month.
+    assert TASK_KWARGS["check_month_final"]["retries"] * TASK_KWARGS["check_month_final"]["retry_delay"].seconds == 12 * 3600
 
 
 def test_selected_month_prefers_conf_then_previous_warsaw_month(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,18 +40,24 @@ def test_selected_month_prefers_conf_then_previous_warsaw_month(monkeypatch: pyt
         dag._selected_month()
 
 
-def test_month_check_requires_every_expected_date_and_the_next_day() -> None:
+def test_month_check_requires_expected_facts_and_next_days_completed_nightly_run() -> None:
     dag = _load_dag_module()
-    published = [f"202607{day:02d}" for day in range(1, 32) if day not in {5, 6, 7}]
-    client = FakeClient([[FakeRow(partition_id=partition_id) for partition_id in published]])
+    facts = [
+        FakeRow(table_name="fct_expected_stop_event", partition_id=f"202607{day:02d}")
+        for day in range(1, 32)
+        if day not in {5, 6, 7}
+    ]
+    # The 1st's facts alone are not enough: the prior-day republish runs in parallel and may not be done.
+    next_day_facts = FakeRow(table_name="fct_expected_stop_event", partition_id="20260801")
+    client = FakeClient([[*facts, next_day_facts]])
 
-    with pytest.raises(RuntimeError, match=r"\['2026-08-01'\]"):
+    with pytest.raises(RuntimeError, match=r"\['mart_pipeline_status 2026-08-01'\]"):
         dag._check_month_published(client, "2026-07")
     partition_ids = client.calls[0].job_config.query_parameters[0].values
     assert "20260705" not in partition_ids
     assert partition_ids[-1] == "20260801"
 
-    client = FakeClient([[FakeRow(partition_id=partition_id) for partition_id in [*published, "20260801"]]])
+    client = FakeClient([[*facts, FakeRow(table_name="mart_pipeline_status", partition_id="20260801")]])
     dag._check_month_published(client, "2026-07")
 
 
@@ -96,8 +104,7 @@ def _install_stubs() -> None:
     sdk.Asset = lambda uri, **_kwargs: uri
     sdk.CronTriggerTimetable = FakeCronTriggerTimetable
     sdk.get_current_context = dict
-    # Declaring the DAG calls the task; the stub must not run the build.
-    sdk.task = lambda _function: lambda: None
+    sdk.task = fake_task
     bigquery = types.ModuleType("google.cloud.bigquery")
     bigquery.Client = lambda project: FakeClient([])
     bigquery.QueryJobConfig = FakeQueryJobConfig
@@ -114,6 +121,17 @@ def _install_stubs() -> None:
             "google.cloud.bigquery": bigquery,
         }
     )
+
+
+def fake_task(function: Any = None, **kwargs: Any) -> Any:
+    """Record retry settings; declaring the DAG calls the tasks, so they must not run."""
+    if function is None:
+        return lambda decorated: fake_task(decorated, **kwargs)
+    TASK_KWARGS[function.__name__] = kwargs
+    return lambda *_args: None
+
+
+TASK_KWARGS: dict[str, dict[str, Any]] = {}
 
 
 class FakeDAG:

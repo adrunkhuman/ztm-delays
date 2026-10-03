@@ -94,7 +94,7 @@
           {% for mode in ["bus", "tram"] %}
             <a class="map-mini" href="{{ url_for('route_map', mode=mode, period='wd') }}">
               <div class="label">{{ mode }} · net delay change · weekdays {{ map_month }}</div>
-              <img src="{{ url_for('map_file', month=map_month, name='mini-' ~ mode ~ '.svg') }}" width="600" height="440" loading="lazy" alt="Map of {{ mode }} segments in {{ map_month }}: blue where delay recovers, red where it grows">
+              <img src="{{ url_for('map_file', month=map_month, name='mini-' ~ mode ~ '.svg', v=map_version) }}" width="600" height="440" loading="lazy" alt="Map of {{ mode }} segments in {{ map_month }}: blue where delay recovers, red where it grows">
               <div class="legend"><span><i style="background: #3f80d0"></i> recovers</span><span><i style="background: #4a4a4a"></i> ±10s</span><span><i style="background: #d84a45"></i> gains</span></div>
             </a>
           {% endfor %}

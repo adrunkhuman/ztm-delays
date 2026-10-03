@@ -155,6 +155,10 @@ def _write_map_month(maps_dir: Path, month: str, segments: dict[str, dict[str, o
     (maps_dir / month / "routes.geojson").write_text("{}")
 
 
+def _map_version(maps_dir: Path, month: str) -> int:
+    return (maps_dir / month / "segments.json").stat().st_mtime_ns
+
+
 def _map_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FlaskClient:
     monkeypatch.setenv("ZTM_MAPS_DIR", str(tmp_path))
     monkeypatch.setattr(queries, "get_export_metadata", lambda _path: {})
@@ -165,6 +169,7 @@ def _map_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FlaskClient:
 def test_route_map_selects_published_month_and_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _map_client(tmp_path, monkeypatch)
     assert client.get("/map").status_code == HTTPStatus.NOT_FOUND
+    assert 'href="/map"' not in client.get("/status").get_data(as_text=True)
 
     _write_map_month(tmp_path, "2026-08", {})
     _write_map_month(tmp_path, "2026-09", {})
@@ -173,7 +178,10 @@ def test_route_map_selects_published_month_and_view(tmp_path: Path, monkeypatch:
     newest = client.get("/map?mode=tram&period=we").get_data(as_text=True)
     assert "<b>2026-09</b>" in newest
     assert 'href="/map?month=2026-08&amp;mode=tram&amp;period=we"' in newest
-    assert 'data-routes="/map/2026-09/routes.geojson"' in newest
+    version = _map_version(tmp_path, "2026-09")
+    assert f'data-routes="/map/2026-09/routes.geojson?v={version}"' in newest
+    assert f'data-segments="/map/segments?month=2026-09&amp;v={version}"' in newest
+    assert 'href="/map"' in newest
     assert 'data-mode="tram" data-period="we"' in newest
 
     older = client.get("/map?month=2026-08&mode=nope").get_data(as_text=True)
@@ -217,15 +225,22 @@ def test_route_map_popup_pages_view_segments_by_traversals(tmp_path: Path, monke
         },
     )
 
-    first = client.get("/map/segments?month=2026-09&mode=bus&period=wd&ids=1,2,3,4,5,2").get_data(as_text=True)
+    url = f"/map/segments?month=2026-09&v={_map_version(tmp_path, '2026-09')}&mode=bus&period=wd"
+    first = client.get(f"{url}&ids=1,2,3,4,5,2").get_data(as_text=True)
     assert [int(value) for value in re.findall(r'data-id="(\d+)"', first)] == [4, 2, 3]
     assert "+65s" in first
     assert "1\u20133 / 4" in first
     assert "page=1" in first
+    assert f"v={_map_version(tmp_path, '2026-09')}" in first
 
-    last = client.get("/map/segments?month=2026-09&mode=bus&period=wd&ids=1,2,3,4,5&page=9").get_data(as_text=True)
+    last = client.get(f"{url}&ids=1,2,3,4,5&page=9").get_data(as_text=True)
     assert re.findall(r'data-id="(\d+)"', last) == ["1"]
     assert "4\u20134 / 4" in last
 
-    assert client.get("/map/segments?month=2026-09&ids=5").status_code == HTTPStatus.NOT_FOUND
+    assert client.get(f"{url}&ids=5").status_code == HTTPStatus.NOT_FOUND
+    assert client.get(f"{url}&ids=%C2%B2,{'9' * 5000}").status_code == HTTPStatus.NOT_FOUND
     assert client.get("/map/segments?month=2026-10&ids=1").status_code == HTTPStatus.NOT_FOUND
+    # A page loaded before a rebuild carries the old version; its ids may now name other corridors.
+    stale = client.get("/map/segments?month=2026-09&v=0&mode=bus&period=wd&ids=1").get_data(as_text=True)
+    assert "Reload the page" in stale
+    assert "data-id" not in stale

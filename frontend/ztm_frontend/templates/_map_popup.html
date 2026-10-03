@@ -1,4 +1,7 @@
 {% import "_widgets.html" as ui %}
+{% if stale %}
+  <div class="map-pop-stops">This month was rebuilt. Reload the page to see current data.</div>
+{% else %}
 {% for row in rows %}
   <div class="map-pop-item" data-id="{{ row.id }}">
     <div class="map-pop-head">
@@ -22,4 +25,5 @@
       {% if step < 0 %}<span>{{ first }}–{{ last }} / {{ total }}</span>{% endif %}
     {% endfor %}
   </nav>
+{% endif %}
 {% endif %}

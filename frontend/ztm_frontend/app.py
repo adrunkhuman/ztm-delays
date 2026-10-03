@@ -20,6 +20,8 @@ LATE_DELAY_SECONDS = 180
 LOW_ON_TIME_RATE = 0.6
 WARSAW = pytz.timezone("Europe/Warsaw")
 MAP_MONTH = re.compile(r"\d{4}-\d{2}")
+MAP_SEGMENT_ID = re.compile(r"[0-9]{1,9}")
+MAP_POPUP_MAX_IDS = 100
 MAP_FILES = {"routes.geojson", "mini-bus.svg", "mini-tram.svg"}
 MAP_VIEWS = {"mode": ("bus", "tram"), "period": ("wd", "we")}
 MAP_POPUP_ROWS = 3
@@ -65,6 +67,7 @@ def create_app() -> Flask:  # noqa: C901
             "grouped_windows_available": grouped_windows_available,
             "scope_href": _scope_href,
             "stylesheet_version": stylesheet_version,
+            "map_available": bool(_map_months()),
         }
 
     @app.url_defaults
@@ -79,7 +82,8 @@ def create_app() -> Flask:  # noqa: C901
     def index() -> str:
         return render_template(
             "overview.html",
-            map_month=next(reversed(_map_months()), None),
+            map_month=(map_month := next(reversed(_map_months()), None)),
+            map_version=_map_month_data(map_month)[1] if map_month else None,
             **queries.get_overview(
                 current_app.config["ZTM_DUCKDB_PATH"],
                 _selected_date_arg(),
@@ -166,10 +170,12 @@ def create_app() -> Flask:  # noqa: C901
         if month not in months:
             month = months[-1]
         index = months.index(month)
+        data, version = _map_month_data(month)
         return render_template(
             "map.html",
             map_month=month,
-            map_meta=_map_segments(month)["meta"],
+            map_meta=data["meta"],
+            map_version=version,
             map_view=_map_view(),
             previous_month=months[index - 1] if index > 0 else None,
             next_month=months[index + 1] if index + 1 < len(months) else None,
@@ -211,9 +217,15 @@ def _map_view() -> dict[str, str]:
     }
 
 
-def _map_segments(month: str) -> dict[str, Any]:
+def _map_month_data(month: str) -> tuple[dict[str, Any], str]:
+    """Parsed segments.json and a version that changes whenever the month is republished."""
     path = current_app.config["ZTM_MAPS_DIR"] / month / "segments.json"
-    return _read_map_segments(path, path.stat().st_mtime_ns)
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except FileNotFoundError:
+        # A rebuild swaps the month directory in two renames; the month is briefly absent.
+        abort(404)
+    return _read_map_segments(path, mtime_ns), str(mtime_ns)
 
 
 @lru_cache(maxsize=4)
@@ -228,8 +240,13 @@ def _render_map_popup() -> str:
     if month not in _map_months():
         abort(404)
     view = _map_view()
-    ids = list(dict.fromkeys(int(value) for value in request.args.get("ids", "").split(",") if value.isdigit()))
-    data = _map_segments(month)
+    data, version = _map_month_data(month)
+    # Feature ids are only stable within one build; ids from a page loaded before a rebuild would
+    # silently describe other corridors.
+    if request.args.get("v") != version:
+        return render_template("_map_popup.html", stale=True)
+    raw_ids = request.args.get("ids", "").split(",")
+    ids = list(dict.fromkeys(int(value) for value in raw_ids if MAP_SEGMENT_ID.fullmatch(value)))[:MAP_POPUP_MAX_IDS]
     prefix = f"{view['period']}_{view['mode']}"
     segments = [(id_, data["segments"].get(str(id_), {})) for id_ in ids]
     paths = sorted(
@@ -253,7 +270,9 @@ def _render_map_popup() -> str:
         first=start + 1,
         last=min(start + MAP_POPUP_ROWS, len(paths)),
         total=len(paths),
-        page_href=lambda target: url_for("map_segments", month=month, **view, ids=",".join(map(str, ids)), page=target),
+        page_href=lambda target: url_for(
+            "map_segments", month=month, v=version, **view, ids=",".join(map(str, ids)), page=target
+        ),
     )
 
 
