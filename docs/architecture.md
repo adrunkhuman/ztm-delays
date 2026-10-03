@@ -50,6 +50,8 @@ Airflow exports a fixed [table allowlist](../airflow/dags/dag_serving_export.py)
 
 The exporter supports a materialized DuckDB file or a partitioned store: small reference tables in DuckDB, date-bearing tables as views over retained local Parquet. Partitioned runs refresh changed dates rather than rewriting the archive. Total local storage still grows with history.
 
+Route delay maps are a separate monthly artifact. Airflow aggregates delay change between consecutive scheduled stops of complete trips, aligns each stop pair onto its GTFS shape, and publishes one directory per month under `maps/` in the same serving storage. Stop pairs that cannot be placed unambiguously on the shape are dropped and counted; they are never drawn as straight lines.
+
 The Flask app holds a read-only DuckDB connection for each request. Warehouse marts supply entity summaries and exact display-grain quantiles; frontend queries also filter, aggregate, and rank exported trip rows for browsing. New requests see a newly published catalog without an app restart.
 
 ## Interpreting the results

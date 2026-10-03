@@ -25,3 +25,7 @@ convention = "google"
 # Cloud clients are intentionally duck-typed and query identifiers are constrained by local matcher contracts.
 "dags/ztm_matcher.py" = ["ANN401", "C901", "ISC004", "PLR0912", "PLR0913", "PLR0917", "S608"]
 "dags/matcher_historical_correction.py" = ["ANN401", "S608"]
+# Dense numeric alignment code validated against real data; splitting it would obscure the algorithm and risk behaviour changes.
+"dags/route_map_geometry.py" = ["C901", "PLR0912", "PLR0913", "PLR0915", "PLR2004"]
+# Hand-run maintenance scripts, not an importable package.
+"scripts/*.py" = ["INP001"]

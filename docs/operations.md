@@ -104,6 +104,27 @@ The catalog is the publication point. Sidecar and database replacement are separ
 
 Monitor the whole serving filesystem, not just the DuckDB file. Downloads enforce a free-space reserve. To return to a materialized export, disable partitioned mode and publish a fresh export within its size limits; keep Parquet until replacement succeeds.
 
+## Route maps
+
+`dag_monthly_route_map` runs at 12:00 Warsaw time on the 2nd and builds the previous month. `check_month_final` first requires `fct_expected_stop_event` for every expected service date of that month. Dates before the archive start, and known excluded dates, are not expected. It also requires `mart_pipeline_status` for the 1st of the next month, which the nightly run writes only after republishing the month's last day. While anything is missing, the check retries hourly for 12 hours and then fails, listing what is missing.
+
+To backfill or rebuild a month, trigger the DAG with:
+
+```json
+{"month": "2026-07"}
+```
+
+A rebuild never exposes a partial month. It swaps directories with two renames, so the month is briefly absent between them, and the frontend returns 404 for that instant. Open map pages then ask for a reload rather than show stale corridors. Historical corrections do not update published maps; rebuild the affected months.
+
+| Item | Value |
+| --- | --- |
+| Output | `$SERVING_EXPORT_DIR/maps/YYYY-MM/`, read by the frontend as `maps/` beside `ZTM_DUCKDB_PATH` |
+| BigQuery | Two queries of about 4 GB each, capped at 10 GB billed |
+| Runtime | About 3 minutes; peak memory about 3.5 GB |
+| Failure checks | Coverage dates, traversal reconciliation, and at least 95% of daytime traversals mapped |
+
+The task's `report.json` records exclusions and coverage per period. Mini-map street backgrounds are fixed assets. Regenerate them with `airflow/scripts/build_route_map_backgrounds.py` only if the frames or styling change.
+
 ## Monitoring and retention
 
 Set `AIRFLOW_FAILURE_WEBHOOK_URL` for failure callbacks. Inspect task logs, matcher metrics, export validation reports, disk capacity, and poller heartbeat freshness. Exported poller status is a snapshot, not live monitoring. Enable `LOG_BIGQUERY_DBT_JOB_COSTS` for nightly query-cost summaries; attribution is best-effort, not billing enforcement.

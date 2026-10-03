@@ -72,7 +72,7 @@ jobs:
           cache-dependency-glob: airflow/pyproject.toml
 
       - name: Compile Airflow DAGs
-        run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/ztm_matcher.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py airflow/dags/dag_serving_export.py
+        run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/ztm_matcher.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py airflow/dags/dag_serving_export.py airflow/dags/dag_monthly_route_map.py airflow/dags/route_map_build.py airflow/dags/route_map_geometry.py
 
       - name: Lint Airflow
         run: uvx ruff==0.15.21 check airflow

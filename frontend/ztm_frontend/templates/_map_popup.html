@@ -1,0 +1,29 @@
+{% import "_widgets.html" as ui %}
+{% if stale %}
+  <div class="map-pop-stops">This month was rebuilt. Reload the page to see current data.</div>
+{% else %}
+{% for row in rows %}
+  <div class="map-pop-item" data-id="{{ row.id }}">
+    <div class="map-pop-head">
+      <div class="chips">
+        {% for line in row.lines %}{{ ui.chip(line, mode, url_for('lines', line=line, mode=mode, window='month', date=anchor)) }}{% endfor %}
+        {% if row.more_lines %}<span class="map-pop-more">+{{ row.more_lines }}</span>{% endif %}
+      </div>
+      <span class="map-pop-value {{ row.delta_class }}">{{ row.delta }}</span>
+    </div>
+    <div class="map-pop-stops">{{ row.stops }}{% if row.aliases %} <span class="muted">+{{ row.aliases }}</span>{% endif %}</div>
+    <div class="map-pop-bar" title="{{ row.recover|round|int }}% recover · {{ row.gain|round|int }}% gain">
+      <div class="stack"><div class="early" style="width: {{ row.recover|round(1) }}%"></div><div class="ontime" style="width: {{ row.steady|round(1) }}%"></div><div class="late" style="width: {{ row.gain|round(1) }}%"></div></div>
+      <span>{{ row.count|integer }} trips</span>
+    </div>
+  </div>
+{% endfor %}
+{% if pages > 1 %}
+  <nav class="map-pop-pager" aria-label="Overlapping paths">
+    {% for step, label, glyph, disabled in [(-1, "Previous paths", "‹", page == 0), (1, "Next paths", "›", page == pages - 1)] %}
+      <button type="button" data-step="{{ step }}" aria-label="{{ label }}" hx-get="{{ page_href(page + step) }}" hx-target="closest .map-pop-body" {% if disabled %}disabled{% endif %}>{{ glyph }}</button>
+      {% if step < 0 %}<span>{{ first }}–{{ last }} / {{ total }}</span>{% endif %}
+    {% endfor %}
+  </nav>
+{% endif %}
+{% endif %}
