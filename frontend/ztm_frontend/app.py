@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from datetime import UTC, datetime
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import pytz
-from flask import Flask, current_app, render_template, request, url_for
+from flask import Flask, Response, abort, current_app, render_template, request, send_from_directory, url_for
 
 from ztm_frontend import db, queries
 
@@ -16,6 +19,12 @@ EARLY_DELAY_SECONDS = -60
 LATE_DELAY_SECONDS = 180
 LOW_ON_TIME_RATE = 0.6
 WARSAW = pytz.timezone("Europe/Warsaw")
+MAP_MONTH = re.compile(r"\d{4}-\d{2}")
+MAP_FILES = {"routes.geojson", "mini-bus.svg", "mini-tram.svg"}
+MAP_VIEWS = {"mode": ("bus", "tram"), "period": ("wd", "we")}
+MAP_POPUP_ROWS = 3
+MAP_POPUP_CHIPS = 5
+MAP_NEUTRAL_SECONDS = 10
 
 
 def create_app() -> Flask:  # noqa: C901
@@ -27,6 +36,8 @@ def create_app() -> Flask:  # noqa: C901
 
     app.config["ZTM_DUCKDB_PATH"] = db_path
     app.config["ZTM_DUCKDB_META_PATH"] = Path(f"{db_path}.meta.json")
+    # Monthly route maps are published beside the DuckDB export, one directory per month.
+    app.config["ZTM_MAPS_DIR"] = Path(os.environ.get("ZTM_MAPS_DIR", db_path.parent / "maps"))
     app.teardown_appcontext(db.close_request_connections)
 
     app.add_template_filter(_format_delay, "delay")
@@ -68,6 +79,7 @@ def create_app() -> Flask:  # noqa: C901
     def index() -> str:
         return render_template(
             "overview.html",
+            map_month=next(reversed(_map_months()), None),
             **queries.get_overview(
                 current_app.config["ZTM_DUCKDB_PATH"],
                 _selected_date_arg(),
@@ -145,11 +157,127 @@ def create_app() -> Flask:  # noqa: C901
             ),
         )
 
+    @app.get("/map")
+    def route_map() -> str:
+        months = _map_months()
+        if not months:
+            abort(404)
+        month = request.args.get("month")
+        if month not in months:
+            month = months[-1]
+        index = months.index(month)
+        return render_template(
+            "map.html",
+            map_month=month,
+            map_meta=_map_segments(month)["meta"],
+            map_view=_map_view(),
+            previous_month=months[index - 1] if index > 0 else None,
+            next_month=months[index + 1] if index + 1 < len(months) else None,
+        )
+
+    @app.get("/map/segments")
+    def map_segments() -> str:
+        return _render_map_popup()
+
+    @app.get("/map/<month>/<name>")
+    def map_file(month: str, name: str) -> Response:
+        if month not in _map_months() or name not in MAP_FILES:
+            abort(404)
+        return send_from_directory(current_app.config["ZTM_MAPS_DIR"] / month, name, max_age=3600)
+
     @app.get("/status")
     def status() -> str:
         return render_template("status.html", **queries.get_status(current_app.config["ZTM_DUCKDB_PATH"]))
 
     return app
+
+
+def _map_months() -> list[str]:
+    """Published route-map months, oldest first; a month counts once its segments.json exists."""
+    maps_dir: Path = current_app.config["ZTM_MAPS_DIR"]
+    if not maps_dir.is_dir():
+        return []
+    return sorted(
+        path.name
+        for path in maps_dir.iterdir()
+        if MAP_MONTH.fullmatch(path.name) and (path / "segments.json").is_file()
+    )
+
+
+def _map_view() -> dict[str, str]:
+    """Map mode and period from the query string; unknown values fall back to the first option."""
+    return {
+        name: value if (value := request.args.get(name)) in values else values[0] for name, values in MAP_VIEWS.items()
+    }
+
+
+def _map_segments(month: str) -> dict[str, Any]:
+    path = current_app.config["ZTM_MAPS_DIR"] / month / "segments.json"
+    return _read_map_segments(path, path.stat().st_mtime_ns)
+
+
+@lru_cache(maxsize=4)
+def _read_map_segments(path: Path, _mtime_ns: int) -> dict[str, Any]:
+    """Parsed segments.json; the mtime in the cache key picks up a republished month."""
+    return json.loads(path.read_text())
+
+
+def _render_map_popup() -> str:
+    """One page of the segments under a map click, busiest first in the selected view."""
+    month = request.args.get("month", "")
+    if month not in _map_months():
+        abort(404)
+    view = _map_view()
+    ids = list(dict.fromkeys(int(value) for value in request.args.get("ids", "").split(",") if value.isdigit()))
+    data = _map_segments(month)
+    prefix = f"{view['period']}_{view['mode']}"
+    segments = [(id_, data["segments"].get(str(id_), {})) for id_ in ids]
+    paths = sorted(
+        ((id_, segment) for id_, segment in segments if f"{prefix}_d" in segment),
+        key=lambda path: -path[1][f"{prefix}_n"],
+    )
+    if not paths:
+        abort(404)
+    pages = math.ceil(len(paths) / MAP_POPUP_ROWS)
+    page = min(max(request.args.get("page", 0, type=int), 0), pages - 1)
+    start = page * MAP_POPUP_ROWS
+    return render_template(
+        "_map_popup.html",
+        rows=[
+            _map_popup_row(id_, segment, prefix, view["mode"]) for id_, segment in paths[start : start + MAP_POPUP_ROWS]
+        ],
+        anchor=data["meta"]["anchor"],
+        mode=view["mode"],
+        page=page,
+        pages=pages,
+        first=start + 1,
+        last=min(start + MAP_POPUP_ROWS, len(paths)),
+        total=len(paths),
+        page_href=lambda target: url_for("map_segments", month=month, **view, ids=",".join(map(str, ids)), page=target),
+    )
+
+
+def _map_popup_row(id_: int, segment: dict[str, Any], prefix: str, mode: str) -> dict[str, Any]:
+    delta = round(segment[f"{prefix}_d"])
+    count = segment[f"{prefix}_n"]
+    lines = segment.get(mode, [])
+    return {
+        "id": id_,
+        "lines": lines[:MAP_POPUP_CHIPS],
+        "more_lines": max(len(lines) - MAP_POPUP_CHIPS, 0),
+        "delta": f"+{delta}s" if delta > 0 else f"{delta}s",
+        "delta_class": "early-text"
+        if delta <= -MAP_NEUTRAL_SECONDS
+        else "late-text"
+        if delta >= MAP_NEUTRAL_SECONDS
+        else "neutral-text",
+        "stops": segment["stops"],
+        "aliases": segment["aliases"],
+        "count": count,
+        "recover": (recover := segment[f"{prefix}_r"] / count * 100),
+        "gain": (gain := segment[f"{prefix}_g"] / count * 100),
+        "steady": max(100 - recover - gain, 0),
+    }
 
 
 def _format_utc_timestamp(value: object) -> str:

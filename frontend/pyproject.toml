@@ -49,6 +49,8 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "tests/**/*.py" = ["S101", "D"]
+# Hand-run maintenance scripts, not an importable package.
+"scripts/*.py" = ["INP001"]
 
 [tool.ty.environment]
 python-version = "3.13"

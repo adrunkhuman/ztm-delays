@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}map · ZTM delays{% endblock %}
+
+{% block body %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+  <div class="body map-page">
+    <aside class="rail">
+      {% for name, labels in [("mode", {"bus": "bus", "tram": "tram"}), ("period", {"wd": "weekdays", "we": "weekend"})] %}
+        <div class="mode map-toggle" role="group" aria-label="{{ name|capitalize }}" data-view="{{ name }}">
+          {% for value, label in labels.items() %}
+            {% set active = map_view[name] == value %}
+            <button type="button" class="{% if active %}active{% endif %}" data-value="{{ value }}" aria-pressed="{{ active|lower }}">{{ label }}</button>
+          {% endfor %}
+        </div>
+      {% endfor %}
+
+      <div class="label">net change / segment</div>
+      <ul class="map-legend">
+        {% for color, text, height in [
+          ("#4a9eff", "≤ −60s", 7), ("#3f80d0", "−60 … −30s", 4), ("#33608f", "−30 … −10s", 3), ("#4a4a4a", "±10s", 2),
+          ("#a03d3d", "+10 … +30s", 3), ("#d84a45", "+30 … +60s", 4), ("#ff5c5c", "≥ +60s", 7)
+        ] %}
+          <li><span class="map-swatch" style="background: {{ color }}; height: {{ height }}px"></span>{{ text }}</li>
+        {% endfor %}
+      </ul>
+    </aside>
+
+    <main class="main">
+      <header class="head">
+        <h1 class="hero-title">map</h1>
+        <div class="datebox">
+          <div class="date">
+            {% if previous_month %}<a aria-label="Previous month" href="{{ url_for('route_map', month=previous_month, **map_view) }}">‹</a>{% else %}<span class="disabled" aria-label="Previous month" aria-disabled="true">‹</span>{% endif %}
+            <b>{{ map_month }}</b>
+            {% if next_month %}<a aria-label="Next month" href="{{ url_for('route_map', month=next_month, **map_view) }}">›</a>{% else %}<span class="disabled" aria-label="Next month" aria-disabled="true">›</span>{% endif %}
+          </div>
+          <div class="scope-note" id="map-stats">
+            {% for period, totals_key in [("wd", "weekday"), ("we", "weekend")] %}
+              {% for mode in ["bus", "tram"] %}
+                {% set totals = map_meta.totals[totals_key][mode] %}
+                <span data-view="{{ period }}_{{ mode }}" {% if map_view.period ~ '_' ~ map_view.mode != period ~ '_' ~ mode %}hidden{% endif %}>{{ totals.corridors|integer }} segments · {{ totals.traversals|integer }} traversals</span>
+              {% endfor %}
+            {% endfor %}
+          </div>
+        </div>
+      </header>
+
+      <div class="map-frame">
+        <div id="route-map" aria-label="Net delay change along routes"
+          data-mode="{{ map_view.mode }}" data-period="{{ map_view.period }}"
+          data-routes="{{ url_for('map_file', month=map_month, name='routes.geojson') }}"
+          data-segments="{{ url_for('map_segments', month=map_month) }}"
+          data-style="{{ url_for('static', filename='map-style.json') }}"
+          data-tram-bounds="{{ map_meta.tram_bounds|to_json }}"></div>
+        <div class="map-error" id="map-error" role="alert" hidden></div>
+      </div>
+    </main>
+  </div>
+  <script src="{{ url_for('static', filename='map.js') }}"></script>
+{% endblock %}

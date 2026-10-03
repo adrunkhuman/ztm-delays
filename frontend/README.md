@@ -2,7 +2,7 @@
 
 Server-rendered Flask app for the transit archive. Overview, line, stop, and trip views expose delays and reconstructed service; the status page shows archive coverage and export freshness.
 
-The app reads a local DuckDB serving artifact in read-only mode. It does not refresh data or connect to BigQuery, GCS, or the city API.
+The app reads a local DuckDB serving artifact in read-only mode. It does not refresh data or connect to BigQuery, GCS, or the city API. Monthly route maps are read from `maps/` beside the DuckDB file, or from `ZTM_MAPS_DIR`. The map page loads MapLibre and OpenFreeMap tiles in the browser.
 
 ## Run
 
@@ -39,6 +39,8 @@ Delay summaries use complete trips. Detail pages retain lower-quality evidence a
 Weekday/weekend classification follows timetable service, not a calendar-only filter. Line comparisons in those windows use timetable versions active at the selected anchor; month views retain the whole observed month. Daily chart medians are not recombined into aggregate medians.
 
 Entity rankings use qualifying zone-1 public-service trips and minimum observation counts. They are not rankings of every scheduled line or stop. [Architecture](../docs/architecture.md#interpreting-the-results) explains the wider coverage limitations.
+
+The route map shows **net delay change** between consecutive scheduled stops: the downstream stop's signed arrival delay minus the upstream stop's. Red means delay grows over that segment; blue means time is recovered. It uses complete trips with both scheduled arrivals between 06:00 and 22:00, and corridors with at least 100 traversals in the period. Weekdays and weekends are calendar days. A segment's change includes dwell time at the upstream stop. It does not show where inside the segment the delay arose. `scripts/build_map_style.py` regenerates the dark basemap style.
 
 Status coverage uses observed/expected service minutes in the summary and observed/expected trips in daily rows. Poller status is captured at export time, not live. Sidecar metadata is accepted only when its export ID matches the database.
 
