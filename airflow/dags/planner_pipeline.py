@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from google.cloud import bigquery, storage
+from ztm_airflow_common import BIGQUERY_LOCATION
 
 if TYPE_CHECKING:
     from datetime import date
@@ -69,6 +70,7 @@ def export_parquet(
             query_parameters=[bigquery.ScalarQueryParameter(k, "DATE", v) for k, v in params.items()],
             maximum_bytes_billed=MAX_BYTES_BILLED,
         ),
+        location=BIGQUERY_LOCATION,
     )
     job.result()
     LOGGER.info("Extract %s billed %s bytes", gcs_prefix, job.total_bytes_billed)
@@ -78,6 +80,7 @@ def export_parquet(
         job.destination,
         f"gs://{bucket.name}/{gcs_prefix}/part-*.parquet",
         job_config=bigquery.ExtractJobConfig(destination_format="PARQUET", compression="SNAPPY"),
+        location=BIGQUERY_LOCATION,
     )
     extract.result()
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -177,6 +180,9 @@ def download_current_bundle(bucket: storage.Bucket, cache_dir: Path) -> Path:
     if not (tmp / "meta.json").exists():
         raise RuntimeError(f"Planner bundle {version} is incomplete")
     tmp.rename(target)
+    for old in cache_dir.iterdir():  # one bundle a week otherwise piles up
+        if old != target:
+            shutil.rmtree(old, ignore_errors=True)
     return target
 
 
@@ -184,9 +190,8 @@ def run_planner(config: PlannerConfig, args: list[str]) -> dict[str, Any]:
     """Run ``ztm-planner`` and return its JSON summary (last stdout line)."""
     argv = [*config.command, *args]
     LOGGER.info("Running %s", " ".join(argv))
+    # stderr is inherited, so progress and any traceback stream into the task log even when the command fails.
     result = subprocess.run(  # noqa: S603 - argv from configuration and fixed flags, no shell
-        argv, check=True, timeout=config.timeout_seconds, capture_output=True, text=True, shell=False
+        argv, check=True, timeout=config.timeout_seconds, stdout=subprocess.PIPE, text=True, shell=False
     )
-    if result.stderr:
-        LOGGER.info("%s", result.stderr[-20000:])
     return json.loads(result.stdout.strip().splitlines()[-1])

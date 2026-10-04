@@ -37,6 +37,7 @@ from planner_pipeline import (
 )
 from ztm_airflow_common import (
     AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
+    BIGQUERY_LOCATION,
     BIGQUERY_MARTS_DATASET,
     BIGQUERY_RAW_DATASET,
     GCP_PROJECT,
@@ -61,7 +62,8 @@ def _today() -> date:
 
 def _latest_published_date(client: bigquery.Client) -> date:
     row = next(iter(client.query(
-        f"select max(service_date) as d from `{MARTS}.fct_trip` where service_date >= date_sub(current_date(), interval 14 day)"
+        f"select max(service_date) as d from `{MARTS}.fct_trip` where service_date >= date_sub(current_date(), interval 14 day)",
+        location=BIGQUERY_LOCATION,
     ).result()))  # fmt: skip
     if row.d is None:
         raise RuntimeError("No published trips in the last 14 days")
@@ -70,11 +72,20 @@ def _latest_published_date(client: bigquery.Client) -> date:
 
 def _train(version: str) -> dict[str, Any]:
     config = PlannerConfig.from_env()
+    # Extracts and the training database take several GB; clear them whatever the outcome, and clear what a killed
+    # run left behind before starting.
+    root = config.workdir / "train"
+    shutil.rmtree(root, ignore_errors=True)
+    try:
+        return _train_in(config, root / version, version)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _train_in(config: PlannerConfig, work: Path, version: str) -> dict[str, Any]:
     client, bucket = bigquery.Client(project=GCP_PROJECT), storage.Client(project=GCP_PROJECT).bucket(GCS_BUCKET)
     end = _latest_published_date(client)
     start = end - timedelta(weeks=TRAIN_WEEKS) + timedelta(days=1)
-    work = config.workdir / "train" / version
-    shutil.rmtree(work, ignore_errors=True)
     inputs = work / "inputs"
     window = {"start": start, "end": end}
     export_parquet(
@@ -114,7 +125,6 @@ def _train(version: str) -> dict[str, Any]:
         raise RuntimeError(f"Planner model {version} not promoted: {reason}")
     upload_bundle(bucket, work / "bundle", version)
     LOGGER.info("Promoted planner model %s: %s", version, reason)
-    shutil.rmtree(inputs, ignore_errors=True)
     return meta
 
 
@@ -150,6 +160,7 @@ def _snapshots(client: bigquery.Client, today: date) -> tuple[Any, Any]:
          where snapshot_timestamp < timestamp(@today, 'Europe/Warsaw') order by snapshot_timestamp desc limit 1)
         """,
         job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("today", "DATE", today)]),
+        location=BIGQUERY_LOCATION,
     ).result())  # fmt: skip
     by_kind = {row.kind: row for row in rows}
     if "latest" not in by_kind:

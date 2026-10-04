@@ -140,11 +140,13 @@ class FakeClient:
     def __init__(self, bucket: FakeBucket, shards: int) -> None:
         self.bucket, self.shards, self.queries = bucket, shards, []
 
-    def query(self, sql: str, job_config: dict[str, Any]) -> FakeJob:
+    def query(self, sql: str, job_config: dict[str, Any], location: str) -> FakeJob:
+        assert location == "europe-north1"
         self.queries.append((sql, job_config))
         return FakeJob()
 
-    def extract_table(self, table: str, uri: str, job_config: dict[str, Any]) -> FakeJob:
+    def extract_table(self, table: str, uri: str, job_config: dict[str, Any], location: str) -> FakeJob:
+        assert location == "europe-north1"
         prefix = uri.removeprefix(f"gs://{self.bucket.name}/").rsplit("/", 1)[0]
 
         def write() -> None:
@@ -238,6 +240,9 @@ def test_bundle_pointer_moves_last_and_downloads_are_cached(tmp_path: Path) -> N
     bucket.objects.clear()  # a cached version is not downloaded again
     bucket.objects[pipeline.CURRENT_POINTER] = json.dumps({"version": "v1"}).encode()
     assert pipeline.download_current_bundle(bucket, tmp_path / "cache") == first
+    pipeline.upload_bundle(bucket, local, "v2")
+    second = pipeline.download_current_bundle(bucket, tmp_path / "cache")
+    assert [p.name for p in (tmp_path / "cache").iterdir()] == [second.name] == ["v2"]  # older versions pruned
 
 
 def test_footpaths_are_optional_for_scoring(tmp_path: Path) -> None:
@@ -264,3 +269,21 @@ def test_planner_command_summary_is_the_last_stdout_line(monkeypatch: pytest.Mon
     assert calls[0][0] == ["ztm-planner", "score"]
     assert calls[0][1]["shell"] is False
     assert calls[0][1]["check"] is True
+    assert "capture_output" not in calls[0][1]  # stderr streams into the task log, also on failure
+    assert "stderr" not in calls[0][1]
+
+
+def test_training_workspace_is_cleared_when_training_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    dag = _load("dag_planner")
+    monkeypatch.setenv("PLANNER_WORKSPACE_ROOT", str(tmp_path))
+    (tmp_path / "train" / "killed-run").mkdir(parents=True)
+
+    def fail_gate(_config: Any, work: Path, version: str) -> dict[str, Any]:
+        assert not (tmp_path / "train" / "killed-run").exists()
+        (work / "inputs").mkdir(parents=True)
+        raise RuntimeError(f"Planner model {version} not promoted")
+
+    monkeypatch.setattr(dag, "_train_in", fail_gate)
+    with pytest.raises(RuntimeError, match="not promoted"):
+        dag._train("v1")
+    assert not (tmp_path / "train").exists()
