@@ -82,8 +82,8 @@
                 {% if item.kind == 'stop' %}
                   <li class="pl-node{% if loop.first %} first{% endif %}{% if loop.last %} last{% endif %}">
                     <span class="pl-node-time mono">
-                      {%- if item.depart is defined %}{{ flag(item.depart_differs, item.board_scheduled) }}{{ item.depart|clock }}
-                      {%- else %}{{ flag(item.arrive_differs, item.alight_scheduled) }}{{ item.arrive|clock }}{% endif -%}
+                      {%- if item.depart is defined %}{{ item.depart|clock }}{{ flag(item.depart_differs, item.board_scheduled) }}
+                      {%- else %}{{ item.arrive|clock }}{{ flag(item.arrive_differs, item.alight_scheduled) }}{% endif -%}
                     </span>
                     <span class="pl-dot-col" aria-hidden="true"><span class="pl-node-dot"></span></span>
                     <span class="pl-node-body">

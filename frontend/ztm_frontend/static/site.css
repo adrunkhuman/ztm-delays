@@ -2900,7 +2900,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 .pl-flag {
-  margin-right: 0.15rem;
+  margin-left: 0.15rem;
   color: var(--red);
   font-weight: 800;
   cursor: help;
@@ -2984,7 +2984,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 .pl-node,
 .pl-seg {
   display: grid;
-  grid-template-columns: 3.8rem 0.9rem minmax(0, 1fr);
+  grid-template-columns: 3.3rem 0.9rem minmax(0, 1fr);
   column-gap: 0.6rem;
 }
 
@@ -3035,11 +3035,19 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 .pl-node-time {
+  position: relative;
   padding-top: 0.1rem;
   color: var(--fg);
   font-size: 0.9rem;
   font-weight: 700;
   text-align: right;
+}
+
+/* The flag hangs in the column gap so flagged and unflagged times stay right-aligned. */
+.pl-node-time .pl-flag {
+  position: absolute;
+  left: 100%;
+  margin-left: 0.05rem;
 }
 
 .pl-node-body {
