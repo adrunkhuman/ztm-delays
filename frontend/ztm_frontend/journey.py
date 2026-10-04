@@ -353,6 +353,14 @@ def _lower(columns: list[list[int]], k: int, stop: int, value: int) -> None:
         column[stop] = value
 
 
+def _lower_walk(columns: list[dict[tuple[int, int], int]], k: int, key: tuple[int, int], value: int) -> None:
+    """Lower a sparse walking state's bound for this and every larger vehicle count."""
+    for column in columns[k:]:
+        if value >= column.get(key, INF):
+            break
+        column[key] = value
+
+
 def _deadline(
     ride: list[int], downstream: list[int], shortest: list[float], reach: list[float], target_best: int
 ) -> float:
@@ -377,11 +385,15 @@ class _Profile:
         # labels only fall, so the pruning holds for every later run.
         self.to_target = net.lower_bounds(targets) if to_target is None else to_target
         self.best = [[INF] * n for _ in columns]
-        # Ride-only labels are distinct: a better walked arrival cannot start another
-        # footpath, and therefore cannot dominate a ride for footpath expansion.
+        # Unrestricted labels can board every pattern and start a walk. A walked label can do neither,
+        # so it must not hide an unrestricted label even when it arrives earlier.
         self.best_ride = [[INF] * n for _ in columns]
-        # Earliest label a stop's trips were scanned from, by vehicles before boarding.
+        # Walks from different posts forbid different boardings. Keep sparse bounds by (stop, walk origin);
+        # -1 denotes the initial walk, whose restriction covers all origin posts.
+        self.best_walk: list[dict[tuple[int, int], int]] = [{} for _ in columns]
+        # Scan bounds must have the same restrictions as the labels that established them.
         self.scanned = [[INF] * n for _ in columns]
+        self.scanned_walk: list[dict[tuple[int, int], int]] = [{} for _ in columns]
         # First boardable position of each pattern at any origin post, for the walking rule in run().
         self.origin_board: dict[int, int] = {}
         for stop in origins:
@@ -397,21 +409,25 @@ class _Profile:
         net, origins, targets = self.net, self.origins, self.targets
         late_base, cumulative, trip_rows = net.late_base, net.cumulative, net.trip_rows
         best, best_ride, scanned, to_target = self.best, self.best_ride, self.scanned, self.to_target
-        marked: dict[int, _Label] = {}
+        best_walk, scanned_walk = self.best_walk, self.scanned_walk
+        marked: dict[tuple[int, int | None], _Label] = {}
         origin = _Label(after)
         for stop in origins:
-            if after < best[0][stop]:
+            if after < best_ride[0][stop]:
+                _lower(best_ride, 0, stop, after)
                 _lower(best, 0, stop, after)
                 if boarding is None or stop in boarding:
-                    marked[stop] = origin
+                    marked[stop, None] = origin
         for stop in origins:
             for dest, seconds in net.footpaths[stop]:
                 arrival = after + seconds
-                if arrival < best[0][dest]:
+                key = (dest, -1)
+                if arrival < best_walk[0].get(key, INF) and arrival < best_ride[0][dest]:
+                    _lower_walk(best_walk, 0, key, arrival)
                     _lower(best, 0, dest, arrival)
                     if boarding is None or dest in boarding:
                         walk = Walk(net.stop_ids[stop], net.stop_ids[dest], seconds)
-                        marked[dest] = _Label(arrival, origin, walk)
+                        marked[key] = _Label(arrival, origin, walk)
         # Not a reachable arrival, only a horizon: without it, every pattern scans the rest of the day until the
         # destination is first reached.
         horizon = after + MAX_JOURNEY_S
@@ -422,27 +438,29 @@ class _Profile:
             best_k, ride_k, scanned_before = best[vehicles], best_ride[vehicles], scanned[vehicles - 1]
             target_best = min(horizon, *(best_k[t] for t in targets))
             rides: dict[int, _Label] = {}
-            improved: dict[int, _Label] = {}
+            improved: dict[tuple[int, int | None], _Label] = {}
             # Earlier labels tend to establish tighter downstream bounds first.
             # This changes scan order only; it assumes nothing about trip overtaking.
-            for stop, previous in sorted(marked.items(), key=lambda item: item[1].time):
+            for (stop, walk_origin), previous in sorted(marked.items(), key=lambda item: item[1].time):
                 remaining = target_best - to_target[stop]
                 if previous.time >= remaining:
                     continue
                 # Trips feasible at an earlier scan's (later) label were already considered, with no more
                 # vehicles; their boarding-specific timings cannot improve the labels now.
-                until = scanned_before[stop]
-                _lower(scanned, vehicles - 1, stop, previous.time)
+                if walk_origin is None:
+                    until = scanned_before[stop]
+                    _lower(scanned, vehicles - 1, stop, previous.time)
+                else:
+                    key = (stop, walk_origin)
+                    until = min(scanned_walk[vehicles - 1].get(key, INF), scanned_before[stop])
+                    _lower_walk(scanned_walk, vehicles - 1, key, previous.time)
                 # Reached on foot: skip trips that already stop, boardable, where the walk started (for a first
                 # walk, any origin post). The same vehicle boarded later only looks better through the
                 # boarding-dependent late bound; it would also let a rider "chase" a missed vehicle, which the
                 # planner does not offer.
                 walked_from = None
-                if isinstance(previous.leg, Walk) and previous.previous is not None:
-                    first_walk = previous.previous.previous is None
-                    walked_from = (
-                        self.origin_board if first_walk else net.board_at[net.stop_index[previous.leg.from_stop]]
-                    )
+                if walk_origin is not None:
+                    walked_from = self.origin_board if walk_origin == -1 else net.board_at[walk_origin]
                 for pattern, pos, times, trips in net.incidence[stop]:
                     if walked_from is not None and walked_from.get(pattern, pos) < pos:
                         continue
@@ -490,9 +508,9 @@ class _Profile:
                                 changed = True
                                 label = _Label(arrival, previous, (trip, board, row + alight_pos))
                                 rides[dest] = label
+                                improved[dest, None] = label
                                 if arrival < best_k[dest]:
                                     _lower(best, vehicles, dest, arrival)
-                                    improved[dest] = label
                                 if dest in targets:
                                     target_best = arrival
                         if changed:
@@ -500,14 +518,18 @@ class _Profile:
             for stop, previous in rides.items():
                 for dest, seconds in net.footpaths[stop]:
                     arrival = previous.time + seconds
-                    if arrival < best_k[dest] and arrival + to_target[dest] < target_best:
+                    key = (dest, stop)
+                    if (
+                        arrival < best_walk[vehicles].get(key, INF)
+                        and arrival < ride_k[dest]
+                        and arrival + to_target[dest] < target_best
+                    ):
+                        _lower_walk(best_walk, vehicles, key, arrival)
                         _lower(best, vehicles, dest, arrival)
-                        improved[dest] = _Label(
-                            arrival, previous, Walk(net.stop_ids[stop], net.stop_ids[dest], seconds)
-                        )
+                        improved[key] = _Label(arrival, previous, Walk(net.stop_ids[stop], net.stop_ids[dest], seconds))
                         if dest in targets:
                             target_best = arrival
-            reached = [label for stop, label in improved.items() if stop in targets]
+            reached = [label for (stop, _), label in improved.items() if stop in targets]
             if reached:
                 results.append(min(reached, key=lambda label: label.time))
             marked = improved

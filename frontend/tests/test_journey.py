@@ -368,6 +368,43 @@ def test_walked_label_cannot_dominate_ride_for_another_walk() -> None:
     assert result.arrive_late == 242
 
 
+@pytest.mark.parametrize("restricted_departure", [100, 120])
+def test_walk_cannot_hide_unrestricted_boarding_arrival(restricted_departure: int) -> None:
+    # The earlier arrival at B walked from A, so it cannot board trip 3 there.
+    # With a later departure on trip 1, plan() also scans that restriction in a prior profile run.
+    trips = (
+        Trip(1, (Stop("O:1", restricted_departure), Stop("A:1", 200))),
+        Trip(2, (Stop("O:1", 100), Stop("B:1", 250))),
+        Trip(3, (Stop("A:1", 100), Stop("B:1", 300), Stop("D:1", 400))),
+    )
+    for walks in ((), (("A:1", "B:1", 30),)):
+        net = _network(*trips, walks=walks)
+        for results in (net.search("O", "D", 0), journey.plan(net, "O", "D", 0, results=10)):
+            assert len(results) == 1
+            (result,) = results
+            assert _keys(result) == [2, 3]
+            assert (result.depart, result.arrive_late, result.vehicles) == (100, 410, 2)
+            _assert_feasible(net, result)
+
+
+@pytest.mark.parametrize("restricted_departure", [100, 120])
+def test_walks_from_different_origins_keep_distinct_boarding_restrictions(restricted_departure: int) -> None:
+    # Both arrivals at B walked, but only the walk from A forbids boarding trip 3.
+    net = _network(
+        Trip(1, (Stop("O:1", restricted_departure), Stop("A:1", 200))),
+        Trip(2, (Stop("O:1", 100), Stop("C:1", 250))),
+        Trip(3, (Stop("A:1", 100), Stop("B:1", 300), Stop("D:1", 400))),
+        walks=(("A:1", "B:1", 30), ("C:1", "B:1", 30)),
+    )
+    for results in (net.search("O", "D", 0), journey.plan(net, "O", "D", 0, results=10)):
+        assert len(results) == 1
+        (result,) = results
+        assert _keys(result) == [2, 3]
+        assert result.legs[1] == Walk("C:1", "B:1", 30)
+        assert (result.depart, result.arrive_late, result.vehicles) == (100, 410, 2)
+        _assert_feasible(net, result)
+
+
 def test_distinct_posts_and_five_vehicle_limit() -> None:
     net = _network(
         Trip(1, (Stop("O:1", 100), Stop("X:1", 200))),
