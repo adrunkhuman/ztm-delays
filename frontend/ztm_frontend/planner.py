@@ -1,4 +1,4 @@
-"""Direct-trip planner over the published planner artifact.
+"""Journey cards over the published planner artifact.
 
 The artifact (``planner/planner.duckdb`` beside the serving export) is rebuilt nightly by the pipeline for the
 coming days and is read-only here. Its tables:
@@ -10,9 +10,11 @@ coming days and is read-only here. Its tables:
 - ``planner_stop``: per scheduled stop of a trip: ``trip_key``, ``stop_sequence``, ``stop_id``, ``stop_group_id``,
   ``stop_name``, ``scheduled_sod`` (seconds after service-date midnight, may exceed 24 h), ``usual_delay_s`` (median
   delay there), ``late_delay_s`` (90th percentile), ``leave_by_offset_s`` (<= 0: be at the stop this long before
-  the timetable; null at the last stop), ``ride_from_start_s`` (predicted ride from the trip's first stop).
+  the timetable; null where boarding is prohibited), ``ride_from_start_s`` (predicted ride from the trip's first
+  stop), ``can_alight`` (false at pickup-only stops).
 - ``planner_range``: calibrated ride-time spread, complete for every ``is_tram`` x ``weekday`` x ``hour`` x ride
   bucket ``(min_ride_s, max_ride_s]``: ``low_ratio``/``high_ratio`` are the 10th/90th percentile of actual/predicted.
+- ``planner_footpath``: directed walks between posts, with ``distance_m`` and ``walk_s``.
 """
 
 from __future__ import annotations
@@ -22,17 +24,18 @@ import unicodedata
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
+from ztm_frontend import journey
 from ztm_frontend.db import fetch_all, fetch_one
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 RESULTS = 6
+EXTRA_CANDIDATES = 2  # unbeaten journeys beyond RESULTS: a later one can still beat a card on usual times
 SUGGESTIONS = 8
 MIN_QUERY_LENGTH = 2
 DAY_SECONDS = 86_400
 EARLIER_STEP_SECONDS = 30 * 60
-DEFAULT_HIGH_RATIO = 1.1
 TIMETABLE_FLAG_SECONDS = 120  # expected times at least this far from the timetable get a marker
 
 
@@ -82,66 +85,157 @@ def resolve_stop_group(path: Path, stop_group_id: str | None, typed: str | None)
     return chosen
 
 
-def departures(path: Path, origin: str, destination: str, day: date, after_sod: int) -> list[dict[str, Any]]:
-    """Next direct trips from any post of ``origin`` to a later post of ``destination``.
+def connections(path: Path, origin: str, destination: str, day: date, after_sod: int) -> list[dict[str, Any]]:
+    """Up to RESULTS journey cards, by departure.
 
-    Trips expected to leave at or after ``after_sod`` on ``day``; trips of the previous service date running
-    past midnight count too.
+    The router keeps journeys that win on the late-case arrival; a journey is also dropped when another leaves
+    no earlier, with no more changes, and is expected to arrive no later (e.g. a change to the metro whose worst
+    case is better but whose usual arrival is later than staying on the bus).
     """
-    rows = fetch_all(
+    net = journey.network(path, day)
+    results = journey.plan(net, origin, destination, after_sod, RESULTS + EXTRA_CANDIDATES, useful=_unbeaten)
+    return [_connection(path, result, day) for result in results[:RESULTS]]
+
+
+def _unbeaten(found: list[journey.Journey]) -> list[journey.Journey]:
+    """Journeys no other beats on the card's leave-by minute, changes and usual arrival minute.
+
+    The router's front holds every late-case winner, often a change that saves a minute only in the late case.
+    """
+    keys = [_usual(result) for result in found]
+    return [result for result, key in zip(found, keys, strict=True) if not any(_beats(o, key) for o in keys)]
+
+
+def _usual(result: journey.Journey) -> tuple[int, int, int]:
+    expected = float(result.depart)
+    for leg in result.legs:
+        expected = expected + leg.walk_s if isinstance(leg, journey.Walk) else float(leg.arrive or 0)
+    return _floor_minute(result.depart), result.vehicles - 1, _round_minute(expected)
+
+
+def _beats(key: tuple[int, int, int], other: tuple[int, int, int]) -> bool:
+    """Leaves no earlier, with no more changes, usually arriving no later; equal keys beat neither."""
+    return key != other and key[0] >= other[0] and key[1] <= other[1] and key[2] <= other[2]
+
+
+def _ride_details(path: Path, leg: journey.Ride, day: date) -> dict[str, Any]:
+    row = fetch_one(
         path,
         """
-        with board as (select * from planner_stop where stop_group_id = ?),
-        alight as (select * from planner_stop where stop_group_id = ?),
-        pairs as (
-            select
-                t.trip_key, t.service_date, t.mode, t.line, t.headsign,
-                board.stop_sequence as board_sequence, alight.stop_sequence as alight_sequence,
-                board.stop_id as board_stop_id, board.stop_name as board_name, alight.stop_name as alight_name,
-                board.scheduled_sod + ? * (t.service_date - ?::date) as board_scheduled,
-                alight.scheduled_sod + ? * (t.service_date - ?::date) as alight_scheduled,
-                board.usual_delay_s, board.late_delay_s, coalesce(board.leave_by_offset_s, 0) as leave_by_offset_s,
-                (alight.ride_from_start_s - board.ride_from_start_s)::double as ride_s,
-                alight.stop_sequence - board.stop_sequence as stop_count,
-                (board.scheduled_sod // 3600) % 24 as board_hour,
-                -- weekday/weekend by service date, as the ranges were calibrated
-                isodow(t.service_date) <= 5 as weekday
-            from board
-            join alight using (trip_key)
-            join planner_trip t using (trip_key)
-            where alight.stop_sequence > board.stop_sequence and t.service_date in (?::date, ?::date - 1)
-            qualify row_number() over (partition by t.trip_key order by alight.stop_sequence - board.stop_sequence) = 1
-        )
-        select pairs.*, coalesce(r.high_ratio, ?)::double as high_ratio
-        from pairs
-        left join planner_range r
-            on r.is_tram = (pairs.mode = 'tram') and r.weekday = pairs.weekday and r.hour = pairs.board_hour
-            and pairs.ride_s > r.min_ride_s and pairs.ride_s <= r.max_ride_s
-        where board_scheduled + usual_delay_s >= ?
-        order by board_scheduled + usual_delay_s, ride_s
-        limit ?
+        select t.trip_key, t.mode, t.line, t.headsign,
+            b.stop_sequence as board_sequence, a.stop_sequence as alight_sequence,
+            b.stop_id as board_stop_id, a.stop_id as alight_stop_id,
+            b.stop_name as board_name, a.stop_name as alight_name,
+            b.scheduled_sod + ? * (t.service_date - ?::date) as board_scheduled,
+            a.scheduled_sod + ? * (t.service_date - ?::date) as alight_scheduled,
+            a.stop_sequence - b.stop_sequence as stop_count
+        from planner_trip t
+        join planner_stop b using (trip_key)
+        join planner_stop a using (trip_key)
+        where t.trip_key = ? and b.stop_sequence = ? and a.stop_sequence = ?
         """,
-        [origin, destination, DAY_SECONDS, day, DAY_SECONDS, day, day, day, DEFAULT_HIGH_RATIO, after_sod, RESULTS],
+        [DAY_SECONDS, day, DAY_SECONDS, day, leg.trip_key, leg.board_sequence, leg.alight_sequence],
     )
-    return [_departure(row) for row in rows]
+    if row is None or leg.depart is None or leg.arrive is None or leg.arrive_late is None:
+        raise ValueError("journey leg missing from the planner artifact")
+    return row
 
 
-def _departure(row: dict[str, Any]) -> dict[str, Any]:
-    depart = row["board_scheduled"] + row["usual_delay_s"]
-    arrive = depart + row["ride_s"]
-    # Late-side spread of the departure plus that of the ride; summed because combining them as independent
-    # errors under-covered on held-out data (~86% instead of 90%).
-    arrive_by = arrive + (row["late_delay_s"] - row["usual_delay_s"]) + row["ride_s"] * (row["high_ratio"] - 1)
+def _walk_details(path: Path, leg: journey.Walk) -> dict[str, Any]:
+    row = fetch_one(
+        path,
+        """
+        select (select any_value(stop_name) from planner_stop where stop_id = ?) as from_name,
+            (select any_value(stop_name) from planner_stop where stop_id = ?) as to_name,
+            (select min(distance_m) from planner_footpath where from_stop_id = ? and to_stop_id = ?) as distance_m
+        """,
+        [leg.from_stop, leg.to_stop, leg.from_stop, leg.to_stop],
+    )
+    if row is None or row["from_name"] is None or row["to_name"] is None:
+        raise ValueError("journey walk missing from the planner artifact")
+    return row
+
+
+def post_label(stop_id: str) -> str:
+    """Which post of a stop: ZTM bus and tram posts are the stop group plus a two-digit number."""
+    if "M:" in stop_id:
+        return "metro"
+    if len(stop_id) == 4:  # noqa: PLR2004 - SKM stations are bare four-digit groups
+        return "train"
+    return stop_id[4:]
+
+
+def _stop_node(stop_id: str, name: str) -> dict[str, Any]:
+    return {"kind": "stop", "stop_id": stop_id, "name": name, "post": post_label(stop_id)}
+
+
+def _connection(path: Path, result: journey.Journey, day: date) -> dict[str, Any]:
+    """Card model: summary chips and an itinerary of stop nodes joined by ride or walk segments.
+
+    Stop times shown are expected times; a boarding node also shows when to be there (the never-early margin).
+    A change at the same post is one node with both an arrival and a departure.
+    """
+    nodes: list[dict[str, Any]] = []  # nodes[i] and nodes[i + 1] are joined by segments[i]
+    segments: list[dict[str, Any]] = []
+    chips: list[dict[str, Any]] = []
+    expected: float = result.depart
+    for leg in result.legs:
+        if isinstance(leg, journey.Walk):
+            walk = _walk_details(path, leg)
+            if not nodes:
+                nodes.append({**_stop_node(leg.from_stop, walk["from_name"]), "depart": _floor_minute(result.depart)})
+            minutes = max(1, math.ceil(leg.walk_s / 60))
+            segments.append({"kind": "walk", "minutes": minutes, "distance_m": walk["distance_m"]})
+            chips.append({"kind": "walk", "minutes": minutes})
+            expected += leg.walk_s
+            nodes.append({**_stop_node(leg.to_stop, walk["to_name"]), "arrive": _round_minute(expected)})
+            continue
+        ride = _ride_details(path, leg, day)
+        depart, arrive = float(leg.depart or 0), float(leg.arrive or 0)
+        if not nodes or nodes[-1]["stop_id"] != ride["board_stop_id"]:
+            nodes.append(_stop_node(ride["board_stop_id"], ride["board_name"]))
+        board = nodes[-1]
+        board.update(
+            depart=_round_minute(depart),
+            depart_differs=differs_from_timetable(depart, ride["board_scheduled"]),
+            board_scheduled=ride["board_scheduled"],
+            be_by=_floor_minute(leg.board_by),
+        )
+        if any(seg["kind"] == "ride" for seg in segments):
+            # A change; the router already guarantees it holds when the previous vehicle runs late.
+            board["wait_minutes"] = max(0, round((depart - expected) / 60))
+        segments.append({
+            "kind": "ride",
+            "trip_key": ride["trip_key"],
+            "mode": ride["mode"],
+            "line": ride["line"],
+            "headsign": ride["headsign"],
+            "board_sequence": ride["board_sequence"],
+            "alight_sequence": ride["alight_sequence"],
+            "stop_count": ride["stop_count"],
+            "minutes": max(1, round((arrive - depart) / 60)),
+        })  # fmt: skip
+        chips.append({"kind": "ride", "mode": ride["mode"], "line": ride["line"]})
+        expected = arrive
+        nodes.append({
+            **_stop_node(ride["alight_stop_id"], ride["alight_name"]),
+            "arrive": _round_minute(arrive),
+            "arrive_differs": differs_from_timetable(arrive, ride["alight_scheduled"]),
+            "alight_scheduled": ride["alight_scheduled"],
+        })  # fmt: skip
+    first_board = next(n for n in nodes if "be_by" in n)
     return {
-        **row,
-        "depart": _round_minute(depart),
-        "depart_differs": differs_from_timetable(depart, row["board_scheduled"]),
-        "leave_by": _floor_minute(row["board_scheduled"] + row["leave_by_offset_s"]),
-        "arrive": _round_minute(arrive),
-        "arrive_differs": differs_from_timetable(arrive, row["alight_scheduled"]),
-        "arrive_by": _ceil_minute(arrive_by),
-        "ride_minutes": max(1, round(row["ride_s"] / 60)),
-        "timetable_minutes": max(1, round((row["alight_scheduled"] - row["board_scheduled"]) / 60)),
+        "depart": result.depart,  # seconds, for pagination; the card shows leave_by
+        "leave_by": _floor_minute(result.depart),
+        "initial_walk": isinstance(result.legs[0], journey.Walk),
+        "from_name": first_board["name"],
+        "from_post": first_board["post"],
+        "arrive": _round_minute(expected),
+        "arrive_by": _ceil_minute(result.arrive_late),
+        "duration_minutes": max(1, math.ceil((expected - result.depart) / 60)),
+        "changes": result.vehicles - 1,
+        "chips": chips,
+        "timeline": [item for pair in zip(nodes, [*segments, None], strict=True) for item in pair if item],
     }
 
 
@@ -152,7 +246,7 @@ def trip_stops(path: Path, trip_key: int, board_sequence: int, alight_sequence: 
         """
         select s.stop_sequence, s.stop_name, s.stop_id,
             s.scheduled_sod + ? * (t.service_date - ?::date) as scheduled,
-            s.ride_from_start_s::double as ride_from_start_s, s.usual_delay_s
+            s.ride_from_start_s::double as ride_from_start_s, s.usual_delay_s, s.leave_by_offset_s
         from planner_stop s join planner_trip t using (trip_key)
         where s.trip_key = ? and s.stop_sequence between ? and ?
         order by s.stop_sequence
@@ -161,7 +255,9 @@ def trip_stops(path: Path, trip_key: int, board_sequence: int, alight_sequence: 
     )
     if not rows:
         return []
-    start = rows[0]["scheduled"] + rows[0]["usual_delay_s"] - rows[0]["ride_from_start_s"]
+    board = rows[0]
+    depart = board["scheduled"] + max(board["usual_delay_s"], board["leave_by_offset_s"] or 0)
+    start = depart - board["ride_from_start_s"]
     stops = []
     for row in rows:
         expected = start + row["ride_from_start_s"]
@@ -213,7 +309,7 @@ def _ceil_minute(seconds: float) -> int:
 
 
 def get_page(path: Path, args: dict[str, str], today: date, now_sod: int) -> dict[str, Any]:
-    """Template context for the planner: the search form state and, with both stops chosen, departures."""
+    """Template context for the search form and, with both stops chosen, modelled journeys."""
     dates = available_dates(path)
     requested = parse_date(args.get("date"))
     # Default to today; outside the published window fall back to its first day.
@@ -223,8 +319,9 @@ def get_page(path: Path, args: dict[str, str], today: date, now_sod: int) -> dic
     destination = resolve_stop_group(path, args.get("to"), args.get("q_to"))
     results: list[dict[str, Any]] = []
     if origin and destination and origin["stop_group_id"] != destination["stop_group_id"]:
-        results = departures(path, origin["stop_group_id"], destination["stop_group_id"], day, after)
-    later = results[-1]["depart"] + 60 if results else None
+        results = connections(path, origin["stop_group_id"], destination["stop_group_id"], day, after)
+    # The form searches whole minutes; advance past the last raw boarding deadline.
+    later = _floor_minute(results[-1]["depart"]) + 60 if results else None
     return {
         "dates": dates,
         "day": day,

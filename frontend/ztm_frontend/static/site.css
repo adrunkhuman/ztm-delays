@@ -2900,26 +2900,207 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 .pl-flag {
-  margin-left: 0.15rem;
+  margin-right: 0.15rem;
   color: var(--red);
   font-weight: 800;
   cursor: help;
 }
 
-.pl-body {
-  padding: 0 1rem 0.9rem;
-  border-top: 1px solid var(--hair);
+.pl-pill {
+  padding: 0 0.3rem;
 }
 
-.pl-promise {
-  margin: 0.7rem 0 0;
-  color: var(--muted);
+.pl-pill.mode-bus {
+  border-color: #6c55a8;
+  color: #c2b0ff;
+}
+
+.pl-pill.mode-tram {
+  border-color: #8a7330;
+  color: #e6c55c;
+}
+
+.pl-pill.mode-metro {
+  border-color: #3a5fb8;
+  color: #9db8ff;
+}
+
+.pl-pill.mode-rail {
+  border-color: #2f7a50;
+  color: #7fd3a0;
+}
+
+.pl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.pl-sep {
+  color: var(--dim);
   font-size: 0.8rem;
 }
 
-.pl-promise b {
+.pl-walker {
+  width: 0.6rem;
+  height: 0.8rem;
+  margin-right: 0.15rem;
+  fill: currentColor;
+  vertical-align: -0.1rem;
+}
+
+.pl-walk-chip {
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.pl-sub {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl-sub .mono,
+.pl-post {
+  color: #8a8a8a;
+  font-size: 0.72rem;
+  font-weight: 400;
+}
+
+/* Itinerary: time | rail with dots and lines | text. Segments draw the rail in their mode's colour. */
+.pl-timeline {
+  margin: 0;
+  padding: 0.6rem 1rem 0.9rem;
+  border-top: 1px solid var(--hair);
+  list-style: none;
+  --rail: #555555;
+  --note: #b4b4b4;
+}
+
+.pl-node,
+.pl-seg {
+  display: grid;
+  grid-template-columns: 3.8rem 0.9rem minmax(0, 1fr);
+  column-gap: 0.6rem;
+}
+
+.pl-dot-col {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+.pl-node .pl-dot-col::before,
+.pl-node .pl-dot-col::after {
+  position: absolute;
+  left: calc(50% - 1px);
+  width: 2px;
+  background: var(--dim);
+  content: "";
+}
+
+.pl-node .pl-dot-col::before {
+  top: 0;
+  height: 0.55rem;
+}
+
+.pl-node .pl-dot-col::after {
+  top: 0.55rem;
+  bottom: 0;
+}
+
+.pl-node.first .pl-dot-col::before,
+.pl-node.last .pl-dot-col::after {
+  display: none;
+}
+
+.pl-node-dot {
+  position: relative;
+  z-index: 1;
+  width: 0.62rem;
+  height: 0.62rem;
+  margin-top: 0.3rem;
+  border: 2px solid var(--fg);
+  border-radius: 50%;
+  background: var(--panel);
+}
+
+.pl-node.first .pl-node-dot,
+.pl-node.last .pl-node-dot {
+  background: var(--fg);
+}
+
+.pl-node-time {
+  padding-top: 0.1rem;
+  color: var(--fg);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-align: right;
+}
+
+.pl-node-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0.1rem 0 0.35rem;
+}
+
+.pl-node-name {
+  color: var(--fg);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.pl-node-note {
+  color: var(--note);
+  font-size: 0.8rem;
+}
+
+.pl-node-note b {
   color: var(--fg);
   font-weight: 700;
+}
+
+.pl-seg-line {
+  width: 4px;
+  height: 100%;
+  background: var(--rail);
+}
+
+.pl-seg.ride.mode-bus { --rail: #6c55a8; }
+.pl-seg.ride.mode-tram { --rail: #8a7330; }
+.pl-seg.ride.mode-metro { --rail: #3a5fb8; }
+.pl-seg.ride.mode-rail { --rail: #2f7a50; }
+
+.pl-seg.walk .pl-seg-line {
+  width: 0;
+  border-left: 2px dotted var(--note);
+  background: none;
+}
+
+.pl-seg-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.45rem 0 0.6rem;
+  font-size: 0.8rem;
+}
+
+.pl-stops-toggle > summary {
+  width: fit-content;
+  color: var(--note);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.pl-stops-toggle > summary:hover {
+  color: var(--fg);
 }
 
 .pl-trip {
@@ -2938,7 +3119,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   gap: 0.6rem;
   padding: 0.22rem 0;
   border-bottom: 1px solid var(--hair);
-  color: #9a9a9a;
+  color: var(--note);
   font-size: 0.8rem;
 }
 
@@ -3003,5 +3184,22 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
   .pl-time {
     font-size: 1.5rem;
+  }
+}
+
+.pl-seg.walk .pl-seg-body {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.1rem;
+  color: var(--note);
+}
+
+@media (max-width: 600px) {
+  .pl-sub {
+    white-space: normal;
+  }
+
+  .pl-timeline {
+    padding: 0.5rem 0.75rem 0.8rem;
   }
 }

@@ -10,6 +10,14 @@
   {{ url_for('planner_page', date=day, time=time_value, **{'from': origin.stop_group_id, 'to': destination.stop_group_id}) }}
 {%- endmacro %}
 
+{% macro pill(mode, line) -%}
+  <span class="landing-line-pill mono pl-pill mode-{{ mode }}" title="{{ mode }}">{{ line }}</span>
+{%- endmacro %}
+
+{% macro walker() -%}
+  <svg class="pl-walker" viewBox="0 0 12 16" aria-hidden="true"><circle cx="6.5" cy="2" r="1.6"/><path d="M5 5.5 3.5 9M5 5.5l2.6.6L9 9M5.6 6l-.6 4 2.4 2.2L8 15.5M5 10l-1.6 5.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+{%- endmacro %}
+
 {% block body %}
   <main class="main pl-main">
     <form class="pl-form" action="{{ url_for('planner_page') }}" method="get" autocomplete="off">
@@ -38,35 +46,87 @@
     </form>
 
     {% if origin and destination %}
-      <section class="pl-results" aria-label="Direct connections">
+      <section class="pl-results" aria-label="Connections">
         {% if earlier_time %}<a class="pl-more" href="{{ planner_href(earlier_time) }}">Earlier routes</a>{% endif %}
         {% for r in results %}
-          <details class="pl-card"
-            hx-get="{{ url_for('planner_trip', trip_key=r.trip_key, date=day, board=r.board_sequence, alight=r.alight_sequence) }}"
-            hx-trigger="toggle once" hx-target="#pl-trip-{{ loop.index }}" hx-swap="innerHTML">
+          {% set card = loop.index %}
+          <details class="pl-card">
             <summary class="pl-summary">
               <span class="pl-depart">
-                <span class="pl-label">Be at the stop at</span>
+                <span class="pl-label">{{ 'Leave at' if r.initial_walk else 'Be at the stop' }}</span>
                 <span class="pl-time mono">{{ r.leave_by|clock }}</span>
               </span>
               <span class="pl-route">
-                <span class="pl-line">
-                  <span class="landing-line-pill mono {% if r.mode == 'tram' %}tram{% endif %}">{{ r.line }}</span>
-                  <span class="pl-headsign">{{ r.headsign }}</span>
+                <span class="pl-chips">
+                  {% for c in r.chips %}
+                    {% if not loop.first %}<span class="pl-sep" aria-hidden="true">›</span>{% endif %}
+                    {% if c.kind == 'walk' %}
+                      <span class="pl-walk-chip mono" title="walk {{ c.minutes }} min">{{ walker() }}{{ c.minutes }}</span>
+                    {% else %}
+                      {{ pill(c.mode, c.line) }}
+                    {% endif %}
+                  {% endfor %}
+                </span>
+                <span class="pl-sub">
+                  from {{ r.from_name }} <span class="mono">{{ r.from_post }}</span>
+                  · {{ 'direct' if not r.changes else r.changes|string + (' change' if r.changes == 1 else ' changes') }}
                 </span>
               </span>
               <span class="pl-trip-time">
-                <span class="pl-duration mono">{{ r.ride_minutes }} min</span>
-                <span class="pl-arrival">arrives <b class="mono">{{ r.arrive|clock }}</b>{{ flag(r.arrive_differs, r.alight_scheduled) }}</span>
+                <span class="pl-duration mono">{{ r.duration_minutes }} min</span>
+                <span class="pl-arrival">arrives <b class="mono">{{ r.arrive|clock }}</b></span>
               </span>
             </summary>
-            <div class="pl-body">
-              <p class="pl-promise">9 times in 10 you'll arrive by <b class="mono">{{ r.arrive_by|clock }}</b></p>
-              <div id="pl-trip-{{ loop.index }}" class="pl-trip"><span class="muted">Loading stops…</span></div>
-            </div>
+            <ol class="pl-timeline">
+              {% for item in r.timeline %}
+                {% if item.kind == 'stop' %}
+                  <li class="pl-node{% if loop.first %} first{% endif %}{% if loop.last %} last{% endif %}">
+                    <span class="pl-node-time mono">
+                      {%- if item.depart is defined %}{{ flag(item.depart_differs, item.board_scheduled) }}{{ item.depart|clock }}
+                      {%- else %}{{ flag(item.arrive_differs, item.alight_scheduled) }}{{ item.arrive|clock }}{% endif -%}
+                    </span>
+                    <span class="pl-dot-col" aria-hidden="true"><span class="pl-node-dot"></span></span>
+                    <span class="pl-node-body">
+                      <span class="pl-node-name">{{ item.name }}{% if item.post.isdigit() %} <span class="pl-post mono">{{ item.post }}</span>{% endif %}</span>
+                      {% if loop.last %}
+                        {% if r.arrive_by - r.arrive >= 120 %}<span class="pl-node-note">running late: <b class="mono">{{ r.arrive_by|clock }}</b></span>{% endif %}
+                      {% elif item.be_by is defined %}
+                        {% set wait, early = item.wait_minutes|default(0) > 0, item.be_by < item.depart %}
+                        {% if wait or early %}
+                          <span class="pl-node-note">
+                            {%- if wait %}wait {{ item.wait_minutes }} min{% endif %}{% if wait and early %} · {% endif %}
+                            {%- if early %}be here by <b class="mono">{{ item.be_by|clock }}</b>{% endif -%}
+                          </span>
+                        {% endif %}
+                      {% endif %}
+                    </span>
+                  </li>
+                {% elif item.kind == 'walk' %}
+                  <li class="pl-seg walk">
+                    <span></span>
+                    <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
+                    <span class="pl-seg-body">{{ walker() }} walk {{ item.minutes }} min{% if item.distance_m %} · {{ item.distance_m }} m{% endif %}</span>
+                  </li>
+                {% else %}
+                  <li class="pl-seg ride mode-{{ item.mode }}">
+                    <span></span>
+                    <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
+                    <span class="pl-seg-body">
+                      <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span></span>
+                      <details class="pl-stops-toggle"
+                        hx-get="{{ url_for('planner_trip', trip_key=item.trip_key, date=day, board=item.board_sequence, alight=item.alight_sequence) }}"
+                        hx-trigger="toggle once" hx-target="#pl-trip-{{ card }}-{{ loop.index }}" hx-swap="innerHTML">
+                        <summary>{{ item.stop_count }} stop{{ 's' if item.stop_count != 1 }} · {{ item.minutes }} min</summary>
+                        <div id="pl-trip-{{ card }}-{{ loop.index }}" class="pl-trip"><span class="muted">Loading stops…</span></div>
+                      </details>
+                    </span>
+                  </li>
+                {% endif %}
+              {% endfor %}
+            </ol>
           </details>
         {% else %}
-          <p class="pl-empty">No direct connection from {{ origin.name }} to {{ destination.name }} after {{ time }}. Connections with a change aren't supported yet.</p>
+          <p class="pl-empty">No connection from {{ origin.name }} to {{ destination.name }} after {{ time }} this day.</p>
         {% endfor %}
         {% if later_time %}<a class="pl-more" href="{{ planner_href(later_time) }}">Later routes</a>{% endif %}
       </section>
@@ -74,6 +134,6 @@
       <p class="pl-empty">Choose both stops from the suggestions.</p>
     {% endif %}
 
-    <p class="pl-note">Times come from past GPS records and the weather forecast, refreshed every night. Direct connections only.</p>
+    <p class="pl-note">Bus and tram times come from past GPS records and the weather forecast, refreshed nightly; metro and SKM follow the timetable. Changes leave room for a late arrival and the walk. <span class="pl-flag">!</span> marks times at least 2 min off the timetable.</p>
   </main>
 {% endblock %}

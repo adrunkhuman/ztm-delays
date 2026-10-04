@@ -2,7 +2,7 @@
   <li class="pl-stop-head" aria-hidden="true"><span>expected</span><span></span><span>timetable</span></li>
   {% for s in stops %}
     <li class="{% if loop.first or loop.last %}pl-stop-end{% endif %}">
-      <span class="mono">{{ s.expected|clock }}{% if s.differs %}<span class="pl-flag" title="timetable {{ s.scheduled|clock }}" aria-label="differs from timetable">!</span>{% endif %}</span>
+      <span class="mono">{% if s.differs %}<span class="pl-flag" title="timetable {{ s.scheduled|clock }}" aria-label="differs from timetable">!</span>{% endif %}{{ s.expected|clock }}</span>
       <span class="pl-stop-name">{{ s.stop_name }}</span>
       <span class="mono muted">{{ s.scheduled|clock }}</span>
     </li>
