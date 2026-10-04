@@ -125,6 +125,21 @@ A rebuild never exposes a partial month. It swaps directories with two renames, 
 
 The task's `report.json` records exclusions and coverage per period. Mini-map street backgrounds are fixed assets. Regenerate them with `airflow/scripts/build_route_map_backgrounds.py` only if the frames or styling change.
 
+## Trip planner
+
+`dag_planner_train` runs on Sundays at 13:00 and `dag_planner_score` daily at 02:30 Warsaw time, before the 04:00 warehouse run. Scoring needs a promoted model, so on first deployment trigger `dag_planner_train` once, then `dag_planner_score`. The tab appears once `planner/planner.duckdb` exists.
+
+| Item | Value |
+| --- | --- |
+| Output | `$SERVING_EXPORT_DIR/planner/planner.duckdb`, read by the frontend from `planner/` beside `ZTM_DUCKDB_PATH` |
+| Models | `gs://$GCS_BUCKET/planner/models/<version>/`; `planner/models/current.json` names the promoted version |
+| Workspace | `PLANNER_WORKSPACE_ROOT` (default `/opt/airflow/planner-work`): extracts, DuckDB spill, cached bundles; keep about 5 GB free on disk, not tmpfs, whose files count as memory |
+| Command | `PLANNER_COMMAND` (image default `/opt/airflow/planner-venv/bin/ztm-planner`); `PLANNER_TIMEOUT_SECONDS` defaults to 4 hours |
+| BigQuery | Training: about 16 GB billed per week (segments and two stop-table queries). Scoring: about 0.5 GB per night. Each query is capped at 20 GB. |
+| Memory | Training peaks near 3 GB and runs under a 4 GB container limit; scoring stays below 2 GB. Both use CPU cores minus two at lowered priority. |
+
+A failed promotion gate fails the training task and leaves the previous model current; its log states the held-out errors. To roll back, point `current.json` at an earlier version (`{"version": "..."}`) and rerun `dag_planner_score`. A failed scoring run leaves yesterday's artifact in place, which still covers the next six days.
+
 ## Monitoring and retention
 
 Set `AIRFLOW_FAILURE_WEBHOOK_URL` for failure callbacks. Inspect task logs, matcher metrics, export validation reports, disk capacity, and poller heartbeat freshness. Exported poller status is a snapshot, not live monitoring. Enable `LOG_BIGQUERY_DBT_JOB_COSTS` for nightly query-cost summaries; attribution is best-effort, not billing enforcement.
