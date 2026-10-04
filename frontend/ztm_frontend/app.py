@@ -11,9 +11,19 @@ from pathlib import Path
 from typing import Any
 
 import pytz
-from flask import Flask, Response, abort, current_app, render_template, request, send_from_directory, url_for
+from flask import (
+    Flask,
+    Response,
+    abort,
+    current_app,
+    make_response,
+    render_template,
+    request,
+    send_from_directory,
+    url_for,
+)
 
-from ztm_frontend import db, planner, queries
+from ztm_frontend import db, planner, planner_text, queries
 
 EARLY_DELAY_SECONDS = -60
 LATE_DELAY_SECONDS = 180
@@ -27,6 +37,8 @@ MAP_VIEWS = {"mode": ("bus", "tram"), "period": ("wd", "we")}
 MAP_POPUP_ROWS = 3
 MAP_POPUP_CHIPS = 5
 MAP_NEUTRAL_SECONDS = 10
+PLANNER_LANG_COOKIE = "planner_lang"
+PLANNER_LANG_COOKIE_SECONDS = 365 * 86_400
 
 
 def create_app() -> Flask:  # noqa: C901
@@ -206,13 +218,27 @@ def create_app() -> Flask:  # noqa: C901
 
 
 def _add_planner_routes(app: Flask) -> None:
+    app.add_template_filter(planner_text.plural, "plural")
+    app.add_template_filter(planner_text.day_label, "day_label")
+
     @app.get("/planner")
-    def planner_page() -> str:
+    def planner_page() -> Response:
         now = datetime.now(WARSAW)
-        return render_template(
-            "planner.html",
-            **planner.get_page(_planner_path(), request.args.to_dict(), now.date(), now.hour * 3600 + now.minute * 60),
+        lang = _planner_lang()
+        args = {key: value for key, value in request.args.items() if key != "lang"}
+        response = make_response(
+            render_template(
+                "planner.html",
+                lang=lang,
+                t=planner_text.TEXT[lang],
+                args=args,
+                **planner.get_page(_planner_path(), args, now.date(), now.hour * 3600 + now.minute * 60),
+            )
         )
+        if request.args.get("lang") in planner_text.LANGS:  # the switch: remember the choice
+            response.set_cookie(PLANNER_LANG_COOKIE, lang, max_age=PLANNER_LANG_COOKIE_SECONDS, samesite="Lax")
+        response.vary.update(("Accept-Language", "Cookie"))
+        return response
 
     @app.get("/planner/suggest/<field>")
     def planner_suggest(field: str) -> str:
@@ -236,7 +262,15 @@ def _add_planner_routes(app: Flask) -> None:
         stops = planner.trip_stops(_planner_path(), trip_key, board, alight, day)
         if not stops:
             abort(404)
-        return render_template("_planner_stops.html", stops=stops)
+        return render_template("_planner_stops.html", stops=stops, t=planner_text.TEXT[_planner_lang()])
+
+
+def _planner_lang() -> str:
+    """The switch's ``?lang=``, then the remembered choice, then the browser's preferred language."""
+    for chosen in (request.args.get("lang"), request.cookies.get(PLANNER_LANG_COOKIE)):
+        if chosen in planner_text.LANGS:
+            return chosen
+    return request.accept_languages.best_match(planner_text.LANGS, default=planner_text.DEFAULT_LANG)
 
 
 def _planner_path() -> Path:

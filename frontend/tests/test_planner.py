@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from html import unescape
 from http import HTTPStatus
 from pathlib import Path
@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
-from ztm_frontend import planner, queries
+from ztm_frontend import planner, planner_text, queries
 from ztm_frontend.app import create_app
 
 if TYPE_CHECKING:
@@ -86,7 +86,9 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, published: bool 
     monkeypatch.setenv("ZTM_MAPS_DIR", str(tmp_path / "maps"))
     monkeypatch.setattr(queries, "get_export_metadata", lambda _path: {})
     monkeypatch.setattr(queries, "grouped_windows_available", lambda _path: True)
-    return create_app().test_client()
+    client = create_app().test_client()
+    client.environ_base["HTTP_ACCEPT_LANGUAGE"] = "en"  # page assertions read the English wording
+    return client
 
 
 def _assert_lazy_stops(client: FlaskClient, page: str, expected: list[tuple[int, str, str]]) -> None:
@@ -253,7 +255,7 @@ def test_multi_leg_page_renders_changes_walks_and_distinct_lazy_stops(
     assert "walk 2 min · 120 m" in page
     assert "wait 8 min" in page
     assert 'be here by <b class="mono">08:06</b>' not in page  # the timetabled metro: be there when it leaves
-    assert "metro and SKM follow the timetable" in page
+    assert "Changes leave room for a late arrival and the walk." in page
     _assert_lazy_stops(client, page, [(1, "Łomianki", "Metro Marymont"), (11, "Metro Marymont", "Centrum")])
     assert 'hx-target="#pl-trip-1-2"' in page
     assert 'hx-target="#pl-trip-1-6"' in page  # the intervening walk has no lazy trip request
@@ -368,3 +370,33 @@ def test_cards_beaten_on_usual_times_are_dropped() -> None:
     assert planner._beats(direct, via_metro)  # same start, fewer changes, earlier usual arrival  # noqa: SLF001
     assert not planner._beats(direct, later)  # noqa: SLF001 - leaving later is its own option
     assert not planner._beats(direct, card(600, 0, 2280))  # noqa: SLF001 - equal cards both stay
+
+
+def test_planner_speaks_polish_to_polish_browsers_and_remembers_the_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    url = "/planner?date=2026-09-23&time=07:00&from=1001&to=4004"
+    page = client.get(url, headers={"Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"}).get_data(as_text=True)
+    assert '<main class="main pl-main" lang="pl">' in page
+    assert "1 przesiadka" in page
+    assert "pieszo 2 min · 120 m" in page
+    assert "Przesiadki mają zapas na spóźnienie pojazdu i dojście." in page
+    assert "Szukaj" in page
+    assert 'href="/planner?date=2026-09-23&amp;time=07:00&amp;from=1001&amp;to=4004&amp;lang=en"' in page
+
+    switched = client.get(url + "&lang=pl")
+    assert "planner_lang=pl" in switched.headers["Set-Cookie"]
+    assert "1 przesiadka" in client.get(url).get_data(as_text=True)  # the cookie beats the browser's English
+    stops = client.get("/planner/trip/11?date=2026-09-23&board=0&alight=1").get_data(as_text=True)
+    assert "przewidywany" in stops
+
+
+def test_polish_plurals_and_eu_dates() -> None:
+    forms = ("przesiadka", "przesiadki", "przesiadek")
+    assert [planner_text.plural(n, forms) for n in (1, 2, 4, 5, 12, 22, 25)] == [
+        "przesiadka", "przesiadki", "przesiadki", "przesiadek", "przesiadek", "przesiadki", "przesiadek",
+    ]  # fmt: skip
+    assert planner_text.plural(2, ("stop", "stops")) == "stops"
+    assert planner_text.day_label(DAY, DAY, "pl") == "Dziś, śr. 23.09"
+    assert planner_text.day_label(DAY + timedelta(days=2), DAY, "en") == "Fri 25 Sep"

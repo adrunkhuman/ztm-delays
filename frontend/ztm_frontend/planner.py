@@ -324,6 +324,7 @@ def get_page(path: Path, args: dict[str, str], today: date, now_sod: int) -> dic
     later = _floor_minute(results[-1]["depart"]) + 60 if results else None
     return {
         "dates": dates,
+        "today": today,
         "day": day,
         "time": clock(after),
         "origin": origin,
