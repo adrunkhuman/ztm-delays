@@ -20,6 +20,7 @@ from ztm_planner import artifact, assemble, bundle, features, gtfs, model, weath
 from ztm_planner.bundle import STOP_LEVELS
 from ztm_planner.db import connect, one
 from ztm_planner.settings import (
+    INTERCHANGES,
     RAIL_LATE_S,
     STATION_ACCESS_S,
     STOP_EPS_GRID,
@@ -190,6 +191,7 @@ def _footpaths(con: duckdb.DuckDBPyConnection, footpaths: Path | None) -> None:
 
     OSM distances where the weekly table covers both posts (it marks a covered post with a row to itself);
     otherwise straight line x WALK_DETOUR. Metro and rail platforms add the station access time.
+    INTERCHANGES replace the walk between their posts with a fixed time and no distance.
     """
     con.execute(
         """
@@ -232,6 +234,18 @@ def _footpaths(con: duckdb.DuckDBPyConnection, footpaths: Path | None) -> None:
             (greatest({WALK_MIN_S}, ceil(w.distance_m / {WALK_SPEED_MPS}))
                 + case when a.station or b.station then {STATION_ACCESS_S} else 0 end)::integer as walk_s
         from walk w join post a on a.stop_id = w.from_stop_id join post b on b.stop_id = w.to_stop_id
+        """
+    )
+    rows = [(a, b, s) for (x, y), s in INTERCHANGES.items() for a, b in ((x, y), (y, x))]
+    con.execute("create or replace temp table interchange (from_stop_id varchar, to_stop_id varchar, walk_s integer)")
+    con.executemany("insert into interchange values (?, ?, ?)", rows)
+    con.execute(
+        """
+        delete from out_footpath f using interchange i
+        where f.from_stop_id = i.from_stop_id and f.to_stop_id = i.to_stop_id;
+        insert into out_footpath
+        select from_stop_id, to_stop_id, null, walk_s from interchange i
+        where from_stop_id in (select stop_id from post) and to_stop_id in (select stop_id from post)
         """
     )
 

@@ -48,7 +48,7 @@
     "planner_footpath": [
       {"name": "from_stop_id", "duckdb_type": "VARCHAR", "nullable": false},
       {"name": "to_stop_id", "duckdb_type": "VARCHAR", "nullable": false},
-      {"name": "distance_m", "duckdb_type": "INTEGER", "nullable": false},
+      {"name": "distance_m", "duckdb_type": "INTEGER", "nullable": true},
       {"name": "walk_s", "duckdb_type": "INTEGER", "nullable": false}
     ]
   }

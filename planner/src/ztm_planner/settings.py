@@ -31,6 +31,8 @@ WALK_SPEED_MPS = 1.2
 WALK_DETOUR = 1.3  # straight line -> walking distance, for posts the OSM paths don't cover
 WALK_MIN_S = 30  # even between posts a few metres apart
 STATION_ACCESS_S = 60  # stairs and corridors to a metro or rail platform, on top of the walk
+# Underground interchanges OSM paths miss (they route over the street): fixed walk_s both ways, no distance.
+INTERCHANGES = {("7014M:P1", "7014M:P2"): 180}  # Świętokrzyska M1 <-> M2
 RAIL_LATE_S = 60  # SKM "late" arrival margin over its timetable; metro runs to its timetable
 
 GBM_PARAMS = {

@@ -222,7 +222,7 @@ def test_training_writes_a_complete_bundle_that_beats_the_timetable(trained: Pat
 
 
 def test_scoring_publishes_a_contract_artifact_with_learned_times(
-    tmp_path: Path, world: dict[str, Path], trained: Path
+    tmp_path: Path, world: dict[str, Path], trained: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = tmp_path / "serving" / "planner" / "planner.duckdb"
     # OSM covers Alpha's bus post and platform (a 200 m walk around a building); the rest is estimated.
@@ -236,6 +236,7 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
     duckdb.sql(
         f"copy (select * from (values {', '.join(map(str, pairs))}) t(from_stop_id, to_stop_id, distance_m)) to '{osm}'"
     )
+    monkeypatch.setattr("ztm_planner.score.INTERCHANGES", {("100301", "1001M:P1"): 90, ("100301", "absent"): 90})
     main([
         "--workdir", str(tmp_path / "work"), "--threads", "2", "--memory-limit", "1GB", "--nice", "0", "score",
         "--bundle", str(trained), "--gtfs-zip", str(world["gtfs_latest"]), "--previous-gtfs-zip", str(world["gtfs"]),
@@ -277,6 +278,11 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
     assert walks["100101>1001M:P1"] == walks["1001M:P1>100101"] == math.ceil(200 / WALK_SPEED_MPS) + STATION_ACCESS_S
     assert STATION_ACCESS_S + 60 < walks["100201>4900"] < STATION_ACCESS_S + 90  # ~65 m x detour at walking pace
     assert len([k for k in walks if k.startswith("100101>")]) == 1
+    # An interchange replaces the walk with its fixed time, both ways, and has no distance.
+    interchange = "select distance_m, walk_s from planner_footpath where from_stop_id = ? and to_stop_id = ?"
+    assert con.execute(interchange, ["100301", "1001M:P1"]).fetchall() == [(None, 90)]
+    assert con.execute(interchange, ["1001M:P1", "100301"]).fetchall() == [(None, 90)]
+    assert "100301>absent" not in walks
     # Bus rides at peak take longer than off-peak, as in the observations (40% slower).
     peak, calm = (
         one(

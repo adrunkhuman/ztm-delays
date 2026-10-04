@@ -38,7 +38,7 @@ CONTRACT: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("high_ratio", "DOUBLE", False),
     ),
     "planner_footpath": (
-        ("from_stop_id", "VARCHAR", False), ("to_stop_id", "VARCHAR", False), ("distance_m", "INTEGER", False),
+        ("from_stop_id", "VARCHAR", False), ("to_stop_id", "VARCHAR", False), ("distance_m", "INTEGER", True),
         ("walk_s", "INTEGER", False),
     ),
 }  # fmt: skip
