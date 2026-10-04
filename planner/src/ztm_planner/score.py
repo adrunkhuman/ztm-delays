@@ -145,7 +145,8 @@ def _stop_rows(con: duckdb.DuckDBPyConnection) -> None:
         """
     )
     joins, picks = [], {"dq50": [], "dq90": [], "eps": []}
-    eps_case = " ".join(f"when e.eps_index = {i} then {{t}}.e{i}" for i in range(len(STOP_EPS_GRID)))
+    # A mode x band without calibration falls back to the most conservative quantile, not to no margin.
+    eps_case = " ".join(f"when coalesce(e.eps_index, 0) = {i} then {{t}}.e{i}" for i in range(len(STOP_EPS_GRID)))
     for i, level in enumerate(STOP_LEVELS):
         on = " and ".join(f"l{i}.{key} = c.{key}" for key in STOP_LEVEL_KEYS[level])
         joins.append(f"left join (select * from stop_slots where level = '{level}') l{i} on {on}")
