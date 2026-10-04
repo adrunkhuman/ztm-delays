@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}planner · ZTM delays{% endblock %}
+
+{% macro flag(on, scheduled) -%}
+  {% if on %}<span class="pl-flag" title="timetable {{ scheduled|clock }}" aria-label="differs from timetable {{ scheduled|clock }}">!</span>{% endif %}
+{%- endmacro %}
+
+{% macro planner_href(time_value) -%}
+  {{ url_for('planner_page', date=day, time=time_value, **{'from': origin.stop_group_id, 'to': destination.stop_group_id}) }}
+{%- endmacro %}
+
+{% block body %}
+  <main class="main pl-main">
+    <form class="pl-form" action="{{ url_for('planner_page') }}" method="get" autocomplete="off">
+      <input type="hidden" name="from" value="{{ origin.stop_group_id if origin else '' }}">
+      <input type="hidden" name="to" value="{{ destination.stop_group_id if destination else '' }}">
+      <div class="pl-stops-line" aria-hidden="true"></div>
+      {% for field, chosen, placeholder in [('from', origin, 'From'), ('to', destination, 'To')] %}
+        <div class="pl-field">
+          <span class="pl-dot {{ field }}" aria-hidden="true"></span>
+          <input class="pl-input" name="q_{{ field }}" value="{{ chosen.name if chosen else '' }}" placeholder="{{ placeholder }}" aria-label="{{ placeholder }} stop"
+            hx-get="{{ url_for('planner_suggest', field=field) }}" hx-trigger="input changed delay:200ms" hx-include="closest form"
+            hx-target="#pl-suggest-{{ field }}" hx-swap="innerHTML" hx-sync="this:replace">
+          {% if field == 'to' and (origin or destination) %}
+            <a class="pl-swap" href="{{ url_for('planner_page', date=day, time=time, **{'from': destination.stop_group_id if destination else none, 'to': origin.stop_group_id if origin else none}) }}" title="Swap stops" aria-label="Swap stops">⇅</a>
+          {% endif %}
+          <div class="pl-suggestions" id="pl-suggest-{{ field }}"></div>
+        </div>
+      {% endfor %}
+      <div class="pl-when">
+        <select name="date" aria-label="Date">
+          {% for d in dates %}<option value="{{ d }}" {% if d == day %}selected{% endif %}>{{ d.strftime('%a %d %b') }}</option>{% endfor %}
+        </select>
+        <input type="time" name="time" value="{{ time }}" aria-label="Leaving after">
+        <button class="pl-go" type="submit">Show routes <span aria-hidden="true">→</span></button>
+      </div>
+    </form>
+
+    {% if origin and destination %}
+      <section class="pl-results" aria-label="Direct connections">
+        {% if earlier_time %}<a class="pl-more" href="{{ planner_href(earlier_time) }}">Earlier routes</a>{% endif %}
+        {% for r in results %}
+          <details class="pl-card"
+            hx-get="{{ url_for('planner_trip', trip_key=r.trip_key, date=day, board=r.board_sequence, alight=r.alight_sequence) }}"
+            hx-trigger="toggle once" hx-target="#pl-trip-{{ loop.index }}" hx-swap="innerHTML">
+            <summary class="pl-summary">
+              <span class="pl-depart">
+                <span class="pl-label">Be at the stop at</span>
+                <span class="pl-time mono">{{ r.leave_by|clock }}</span>
+              </span>
+              <span class="pl-route">
+                <span class="pl-line">
+                  <span class="landing-line-pill mono {% if r.mode == 'tram' %}tram{% endif %}">{{ r.line }}</span>
+                  <span class="pl-headsign">{{ r.headsign }}</span>
+                </span>
+              </span>
+              <span class="pl-trip-time">
+                <span class="pl-duration mono">{{ r.ride_minutes }} min</span>
+                <span class="pl-arrival">arrives <b class="mono">{{ r.arrive|clock }}</b>{{ flag(r.arrive_differs, r.alight_scheduled) }}</span>
+              </span>
+            </summary>
+            <div class="pl-body">
+              <p class="pl-promise">9 times in 10 you'll arrive by <b class="mono">{{ r.arrive_by|clock }}</b></p>
+              <div id="pl-trip-{{ loop.index }}" class="pl-trip"><span class="muted">Loading stops…</span></div>
+            </div>
+          </details>
+        {% else %}
+          <p class="pl-empty">No direct connection from {{ origin.name }} to {{ destination.name }} after {{ time }}. Connections with a change aren't supported yet.</p>
+        {% endfor %}
+        {% if later_time %}<a class="pl-more" href="{{ planner_href(later_time) }}">Later routes</a>{% endif %}
+      </section>
+    {% elif searched %}
+      <p class="pl-empty">Choose both stops from the suggestions.</p>
+    {% endif %}
+
+    <p class="pl-note">Times come from past GPS records and the weather forecast, refreshed every night. Direct connections only.</p>
+  </main>
+{% endblock %}

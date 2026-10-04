@@ -13,7 +13,7 @@ from typing import Any
 import pytz
 from flask import Flask, Response, abort, current_app, render_template, request, send_from_directory, url_for
 
-from ztm_frontend import db, queries
+from ztm_frontend import db, planner, queries
 
 EARLY_DELAY_SECONDS = -60
 LATE_DELAY_SECONDS = 180
@@ -40,7 +40,13 @@ def create_app() -> Flask:  # noqa: C901
     app.config["ZTM_DUCKDB_META_PATH"] = Path(f"{db_path}.meta.json")
     # Monthly route maps are published beside the DuckDB export, one directory per month.
     app.config["ZTM_MAPS_DIR"] = Path(os.environ.get("ZTM_MAPS_DIR", db_path.parent / "maps"))
+    # The planner artifact is published separately, nightly, beside the export (see planner.py).
+    app.config["ZTM_PLANNER_PATH"] = Path(
+        os.environ.get("ZTM_PLANNER_PATH", db_path.parent / "planner" / "planner.duckdb")
+    )
+    app.add_template_filter(planner.clock, "clock")
     app.teardown_appcontext(db.close_request_connections)
+    _add_planner_routes(app)
 
     app.add_template_filter(_format_delay, "delay")
     app.add_template_filter(_format_integer, "integer")
@@ -68,6 +74,7 @@ def create_app() -> Flask:  # noqa: C901
             "scope_href": _scope_href,
             "stylesheet_version": stylesheet_version,
             "map_available": bool(_map_months()),
+            "planner_available": current_app.config["ZTM_PLANNER_PATH"].is_file(),
         }
 
     @app.url_defaults
@@ -196,6 +203,47 @@ def create_app() -> Flask:  # noqa: C901
         return render_template("status.html", **queries.get_status(current_app.config["ZTM_DUCKDB_PATH"]))
 
     return app
+
+
+def _add_planner_routes(app: Flask) -> None:
+    @app.get("/planner")
+    def planner_page() -> str:
+        now = datetime.now(WARSAW)
+        return render_template(
+            "planner.html",
+            **planner.get_page(_planner_path(), request.args.to_dict(), now.date(), now.hour * 3600 + now.minute * 60),
+        )
+
+    @app.get("/planner/suggest/<field>")
+    def planner_suggest(field: str) -> str:
+        if field not in {"from", "to"}:
+            abort(404)
+        # Each suggestion is a link to the planner with that stop chosen and the rest of the form kept.
+        state = {key: value for key in ("date", "time", "from", "to") if (value := request.args.get(key))}
+        return render_template(
+            "_planner_suggest.html",
+            field=field,
+            state=state,
+            groups=planner.suggest(_planner_path(), request.args.get(f"q_{field}", "")),
+        )
+
+    @app.get("/planner/trip/<int(signed=True):trip_key>")
+    def planner_trip(trip_key: int) -> str:
+        day = planner.parse_date(request.args.get("date"))
+        board, alight = request.args.get("board", type=int), request.args.get("alight", type=int)
+        if day is None or board is None or alight is None:
+            abort(404)
+        stops = planner.trip_stops(_planner_path(), trip_key, board, alight, day)
+        if not stops:
+            abort(404)
+        return render_template("_planner_stops.html", stops=stops)
+
+
+def _planner_path() -> Path:
+    path: Path = current_app.config["ZTM_PLANNER_PATH"]
+    if not path.is_file():
+        abort(404)
+    return path
 
 
 def _map_months() -> list[str]:

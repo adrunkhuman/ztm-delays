@@ -44,6 +44,12 @@ The route map shows **net delay change** between consecutive scheduled stops: th
 
 Status coverage uses observed/expected service minutes in the summary and observed/expected trips in daily rows. Poller status is captured at export time, not live. Sidecar metadata is accepted only when its export ID matches the database.
 
+## Planner
+
+The planner tab finds direct connections between two stops for the coming days. A stop group (all posts of one stop) is one search entry. Each result shows when the vehicle usually leaves, the expected arrival, and on expand: when to be at the stop (vehicles very rarely leave earlier), the arrival time met nine times in ten, the timetable's version, and the stops on the way.
+
+It reads a separate artifact, `planner/planner.duckdb` beside the export or `ZTM_PLANNER_PATH`; the tab is hidden until one exists. [planner.py](ztm_frontend/planner.py) documents its tables. The artifact is rebuilt nightly by the pipeline from the current timetable and the travel-time models; page requests only read it.
+
 ## Checks
 
 From `frontend/`:

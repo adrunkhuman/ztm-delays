@@ -22,6 +22,7 @@
           <a href="{{ url_for('stops', date=navigation_date) }}" class="{% if request.endpoint == 'stops' %}active{% endif %}">stops</a>
           <a href="{{ url_for('schedule', date=navigation_date) }}" class="{% if request.endpoint in ['schedule', 'trip_detail'] %}active{% endif %}">trips</a>
           {% if map_available %}<a href="{{ url_for('route_map') }}" class="{% if request.endpoint == 'route_map' %}active{% endif %}">map</a>{% endif %}
+          {% if planner_available %}<a href="{{ url_for('planner_page') }}" class="{% if request.endpoint == 'planner_page' %}active{% endif %}">planner</a>{% endif %}
         </div>
         <div class="nav-actions">
           <a class="status-link" href="https://github.com/adrunkhuman/ztm-delays" aria-label="Project on GitHub" title="Project on GitHub">
