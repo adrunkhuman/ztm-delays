@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from http import HTTPStatus
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import duckdb
@@ -10,11 +12,10 @@ from ztm_frontend import planner, queries
 from ztm_frontend.app import create_app
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
     from flask.testing import FlaskClient
 
+CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "planner_artifact_v1.json"
 DAY = date(2026, 9, 23)  # a Wednesday
 NEGATIVE_TRIP_KEY = -5  # trip keys are signed 64-bit hashes
 NIGHT_STOP_COUNT = 2
@@ -153,3 +154,13 @@ def test_page_state_falls_back_inside_the_published_window(tmp_path: Path) -> No
     assert (outside["day"], outside["time"], outside["results"]) == (date(2026, 9, 22), "08:00", [])
     same = planner.get_page(path, {"from": "1001", "to": "1001"}, DAY, 0)
     assert same["results"] == []
+
+
+def test_fixture_follows_the_artifact_contract(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    with duckdb.connect(str(path)) as connection:
+        for table, fields in contract["tables"].items():
+            columns = [row[0] for row in connection.execute(f"describe {table}").fetchall()]
+            assert columns == [field["name"] for field in fields], table
