@@ -591,6 +591,16 @@ def _front_of_searches(net: Network, until: int) -> list[tuple[int, int, int]]:
     return sorted(j for j in found if not any(o != j and o[0] >= j[0] and o[1] <= j[1] and o[2] <= j[2] for o in found))
 
 
+def test_profile_plan_drops_journeys_a_later_window_beats() -> None:
+    # Timetabled trips arriving together: a search from 100 s keeps the first, which the second beats by leaving
+    # later, but the second leaves in the next departure window.
+    slow = Trip(1, (Stop("O:1", 100, cumulative=0), Stop("D:1", 4800, cumulative=4700)), mode="metro")
+    late = journey.PROFILE_WINDOW_S + 200
+    fast = Trip(2, (Stop("O:1", late, cumulative=0), Stop("D:1", 4800, cumulative=4800 - late)), mode="metro")
+    planned = journey.plan(_network(slow, fast), "O", "D", 0, results=2)
+    assert [_keys(j) for j in planned] == [[2]]
+
+
 @pytest.mark.parametrize("seed", [11, 512, 2026])
 def test_profile_plan_is_the_front_of_searches_from_every_departure(seed: int) -> None:
     rng = random.Random(seed)  # noqa: S311 - reproducible test inputs

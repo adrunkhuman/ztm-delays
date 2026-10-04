@@ -589,7 +589,10 @@ def plan(  # noqa: PLR0913
         for n, (departure, boarding) in enumerate(events):
             labels = profile.run(departure, boarding if n else None)
             found.extend(j for j in map(partial(_journey, net), labels) if j.depart < end)
-        found.sort(key=lambda j: (j.depart, j.arrive_late))
+        # Windows label afresh, so a later window's journey can beat an earlier window's.
+        found = sorted(
+            (j for j in found if not any(o.dominates(j) for o in found)), key=lambda j: (j.depart, j.arrive_late)
+        )
         kept = useful(found) if useful else found
         # Each window starts its labels afresh (a later window cannot reuse an earlier one's), and its every
         # departure costs a run, so size it to what is missing rather than doubling.
