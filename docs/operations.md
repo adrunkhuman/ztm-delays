@@ -127,26 +127,25 @@ The task's `report.json` records exclusions and coverage per period. Mini-map st
 
 ## Trip planner
 
-`dag_planner_train` runs on Sundays at 13:00 and `dag_planner_score` daily at 02:30 Warsaw time, before the 04:00 warehouse run. The weekly DAG runs `train_model`, then `build_footpaths` with `all_done`: walking distances are rebuilt even if training fails its promotion gate. They run sequentially to limit peak memory. Scoring needs a promoted model, so on first deployment trigger `dag_planner_train` once, confirm promotion, then trigger `dag_planner_score`. Footpaths are optional for scoring. When upgrading an older planner build, retrain and promote a model bundle after the missing-feature fix, then score a new artifact containing footpaths and alighting permissions before deploying the new frontend. Old bundles treated missing features as zeros; the corrected model uses missing values. The tab appears once `planner/planner.duckdb` exists.
+`dag_planner_train` runs on Sundays at 13:00 Warsaw time: `train_model`, then `build_footpaths`. They run one after the other to limit peak memory, and `build_footpaths` runs even when training fails (`all_done`). `dag_planner_score` runs daily at 06:30, after the 04:00 warehouse run has published yesterday. Its recent conditions end on the latest published day, so a late warehouse run makes them a day older but never leaves a gap. The planner tab appears once `planner/planner.duckdb` exists.
+
+On first deployment, trigger `dag_planner_train`, confirm promotion in its log, then trigger `dag_planner_score`. Scoring fails until a model is promoted. The footpath build holds the regional OSM graph in memory, outside DuckDB's limit; check its peak on the first run.
 
 | Item | Value |
 | --- | --- |
 | Output | `$SERVING_EXPORT_DIR/planner/planner.duckdb`, read by the frontend from `planner/` beside `ZTM_DUCKDB_PATH` |
 | Models | `gs://$GCS_BUCKET/planner/models/<version>/`; `planner/models/current.json` names the promoted version |
-| Footpaths | `gs://$GCS_BUCKET/planner/footpaths/footpaths.parquet`; weekly distances downloaded by nightly scoring and converted to `planner_footpath` walking times in the artifact |
-| Tasks | Weekly: `train_model` → `build_footpaths`; nightly: `publish_planner` |
-| Workspace | `PLANNER_WORKSPACE_ROOT` (default `/opt/airflow/planner-work`): extracts, DuckDB spill, cached bundles and OSM build files; keep about 5 GB free for training/scoring plus room for the regional PBF and footpath build, on disk rather than tmpfs |
-| Command | `PLANNER_COMMAND` (image default `/opt/airflow/planner-venv/bin/ztm-planner`); `PLANNER_TIMEOUT_SECONDS` defaults to 4 hours |
-| BigQuery | Training: about 16 GB billed per week (segments and two stop-table queries). Scoring: about 0.5 GB per night. Each query is capped at 20 GB. |
-| Memory | Training peaks near 3 GB and runs under a 4 GB container limit; scoring stays below 2 GB. Both use CPU cores minus two at lowered priority. |
+| Footpaths | `gs://$GCS_BUCKET/planner/footpaths/footpaths.parquet`, rebuilt weekly and turned into walking times by scoring |
+| Workspace | `PLANNER_WORKSPACE_ROOT` (default `/opt/airflow/planner-work`), on disk rather than tmpfs, with about 5 GB free. Training clears its folder after every run; scoring keeps only the current bundle. |
+| Command | `PLANNER_COMMAND` (image default `/opt/airflow/planner-venv/bin/ztm-planner`). Global flags go before the subcommand, e.g. `ztm-planner --memory-limit 1000MB`. `PLANNER_TIMEOUT_SECONDS` defaults to 4 hours. Progress and errors stream into the task log. |
+| BigQuery | Training about 16 GB billed per week; scoring about 0.5 GB per night. Each query is capped at 20 GB. |
+| Memory | Training peaks near 3 GB, scoring below 2 GB. Both use CPU cores minus two at lowered priority. |
 
-`build_footpaths` downloads the latest GTFS ZIP and [Geofabrik's Mazowieckie PBF](https://download.geofabrik.de/europe/poland/mazowieckie-latest.osm.pbf), streams the PBF to disk, then runs `ztm-planner footpaths`. The download URL is fixed in `planner_pipeline.py`, not an environment setting. Allow outbound HTTPS to Geofabrik as well as the existing cloud and weather services. Files use `$PLANNER_WORKSPACE_ROOT/footpaths/` and are removed after successful publication; a failed build can leave files there. The OSM graph is built in memory, outside DuckDB's spill limit.
+`build_footpaths` downloads the latest GTFS ZIP and [Geofabrik's Mazowieckie PBF](https://download.geofabrik.de/europe/poland/mazowieckie-latest.osm.pbf); allow outbound HTTPS to Geofabrik. The URL is fixed in `planner_pipeline.py`. A failed build keeps the previous GCS file in use and may leave files in `$PLANNER_WORKSPACE_ROOT/footpaths/`. With no file at all, scoring logs a warning and estimates every walk; an error downloading an existing file fails scoring instead. To refresh only walks, rerun `build_footpaths`, then `publish_planner`.
 
-A failed footpath build leaves the previous GCS file available to scoring. If no file exists yet, scoring logs a warning and estimates all walks from straight-line distance × 1.3. Uncovered posts, including new posts absent from the weekly file, also use estimates. If both posts are covered but no OSM path is within 700 m, scoring does not add an estimated connection. An error downloading an existing GCS file fails scoring; it does not silently switch to estimates. To refresh only walks, rerun `build_footpaths`, then `publish_planner` to include them in the frontend artifact.
+A failed promotion gate fails `train_model`, logs the held-out errors and keeps the previous model; `training_complete` then fails too, even if footpaths succeed. To roll back, point `current.json` at an earlier version (`{"version": "..."}`) and rerun `dag_planner_score`. A failed scoring run leaves the previous artifact, which still covers the next six days.
 
-Journey requests read the artifact locally. The [router](../frontend/ztm_frontend/journey.py) caches the last two service-day networks and invalidates them when the artifact's modification time changes. Its boarding-dependent search allows overtaking without a FIFO assumption, uses up to five vehicles, and lists departures with a profile search that finds every nondominated alternative leaving in the searched windows (up to 8 h after the requested time). Each change requires `conservative arrival + walk <= next board_by`. [Ride bounds](../planner/README.md#journeys-and-walks) combine boarding delay with predicted duration and do not establish 90% end-to-end reliability. Previous-day night trips are included, but the next service day's daytime trips are not part of the same search; cross-service-day routing remains deferred. The page integration adds per-leg cards, walks/change deadlines and lazy stop lists.
-
-A failed promotion gate fails the training task and leaves the previous model current; its log states the held-out errors. The final `training_complete` task requires both training and footpaths to succeed, so successful footpaths cannot mask a training failure in the DAG status. To roll back, point `current.json` at an earlier version (`{"version": "..."}`) and rerun `dag_planner_score`. A failed scoring run leaves yesterday's artifact in place, which still covers the next six days.
+The frontend reads the artifact locally. Each process caches the networks of two service days, keyed by the artifact's `build_id`; building one takes about 1.5 s.
 
 ## Monitoring and retention
 

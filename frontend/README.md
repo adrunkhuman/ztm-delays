@@ -46,13 +46,13 @@ Status coverage uses observed/expected service minutes in the summary and observ
 
 ## Planner
 
-The [journey router](ztm_frontend/journey.py) finds connections between stop groups (all posts of one stop), with up to five vehicles and walks. The planner page shows per-leg cards, walking legs and change deadlines, and loads each ride's stop list only when expanded.
+The planner tab reads a separate artifact, `planner/planner.duckdb` beside the export or `ZTM_PLANNER_PATH`, and stays hidden until one exists. The pipeline rebuilds it nightly; [planner.py](ztm_frontend/planner.py) lists its tables.
 
-Bus and tram expected arrivals use the boarding stop's usual delay plus the predicted cumulative ride-time difference. Conservative arrivals use the boarding stop's late delay plus a monotone calibrated upper ride-duration envelope (ratios at least 1; fallback 1.1). Departure bases are clamped to the boarding deadline, and the conservative base is never earlier than expected departure. Metro and SKM retain timetable ride durations, with a fixed 60 s late margin for SKM. Every change requires `conservative arrival + walk <= next board_by`; a same-post change has zero walk. These per-ride bounds are planning margins, not a claim of 90% end-to-end reliability.
+The [journey router](ztm_frontend/journey.py) searches between stop groups (all posts of one stop) with up to five vehicles and walks before, between and after rides. It is a round-based search in the style of RAPTOR, except that it does not assume trips keep their order, because predicted times let them overtake. A profile search (rRAPTOR) lists every journey not beaten on departure, conservative arrival and number of vehicles, leaving up to 8 h after the requested time. It includes previous-day trips running past midnight but not the next day's trips. [Planner timing](../planner/README.md#journeys-and-walks) defines expected and conservative times.
 
-The bounded round-based earliest-arrival search is inspired by RAPTOR but does not assume FIFO: trips may overtake. Departures come from a profile search (rRAPTOR: windows from the requested time, each run from its latest departure to its earliest, reusing labels), pruned by a no-waiting lower bound to the destination; within the searched windows the list of nondominated alternatives is complete. Previous-day night trips are supported; next service day's daytime trips are not included in the same search, and cross-service-day routing is deferred.
+Each process caches the networks of two service days, keyed by the artifact's `build_id`. Cards show when to be at the stop, the changes and walks, and load a ride's stop list only when expanded. Times differing from the timetable by 2 min or more are flagged with `!`.
 
-It reads a separate artifact, `planner/planner.duckdb` beside the export or `ZTM_PLANNER_PATH`; the tab is hidden until one exists. [planner.py](ztm_frontend/planner.py) documents its tables. The artifact is rebuilt nightly by the pipeline from the current timetable and the travel-time models; page requests only read it.
+The planner is in Polish and English. The PL/EN switch stores the choice in a cookie; without one, browsers preferring English get English and others Polish. Wording lives in [planner_text.py](ztm_frontend/planner_text.py).
 
 ## Checks
 
