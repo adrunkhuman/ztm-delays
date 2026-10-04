@@ -9,7 +9,7 @@ import os
 from datetime import date
 from pathlib import Path
 
-from ztm_planner import score, train
+from ztm_planner import footpaths, score, train
 from ztm_planner.settings import HORIZON_DAYS, Resources
 
 
@@ -42,6 +42,12 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--days", type=int, default=HORIZON_DAYS)
     s.add_argument("--output", type=Path, required=True)
     s.add_argument("--build-id", default=None)
+    s.add_argument("--footpaths", type=Path, help="weekly OSM footpaths parquet; walks are estimated without it")
+
+    f = sub.add_parser("footpaths", help="OSM extract + GTFS stops -> walking distances between nearby posts")
+    f.add_argument("--osm-pbf", type=Path, required=True)
+    f.add_argument("--gtfs-zip", type=Path, required=True)
+    f.add_argument("--output", type=Path, required=True)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -58,9 +64,12 @@ def main(argv: list[str] | None = None) -> None:
             args.segments, args.weather_json, args.stop_slots, args.stop_eps, args.start, args.end
         )
         result = train.train(inputs, args.workdir, args.bundle_out, args.version, resources)
+    elif args.command == "footpaths":
+        result = footpaths.build(args.osm_pbf, args.gtfs_zip, args.output)
     else:
         result = score.score(
             args.bundle, args.gtfs_zip, args.recent_daily, args.weather_json, args.start, args.days,
             args.workdir, args.output, args.build_id or score.build_id_now(), resources, args.previous_gtfs_zip,
+            args.footpaths,
         )  # fmt: skip
     print(json.dumps(result, sort_keys=True))

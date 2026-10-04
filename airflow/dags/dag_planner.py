@@ -1,7 +1,8 @@
 """Trip planner: weekly model training and the nightly planner artifact beside the serving export.
 
 dag_planner_train (Sunday 13:00): ten weeks of observed segments and stop arrivals -> model bundle in GCS,
-promoted only if it beats the timetable and the lookup on its own held-out week.
+promoted only if it beats the timetable and the lookup on its own held-out week; then, whatever the model gate
+decided, walking distances between nearby stop posts from the OSM extract -> footpaths in GCS.
 dag_planner_score (02:30, before the 04:00 warehouse run): current timetable + promoted bundle + weather
 forecast -> <serving>/planner/planner.duckdb for the frontend's planner tab.
 """
@@ -17,16 +18,20 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import planner_queries as queries
-from airflow.sdk import DAG, CronTriggerTimetable, task
+from airflow.sdk import DAG, CronTriggerTimetable, TriggerRule, task
 from google.cloud import bigquery, storage
 from planner_pipeline import (
+    OSM_PBF_URL,
     PlannerConfig,
+    download,
     download_current_bundle,
+    download_footpaths,
     export_parquet,
     fetch_weather,
     promotable,
     run_planner,
     upload_bundle,
+    upload_footpaths,
     weather_archive_url,
     weather_forecast_url,
 )
@@ -113,6 +118,27 @@ def _train(version: str) -> dict[str, Any]:
     return meta
 
 
+def _footpaths() -> dict[str, Any]:
+    config = PlannerConfig.from_env()
+    client, bucket = bigquery.Client(project=GCP_PROJECT), storage.Client(project=GCP_PROJECT).bucket(GCS_BUCKET)
+    work = config.workdir / "footpaths"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    snapshot, _ = _snapshots(client, _today())
+    gtfs_zip = work / "gtfs.zip"
+    storage.Blob.from_string(snapshot.gcs_path, client=bucket.client).download_to_filename(str(gtfs_zip))
+    pbf = download(OSM_PBF_URL, work / "region.osm.pbf")
+    output = work / "footpaths.parquet"
+    summary = run_planner(config, [
+        "--workdir", str(work / "run"), "footpaths", "--osm-pbf", str(pbf), "--gtfs-zip", str(gtfs_zip),
+        "--output", str(output),
+    ])  # fmt: skip
+    upload_footpaths(bucket, output)
+    LOGGER.info("Published footpaths for GTFS %s: %s", snapshot.snapshot_id, summary)
+    shutil.rmtree(work, ignore_errors=True)
+    return {**summary, "gtfs_snapshot_id": snapshot.snapshot_id}
+
+
 def _snapshots(client: bigquery.Client, today: date) -> tuple[Any, Any]:
     """Latest GTFS snapshot, and the last one taken before today (it still lists yesterday's night trips)."""
     rows = list(client.query(
@@ -168,11 +194,13 @@ def _score(run_id: str) -> dict[str, Any]:
     if len(recent) != 1:
         _merge_parquet(recent, inputs / "recent.parquet")
     weather = fetch_weather(weather_forecast_url(HORIZON_DAYS), inputs / "forecast.json")
+    footpaths = download_footpaths(bucket, inputs / "footpaths.parquet")
+    footpath_args = ["--footpaths", str(footpaths)] if footpaths else []
     output = Path(os.getenv("SERVING_EXPORT_DIR", SERVING_EXPORT_DIR)) / "planner" / "planner.duckdb"
     summary = run_planner(config, [
         "--workdir", str(work / "run"), "score", "--bundle", str(bundle), "--gtfs-zip", str(gtfs_zip), *previous_args,
         "--recent-daily", str(_single(recent, inputs / "recent.parquet")), "--weather-json", str(weather),
-        "--start", today.isoformat(), "--days", str(HORIZON_DAYS), "--output", str(output),
+        "--start", today.isoformat(), "--days", str(HORIZON_DAYS), "--output", str(output), *footpath_args,
     ])  # fmt: skip
     LOGGER.info("Published planner artifact from GTFS %s: %s", snapshot.snapshot_id, summary)
     shutil.rmtree(inputs, ignore_errors=True)
@@ -197,7 +225,20 @@ with DAG(
         """Extract, train and promote; a failed gate keeps the previous model."""
         return _train(datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"))
 
-    train_model()
+    # After training rather than beside it: both need ~1.5-3 GB and the VPS has 4 GB for them.
+    @task(trigger_rule=TriggerRule.ALL_DONE)
+    def build_footpaths() -> dict[str, Any]:
+        """OSM walking distances between nearby posts; scoring keeps the previous ones if this fails."""
+        return _footpaths()
+
+    @task(trigger_rule=TriggerRule.ALL_SUCCESS)
+    def training_complete() -> None:
+        """Keep a training failure visible even when the all-done footpath task succeeds."""
+
+    trained, walked, complete = train_model(), build_footpaths(), training_complete()
+    trained >> walked
+    trained >> complete
+    walked >> complete
 
 
 with DAG(

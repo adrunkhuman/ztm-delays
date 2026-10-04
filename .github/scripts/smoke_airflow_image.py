@@ -75,7 +75,7 @@ def main():
     run(*shlex.split(os.environ["PLANNER_COMMAND"]), "--help")
     run(
         str(home / "planner-venv/bin/python"), "-c",
-        "import sys, duckdb, lightgbm, numpy, pyarrow, ztm_planner; "
+        "import sys, duckdb, lightgbm, numpy, osmium, pyarrow, scipy, ztm_planner.footpaths; "
         "assert sys.prefix == '/opt/airflow/planner-venv'; "
         "import importlib.util; assert importlib.util.find_spec('airflow') is None",
     )

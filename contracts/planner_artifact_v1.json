@@ -33,7 +33,8 @@
       {"name": "usual_delay_s", "duckdb_type": "INTEGER", "nullable": false},
       {"name": "late_delay_s", "duckdb_type": "INTEGER", "nullable": false},
       {"name": "leave_by_offset_s", "duckdb_type": "INTEGER", "nullable": true},
-      {"name": "ride_from_start_s", "duckdb_type": "DOUBLE", "nullable": false}
+      {"name": "ride_from_start_s", "duckdb_type": "DOUBLE", "nullable": false},
+      {"name": "can_alight", "duckdb_type": "BOOLEAN", "nullable": false}
     ],
     "planner_range": [
       {"name": "is_tram", "duckdb_type": "BOOLEAN", "nullable": false},
@@ -43,6 +44,12 @@
       {"name": "max_ride_s", "duckdb_type": "DOUBLE", "nullable": false},
       {"name": "low_ratio", "duckdb_type": "DOUBLE", "nullable": false},
       {"name": "high_ratio", "duckdb_type": "DOUBLE", "nullable": false}
+    ],
+    "planner_footpath": [
+      {"name": "from_stop_id", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "to_stop_id", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "distance_m", "duckdb_type": "INTEGER", "nullable": false},
+      {"name": "walk_s", "duckdb_type": "INTEGER", "nullable": false}
     ]
   }
 }

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import urllib.request
 from dataclasses import dataclass
@@ -25,6 +26,9 @@ LOGGER = logging.getLogger(__name__)
 MODELS_PREFIX = "planner/models"
 CURRENT_POINTER = f"{MODELS_PREFIX}/current.json"
 EXTRACT_PREFIX = "planner/extracts"
+FOOTPATHS_BLOB = "planner/footpaths/footpaths.parquet"
+# Geofabrik's regional extract (~300 MB, refreshed daily); it covers every ZTM stop.
+OSM_PBF_URL = "https://download.geofabrik.de/europe/poland/mazowieckie-latest.osm.pbf"
 WARSAW_LAT, WARSAW_LON = 52.23, 21.01
 WEATHER_FIELDS = "precipitation,snowfall,temperature_2m,wind_speed_10m"
 DEFAULT_PLANNER_COMMAND = "/opt/airflow/planner-venv/bin/ztm-planner"
@@ -96,6 +100,30 @@ def fetch_weather(url: str, path: Path) -> Path:
     hourly = json.loads(path.read_text(encoding="utf-8")).get("hourly", {})
     if not hourly.get("time"):
         raise RuntimeError(f"Weather response without hourly data: {url}")
+    return path
+
+
+def download(url: str, path: Path) -> Path:
+    """Stream a large download to ``path``, replacing it only once complete."""
+    tmp = path.with_name(path.name + ".partial")
+    with urllib.request.urlopen(url, timeout=120) as response, tmp.open("wb") as out:  # noqa: S310 - fixed https URL
+        shutil.copyfileobj(response, out, length=1 << 20)
+    tmp.replace(path)
+    return path
+
+
+def upload_footpaths(bucket: storage.Bucket, path: Path) -> None:
+    """Replace the footpaths scoring reads."""
+    bucket.blob(FOOTPATHS_BLOB).upload_from_filename(str(path))
+
+
+def download_footpaths(bucket: storage.Bucket, path: Path) -> Path | None:
+    """The latest footpaths, or None before the first weekly build (scoring then estimates every walk)."""
+    blob = bucket.blob(FOOTPATHS_BLOB)
+    if not blob.exists():
+        LOGGER.warning("No footpaths at %s yet; walks will be straight-line estimates", FOOTPATHS_BLOB)
+        return None
+    blob.download_to_filename(str(path))
     return path
 
 

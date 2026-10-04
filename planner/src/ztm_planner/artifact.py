@@ -30,14 +30,23 @@ CONTRACT: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("stop_group_id", "VARCHAR", False), ("stop_name", "VARCHAR", False), ("scheduled_sod", "INTEGER", False),
         ("usual_delay_s", "INTEGER", False), ("late_delay_s", "INTEGER", False),
         ("leave_by_offset_s", "INTEGER", True), ("ride_from_start_s", "DOUBLE", False),
+        ("can_alight", "BOOLEAN", False),
     ),
     "planner_range": (
         ("is_tram", "BOOLEAN", False), ("weekday", "BOOLEAN", False), ("hour", "INTEGER", False),
         ("min_ride_s", "DOUBLE", False), ("max_ride_s", "DOUBLE", False), ("low_ratio", "DOUBLE", False),
         ("high_ratio", "DOUBLE", False),
     ),
+    "planner_footpath": (
+        ("from_stop_id", "VARCHAR", False), ("to_stop_id", "VARCHAR", False), ("distance_m", "INTEGER", False),
+        ("walk_s", "INTEGER", False),
+    ),
 }  # fmt: skip
-ORDER = {"planner_stop": "stop_group_id, trip_key, stop_sequence", "planner_trip": "trip_key"}
+ORDER = {
+    "planner_stop": "stop_group_id, trip_key, stop_sequence",
+    "planner_trip": "trip_key",
+    "planner_footpath": "from_stop_id, walk_s",
+}
 
 
 def search_key(text: str) -> str:

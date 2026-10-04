@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import date, timedelta
+from itertools import pairwise
 from pathlib import Path
 
+import conftest
 import duckdb
+import osmium
+import osmium.osm.mutable
 import pytest
-from conftest import SCORE_START, TRAIN_END, TRAIN_START, peak_factor
+from conftest import METRO_RUNS, SCORE_START, STOPS, TRAIN_END, TRAIN_START, peak_factor, write_gtfs
 
-from ztm_planner import artifact, calendar, features, gtfs, lookup, weather
+from ztm_planner import artifact, calendar, features, footpaths, gtfs, lookup, weather
 from ztm_planner.cli import main
 from ztm_planner.db import one
-from ztm_planner.settings import SHRINK, Resources
+from ztm_planner.settings import RAIL_LATE_S, SHRINK, STATION_ACCESS_S, WALK_SPEED_MPS, Resources
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "planner_artifact_v1.json"
 
@@ -72,17 +77,46 @@ def test_weather_features_roll_over_hours(tmp_path: Path) -> None:
     assert all(r[2] == 1 for r in rows[1:])  # wet within 6 h and at most 1 °C
 
 
-def test_gtfs_keeps_passenger_bus_and_tram_stops(tmp_path: Path, world: dict[str, Path]) -> None:
+def test_gtfs_splits_modelled_and_timetable_modes(tmp_path: Path, world: dict[str, Path]) -> None:
     con = duckdb.connect()
     gtfs.load_schedule(con, world["gtfs"], tmp_path, SCORE_START, SCORE_START)
     modes = {r[0] for r in con.execute("select distinct mode from sched_stop").fetchall()}
-    assert modes == {"bus", "tram"}  # metro has no observations to learn from
+    assert modes == {"bus", "tram"}  # metro and SKM have no observations to learn from
+    fixed = dict(con.execute("select mode, count(distinct trip_key) from sched_fixed group by mode").fetchall())
+    assert fixed == {"metro": METRO_RUNS, "rail": 33}
+    # Frequency runs: the template's times shifted to each start, every headway until end_time.
+    starts = [r[0] for r in con.execute(
+        "select scheduled_sod from sched_fixed where mode = 'metro' and stop_id = '1001M:P1' order by 1"
+    ).fetchall()]  # fmt: skip
+    assert starts[:2] == [6 * 3600, 6 * 3600 + 600] and starts[-1] == 9 * 3600 + 45 * 60
+    assert one(con, "select max(scheduled_sod) from sched_fixed where stop_id = '2001M:P1'")[0] == 9 * 3600 + 50 * 60
     assert one(con, "select count(*) from sched_stop where stop_id = '999901'")[0] == 0
     assert one(con, "select bool_and(request) from sched_stop where stop_id = '100201'")[0]
     gtfs.segments(con)
     trips, segs = one(con, "select count(distinct trip_key), count(*) from sched_seg")
     assert (trips, segs) == (66, 33 * 3 + 33 * 2)
     assert one(con, "select min(sched_s), max(sched_s) from sched_seg where mode = 'bus'") == (240, 240)
+
+
+def test_footpaths_follow_osm_paths_and_mark_covered_posts(tmp_path: Path, world: dict[str, Path]) -> None:
+    # An L-shaped footway from Alpha's bus post via a corner to its metro platform; a motorway (not walkable)
+    # cuts the corner. Other posts are too far from any path to snap.
+    pbf = tmp_path / "paths.osm.pbf"
+    (alpha_lat, alpha_lon), (platform_lat, platform_lon) = STOPS["100101"][1:], STOPS["1001M:P1"][1:]
+    with osmium.SimpleWriter(str(pbf)) as writer:
+        for node_id, (lat, lon) in enumerate(
+            [(alpha_lat, alpha_lon), (platform_lat, alpha_lon), (platform_lat, platform_lon)], start=1
+        ):
+            writer.add_node(osmium.osm.mutable.Node(id=node_id, location=(lon, lat), version=1))
+        writer.add_way(osmium.osm.mutable.Way(id=1, nodes=[1, 2, 3], tags={"highway": "footway"}, version=1))
+        writer.add_way(osmium.osm.mutable.Way(id=2, nodes=[1, 3], tags={"highway": "motorway"}, version=1))
+    output = tmp_path / "footpaths.parquet"
+    footpaths.build(pbf, world["gtfs"], output, min_component_nodes=1)
+    rows = {(a, b): d for a, b, d in duckdb.sql(f"select * from '{output}'").fetchall()}
+    leg_lat, leg_lon = 0.0005 * 111_195, 0.0005 * 111_195 * math.cos(math.radians(alpha_lat))
+    assert rows[("100101", "1001M:P1")] == rows[("1001M:P1", "100101")] == round(leg_lat + leg_lon)
+    assert rows[("100101", "100101")] == 0  # covered marker
+    assert {a for a, _ in rows} == {"100101", "1001M:P1"}
 
 
 def test_artifact_contract_matches_the_repository_contract() -> None:
@@ -119,6 +153,62 @@ def trained(tmp_path_factory: pytest.TempPathFactory, world: dict[str, Path]) ->
     return root / "bundle"
 
 
+def test_gtfs_alighting_restrictions_survive_scoring(
+    tmp_path: Path, world: dict[str, Path], trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The last platform is near the origin, so the synthetic artifact also has a valid footpath.
+    stops = ["100101", "100201", "100301", "100401", "200101", "200201", "1001M:P1"]
+    monkeypatch.setattr(
+        conftest, "ROUTES",
+        {line: (kind, stops, 4) for line, kind in (("110", "3"), ("17", "0"), ("M1", "1"), ("S1", "2"))},
+    )
+    timetable = tmp_path / "restricted.zip"
+    write_gtfs(timetable, SCORE_START, 1, stop_types={
+        "100201": ("0", "1"),  # pickup-only intermediate stop: keep boarding and through-riding
+        "100301": ("1", "0"),  # drop-off-only stop: keep alighting
+        "100401": ("2", "2"),  # coordination remains supported
+        "200101": ("3", "3"),  # request stop remains supported
+        "200201": ("", ""),  # blanks mean normal passenger service
+    })
+    with duckdb.connect() as con:
+        gtfs.load_schedule(con, timetable, tmp_path / "schedule", SCORE_START, SCORE_START)
+        for table, modes in (("sched_stop", {"bus", "tram"}), ("sched_fixed", {"metro", "rail"})):
+            assert {r[0] for r in con.execute(f"select distinct mode from {table}").fetchall()} == modes
+            assert one(con, f"select bool_and(no_dropoff and not no_pickup) from {table} where stop_id = '100201'")[0]
+            assert one(con, f"select count(*) from {table} where stop_id <> '100201' and no_dropoff")[0] == 0
+            assert one(con, f"select count(*) from {table} where stop_id = '999901'")[0] == 0
+        gtfs.segments(con)
+        assert one(con, "select count(distinct b_seq) from sched_seg")[0] == len(stops) - 1
+
+    output = tmp_path / "planner.duckdb"
+    main([
+        "--workdir", str(tmp_path / "work"), "--threads", "2", "--memory-limit", "1GB", "--nice", "0", "score",
+        "--bundle", str(trained), "--gtfs-zip", str(timetable), "--recent-daily", str(world["recent"]),
+        "--weather-json", str(world["weather_forecast"]), "--start", SCORE_START.isoformat(), "--days", "1",
+        "--output", str(output), "--build-id", "restricted",
+    ])  # fmt: skip
+    with duckdb.connect(str(output), read_only=True) as con:
+        columns = con.execute("describe planner_stop").fetchall()
+        assert columns[-1][:2] == ("can_alight", "BOOLEAN")
+        assert one(con, "select count(*) from planner_stop where can_alight is null")[0] == 0
+        for mode in ("bus", "tram", "metro", "rail"):
+            rows = con.execute(
+                "select s.stop_id, s.can_alight, s.leave_by_offset_s, s.ride_from_start_s "
+                "from planner_stop s join planner_trip t using (trip_key) "
+                "where t.mode = ? and t.trip_key = (select min(trip_key) from planner_trip where mode = ?) "
+                "order by s.stop_sequence", [mode, mode],
+            ).fetchall()
+            assert [r[0] for r in rows] == stops
+            assert [r[1] for r in rows] == [True, False, True, True, True, True, True]
+            assert rows[1][2] is not None  # pickup-only passengers can still board here
+            assert rows[2][2] is None  # no pickup at the drop-off-only stop
+            assert all(r[2] is not None for r in (rows[3], rows[4], rows[5]))
+            assert rows[-1][2] is None  # no boarding at the terminus
+            assert all(b[3] > a[3] for a, b in pairwise(rows))
+            if mode in {"metro", "rail"}:
+                assert [r[3] for r in rows] == [i * 240 for i in range(len(stops))]
+
+
 def test_training_writes_a_complete_bundle_that_beats_the_timetable(trained: Path) -> None:
     names = {p.name for p in trained.iterdir()}
     assert {"gbm.txt", "meta.json", "line_map.parquet", "ride_range.parquet", "stop_slots.parquet"} <= names
@@ -135,12 +225,23 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
     tmp_path: Path, world: dict[str, Path], trained: Path
 ) -> None:
     output = tmp_path / "serving" / "planner" / "planner.duckdb"
+    # OSM covers Alpha's bus post and platform (a 200 m walk around a building); the rest is estimated.
+    osm = tmp_path / "footpaths.parquet"
+    pairs = [
+        ("100101", "100101", 0),
+        ("1001M:P1", "1001M:P1", 0),
+        ("100101", "1001M:P1", 200),
+        ("1001M:P1", "100101", 200),
+    ]
+    duckdb.sql(
+        f"copy (select * from (values {', '.join(map(str, pairs))}) t(from_stop_id, to_stop_id, distance_m)) to '{osm}'"
+    )
     main([
         "--workdir", str(tmp_path / "work"), "--threads", "2", "--memory-limit", "1GB", "--nice", "0", "score",
         "--bundle", str(trained), "--gtfs-zip", str(world["gtfs_latest"]), "--previous-gtfs-zip", str(world["gtfs"]),
         "--recent-daily", str(world["recent"]),
         "--weather-json", str(world["weather_forecast"]), "--start", SCORE_START.isoformat(), "--days", "7",
-        "--output", str(output), "--build-id", "b-test",
+        "--output", str(output), "--build-id", "b-test", "--footpaths", str(osm),
     ])  # fmt: skip
     con = duckdb.connect(str(output), read_only=True)
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
@@ -163,6 +264,19 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
     ]
     groups = dict(con.execute("select stop_group_id, search_key from planner_stop_group").fetchall())
     assert groups["1001"] == "alpha"
+    assert "M1" in one(con, "select lines from planner_stop_group where stop_group_id = '1001'")[0]
+    # Metro and SKM keep their timetable: no delay, board on time, ride = timetable difference.
+    fixed = one(
+        con,
+        "select count(*), max(abs(usual_delay_s)), max(abs(leave_by_offset_s)), max(late_delay_s), "
+        "max(ride_from_start_s) from planner_stop s join planner_trip t using (trip_key) where t.mode = 'rail'",
+    )
+    assert fixed[0] > 0 and fixed[1:] == (0, 0, RAIL_LATE_S, 9 * 60)
+    # OSM distances where covered, straight-line estimates elsewhere; platforms add the station access time.
+    walks = dict(con.execute("select from_stop_id || '>' || to_stop_id, walk_s from planner_footpath").fetchall())
+    assert walks["100101>1001M:P1"] == walks["1001M:P1>100101"] == math.ceil(200 / WALK_SPEED_MPS) + STATION_ACCESS_S
+    assert STATION_ACCESS_S + 60 < walks["100201>4900"] < STATION_ACCESS_S + 90  # ~65 m x detour at walking pace
+    assert len([k for k in walks if k.startswith("100101>")]) == 1
     # Bus rides at peak take longer than off-peak, as in the observations (40% slower).
     peak, calm = (
         one(

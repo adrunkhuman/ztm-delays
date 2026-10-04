@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "Travel-time models and nightly trip-planner artifact for Warsaw ZTM."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["duckdb>=1.4.0", "lightgbm>=4.6.0", "numpy>=2.0.0", "pyarrow>=22.0.0"]
+dependencies = [
+    "duckdb>=1.4.0",
+    "lightgbm>=4.6.0",
+    "numpy>=2.0.0",
+    "osmium>=4.3.1",
+    "pyarrow>=22.0.0",
+    "scipy>=1.18.1",
+]
 
 [project.scripts]
 ztm-planner = "ztm_planner.cli:main"

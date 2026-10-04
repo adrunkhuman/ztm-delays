@@ -7,7 +7,7 @@ import sys
 import types
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -38,6 +38,7 @@ def _install_stubs() -> None:
     sdk.DAG = FakeDAG
     sdk.Asset = lambda uri, **_kwargs: uri
     sdk.CronTriggerTimetable = lambda cron, timezone: {"cron": cron, "timezone": timezone}
+    sdk.TriggerRule = types.SimpleNamespace(ALL_DONE="all_done", ALL_SUCCESS="all_success")
     sdk.task = fake_task
     bigquery = types.ModuleType("google.cloud.bigquery")
     bigquery.Client = lambda project: None
@@ -58,7 +59,19 @@ def fake_task(function: Any = None, **kwargs: Any) -> Any:
     """Declaring a DAG calls its tasks; they must not run."""
     if function is None:
         return lambda decorated: fake_task(decorated, **kwargs)
-    return lambda *_args, **_kwargs: None
+    return lambda *_args, **_kwargs: FakeTaskRef(function.__name__, kwargs)
+
+
+class FakeTaskRef:
+    declared: ClassVar[list[FakeTaskRef]] = []
+
+    def __init__(self, name: str, kwargs: dict[str, Any]) -> None:
+        self.name, self.kwargs, self.downstream = name, kwargs, []
+        FakeTaskRef.declared.append(self)
+
+    def __rshift__(self, other: FakeTaskRef) -> FakeTaskRef:
+        self.downstream.append(other)
+        return other
 
 
 class FakeDAG:
@@ -175,7 +188,18 @@ def test_queries_use_the_planner_settings() -> None:
 
 
 def test_dags_run_weekly_training_and_nightly_scoring_before_the_warehouse() -> None:
+    FakeTaskRef.declared.clear()
     dag = _load("dag_planner")
+    tasks = {t.name: t for t in FakeTaskRef.declared}
+    # footpaths run after training (memory), even when the model gate fails
+    assert [t.name for t in tasks["train_model"].downstream] == ["build_footpaths", "training_complete"]
+    assert tasks["build_footpaths"].kwargs["trigger_rule"] == "all_done"
+    assert tasks["build_footpaths"].downstream == [tasks["training_complete"]]
+    complete = tasks["training_complete"]
+    # An all-done leaf would mark a failed training run successful. The sole
+    # training leaf must depend directly on both tasks and require their success.
+    assert complete.downstream == []
+    assert complete.kwargs["trigger_rule"] == "all_success"
     assert dag.train_dag.kwargs["schedule"] == {"cron": "0 13 * * 0", "timezone": "Europe/Warsaw"}
     assert dag.score_dag.kwargs["schedule"] == {"cron": "30 2 * * *", "timezone": "Europe/Warsaw"}
     for d in (dag.train_dag, dag.score_dag):
@@ -214,6 +238,16 @@ def test_bundle_pointer_moves_last_and_downloads_are_cached(tmp_path: Path) -> N
     bucket.objects.clear()  # a cached version is not downloaded again
     bucket.objects[pipeline.CURRENT_POINTER] = json.dumps({"version": "v1"}).encode()
     assert pipeline.download_current_bundle(bucket, tmp_path / "cache") == first
+
+
+def test_footpaths_are_optional_for_scoring(tmp_path: Path) -> None:
+    pipeline = _load("planner_pipeline")
+    bucket = FakeBucket()
+    assert pipeline.download_footpaths(bucket, tmp_path / "f.parquet") is None
+    source = tmp_path / "built.parquet"
+    source.write_bytes(b"pq")
+    pipeline.upload_footpaths(bucket, source)
+    assert pipeline.download_footpaths(bucket, tmp_path / "f.parquet").read_bytes() == b"pq"
 
 
 def test_planner_command_summary_is_the_last_stdout_line(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

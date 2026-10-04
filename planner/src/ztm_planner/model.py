@@ -31,7 +31,9 @@ def matrix(con: duckdb.DuckDBPyConnection, table: str) -> np.ndarray:
     out = np.empty((n, len(FEATURES)), dtype=np.float32)
     for i, name in enumerate(FEATURES):
         column = con.execute(f"select {name}::double from {table} order by row_id").fetchnumpy()
-        out[:, i] = next(iter(column.values())).astype(np.float32, copy=False)
+        values = next(iter(column.values())).astype(np.float32, copy=False)
+        # Plain ndarray assignment discards DuckDB's NULL mask; LightGBM needs explicit missing values.
+        out[:, i] = np.ma.filled(values, np.nan)
     return out
 
 

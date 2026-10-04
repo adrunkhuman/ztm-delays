@@ -1,4 +1,8 @@
-"""Synthetic network: a bus line and a tram line with known peak slowdowns, plus a metro line to ignore."""
+"""Synthetic network: a bus line and a tram line with known peak slowdowns, plus metro and SKM on their timetable.
+
+Metro platforms sit next to the bus and tram stops of the same group (as in the Warsaw feed); the metro runs from
+one frequency template.
+"""
 
 from __future__ import annotations
 
@@ -27,12 +31,19 @@ STOPS = {  # stop_id: (name, lat, lon)
     "200201": ("Foxtrot", 52.25, 21.05),
     "200301": ("Golf", 52.26, 21.06),
     "999901": ("Depot", 52.27, 21.07),
+    "1001M:P1": ("Alpha", 52.2005, 21.0005),  # ~65 m from Alpha's bus post
+    "2001M:P1": ("Echo", 52.2405, 21.0405),
+    "4900": ("Bravo PKP", 52.2105, 21.0105),
+    "4901": ("Golf PKP", 52.2605, 21.0605),
 }
 ROUTES = {  # route_id: (route_type, stops in order, scheduled minutes between stops)
     "110": ("3", ["100101", "100201", "100301", "100401"], 4),
     "17": ("0", ["200101", "200201", "200301"], 3),
-    "M1": ("1", ["100101", "200101"], 2),
+    "M1": ("1", ["1001M:P1", "2001M:P1"], 5),
+    "S1": ("2", ["4900", "4901"], 9),
 }
+METRO_FREQUENCIES = [("06:00:00", "09:00:00", 600), ("09:00:00", "10:00:00", 900)]  # 18 + 4 runs a day
+METRO_RUNS = 22
 
 
 def departures() -> list[int]:
@@ -49,7 +60,9 @@ def _hms(seconds: int) -> str:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
-def write_gtfs(path: Path, start: date, days: int) -> None:
+def write_gtfs(
+    path: Path, start: date, days: int, stop_types: dict[str, tuple[str, str]] | None = None
+) -> None:
     files: dict[str, list[list[str]]] = {
         "routes.txt": [["route_id", "route_short_name", "route_type"]],
         "trips.txt": [["route_id", "service_id", "trip_id", "trip_headsign", "direction_id"]],
@@ -58,6 +71,7 @@ def write_gtfs(path: Path, start: date, days: int) -> None:
         ],
         "stops.txt": [["stop_id", "stop_name", "stop_lat", "stop_lon"]],
         "calendar_dates.txt": [["service_id", "date", "exception_type"]],
+        "frequencies.txt": [["trip_id", "start_time", "end_time", "headway_secs", "exact_times"]],
     }
     for stop_id, (name, lat, lon) in STOPS.items():
         files["stops.txt"].append([stop_id, name, str(lat), str(lon)])
@@ -65,13 +79,22 @@ def write_gtfs(path: Path, start: date, days: int) -> None:
         files["calendar_dates.txt"].append(["S", (start + timedelta(days=d)).strftime("%Y%m%d"), "1"])
     for route, (route_type, stops, minutes) in ROUTES.items():
         files["routes.txt"].append([route, route, route_type])
+        if route_type == "1":
+            files["trips.txt"].append([route, "S", "M1:T", STOPS[stops[-1]][0], "0"])
+            for seq, stop in enumerate(stops):
+                t = seq * minutes * 60
+                pickup, dropoff = (stop_types or {}).get(stop, ("0", "0"))
+                files["stop_times.txt"].append(["M1:T", _hms(t), _hms(t), stop, str(seq), pickup, dropoff])
+            for start_time, end_time, headway in METRO_FREQUENCIES:
+                files["frequencies.txt"].append(["M1:T", start_time, end_time, str(headway), "0"])
+            continue
         for dep in departures():
             trip = f"{route}:{dep}"
             files["trips.txt"].append([route, "S", trip, STOPS[stops[-1]][0], "0"])
             for seq, stop in enumerate(stops):
                 t = dep + seq * minutes * 60
-                pickup = "3" if stop == "100201" else "0"  # a request stop
-                files["stop_times.txt"].append([trip, _hms(t), _hms(t), stop, str(seq + 1), pickup, "0"])
+                pickup, dropoff = (stop_types or {}).get(stop, ("3" if stop == "100201" else "0", "0"))
+                files["stop_times.txt"].append([trip, _hms(t), _hms(t), stop, str(seq + 1), pickup, dropoff])
             # technical run to the depot: not in passenger service, must be skipped
             t = dep + len(stops) * minutes * 60
             files["stop_times.txt"].append([trip, _hms(t), _hms(t), "999901", str(len(stops) + 1), "1", "1"])
@@ -92,7 +115,7 @@ def write_segments(path: Path, start: date, end: date, seed: int = 0) -> None:
     day = start
     while day <= end:
         for route, (route_type, stops, minutes) in ROUTES.items():
-            if route_type == "1":
+            if route_type in {"1", "2"}:
                 continue
             mode = "tram" if route_type == "0" else "bus"
             for dep in departures():
