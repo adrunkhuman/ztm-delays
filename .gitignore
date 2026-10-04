@@ -28,6 +28,7 @@ frontend/ztm/*.duckdb
 frontend/ztm/*.duckdb*.bak
 frontend/ztm/*.duckdb.wal
 frontend/ztm/*.duckdb.tmp
+frontend/ztm/planner/
 frontend/ztm/*.meta.json
 
 # Tooling and OS noise

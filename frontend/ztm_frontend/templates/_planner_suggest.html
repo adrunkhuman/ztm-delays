@@ -1,0 +1,6 @@
+{% for g in groups %}
+  <a class="pl-suggestion" href="{{ url_for('planner_page', **dict(state, **{field: g.stop_group_id})) }}">
+    <span class="pl-suggestion-name">{{ g.name }}</span>
+    <span class="pl-suggestion-lines mono">{{ g.lines[:6]|join(' · ') }}{% if g.lines|length > 6 %} · +{{ g.lines|length - 6 }}{% endif %}</span>
+  </a>
+{% endfor %}

@@ -54,6 +54,18 @@ Route delay maps are a separate monthly artifact. Airflow aggregates delay chang
 
 The Flask app holds a read-only DuckDB connection for each request. Warehouse marts supply entity summaries and exact display-grain quantiles; frontend queries also filter, aggregate, and rank exported trip rows for browsing. New requests see a newly published catalog without an app restart.
 
+## Trip planner
+
+The planner finds journeys between two stops in the coming week, with changes and walks. It reads its own artifact, `planner/planner.duckdb`, published beside the export like the route maps. The [planner component](../planner/README.md) builds it outside the warehouse.
+
+A weekly DAG extracts ten weeks of observed bus and tram segments and stop arrivals from BigQuery to GCS Parquet and trains a lookup plus LightGBM model. It promotes the bundle only if, on the held-out last week, the model beats the lookup and the lookup beats the timetable. A second task then builds walking distances between nearby stop posts from Geofabrik's Mazowieckie OSM extract.
+
+A nightly DAG predicts the latest GTFS snapshot for seven days from the promoted bundle, the last week's observed conditions and an Open-Meteo forecast, then replaces the artifact atomically. The previous snapshot supplies yesterday's trips still running after midnight. Metro and SKM follow the timetable. The [contract](../contracts/planner_artifact_v1.json) defines the artifact's tables.
+
+The frontend's [journey router](../frontend/README.md#planner) searches that artifact per request. A change must still work when the arriving vehicle runs late: its conservative arrival plus the walk must not pass the next vehicle's boarding deadline. [Planner timing](../planner/README.md#journeys-and-walks) defines these bounds; they are per-ride planning margins, not a 90% guarantee for the whole journey.
+
+Predictions describe usual conditions, not live positions. A disruption on the day, such as a detour, crash or event, is invisible to them.
+
 ## Interpreting the results
 
 Delay is actual minus scheduled arrival time: positive is late. Delay summaries use `complete` trips; `partial` trips remain useful for drill-down, while `broken` trips are diagnostic. These classifications describe evidence quality, not whether a service ran successfully.

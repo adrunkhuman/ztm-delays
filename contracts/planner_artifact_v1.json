@@ -1,0 +1,55 @@
+{
+  "version": "planner-artifact-v1",
+  "description": "Tables of planner/planner.duckdb: written nightly by planner/ (ztm-planner score), read by frontend/ztm_frontend/planner.py.",
+  "tables": {
+    "planner_metadata": [
+      {"name": "build_id", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "built_at", "duckdb_type": "TIMESTAMP", "nullable": false},
+      {"name": "model_version", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "first_date", "duckdb_type": "DATE", "nullable": false},
+      {"name": "last_date", "duckdb_type": "DATE", "nullable": false}
+    ],
+    "planner_stop_group": [
+      {"name": "stop_group_id", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "name", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "search_key", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "lines", "duckdb_type": "VARCHAR[]", "nullable": false},
+      {"name": "visits", "duckdb_type": "INTEGER", "nullable": false}
+    ],
+    "planner_trip": [
+      {"name": "trip_key", "duckdb_type": "BIGINT", "nullable": false},
+      {"name": "service_date", "duckdb_type": "DATE", "nullable": false},
+      {"name": "mode", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "line", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "headsign", "duckdb_type": "VARCHAR", "nullable": false}
+    ],
+    "planner_stop": [
+      {"name": "trip_key", "duckdb_type": "BIGINT", "nullable": false},
+      {"name": "stop_sequence", "duckdb_type": "INTEGER", "nullable": false},
+      {"name": "stop_id", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "stop_group_id", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "stop_name", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "scheduled_sod", "duckdb_type": "INTEGER", "nullable": false},
+      {"name": "usual_delay_s", "duckdb_type": "INTEGER", "nullable": false},
+      {"name": "late_delay_s", "duckdb_type": "INTEGER", "nullable": false},
+      {"name": "leave_by_offset_s", "duckdb_type": "INTEGER", "nullable": true},
+      {"name": "ride_from_start_s", "duckdb_type": "DOUBLE", "nullable": false},
+      {"name": "can_alight", "duckdb_type": "BOOLEAN", "nullable": false}
+    ],
+    "planner_range": [
+      {"name": "is_tram", "duckdb_type": "BOOLEAN", "nullable": false},
+      {"name": "weekday", "duckdb_type": "BOOLEAN", "nullable": false},
+      {"name": "hour", "duckdb_type": "INTEGER", "nullable": false},
+      {"name": "min_ride_s", "duckdb_type": "DOUBLE", "nullable": false},
+      {"name": "max_ride_s", "duckdb_type": "DOUBLE", "nullable": false},
+      {"name": "low_ratio", "duckdb_type": "DOUBLE", "nullable": false},
+      {"name": "high_ratio", "duckdb_type": "DOUBLE", "nullable": false}
+    ],
+    "planner_footpath": [
+      {"name": "from_stop_id", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "to_stop_id", "duckdb_type": "VARCHAR", "nullable": false},
+      {"name": "distance_m", "duckdb_type": "INTEGER", "nullable": true},
+      {"name": "walk_s", "duckdb_type": "INTEGER", "nullable": false}
+    ]
+  }
+}

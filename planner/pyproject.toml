@@ -1,0 +1,41 @@
+[project]
+name = "ztm-planner"
+version = "0.1.0"
+description = "Travel-time models and nightly trip-planner artifact for Warsaw ZTM."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.4.0",
+    "lightgbm>=4.6.0",
+    "numpy>=2.0.0",
+    "osmium>=4.3.1",
+    "pyarrow>=22.0.0",
+    "scipy>=1.18.1",
+]
+
+[project.scripts]
+ztm-planner = "ztm_planner.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=9.0.0", "ruff>=0.15.0", "ty>=0.0.15"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "SIM", "RUF"]
+ignore = ["S608"]  # SQL is built from module constants and validated identifiers, never user input
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ty.environment]
+python-version = "3.13"

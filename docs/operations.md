@@ -125,6 +125,28 @@ A rebuild never exposes a partial month. It swaps directories with two renames, 
 
 The task's `report.json` records exclusions and coverage per period. Mini-map street backgrounds are fixed assets. Regenerate them with `airflow/scripts/build_route_map_backgrounds.py` only if the frames or styling change.
 
+## Trip planner
+
+`dag_planner_train` runs on Sundays at 13:00 Warsaw time: `train_model`, then `build_footpaths`. They run one after the other to limit peak memory, and `build_footpaths` runs even when training fails (`all_done`). `dag_planner_score` runs daily at 06:30, after the 04:00 warehouse run has published yesterday. Its recent conditions end on the latest published day, so a late warehouse run makes them a day older but never leaves a gap. The planner tab appears once `planner/planner.duckdb` exists.
+
+On first deployment, trigger `dag_planner_train`, confirm promotion in its log, then trigger `dag_planner_score`. Scoring fails until a model is promoted. The footpath build holds the regional OSM graph in memory, outside DuckDB's limit; check its peak on the first run.
+
+| Item | Value |
+| --- | --- |
+| Output | `$SERVING_EXPORT_DIR/planner/planner.duckdb`, read by the frontend from `planner/` beside `ZTM_DUCKDB_PATH` |
+| Models | `gs://$GCS_BUCKET/planner/models/<version>/`; `planner/models/current.json` names the promoted version |
+| Footpaths | `gs://$GCS_BUCKET/planner/footpaths/footpaths.parquet`, rebuilt weekly and turned into walking times by scoring |
+| Workspace | `PLANNER_WORKSPACE_ROOT` (default `/opt/airflow/planner-work`), on disk rather than tmpfs, with about 5 GB free. Training clears its folder after every run; scoring keeps only the current bundle. |
+| Command | `PLANNER_COMMAND` (image default `/opt/airflow/planner-venv/bin/ztm-planner`). Global flags go before the subcommand, e.g. `ztm-planner --memory-limit 1000MB`. `PLANNER_TIMEOUT_SECONDS` defaults to 4 hours. Progress and errors stream into the task log. |
+| BigQuery | Training about 16 GB billed per week; scoring about 0.5 GB per night. Each query is capped at 20 GB. |
+| Memory | Training peaks near 3 GB, scoring below 2 GB. Both use CPU cores minus two at lowered priority. |
+
+`build_footpaths` downloads the latest GTFS ZIP and [Geofabrik's Mazowieckie PBF](https://download.geofabrik.de/europe/poland/mazowieckie-latest.osm.pbf); allow outbound HTTPS to Geofabrik. The URL is fixed in `planner_pipeline.py`. A failed build keeps the previous GCS file in use and may leave files in `$PLANNER_WORKSPACE_ROOT/footpaths/`. With no file at all, scoring logs a warning and estimates every walk; an error downloading an existing file fails scoring instead. To refresh only walks, rerun `build_footpaths`, then `publish_planner`.
+
+A failed promotion gate fails `train_model`, logs the held-out errors and keeps the previous model; `training_complete` then fails too, even if footpaths succeed. To roll back, point `current.json` at an earlier version (`{"version": "..."}`) and rerun `dag_planner_score`. A failed scoring run leaves the previous artifact, which still covers the next six days.
+
+The frontend reads the artifact locally. Each process caches the networks of two service days, keyed by the artifact's `build_id`; building one takes about 1.5 s.
+
 ## Monitoring and retention
 
 Set `AIRFLOW_FAILURE_WEBHOOK_URL` for failure callbacks. Inspect task logs, matcher metrics, export validation reports, disk capacity, and poller heartbeat freshness. Exported poller status is a snapshot, not live monitoring. Enable `LOG_BIGQUERY_DBT_JOB_COSTS` for nightly query-cost summaries; attribution is best-effort, not billing enforcement.

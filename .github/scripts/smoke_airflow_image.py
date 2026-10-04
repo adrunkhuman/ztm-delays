@@ -32,15 +32,17 @@ def main():
     assert dags
     for dag in dags:
         compile(dag.read_text(), str(dag), "exec")
-    for directory in ("dbt/target", "dbt/logs", "matcher-work", "serving", "logs", "auth"):
+    for directory in ("dbt/target", "dbt/logs", "matcher-work", "planner-work", "serving", "logs", "auth"):
         probe = home / directory / ".image-smoke"
         probe.write_text("writable")
         probe.unlink()
-    for directory in ("dags", "dbt/models", "matcher/src/ztm_matcher"):
+    for directory in ("dags", "dbt/models", "matcher/src/ztm_matcher", "planner/src/ztm_planner"):
         for filename in (".env.image-smoke", "image-smoke.parquet"):
             assert not (home / directory / filename).exists(), (directory, filename)
     assert (home / "matcher/uv.lock").is_file()
     assert (home / "matcher/src/ztm_matcher/cli.py").is_file()
+    assert (home / "planner/uv.lock").is_file()
+    assert not (home / "planner/tests").exists()
     for asset in ("route_map_sql/segment_statistics.sql", "route_map_sql/pooled_routes.sql",
                   "route_map_assets/mini-background-bus.svg", "route_map_assets/mini-background-tram.svg"):
         assert (home / "dags" / asset).is_file(), asset
@@ -70,6 +72,14 @@ def main():
         "import importlib.util; assert importlib.util.find_spec('airflow') is None",
     )
     run("uv", "pip", "check", "--python", str(home / "matcher-venv/bin/python"))
+    run(*shlex.split(os.environ["PLANNER_COMMAND"]), "--help")
+    run(
+        str(home / "planner-venv/bin/python"), "-c",
+        "import sys, duckdb, lightgbm, numpy, osmium, pyarrow, scipy, ztm_planner.footpaths; "
+        "assert sys.prefix == '/opt/airflow/planner-venv'; "
+        "import importlib.util; assert importlib.util.find_spec('airflow') is None",
+    )
+    run("uv", "pip", "check", "--python", str(home / "planner-venv/bin/python"))
     run(
         "dbt", "--no-send-anonymous-usage-stats", "parse", "--no-partial-parse", "--profiles-dir", ".",
         cwd=home / "dbt",
