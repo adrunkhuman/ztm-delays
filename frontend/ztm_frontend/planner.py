@@ -86,7 +86,14 @@ def resolve_stop_group(path: Path, stop_group_id: str | None, typed: str | None)
 
 
 def connections(path: Path, origin: str, destination: str, day: date, after_sod: int) -> list[dict[str, Any]]:
-    """Up to RESULTS journey cards, by departure.
+    """Up to RESULTS journey cards, by departure."""
+    return search(path, origin, destination, day, after_sod)[0]
+
+
+def search(
+    path: Path, origin: str, destination: str, day: date, after_sod: int
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Journey cards and where the next page's search starts (None without cards).
 
     The router keeps journeys that win on the late-case arrival; a journey is also dropped when another leaves
     no earlier, with no more changes, and is expected to arrive no later (e.g. a change to the metro whose worst
@@ -94,7 +101,14 @@ def connections(path: Path, origin: str, destination: str, day: date, after_sod:
     """
     net = journey.network(path, day)
     results = journey.plan(net, origin, destination, after_sod, RESULTS + EXTRA_CANDIDATES, useful=_unbeaten)
-    return [_connection(path, result, day) for result in results[:RESULTS]]
+    shown, hidden = results[:RESULTS], results[RESULTS:]
+    later = None
+    if shown:
+        # The form searches whole minutes: advance past the last raw boarding deadline, unless that would skip
+        # an unshown journey leaving in the same minute (the page then starts there, repeating that minute's cards).
+        last = _floor_minute(shown[-1].depart)
+        later = last if hidden and _floor_minute(hidden[0].depart) == last > after_sod else last + 60
+    return [_connection(path, result, day) for result in shown], later
 
 
 def _unbeaten(found: list[journey.Journey]) -> list[journey.Journey]:
@@ -318,10 +332,9 @@ def get_page(path: Path, args: dict[str, str], today: date, now_sod: int) -> dic
     origin = resolve_stop_group(path, args.get("from"), args.get("q_from"))
     destination = resolve_stop_group(path, args.get("to"), args.get("q_to"))
     results: list[dict[str, Any]] = []
+    later = None
     if origin and destination and origin["stop_group_id"] != destination["stop_group_id"]:
-        results = connections(path, origin["stop_group_id"], destination["stop_group_id"], day, after)
-    # The form searches whole minutes; advance past the last raw boarding deadline.
-    later = _floor_minute(results[-1]["depart"]) + 60 if results else None
+        results, later = search(path, origin["stop_group_id"], destination["stop_group_id"], day, after)
     return {
         "dates": dates,
         "today": today,

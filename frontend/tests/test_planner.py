@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
-from ztm_frontend import planner, planner_text, queries
+from ztm_frontend import journey, planner, planner_text, queries
 from ztm_frontend.app import create_app
 
 if TYPE_CHECKING:
@@ -315,17 +315,17 @@ def test_page_keeps_one_generation_when_artifact_is_published_mid_request(
         connection.execute("update planner_metadata set build_id = 'b2'")
         connection.execute("update planner_trip set trip_key = 21 where trip_key = 1")
         connection.execute("update planner_stop set trip_key = 21 where trip_key = 1")
-    original = planner.connections
+    original = planner.search
 
     def publish_then_search(
         artifact: Path, origin: str, destination: str, day: date, after_sod: int
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], int | None]:
         # Date/stop lookups already opened the old request-scoped connection.
         replacement.replace(path)
-        monkeypatch.setattr(planner, "connections", original)
+        monkeypatch.setattr(planner, "search", original)
         return original(artifact, origin, destination, day, after_sod)
 
-    monkeypatch.setattr(planner, "connections", publish_then_search)
+    monkeypatch.setattr(planner, "search", publish_then_search)
     url = "/planner?date=2026-09-23&time=07:00&from=1001&to=2002"
     old = client.get(url)
     new = client.get(url)
@@ -407,3 +407,20 @@ def test_polish_plurals_and_eu_dates() -> None:
     assert planner_text.plural(2, ("stop", "stops")) == "stops"
     assert planner_text.day_label(DAY, DAY, "pl") == "Dziś, śr. 23.09"
     assert planner_text.day_label(DAY + timedelta(days=2), DAY, "en") == "Fri 25 Sep"
+
+
+def test_later_page_starts_where_an_unshown_journey_would_be_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    def found(*departs: int) -> None:
+        legs = (journey.Walk("a", "b", 60),)
+        results = [journey.Journey(d, d + 600, legs) for d in departs]
+        monkeypatch.setattr(planner.journey, "plan", lambda *_args, **_kwargs: results)
+
+    monkeypatch.setattr(planner.journey, "network", lambda *_args: None)
+    monkeypatch.setattr(planner, "_connection", lambda _path, result, _day: {"depart": result.depart})
+    shown = [600 + 60 * i for i in range(planner.RESULTS)]  # the last card leaves at 00:15:00
+    found(*shown, shown[-1] + 30)  # an unshown journey at 00:15:30
+    assert planner.search(Path(), "1", "2", DAY, 0)[1] == shown[-1]
+    found(*shown, shown[-1] + 60)
+    assert planner.search(Path(), "1", "2", DAY, 0)[1] == shown[-1] + 60
+    found(*[600] * (planner.RESULTS + 1))  # a whole page in the requested minute still advances
+    assert planner.search(Path(), "1", "2", DAY, 600)[1] == 660
