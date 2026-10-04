@@ -72,7 +72,7 @@ jobs:
           cache-dependency-glob: airflow/pyproject.toml
 
       - name: Compile Airflow DAGs
-        run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/ztm_matcher.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py airflow/dags/dag_serving_export.py airflow/dags/dag_monthly_route_map.py airflow/dags/route_map_build.py airflow/dags/route_map_geometry.py
+        run: python -m py_compile airflow/dags/ztm_airflow_common.py airflow/dags/ztm_matcher.py airflow/dags/dag_gtfs_poll.py airflow/dags/dag_gtfs_load.py airflow/dags/dag_daily_gps.py airflow/dags/dag_serving_export.py airflow/dags/dag_monthly_route_map.py airflow/dags/route_map_build.py airflow/dags/route_map_geometry.py airflow/dags/dag_planner.py airflow/dags/planner_pipeline.py airflow/dags/planner_queries.py
 
       - name: Lint Airflow
         run: uvx ruff==0.15.21 check airflow
@@ -90,7 +90,7 @@ jobs:
       - name: Build repository image
         run: |
           # Harmless canaries verify exclusions inside otherwise included source trees.
-          for dir in airflow/dags dbt/models matcher/src/ztm_matcher; do
+          for dir in airflow/dags dbt/models matcher/src/ztm_matcher planner/src/ztm_planner; do
             touch "$dir/.env.image-smoke" "$dir/image-smoke.parquet"
           done
           docker build --platform linux/amd64 -f airflow/Dockerfile -t ztm-airflow:ci .
@@ -133,6 +133,40 @@ jobs:
       - name: Test matcher
         run: uv run pytest
         working-directory: matcher
+
+  planner:
+    name: Planner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: planner/uv.lock
+
+      - name: Install planner dependencies
+        run: uv sync --locked
+        working-directory: planner
+
+      - name: Lint planner
+        run: uv run ruff check .
+        working-directory: planner
+
+      - name: Type check planner
+        run: uv run ty check
+        working-directory: planner
+
+      - name: Test planner
+        run: uv run pytest
+        working-directory: planner
 
   offline-pipeline:
     name: Pipeline test

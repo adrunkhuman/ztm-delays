@@ -27,5 +27,10 @@ convention = "google"
 "dags/matcher_historical_correction.py" = ["ANN401", "S608"]
 # Dense numeric alignment code validated against real data; splitting it would obscure the algorithm and risk behaviour changes.
 "dags/route_map_geometry.py" = ["C901", "PLR0912", "PLR0913", "PLR0915", "PLR2004"]
+# Planner queries are built from module constants and configured dataset names, not user input.
+"dags/planner_queries.py" = ["S608"]
+"dags/dag_planner.py" = ["S608"]
+# An extract needs client, bucket, query, parameters, destination prefix and local directory.
+"dags/planner_pipeline.py" = ["PLR0913"]
 # Hand-run maintenance scripts, not an importable package.
 "scripts/*.py" = ["INP001"]

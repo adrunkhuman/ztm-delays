@@ -14,6 +14,10 @@
 !matcher/uv.lock
 !matcher/README.md
 !matcher/src/**/*.py
+!planner/pyproject.toml
+!planner/uv.lock
+!planner/README.md
+!planner/src/**/*.py
 # Defense in depth within allowed source trees.
 **/.env*
 **/*key*.json
