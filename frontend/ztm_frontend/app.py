@@ -37,6 +37,8 @@ MAP_VIEWS = {"mode": ("bus", "tram"), "period": ("wd", "we")}
 MAP_POPUP_ROWS = 3
 MAP_POPUP_CHIPS = 5
 MAP_NEUTRAL_SECONDS = 10
+# The planner form's query keys; links rebuilt from the request (the language switch) carry only these.
+PLANNER_ARGS = ("date", "time", "from", "to", "q_from", "q_to")
 PLANNER_LANG_COOKIE = "planner_lang"
 PLANNER_LANG_COOKIE_SECONDS = 365 * 86_400
 
@@ -225,7 +227,7 @@ def _add_planner_routes(app: Flask) -> None:
     def planner_page() -> Response:
         now = datetime.now(WARSAW)
         lang = _planner_lang()
-        args = {key: value for key, value in request.args.items() if key != "lang"}
+        args = {key: value for key in PLANNER_ARGS if (value := request.args.get(key))}
         response = make_response(
             render_template(
                 "planner.html",

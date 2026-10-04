@@ -343,6 +343,13 @@ def test_suggestions_keep_the_rest_of_the_form(tmp_path: Path, monkeypatch: pyte
     assert client.get("/planner/suggest/via?q_via=metro").status_code == HTTPStatus.NOT_FOUND
 
 
+def test_planner_ignores_unknown_query_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    response = client.get("/planner?from=1001&endpoint=x&_external=1&_method=POST")
+    assert response.status_code == HTTPStatus.OK
+    assert 'href="/planner?from=1001&amp;lang=pl"' in response.get_data(as_text=True)
+
+
 def test_page_state_falls_back_inside_the_published_window(tmp_path: Path) -> None:
     path = tmp_path / "planner.duckdb"
     _write_artifact(path)
