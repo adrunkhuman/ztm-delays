@@ -46,7 +46,11 @@ Status coverage uses observed/expected service minutes in the summary and observ
 
 ## Planner
 
-The planner tab finds direct connections between two stops for the coming days. A stop group (all posts of one stop) is one search entry. Each result shows when the vehicle usually leaves, the expected arrival, and on expand: when to be at the stop (vehicles very rarely leave earlier), the arrival time met nine times in ten, the timetable's version, and the stops on the way.
+The [journey router](ztm_frontend/journey.py) finds connections between stop groups (all posts of one stop), with up to five vehicles and walks. The planner page shows per-leg cards, walking legs and change deadlines, and loads each ride's stop list only when expanded.
+
+Bus and tram expected arrivals use the boarding stop's usual delay plus the predicted cumulative ride-time difference. Conservative arrivals use the boarding stop's late delay plus a monotone calibrated upper ride-duration envelope (ratios at least 1; fallback 1.1). Departure bases are clamped to the boarding deadline, and the conservative base is never earlier than expected departure. Metro and SKM retain timetable ride durations, with a fixed 60 s late margin for SKM. Every change requires `conservative arrival + walk <= next board_by`; a same-post change has zero walk. These per-ride bounds are planning margins, not a claim of 90% end-to-end reliability.
+
+The bounded round-based earliest-arrival search is inspired by RAPTOR but does not assume FIFO: trips may overtake. Departures come from a profile search (rRAPTOR: windows from the requested time, each run from its latest departure to its earliest, reusing labels), pruned by a no-waiting lower bound to the destination; within the searched windows the list of nondominated alternatives is complete. Previous-day night trips are supported; next service day's daytime trips are not included in the same search, and cross-service-day routing is deferred.
 
 It reads a separate artifact, `planner/planner.duckdb` beside the export or `ZTM_PLANNER_PATH`; the tab is hidden until one exists. [planner.py](ztm_frontend/planner.py) documents its tables. The artifact is rebuilt nightly by the pipeline from the current timetable and the travel-time models; page requests only read it.
 
