@@ -187,7 +187,7 @@ def test_queries_use_the_planner_settings() -> None:
     assert "GROUP BY 1, 2, 3" in queries.recent_daily("p.d")
 
 
-def test_dags_run_weekly_training_and_nightly_scoring_before_the_warehouse() -> None:
+def test_dags_run_weekly_training_and_nightly_scoring_after_the_warehouse() -> None:
     FakeTaskRef.declared.clear()
     dag = _load("dag_planner")
     tasks = {t.name: t for t in FakeTaskRef.declared}
@@ -201,7 +201,7 @@ def test_dags_run_weekly_training_and_nightly_scoring_before_the_warehouse() -> 
     assert complete.downstream == []
     assert complete.kwargs["trigger_rule"] == "all_success"
     assert dag.train_dag.kwargs["schedule"] == {"cron": "0 13 * * 0", "timezone": "Europe/Warsaw"}
-    assert dag.score_dag.kwargs["schedule"] == {"cron": "30 2 * * *", "timezone": "Europe/Warsaw"}
+    assert dag.score_dag.kwargs["schedule"] == {"cron": "30 6 * * *", "timezone": "Europe/Warsaw"}
     for d in (dag.train_dag, dag.score_dag):
         assert d.kwargs["catchup"] is False
         assert d.kwargs["max_active_runs"] == 1

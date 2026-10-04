@@ -77,7 +77,9 @@ def score(
     features.add_features(con, "sched_seg", "seg_feat")
     weather.load(con, weather_json)
     con.execute(f"create or replace table recent_daily as select * from read_parquet('{recent_daily}')")
-    asof = start - timedelta(days=1)
+    # Recent conditions end on the last published day, so a late warehouse run cannot leave an empty day in the window.
+    (latest,) = con.execute("select max(service_date) from recent_daily").fetchone() or (None,)
+    asof = min(start - timedelta(days=1), latest or start)
 
     con.execute("create or replace table seg_pred (trip_key bigint, b_seq integer, pred double)")
     for (day,) in con.execute("select distinct service_date from seg_feat order by 1").fetchall():

@@ -3,8 +3,8 @@
 dag_planner_train (Sunday 13:00): ten weeks of observed segments and stop arrivals -> model bundle in GCS,
 promoted only if it beats the timetable and the lookup on its own held-out week; then, whatever the model gate
 decided, walking distances between nearby stop posts from the OSM extract -> footpaths in GCS.
-dag_planner_score (02:30, before the 04:00 warehouse run): current timetable + promoted bundle + weather
-forecast -> <serving>/planner/planner.duckdb for the frontend's planner tab.
+dag_planner_score (06:30, after the 04:00 warehouse run adds yesterday): current timetable + promoted bundle +
+recent conditions + weather forecast -> <serving>/planner/planner.duckdb for the frontend's planner tab.
 """
 
 from __future__ import annotations
@@ -246,7 +246,7 @@ with DAG(
     dag_display_name="Planner nightly artifact",
     description="Predict the coming week's timetable and publish planner.duckdb beside the serving export.",
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
-    schedule=CronTriggerTimetable("30 2 * * *", timezone="Europe/Warsaw"),
+    schedule=CronTriggerTimetable("30 6 * * *", timezone="Europe/Warsaw"),
     catchup=False,
     max_active_runs=1,
     default_args=AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
