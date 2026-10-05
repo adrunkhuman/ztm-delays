@@ -52,12 +52,12 @@ def validate_duckdb(  # noqa: PLR0913
     duckdb = import_module("duckdb")
 
     temp_directory.mkdir(parents=True, exist_ok=True)
-    with duckdb.connect(str(path), read_only=True) as connection:
+    # Limit workers at connection creation; SET runs too late under RLIMIT_AS.
+    with duckdb.connect(str(path), read_only=True, config={"threads": str(threads)}) as connection:
         escaped_temp_directory = temp_directory.as_posix().replace("'", "''")
         connection.execute(f"set temp_directory = '{escaped_temp_directory}'")
         connection.execute(f"set max_temp_directory_size = '{temp_limit_mb}MB'")
         connection.execute(f"set memory_limit = '{memory_limit_mb}MB'")
-        connection.execute(f"set threads = {threads}")
         connection.execute("set preserve_insertion_order = false")
 
         _validate_required_columns(connection)

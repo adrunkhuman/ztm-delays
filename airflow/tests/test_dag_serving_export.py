@@ -1701,6 +1701,39 @@ def test_validator_applies_process_memory_limit_in_child() -> None:
     assert completed.stdout.strip() == str((256 * 1024 * 1024, 256 * 1024 * 1024))
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="native validation under RLIMIT_AS is a Linux runtime contract")
+def test_validator_reaches_contract_checks_under_process_memory_limit(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    candidate_path = tmp_path / "candidate.duckdb"
+    with duckdb.connect(str(candidate_path)):
+        pass
+
+    validator_path = Path(__file__).parents[1] / "dags" / "serving_export_validator.py"
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter, repository code, and local test paths.
+        [
+            sys.executable,
+            str(validator_path),
+            str(candidate_path),
+            "--memory-limit-mb",
+            "512",
+            "--temp-limit-mb",
+            "64",
+            "--threads",
+            "1",
+            "--temp-directory",
+            str(tmp_path / "validation-temp"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    # An empty database should fail its contract, not crash while starting DuckDB.
+    assert completed.returncode == 2, completed.stderr
+    assert "required_columns:dim_serving_date: missing service_date, service_date_key" in completed.stderr
+
+
 def test_publish_duckdb_cleans_temp_files_when_metadata_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
