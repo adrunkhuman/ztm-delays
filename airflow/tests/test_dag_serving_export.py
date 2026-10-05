@@ -1734,6 +1734,70 @@ def test_validator_reaches_contract_checks_under_process_memory_limit(tmp_path: 
     assert "required_columns:dim_serving_date: missing service_date, service_date_key" in completed.stderr
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="native validation under RLIMIT_AS is a Linux runtime contract")
+@pytest.mark.parametrize("stack_limit_mb", [8, 16])
+def test_validator_exits_cleanly_after_success_under_process_memory_limit(tmp_path: Path, stack_limit_mb: int) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
+    source_stats = [
+        dag.TableStats(table_name, 2 if table_name == "mart_pipeline_status" else 1, 10)
+        for table_name in dag.MART_TABLES
+    ]
+    candidate_path = tmp_path / "candidate.duckdb"
+    dag._build_duckdb_file(
+        duckdb,
+        candidate_path,
+        dag.DuckdbBuildInput(
+            paths_by_table,
+            source_stats,
+            _test_export_config(dag, tmp_path),
+            datetime(2026, 7, 2, tzinfo=UTC),
+            tmp_path / "build-temp",
+        ),
+    )
+    validator_path = Path(__file__).parents[1] / "dags" / "serving_export_validator.py"
+    # libc caches the default thread stack size at startup, so exec after setting it.
+    launcher = (
+        "import os, resource, sys; "
+        f"resource.setrlimit(resource.RLIMIT_STACK, ({stack_limit_mb * 1024 * 1024}, "
+        "resource.getrlimit(resource.RLIMIT_STACK)[1])); "
+        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0)); "
+        "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])"
+    )
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter, repository code, and local test paths.
+        [
+            sys.executable,
+            "-c",
+            launcher,
+            str(validator_path),
+            str(candidate_path),
+            "--memory-limit-mb",
+            "512",
+            "--temp-limit-mb",
+            "64",
+            "--threads",
+            "1",
+            "--temp-directory",
+            str(tmp_path / "validation-temp"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    # A valid report is insufficient: an idle default worker can crash during shutdown.
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "checked_dates": ["2026-07-02"],
+        "status": "pass",
+        "warning_count": 0,
+        "warnings_truncated": False,
+        "warnings": [],
+    }
+
+
 def test_publish_duckdb_cleans_temp_files_when_metadata_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

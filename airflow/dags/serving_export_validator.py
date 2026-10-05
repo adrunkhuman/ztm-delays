@@ -50,6 +50,8 @@ def validate_duckdb(  # noqa: PLR0913
     """Validate bounded semantic contracts in a candidate serving database."""
     _apply_process_memory_limit(memory_limit_mb)
     duckdb = import_module("duckdb")
+    # The isolated CLI never uses the default connection; its idle pool can crash on exit under RLIMIT_AS.
+    duckdb.close()
 
     temp_directory.mkdir(parents=True, exist_ok=True)
     # Limit workers at connection creation; SET runs too late under RLIMIT_AS.
