@@ -175,7 +175,8 @@ class Network:
                 qualify max(sched) over (partition by s.trip_key) >= 0
             )
             select trip_key, mode, weekday, stop_id, stop_sequence,
-                coalesce(sched + leave_by_offset_s, {NO_BOARD}), sched + usual_delay_s, sched + late_delay_s,
+                coalesce(sched + leave_by_offset_s, {NO_BOARD}), sched - scheduled_sod + expected_sod,
+                sched + late_delay_s,
                 case when mode in ('bus', 'tram') then ride_from_start_s else sched end,
                 (scheduled_sod // 3600) % 24, can_alight
             from ev order by trip_key, stop_sequence
@@ -185,7 +186,7 @@ class Network:
         # Stream sorted rows: ordered list aggregates consume gigabytes on a full
         # day, while this retains Python copies of only one batch and one trip.
         rows = (row for batch in iter(lambda: cursor.fetchmany(8192), []) for row in batch)
-        self.board, self.depart, self.late_base = array("i"), array("i"), array("i")
+        self.board, self.expected, self.depart, self.late_base = array("i"), array("i"), array("i"), array("i")
         self.cumulative, self.range_ids, self.seqs = array("d"), array("i"), array("i")
         self.trip_keys, self.trip_rows = array("q"), array("i")
         self.trip_index: dict[int, tuple[int, int]] = {}
@@ -196,7 +197,7 @@ class Network:
         for key, trip_rows in groupby(rows, key=itemgetter(0)):
             events = list(trip_rows)
             mode, weekday = events[0][1:3]
-            stops, seqs, board, depart, late, cumulative, hours, can_alight = zip(
+            stops, seqs, board, expected, late, cumulative, hours, can_alight = zip(
                 *(event[3:] for event in events), strict=True
             )
             pattern_key = (stops, can_alight)
@@ -211,8 +212,10 @@ class Network:
             self.trip_keys.append(key)
             self.seqs.extend(seqs)
             self.board.extend(board)
+            self.expected.extend(expected)
             # NO_BOARD is only a sentinel, never a real departure constraint.
-            self.depart.extend(max(d, b) if b < NO_BOARD else d for d, b in zip(depart, board, strict=True))
+            depart = [max(e, b) if b < NO_BOARD else e for e, b in zip(expected, board, strict=True)]
+            self.depart.extend(depart)
             self.late_base.extend(
                 max(late_time, d, b if b < NO_BOARD else d) for late_time, d, b in zip(late, depart, board, strict=True)
             )
@@ -299,7 +302,7 @@ class Network:
     def timing(self, trip_key: int, board_sequence: int, alight_sequence: int) -> Ride:
         """Return the exact search/display timing for artifact sequences (not array offsets).
 
-        Expected times remain floats. Late arrival is ceiled to an integer second,
+        Expected times are the trip's, the same from every boarding stop. Late arrival is ceiled to an integer second,
         without an epsilon: even a fractional second past board_by misses a transfer.
         Metro/rail retain timetable duration and only their boarding delay spread.
         """
@@ -309,15 +312,19 @@ class Network:
         return self._ride(trip_key, board, alight, self._late(board, alight))
 
     def _late(self, board: int, alight: int) -> int:
+        # Unlike expected times, the late bound grows with the ride from the boarding stop: per boarding, it held
+        # its miss rate over every ride length, with less margin than a bound per vehicle and stop.
         duration = max(0.0, self.cumulative[alight] - self.cumulative[board])
         cell = self.range_ids[board]
         high = self.envelopes[cell].duration(duration) if cell >= 0 else duration
-        return math.ceil(self.late_base[board] + high)
+        return max(math.ceil(self.late_base[board] + high), self._arrive(board, alight))
+
+    def _arrive(self, board: int, alight: int) -> int:
+        return max(self.expected[alight], self.depart[board])
 
     def _ride(self, key: int, board: int, alight: int, late: int) -> Ride:
-        depart = self.depart[board]
-        duration = max(0.0, self.cumulative[alight] - self.cumulative[board])
-        return Ride(key, self.seqs[board], self.seqs[alight], self.board[board], depart, depart + duration, late)
+        depart, arrive = self.depart[board], self._arrive(board, alight)
+        return Ride(key, self.seqs[board], self.seqs[alight], self.board[board], depart, arrive, late)
 
     def search(self, origin_group: str, destination_group: str, after: int) -> list[Journey]:
         """Earliest-arriving journeys that improve on all smaller vehicle counts, up to five."""

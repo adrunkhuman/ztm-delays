@@ -92,6 +92,7 @@ def score(
         con.unregister("chunk_pred")
     _stop_rows(con)
     _fixed_stop_rows(con)
+    _expected_times(con)
     _stop_groups(con)
     _footpaths(con, footpaths)
     artifact.write(
@@ -185,6 +186,41 @@ def _fixed_stop_rows(con: duckdb.DuckDBPyConnection) -> None:
             scheduled_sod - min(scheduled_sod) over (partition by trip_key) as ride_from_start_s,
             not no_dropoff as can_alight
         from sched_fixed
+        """
+    )
+
+
+def _expected_times(con: duckdb.DuckDBPyConnection) -> None:
+    """One expected time per stop of a trip, whichever stop the passenger boards at.
+
+    Each boardable stop implies a trip start: its timetable time plus usual delay (never before the boarding
+    deadline), less the predicted ride to it. A stop's expected time is the mean start implied by the boardable
+    stops up to it, plus its predicted ride; a running maximum keeps it from going backwards. Averaging smooths
+    the noise of single stop tables yet follows delay that builds up along the route: on held-out data it beat
+    both the stop's own usual delay and anchoring at the boarding stop. Metro and SKM keep their timetable.
+    """
+    con.execute(
+        """
+        create or replace table out_stop as
+        with started as (
+            select *,
+                case when leave_by_offset_s is not null
+                     then scheduled_sod + greatest(usual_delay_s, leave_by_offset_s) - ride_from_start_s end as start_s
+            from out_stop
+        ),
+        averaged as (
+            select *,
+                avg(start_s) over w as mean_start_s,
+                -- a trip that cannot be boarded before this stop: the stop's own delay
+                scheduled_sod + usual_delay_s as own_s
+            from started
+            window w as (partition by trip_key order by stop_sequence rows unbounded preceding)
+        )
+        select * exclude (start_s, mean_start_s, own_s),
+            round(max(coalesce(mean_start_s + ride_from_start_s, own_s)) over (
+                partition by trip_key order by stop_sequence rows unbounded preceding
+            ))::integer as expected_sod
+        from averaged
         """
     )
 

@@ -11,7 +11,8 @@ coming days and is read-only here. Its tables:
   ``stop_name``, ``scheduled_sod`` (seconds after service-date midnight, may exceed 24 h), ``usual_delay_s`` (median
   delay there), ``late_delay_s`` (90th percentile), ``leave_by_offset_s`` (<= 0: be at the stop this long before
   the timetable; null where boarding is prohibited), ``ride_from_start_s`` (predicted ride from the trip's first
-  stop), ``can_alight`` (false at pickup-only stops).
+  stop), ``expected_sod`` (the trip's expected time there, whichever stop it is boarded at), ``can_alight`` (false
+  at pickup-only stops).
 - ``planner_range``: calibrated ride-time spread, complete for every ``is_tram`` x ``weekday`` x ``hour`` x ride
   bucket ``(min_ride_s, max_ride_s]``: ``low_ratio``/``high_ratio`` are the 10th/90th percentile of actual/predicted.
 - ``planner_footpath``: directed walks between posts, with ``distance_m`` and ``walk_s``.
@@ -254,27 +255,28 @@ def _connection(path: Path, result: journey.Journey, day: date) -> dict[str, Any
 
 
 def trip_stops(path: Path, trip_key: int, board_sequence: int, alight_sequence: int, day: date) -> list[dict[str, Any]]:
-    """Stops from boarding to alighting with expected times, given the boarding stop's usual delay."""
+    """Stops from boarding to alighting with the trip's expected times, as the router uses them."""
     rows = fetch_all(
         path,
         """
         select s.stop_sequence, s.stop_name, s.stop_id,
             s.scheduled_sod + ? * (t.service_date - ?::date) as scheduled,
-            s.ride_from_start_s::double as ride_from_start_s, s.usual_delay_s, s.leave_by_offset_s
+            s.expected_sod + ? * (t.service_date - ?::date) as expected_sod, s.leave_by_offset_s
         from planner_stop s join planner_trip t using (trip_key)
         where s.trip_key = ? and s.stop_sequence between ? and ?
         order by s.stop_sequence
         """,
-        [DAY_SECONDS, day, trip_key, board_sequence, alight_sequence],
+        [DAY_SECONDS, day, DAY_SECONDS, day, trip_key, board_sequence, alight_sequence],
     )
     if not rows:
         return []
     board = rows[0]
-    depart = board["scheduled"] + max(board["usual_delay_s"], board["leave_by_offset_s"] or 0)
-    start = depart - board["ride_from_start_s"]
+    depart = board["expected_sod"]
+    if board["leave_by_offset_s"] is not None:
+        depart = max(depart, board["scheduled"] + board["leave_by_offset_s"])
     stops = []
     for row in rows:
-        expected = start + row["ride_from_start_s"]
+        expected = max(row["expected_sod"], depart)
         stops.append(
             {**row, "expected": _round_minute(expected), "differs": differs_from_timetable(expected, row["scheduled"])}
         )

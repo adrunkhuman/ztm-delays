@@ -50,22 +50,22 @@ def _write_artifact(path: Path) -> None:
             create table planner_stop as select * replace (ride_from_start_s::double as ride_from_start_s),
                 true as can_alight from (values
                 -- 07:30 -> 07:50 scheduled; usually 60 s late at boarding; predicted ride 25 min
-                (1::bigint, 0, '100103', '1001', 'Łomianki', 27000, 60, 180, -30, 0.0),
-                (1::bigint, 1, '200201', '2002', 'Metro Marymont', 28200, 90, 240, null, 1500.0),
-                (-5::bigint, 0, '100103', '1001', 'Łomianki', 30600, 0, 60, 0, 0.0),
-                (-5::bigint, 1, '200201', '2002', 'Metro Marymont', 31800, 0, 60, null, 1200.0),
-                -- previous service date, 25:10 = 01:10 on the 23rd
-                (7::bigint, 0, '100101', '1001', 'Łomianki', 90600, 0, 30, 0, 0.0),
-                (7::bigint, 1, '300301', '3003', 'Marymont-Potok', 91200, 0, 30, 0, 500.0),
-                (7::bigint, 2, '200202', '2002', 'Metro Marymont', 91800, 0, 30, null, 1000.0),
+                (1::bigint, 0, '100103', '1001', 'Łomianki', 27000, 60, 180, -30, 0.0, 27060),
+                (1::bigint, 1, '200201', '2002', 'Metro Marymont', 28200, 90, 240, null, 1500.0, 28560),
+                (-5::bigint, 0, '100103', '1001', 'Łomianki', 30600, 0, 60, 0, 0.0, 30600),
+                (-5::bigint, 1, '200201', '2002', 'Metro Marymont', 31800, 0, 60, null, 1200.0, 31800),
+                -- previous service date, 25:10 = 01:10 on the 23rd; the second stop's table implies a later start
+                (7::bigint, 0, '100101', '1001', 'Łomianki', 90600, 0, 30, 0, 0.0, 90600),
+                (7::bigint, 1, '300301', '3003', 'Marymont-Potok', 91200, 0, 30, 0, 500.0, 91150),
+                (7::bigint, 2, '200202', '2002', 'Metro Marymont', 91800, 0, 30, null, 1000.0, 91650),
                 -- 08:04 is too early for the bus's 08:03 bound plus a 2 min walk; 08:06 is catchable.
                 -- Metro has zero delay and timetable ride durations, not a bus model spread.
-                (10::bigint, 0, '200203', '2002', 'Metro Marymont', 29040, 0, 0, 0, 0.0),
-                (10::bigint, 1, '400401', '4004', 'Centrum', 29760, 0, 0, null, 720.0),
-                (11::bigint, 0, '200203', '2002', 'Metro Marymont', 29160, 0, 0, 0, 0.0),
-                (11::bigint, 1, '400401', '4004', 'Centrum', 29880, 0, 0, null, 720.0)
+                (10::bigint, 0, '200203', '2002', 'Metro Marymont', 29040, 0, 0, 0, 0.0, 29040),
+                (10::bigint, 1, '400401', '4004', 'Centrum', 29760, 0, 0, null, 720.0, 29760),
+                (11::bigint, 0, '200203', '2002', 'Metro Marymont', 29160, 0, 0, 0, 0.0, 29160),
+                (11::bigint, 1, '400401', '4004', 'Centrum', 29880, 0, 0, null, 720.0, 29880)
             ) t(trip_key, stop_sequence, stop_id, stop_group_id, stop_name, scheduled_sod,
-                usual_delay_s, late_delay_s, leave_by_offset_s, ride_from_start_s);
+                usual_delay_s, late_delay_s, leave_by_offset_s, ride_from_start_s, expected_sod);
 
             create table planner_range as select false as is_tram, true as weekday, 7::integer as hour,
                 0.0::double as min_ride_s, 1e9::double as max_ride_s,
@@ -187,9 +187,21 @@ def test_night_trips_from_the_previous_service_date_are_found(tmp_path: Path) ->
     night = planner.connections(path, "1001", "2002", DAY, 3600)[0]
     board, ride, _ = night["timeline"]
     assert (ride["line"], planner.clock(board["depart"]), ride["stop_count"]) == ("N50", "01:10", NIGHT_STOP_COUNT)
-    assert planner.clock(night["arrive"]) == "01:27"
+    assert planner.clock(night["arrive"]) == "01:28"
     assert planner.clock(night["arrive_by"]) == "01:29"
     assert planner.connections(path, "2002", "1001", DAY, 0) == []  # wrong direction
+
+
+def test_a_trip_has_the_same_expected_times_from_every_boarding_stop(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    net = journey.network(path, DAY)
+    # Anchored at its own boarding stop, each ride would reach Metro Marymont at 01:26:40 or 01:28:20.
+    assert net.timing(7, 0, 2).arrive == net.timing(7, 1, 2).arrive == 91650 - 86400
+    from_first, from_second = (planner.trip_stops(path, 7, board, 2, DAY) for board in (0, 1))
+    assert [planner.clock(stop["expected"]) for stop in from_first] == ["01:10", "01:19", "01:28"]
+    # Boarded at Marymont-Potok, the bus leaves no earlier than the boarding deadline there.
+    assert [planner.clock(stop["expected"]) for stop in from_second] == ["01:20", "01:28"]
 
 
 def test_planner_page_renders_cards_and_trip_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
