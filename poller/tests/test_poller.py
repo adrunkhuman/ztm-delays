@@ -27,6 +27,7 @@ CUSTOM_FLUSH_LAG_SECONDS = 120
 CUSTOM_HEARTBEAT_SECONDS = 30
 HEARTBEAT_ACCEPTED_ROWS = 10
 EXPECTED_RETRY_FLUSH_CALLS = 2
+EXPECTED_MAX_SLEEP_SECONDS = 0.5
 EGRESS_CHECK_URL = "https://example.test/egress"
 CUSTOM_SPOOL_MAX_BYTES = 12345
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
@@ -690,6 +691,58 @@ def test_main_retries_partial_flush_after_failure(monkeypatch: pytest.MonkeyPatc
     assert poller.main() == 0
     partial_flush_calls = [call for call in flush_calls if not call.get("flush_all")]
     assert len(partial_flush_calls) == EXPECTED_RETRY_FLUSH_CALLS
+
+
+def test_sleep_remaining_handles_deadline_crossing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The old loop checks at 100.999, then calculates a negative sleep at 101.001.
+    clock = iter([100.0, 100.0, 100.999, 101.001])
+    sleeps: list[float] = []
+    monkeypatch.setattr(poller.time, "monotonic", lambda: next(clock, 101.001))
+    monkeypatch.setattr(poller.time, "sleep", sleeps.append)
+
+    poller._sleep_remaining(1.0, 100.0, lambda: False)
+
+    assert sleeps
+    assert all(0.0 < duration <= EXPECTED_MAX_SLEEP_SECONDS for duration in sleeps)
+
+
+@pytest.mark.parametrize("now", [101.0, 102.0])
+def test_sleep_remaining_skips_expired_interval(monkeypatch: pytest.MonkeyPatch, now: float) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(poller.time, "monotonic", lambda: now)
+    monkeypatch.setattr(poller.time, "sleep", sleeps.append)
+
+    poller._sleep_remaining(1.0, 100.0, lambda: False)
+
+    assert sleeps == []
+
+
+def test_sleep_remaining_uses_bounded_chunks_until_original_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = 100.25
+    sleeps: list[float] = []
+
+    def fake_sleep(duration: float) -> None:
+        nonlocal now
+        sleeps.append(duration)
+        now += duration
+
+    monkeypatch.setattr(poller.time, "monotonic", lambda: now)
+    monkeypatch.setattr(poller.time, "sleep", fake_sleep)
+
+    poller._sleep_remaining(1.0, 100.0, lambda: False)
+
+    assert sleeps == [EXPECTED_MAX_SLEEP_SECONDS, 0.25]
+
+
+@pytest.mark.parametrize("chunks_before_stop", [0, 1])
+def test_sleep_remaining_honors_stop_request(monkeypatch: pytest.MonkeyPatch, chunks_before_stop: int) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(poller.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(poller.time, "sleep", sleeps.append)
+
+    poller._sleep_remaining(10.0, 100.0, lambda: len(sleeps) >= chunks_before_stop)
+
+    assert sleeps == [EXPECTED_MAX_SLEEP_SECONDS] * chunks_before_stop
 
 
 def test_poll_vehicle_type_failure_does_not_block_next_vehicle(monkeypatch: pytest.MonkeyPatch) -> None:
