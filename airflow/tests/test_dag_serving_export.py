@@ -2152,6 +2152,8 @@ class FakeBucket:
     def blob(self, blob_name: str) -> FakeBlob:
         matching_blob = next((blob for blob in self.blobs if blob.name == blob_name), None)
         if matching_blob is None:
+            if blob_name == "health/poller/feed-status.json":
+                raise NotFound("feed health is not installed")
             if not blob_name.endswith("/_MANIFEST.json"):
                 raise RuntimeError(f"unexpected blob lookup: {blob_name}")
             matching_blob = FakeBlob(blob_name, deleted_blob_names=self.deleted_blob_names)
@@ -2200,8 +2202,8 @@ class FakeBlob:
         if self.deleted_blob_names is not None:
             self.deleted_blob_names.append(self.name)
 
-    def download_as_bytes(self) -> bytes:
-        return self.data
+    def download_as_bytes(self, *, start: int = 0, end: int | None = None) -> bytes:
+        return self.data[start : end + 1 if end is not None else None]
 
     def upload_from_string(self, data: str, *, content_type: str) -> None:
         assert content_type == "application/json"

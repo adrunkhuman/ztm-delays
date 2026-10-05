@@ -6,6 +6,8 @@ The pipeline separates collection, reconstruction, warehouse modelling, and serv
 
 The poller collects buses and trams from the [Warsaw vehicle-location API](../poller/poller.py). It buffers accepted positions in a durable spool and writes append-safe Parquet parts, partitioned by mode and Warsaw-local date/hour. GPS timestamps are stored in UTC. The shared [raw GPS schema](../contracts/raw_gps_v1.json) is checked across collection and ingestion.
 
+An independent hourly monitor evaluates sanitized collector counters and publishes per-mode health reports. BigQuery stores those rows in `ztm_raw.raw_poller_hourly_health`; separate `mart_poller_hourly_health` and `mart_poller_daily_health` views expose UTC hours with Warsaw-local date/hour and daily summaries. This health feed does not modify `mart_pipeline_status`, the serving shard schema, or nightly model selections. Optional frontend/export consumption is separate from the normal snapshot export, and does not make that export live.
+
 Airflow polls the [mkuran GTFS feed](https://mkuran.pl/gtfs/warsaw.zip) hourly and stores changed ZIPs with timestamp-and-hash snapshot IDs. GTFS is the timetable: routes, stops, scheduled trips, service dates, and vehicle duties. The feed is a rolling window, so historical schedules are known only from collected snapshots onward.
 
 The Python matcher reads raw GPS and one pinned GTFS ZIP locally. It assigns vehicles to ordered duty courses, then aligns GPS segments to scheduled stop occurrences. A duty is a sequence of trips assigned to a vehicle; GTFS `block_id` provides its identity. Line/brigade fallback is weaker evidence and cannot produce high-confidence execution facts.

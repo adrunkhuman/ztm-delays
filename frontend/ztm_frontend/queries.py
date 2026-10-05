@@ -2055,4 +2055,53 @@ def _poller_status_metadata(value: object) -> dict[str, Any]:
         if isinstance(value.get("stale_after_seconds"), int)
         else None,
         "vehicle_types": vehicle_types,
+        "feed_health": _feed_health_metadata(value.get("feed_health")),
     }
+
+
+def _feed_health_metadata(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    fields = (
+        "status",
+        "version",
+        "evaluated_at",
+        "hour_start",
+        "hour_end",
+        "collection_started_at",
+        "stale_after_seconds",
+    )
+    result: dict[str, Any] = {key: value.get(key) for key in fields if key in value}
+    mode_fields = (
+        "status",
+        "status_at_evaluation",
+        "reasons",
+        "intervals",
+        "monitored_minutes",
+        "baseline_samples",
+        "parsed_rows",
+        "accepted_rows",
+        "dropped_stale_rows",
+        "dropped_future_rows",
+        "mean_accepted_vehicles",
+        "mean_accepted_lines",
+    )
+    modes = value.get("vehicle_types")
+    clean_modes = {}
+    if isinstance(modes, dict):
+        for mode in ("bus", "tram"):
+            item = modes.get(mode)
+            if isinstance(item, dict):
+                clean_modes[mode] = {key: item.get(key) for key in mode_fields if key in item}
+    result["vehicle_types"] = clean_modes
+    recent = value.get("recent_intervals")
+    result["recent_intervals"] = (
+        [
+            {key: item.get(key) for key in ("mode", "start_at", "end_at", "reason") if key in item}
+            for item in recent[-48:]
+            if isinstance(item, dict)
+        ]
+        if isinstance(recent, list)
+        else []
+    )
+    return result

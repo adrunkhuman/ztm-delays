@@ -1,0 +1,42 @@
+version: 2
+
+sources:
+  - name: poller_health
+    database: "{{ env_var('GCP_PROJECT', 'ztm-data') }}"
+    schema: "{{ env_var('BIGQUERY_RAW_DATASET', 'ztm_raw') }}"
+    tables:
+      - name: raw_poller_hourly_health
+        description: Sanitized hourly poller health evaluations, one row per mode and UTC hour.
+        columns:
+          - name: version
+            data_type: INTEGER
+          - name: evaluated_at
+            data_type: TIMESTAMP
+          - name: hour_start
+            data_type: TIMESTAMP
+          - name: collection_started_at
+            data_type: TIMESTAMP
+          - name: mode
+            data_type: STRING
+          - name: status
+            data_type: STRING
+          - name: reasons
+            data_type: STRING
+          - name: intervals
+            data_type: STRING
+          - name: monitored_minutes
+            data_type: INTEGER
+          - name: baseline_samples
+            data_type: INTEGER
+          - name: parsed_rows
+            data_type: INTEGER
+          - name: accepted_rows
+            data_type: INTEGER
+          - name: dropped_stale_rows
+            data_type: INTEGER
+          - name: dropped_future_rows
+            data_type: INTEGER
+          - name: mean_accepted_vehicles
+            data_type: FLOAT
+          - name: mean_accepted_lines
+            data_type: FLOAT
