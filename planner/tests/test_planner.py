@@ -14,7 +14,7 @@ import osmium.osm.mutable
 import pytest
 from conftest import METRO_RUNS, SCORE_START, STOPS, TRAIN_END, TRAIN_START, peak_factor, write_gtfs
 
-from ztm_planner import artifact, calendar, features, footpaths, gtfs, lookup, weather
+from ztm_planner import artifact, calendar, features, footpaths, gtfs, lookup, score, weather
 from ztm_planner.cli import main
 from ztm_planner.db import one
 from ztm_planner.settings import RAIL_LATE_S, SHRINK, STATION_ACCESS_S, WALK_SPEED_MPS, Resources
@@ -256,6 +256,27 @@ def test_training_writes_a_complete_bundle_that_beats_the_timetable(trained: Pat
     assert ranges == (2 * 2 * 24 * 8, True)  # complete mode x weekday x hour x bucket grid
 
 
+def test_expected_times_average_the_trip_start_each_boardable_stop_implies() -> None:
+    con = duckdb.connect()
+    con.execute(
+        """
+        create table out_stop as select * from (values
+            -- starts implied: 1000 + 60 - 0 = 1060, then 1300 + 0 - 200 = 1100, then 1600 + 120 - 600 = 1120
+            (1, 0, 1000, 60, -30, 0.0), (1, 1, 1300, 0, -20, 200.0), (1, 2, 1600, 120, 0, 600.0),
+            (1, 3, 1900, 900, null, 760.0),  -- alighting only: ride from the mean start, 1093 + 760
+            -- starts 1000, 1500, 1200: the third lowers the mean enough to turn the trip back, so it holds 1350
+            (2, 0, 1000, 0, 0, 0.0), (2, 1, 1300, 300, 0, 100.0), (2, 2, 1310, 0, 0, 110.0),
+            (2, 3, 1400, 0, null, 200.0),
+            -- no boarding before the stop: its own usual delay
+            (3, 0, 1000, 30, null, 0.0)
+        ) t(trip_key, stop_sequence, scheduled_sod, usual_delay_s, leave_by_offset_s, ride_from_start_s)
+        """
+    )
+    score._expected_times(con)
+    rows = con.execute("select trip_key, expected_sod from out_stop order by trip_key, stop_sequence").fetchall()
+    assert rows == [(1, 1060), (1, 1280), (1, 1693), (1, 1853), (2, 1000), (2, 1350), (2, 1350), (2, 1433), (3, 1030)]
+
+
 def test_scoring_publishes_a_contract_artifact_with_learned_times(
     tmp_path: Path, world: dict[str, Path], trained: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -308,6 +329,13 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
         "max(ride_from_start_s) from planner_stop s join planner_trip t using (trip_key) where t.mode = 'rail'",
     )
     assert fixed[0] > 0 and fixed[1:] == (0, 0, RAIL_LATE_S, 9 * 60)
+    timetabled = "select count(*) from planner_stop s join planner_trip t using (trip_key) where t.mode in"
+    assert one(con, f"{timetabled} ('metro', 'rail') and expected_sod <> scheduled_sod")[0] == 0
+    backwards = (
+        "select count(*) from (select expected_sod < lag(expected_sod) over "
+        "(partition by trip_key order by stop_sequence) as back from planner_stop) where back"
+    )
+    assert one(con, backwards)[0] == 0
     # OSM distances where covered, straight-line estimates elsewhere; platforms add the station access time.
     walks = dict(con.execute("select from_stop_id || '>' || to_stop_id, walk_s from planner_footpath").fetchall())
     assert walks["100101>1001M:P1"] == walks["1001M:P1>100101"] == math.ceil(200 / WALK_SPEED_MPS) + STATION_ACCESS_S

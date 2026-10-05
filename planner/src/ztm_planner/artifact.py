@@ -30,7 +30,7 @@ CONTRACT: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("stop_group_id", "VARCHAR", False), ("stop_name", "VARCHAR", False), ("scheduled_sod", "INTEGER", False),
         ("usual_delay_s", "INTEGER", False), ("late_delay_s", "INTEGER", False),
         ("leave_by_offset_s", "INTEGER", True), ("ride_from_start_s", "DOUBLE", False),
-        ("can_alight", "BOOLEAN", False),
+        ("expected_sod", "INTEGER", False), ("can_alight", "BOOLEAN", False),
     ),
     "planner_range": (
         ("is_tram", "BOOLEAN", False), ("weekday", "BOOLEAN", False), ("hour", "INTEGER", False),

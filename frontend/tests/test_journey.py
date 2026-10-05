@@ -32,6 +32,7 @@ class Stop:
     usual: int = 0
     cumulative: float | None = None
     can_alight: bool = True
+    expected: int | None = None  # default: the timetable for metro and rail, else the first departure plus the ride
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ def _write(
         create table planner_stop (
             trip_key bigint, stop_sequence integer, stop_id varchar, stop_group_id varchar,
             stop_name varchar, scheduled_sod integer, usual_delay_s integer, late_delay_s integer,
-            leave_by_offset_s integer, ride_from_start_s double, can_alight boolean not null
+            leave_by_offset_s integer, ride_from_start_s double, expected_sod integer, can_alight boolean not null
         );
         create table planner_footpath (
             from_stop_id varchar, to_stop_id varchar, distance_m integer, walk_s integer
@@ -75,9 +76,16 @@ def _write(
         connection.execute(
             "insert into planner_trip values (?, ?, ?, 'test', 'Destination')", [trip.key, trip.day, trip.mode]
         )
+        first = trip.stops[0]
+        start = first.scheduled + max(first.usual, first.usual if first.margin is None else first.margin)
+        start -= first.cumulative or 0.0
         for i, stop in enumerate(trip.stops):
+            cumulative = stop.cumulative if stop.cumulative is not None else float(stop.scheduled - first.scheduled)
+            expected = stop.expected
+            if expected is None:
+                expected = stop.scheduled if trip.mode in {"metro", "rail"} else round(start + cumulative)
             connection.execute(
-                "insert into planner_stop values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "insert into planner_stop values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     trip.key,
                     10 * (i + 1),
@@ -88,7 +96,8 @@ def _write(
                     stop.usual,
                     stop.late,
                     stop.margin if i < len(trip.stops) - 1 else None,
-                    stop.cumulative if stop.cumulative is not None else float(stop.scheduled - trip.stops[0].scheduled),
+                    cumulative,
+                    expected,
                     stop.can_alight,
                 ],
             )

@@ -38,6 +38,7 @@
       {"name": "late_delay_s", "duckdb_type": "INTEGER", "nullable": false},
       {"name": "leave_by_offset_s", "duckdb_type": "INTEGER", "nullable": true},
       {"name": "ride_from_start_s", "duckdb_type": "DOUBLE", "nullable": false},
+      {"name": "expected_sod", "duckdb_type": "INTEGER", "nullable": false},
       {"name": "can_alight", "duckdb_type": "BOOLEAN", "nullable": false}
     ],
     "planner_range": [

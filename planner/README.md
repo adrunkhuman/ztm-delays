@@ -33,13 +33,15 @@ On 10 weeks to 2 Oct 2026, the held-out mean absolute segment error was 27.3 s f
 
 These rules define the times the frontend's [journey router](../frontend/README.md#planner) works with.
 
-Ride times depend on where the passenger boards, not the alighting stop's delay model. Let `duration` be the non-negative difference between predicted cumulative ride times at alighting and boarding, and `board_by` the boarding timetable time plus its non-positive boarding margin.
+Each trip has one expected time per stop, `expected_sod`, whichever stop the passenger boards at. Every boardable stop implies a trip start: its timetable time plus usual delay (at least `board_by`), less the predicted cumulative ride to it. A stop's expected time is the mean start implied by the boardable stops up to it, plus its cumulative ride, and never earlier than the stop before. Averaging smooths noisy single stop tables yet follows delay that builds up along the route. On 4 Oct 2026 (held out), it was off by 76 s at bus stops and 55 s at tram stops, against 82 s and 57 s for the stop's own usual delay. Anchoring at each boarding stop instead gave a trip different times depending on where it was boarded.
+
+The conservative arrival does depend on the boarding stop: on the same day it missed 2–3% of arrivals at every ride length, with less margin than a fixed bound per vehicle and stop. Let `duration` be the non-negative difference between predicted cumulative ride times at alighting and boarding, and `board_by` the boarding timetable time plus its non-positive boarding margin.
 
 | Timing | Calculation |
 | --- | --- |
-| Expected departure | Boarding timetable time + usual delay, clamped to at least `board_by`. |
-| Expected arrival | Expected departure + `duration`. |
-| Conservative arrival | Boarding timetable time + late delay, clamped to at least `board_by` and expected departure, plus a monotone calibrated upper ride-duration envelope; rounded up to a whole second. |
+| Expected departure | The boarding stop's expected time, clamped to at least `board_by`. |
+| Expected arrival | The alighting stop's expected time, clamped to at least expected departure. |
+| Conservative arrival | Boarding timetable time + late delay, clamped to at least `board_by` and expected departure, plus a monotone calibrated upper ride-duration envelope; rounded up to a whole second and at least expected arrival. |
 
 The envelope uses calibrated upper ride ratios floored at 1, with 1.1 for missing cells or duration gaps. It retains earlier upper bounds across downward ratio boundaries, so riding farther never improves the conservative bound. Metro and SKM keep timetable ride durations, without a learned envelope; SKM retains its fixed 60 s late margin.
 
