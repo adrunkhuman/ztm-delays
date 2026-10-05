@@ -848,10 +848,12 @@ def _rows_digest(rows: list[GpsRow]) -> str:
 
 
 def _sleep_remaining(interval_seconds: float, loop_started: float, stop_requested: Callable[[], bool]) -> None:
-    remaining = interval_seconds - (time.monotonic() - loop_started)
-    deadline = time.monotonic() + max(0.0, remaining)
-    while not stop_requested() and time.monotonic() < deadline:
-        time.sleep(min(0.5, deadline - time.monotonic()))
+    deadline = loop_started + interval_seconds
+    while not stop_requested():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return
+        time.sleep(min(0.5, remaining))
 
 
 if __name__ == "__main__":
