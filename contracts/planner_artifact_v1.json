@@ -1,6 +1,10 @@
 {
   "version": "planner-artifact-v1",
   "description": "Tables of planner/planner.duckdb: written nightly by planner/ (ztm-planner score), read by frontend/ztm_frontend/planner.py.",
+  "keys": {
+    "planner_trip": ["trip_key"],
+    "planner_stop": ["trip_key", "stop_sequence"]
+  },
   "tables": {
     "planner_metadata": [
       {"name": "build_id", "duckdb_type": "VARCHAR", "nullable": false},

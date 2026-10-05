@@ -42,6 +42,8 @@ CONTRACT: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("walk_s", "INTEGER", False),
     ),
 }  # fmt: skip
+# Unique columns, also in the repository contract; a trip key shared by two trips would merge them.
+KEYS: dict[str, tuple[str, ...]] = {"planner_trip": ("trip_key",), "planner_stop": ("trip_key", "stop_sequence")}
 ORDER = {
     "planner_stop": "stop_group_id, trip_key, stop_sequence",
     "planner_trip": "trip_key",
@@ -84,3 +86,9 @@ def _validate(con: duckdb.DuckDBPyConnection, table: str, columns: tuple[tuple[s
             nulls = one(con, f"select count(*) from artifact.{table} where {name} is null")[0]
             if nulls:
                 raise ValueError(f"artifact {table}.{name} has {nulls} nulls")
+    if table in KEYS:
+        key = ", ".join(KEYS[table])
+        groups = f"select 1 from artifact.{table} group by {key} having count(*) > 1"
+        duplicated = one(con, f"select count(*) from ({groups})")[0]
+        if duplicated:
+            raise ValueError(f"artifact {table} has {duplicated} duplicated ({key}) keys")

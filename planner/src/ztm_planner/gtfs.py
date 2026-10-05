@@ -87,7 +87,9 @@ def load_schedule(
         "service_date, trip_key, mode, line, direction_id, headsign, stop_id, stop_sequence, scheduled_sod, request, "
         "stop_name, lat, lon, no_pickup, no_dropoff"
     )
-    trip_key = "(hash(service_date::varchar || ':' || {id}) >> 1)::bigint as trip_key"
+    # Not DuckDB's hash(): it collides on Warsaw trip ids that differ in two digits, a few times a week (e.g.
+    # 2026-10-06:10:PcS:017:2319 and 2026-10-06:19:PcS:018:2319), and may change between DuckDB versions.
+    trip_key = "(md5_number_upper(service_date::varchar || ':' || {id}) >> 1)::bigint as trip_key"
     con.execute(
         f"""
         {"insert into sched_stop" if append else "create or replace table sched_stop as"}
