@@ -18,7 +18,10 @@ This contacts the live API but does not initialise GCS or upload data. Omit both
 | `ZTM_API_TOKEN` | City API authorization token. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Mounted service-account key for GCS access. |
 | `GCS_BUCKET`, `GCS_PREFIX` | Destination bucket and prefix; prefix defaults to `raw/gps`. |
-| `POLLER_SPOOL_DIR` | Durable buffer directory; default `/var/lib/ztm-poller-spool`. |
+| `POLLER_SPOOL_DIR` | Durable GPS and independent health checkpoint directory; default `/var/lib/ztm-poller-spool`. |
+| `POLLER_HEALTH_GCS_PREFIX` | Private cumulative UTC hourly summaries; default `health/poller/hourly`. |
+| `POLLER_HEALTH_MAX_BYTES` | Health checkpoint/pending-counter cap, separate from the GPS cap; default 8 MiB. Reserves 1 KiB before each API attempt. |
+| `POLLER_HEARTBEAT_INTERVAL_SECONDS` | Heartbeat and closed-hour diagnostic upload/retry tick; default 60 seconds. |
 | `ZTM_API_PROXY` | Optional SOCKS proxy for city API traffic. |
 
 Timing, freshness, and buffer limits are defined in [poller.py](poller.py).
@@ -34,7 +37,23 @@ Multiple parts per hour are expected. A batch's row digest gives retries the sam
 
 Stale and far-future pings are rejected before buffering. By default, flushing runs every 15 minutes and holds recent rows for five minutes. Graceful shutdown flushes the remaining buffer. Failed uploads stay buffered for retry; persisted spool state survives container replacement. The default 100 MiB spool cap fails loudly rather than allowing unbounded disk growth.
 
-A private GCS heartbeat records per-mode attempts, successes, and failures. Heartbeat upload failure is logged without stopping collection. The frontend sees only the sanitized snapshot captured during serving export.
+A private GCS heartbeat records per-mode attempts, successes, and failures. Optional per-mode `feed_status` and `feed_reason` describe freshness separately: more than half of parsed rows rejected as stale/future is `degraded`; other nonempty responses are freshness-`healthy`. Empty responses and request failures are `unknown`. Request success, `last_success_at`, and the top-level heartbeat status keep their existing meaning. Freshness-healthy does **not** prove normal fleet coverage; baseline-dependent vehicle/line collapse detection belongs to the downstream monitor. The frontend sees only the sanitized snapshot captured during serving export.
+
+## Durable feed diagnostics
+
+```text
+health/poller/hourly/YYYY-MM-DD/HH.json
+```
+
+The [v1 shared contract](../contracts/poller_health_v1.json) defines exact fields. Each mode has only **observed** UTC minutes: attempt/success counts; parsed, accepted, stale-dropped and future-dropped rows; and sums of distinct fresh vehicles/lines **per poll**, not hourly unique fleets. Attempts use request-start timestamps, not GPS timestamps. Empty successful responses count as successes; failed attempts contribute no row counts. Missing minutes/hours mean unmonitored, not zero. Deploying mid-hour does not invent earlier minutes; `collection_started_at` is the first retained attempt and survives restart. The private heartbeat also carries this optional root marker, so the monitor can distinguish stopped collection in the first monitored hour from an older collector with no monitoring marker. Legacy heartbeat callers omit it.
+
+`poller-health-v1.json` is a separate versioned checkpoint under the durable spool directory; `buffers.json` is unchanged. Each attempt is atomically checkpointed with file/directory fsync before the next API call, including when all GPS rows were discarded. No raw rejected rows or historical vehicle-ID sets are retained. A crash during an in-flight request or before its checkpoint completes can still leave that attempt unrecorded.
+
+Closed hours upload at heartbeat ticks (normally **one additional object per hour**, covering both modes). Startup retries prior closed hours before polling; graceful shutdown also uploads the partial hour. Failed GCS writes are logged and retained locally without stopping ingestion, then retried at the next tick/startup. Shutdown returns nonzero if uploads remain pending. Writes replace cumulative snapshots at the same key: retries do not add counts. Partial-hour state stays local even after upload, so a same-hour restart extends rather than replaces earlier counts. Successful closed hours are retired locally; collection start remains.
+
+Run **one writer per spool and health prefix**, preserve its volume, and stop the old instance before replacement. Lost/deleted checkpoints cannot reconstruct earlier counts. Do not run multiple writers or move the clock backward into a finalized hour. Closed-hour objects have no invented completeness flag; downstream readers infer coverage from observed minutes.
+
+Pending counters are bounded by `POLLER_HEALTH_MAX_BYTES`. The poller stops loudly **before another API call** if it cannot reserve space; it never evicts pending hours to keep collecting. Disk/checkpoint errors also fail loudly, retaining the previous checkpoint and attempting shutdown uploads. Check logs, restore disk/GCS access, or explicitly increase the cap before restarting; do not delete the checkpoint to clear an outage. Atomic replacement temporarily needs disk space for both old and new checkpoints (up to roughly twice the cap). `--no-upload` neither restores nor writes health checkpoints and makes no GCS calls.
 
 ## Container
 
@@ -46,7 +65,16 @@ The Docker healthcheck checks local processes and Tailscale readiness, not the c
 
 ## Checks
 
-From `poller/`, `uv run pytest` and `uv run ruff check .` run offline checks. To size storage from GCS metadata:
+From `poller/`, run offline checks with:
+
+```sh
+uv run --locked pytest
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked ty check poller.py poller_health_counters.py measure_raw_gps_volume.py
+```
+
+The targeted typecheck covers maintained sources; known existing test-only type diagnostics are separate. To size storage from GCS metadata:
 
 ```sh
 uv run python measure_raw_gps_volume.py \

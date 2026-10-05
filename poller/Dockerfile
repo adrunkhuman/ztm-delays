@@ -14,7 +14,7 @@ RUN apt-get update \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev
 
-COPY poller.py ./
+COPY poller.py poller_health_counters.py ./
 COPY entrypoint.sh ./
 COPY healthcheck.sh ./
 RUN chmod +x entrypoint.sh healthcheck.sh

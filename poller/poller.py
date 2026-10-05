@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -23,6 +24,8 @@ import pyarrow.parquet as pq
 import requests
 from google.api_core.exceptions import GoogleAPIError, PreconditionFailed
 from google.cloud import storage
+
+from poller_health_counters import DEFAULT_MAX_BYTES, DEFAULT_PREFIX, HealthCounters
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,6 +84,8 @@ class Config:
     spool_max_bytes: int
     run_once: bool
     no_upload: bool
+    health_gcs_prefix: str = DEFAULT_PREFIX
+    health_max_bytes: int = DEFAULT_MAX_BYTES
 
 
 @dataclass(frozen=True)
@@ -103,6 +108,9 @@ class PollResult:
     dropped_stale: int = 0
     dropped_future: int = 0
     error_type: str | None = None
+    parsed_rows: int = 0
+    accepted_vehicle_count: int = 0
+    accepted_line_count: int = 0
 
 
 @dataclass
@@ -117,6 +125,11 @@ class PollState:
     last_dropped_future_rows: int = 0
     consecutive_failures: int = 0
     last_error_type: str | None = None
+    last_parsed_rows: int = 0
+    last_accepted_vehicle_count: int = 0
+    last_accepted_line_count: int = 0
+    feed_status: str = "unknown"
+    feed_reason: str | None = None
 
 
 class GpsRow(TypedDict):
@@ -143,6 +156,7 @@ class RuntimeState:
     stop_requested: Callable[[], bool]
     last_partial_flush: float = 0.0
     last_heartbeat: float = 0.0
+    health: HealthCounters | None = None
 
 
 def main() -> int:
@@ -176,17 +190,31 @@ def main() -> int:
         poll_states=poll_states,
         stop_requested=stop_requested,
         last_heartbeat=-config.heartbeat_interval_seconds,
+        health=None
+        if config.no_upload
+        else HealthCounters(config.spool_dir, config.poll_interval_seconds, config.health_max_bytes),
     )
 
     try:
+        if runtime.health is not None:
+            # Drain prior closed hours at startup; failures remain pending without blocking polls.
+            runtime.health.upload(cast("storage.Bucket", bucket), config.health_gcs_prefix, datetime.now(UTC))
         _run_poll_loop(runtime)
     except Exception:
         if not config.no_upload:
-            _flush_shutdown(cast("storage.Bucket", bucket), config, buffers)
+            try:
+                _flush_health_shutdown(runtime)
+            finally:
+                _flush_shutdown(cast("storage.Bucket", bucket), config, buffers)
         raise
 
-    if not config.no_upload and not _flush_shutdown(cast("storage.Bucket", bucket), config, buffers):
-        return 1
+    if not config.no_upload:
+        try:
+            health_succeeded = _flush_health_shutdown(runtime)
+        finally:
+            gps_succeeded = _flush_shutdown(cast("storage.Bucket", bucket), config, buffers)
+        if not health_succeeded or not gps_succeeded:
+            return 1
     LOGGER.info("poller stopped")
     return 0
 
@@ -224,6 +252,10 @@ def _load_config(args: Namespace) -> Config:
     egress_check_url = os.getenv("POLLER_EGRESS_CHECK_URL", "https://ipinfo.io/json").strip()
     spool_dir = Path(os.getenv("POLLER_SPOOL_DIR", "/var/lib/ztm-poller-spool")).expanduser()
     spool_max_bytes = _positive_int_env("POLLER_SPOOL_MAX_BYTES", str(DEFAULT_SPOOL_MAX_BYTES))
+    health_gcs_prefix = os.getenv("POLLER_HEALTH_GCS_PREFIX", DEFAULT_PREFIX).strip("/")
+    if not health_gcs_prefix:
+        raise RuntimeError("POLLER_HEALTH_GCS_PREFIX must not be empty")
+    health_max_bytes = _positive_int_env("POLLER_HEALTH_MAX_BYTES", str(DEFAULT_MAX_BYTES))
     if require_polish_egress and not api_proxy:
         raise RuntimeError("POLLER_REQUIRE_POLISH_EGRESS requires ZTM_API_PROXY")
     if require_polish_egress:
@@ -249,6 +281,8 @@ def _load_config(args: Namespace) -> Config:
         spool_max_bytes=spool_max_bytes,
         run_once=args.once,
         no_upload=args.no_upload,
+        health_gcs_prefix=health_gcs_prefix,
+        health_max_bytes=health_max_bytes,
     )
 
 
@@ -258,7 +292,7 @@ def _positive_float_env(name: str, default: str) -> float:
     except ValueError as exc:
         raise RuntimeError(f"{name} must be a positive number") from exc
 
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise RuntimeError(f"{name} must be a positive number")
     return value
 
@@ -316,6 +350,7 @@ def _poll_vehicle_type(
     attempted_at = datetime.now(UTC)
     try:
         rows = _poll_api(session, config, vehicle_type)
+        parsed_rows = len(rows)
         rows, dropped_stale, dropped_future = _filter_fresh_rows(rows, attempted_at, config)
         for row in rows:
             buffers[_hour_key(row["Time"].astimezone(WARSAW_TZ))].append(row)
@@ -333,6 +368,9 @@ def _poll_vehicle_type(
             accepted_rows=len(rows),
             dropped_stale=dropped_stale,
             dropped_future=dropped_future,
+            parsed_rows=parsed_rows,
+            accepted_vehicle_count=len({row["VehicleNumber"] for row in rows}),
+            accepted_line_count=len({row["Lines"] for row in rows}),
         )
     except requests.RequestException:
         LOGGER.exception("API request failed vehicle_type=%s", vehicle_type.name)
@@ -350,11 +388,16 @@ def _poll_vehicle_types(
     config: Config,
     buffers: dict[str, dict[datetime, list[GpsRow]]],
     poll_states: dict[str, PollState],
+    health: HealthCounters | None = None,
 ) -> int:
     accepted_rows = 0
     for vehicle_type in config.vehicle_types:
+        if health is not None:
+            health.check_capacity()
         result = _poll_vehicle_type(session, config, vehicle_type, buffers[vehicle_type.name])
         _update_poll_state(poll_states[vehicle_type.name], result)
+        if health is not None:
+            health.record(result)
         accepted_rows += result.accepted_rows
         if result.accepted_rows and not config.no_upload:
             _save_spool(config, buffers)
@@ -365,7 +408,7 @@ def _run_poll_loop(runtime: RuntimeState) -> None:
     config = runtime.config
     while not runtime.stop_requested():
         loop_started = time.monotonic()
-        _poll_vehicle_types(runtime.session, config, runtime.buffers, runtime.poll_states)
+        _poll_vehicle_types(runtime.session, config, runtime.buffers, runtime.poll_states, runtime.health)
         if config.no_upload:
             buffered_rows = sum(
                 len(rows) for vehicle_buffers in runtime.buffers.values() for rows in vehicle_buffers.values()
@@ -389,24 +432,61 @@ def _handle_uploads(runtime: RuntimeState, loop_started: float) -> None:
         _save_spool(config, runtime.buffers)
         if flush_succeeded:
             runtime.last_partial_flush = loop_started
-    if loop_started - runtime.last_heartbeat >= config.heartbeat_interval_seconds and _write_heartbeat(
-        bucket, config, runtime.poll_states
-    ):
+    if loop_started - runtime.last_heartbeat >= config.heartbeat_interval_seconds:
+        if runtime.health is not None:
+            runtime.health.upload(bucket, config.health_gcs_prefix, datetime.now(UTC))
+        _write_heartbeat(
+            bucket,
+            config,
+            runtime.poll_states,
+            runtime.health.collection_started_at if runtime.health is not None else None,
+        )
+        # Retry on heartbeat ticks, not every poll when the heartbeat upload fails.
         runtime.last_heartbeat = loop_started
+
+
+def _flush_health_shutdown(runtime: RuntimeState) -> bool:
+    if runtime.health is None:
+        return True
+    succeeded = runtime.health.upload(
+        cast("storage.Bucket", runtime.bucket),
+        runtime.config.health_gcs_prefix,
+        datetime.now(UTC),
+        include_partial=True,
+    )
+    runtime.health.save()
+    if not succeeded:
+        LOGGER.error("poller stopped with pending health uploads; checkpoint retained")
+    return succeeded
 
 
 def _update_poll_state(state: PollState, result: PollResult) -> None:
     state.last_attempt_at = result.attempted_at
+    state.feed_status, state.feed_reason = _feed_health(result)
     if result.succeeded:
         state.last_success_at = result.attempted_at
         state.last_accepted_rows = result.accepted_rows
         state.last_dropped_stale_rows = result.dropped_stale
         state.last_dropped_future_rows = result.dropped_future
+        state.last_parsed_rows = result.parsed_rows
+        state.last_accepted_vehicle_count = result.accepted_vehicle_count
+        state.last_accepted_line_count = result.accepted_line_count
         state.consecutive_failures = 0
         state.last_error_type = None
         return
     state.consecutive_failures += 1
     state.last_error_type = result.error_type
+
+
+def _feed_health(result: PollResult) -> tuple[str, str | None]:
+    """Report only demonstrable freshness loss, not baseline-dependent fleet coverage."""
+    if not result.succeeded or result.parsed_rows == 0:
+        return "unknown", None
+    if (result.dropped_stale + result.dropped_future) * 2 > result.parsed_rows:
+        if result.dropped_stale and result.dropped_future:
+            return "degraded", "stale_and_future_heavy"
+        return "degraded", "stale_heavy" if result.dropped_stale else "future_heavy"
+    return "healthy", None
 
 
 def _assert_polish_egress(session: requests.Session, config: Config) -> None:
@@ -755,8 +835,13 @@ def _upload_hour(
     LOGGER.info("uploaded hourly parquet gcs_path=gs://%s/%s rows=%d", config.gcs_bucket, path, len(rows))
 
 
-def _write_heartbeat(bucket: storage.Bucket, config: Config, poll_states: dict[str, PollState]) -> bool:
-    payload = _heartbeat_payload(config, poll_states, datetime.now(UTC))
+def _write_heartbeat(
+    bucket: storage.Bucket,
+    config: Config,
+    poll_states: dict[str, PollState],
+    collection_started_at: str | None = None,
+) -> bool:
+    payload = _heartbeat_payload(config, poll_states, datetime.now(UTC), collection_started_at)
     data = json.dumps(payload, sort_keys=True).encode()
     try:
         bucket.blob(config.heartbeat_gcs_path).upload_from_string(data, content_type="application/json")
@@ -774,8 +859,13 @@ def _write_heartbeat(bucket: storage.Bucket, config: Config, poll_states: dict[s
     return True
 
 
-def _heartbeat_payload(config: Config, poll_states: dict[str, PollState], updated_at: datetime) -> dict[str, object]:
-    return {
+def _heartbeat_payload(
+    config: Config,
+    poll_states: dict[str, PollState],
+    updated_at: datetime,
+    collection_started_at: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "updated_at": _isoformat_utc(updated_at),
         "status": _heartbeat_status(poll_states),
         "poller_hostname": gethostname(),
@@ -789,12 +879,20 @@ def _heartbeat_payload(config: Config, poll_states: dict[str, PollState], update
                 "last_accepted_rows": state.last_accepted_rows,
                 "last_dropped_stale_rows": state.last_dropped_stale_rows,
                 "last_dropped_future_rows": state.last_dropped_future_rows,
+                "last_parsed_rows": state.last_parsed_rows,
+                "last_accepted_vehicle_count": state.last_accepted_vehicle_count,
+                "last_accepted_line_count": state.last_accepted_line_count,
+                "feed_status": state.feed_status,
+                "feed_reason": state.feed_reason,
                 "consecutive_failures": state.consecutive_failures,
                 "last_error_type": state.last_error_type,
             }
             for name, state in sorted(poll_states.items())
         },
     }
+    if collection_started_at is not None:
+        payload["collection_started_at"] = collection_started_at
+    return payload
 
 
 def _heartbeat_status(poll_states: dict[str, PollState]) -> str:

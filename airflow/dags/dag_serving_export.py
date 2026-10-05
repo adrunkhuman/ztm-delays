@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, cast
 from airflow.sdk import DAG, PartitionedAssetTimetable, get_current_context, task
 from google.api_core.exceptions import Conflict, NotFound
 from google.cloud import bigquery, storage
+from poller_health import REPORT_MAX_BYTES, decode_json
+from poller_health_serving import serving_snapshot
 from ztm_airflow_common import (
     BIGQUERY_LOCATION,
     BIGQUERY_MARTS_DATASET,
@@ -1491,6 +1493,28 @@ def _export_metadata(  # noqa: PLR0913
 
 
 def _poller_status(storage_client: storage.Client, now: datetime, bucket_name: str) -> dict[str, object]:
+    status = _poller_heartbeat_status(storage_client, now, bucket_name)
+    feed_health = _poller_feed_status(storage_client, now, bucket_name)
+    if feed_health is not None:
+        status["feed_health"] = feed_health
+    return status
+
+
+def _poller_feed_status(storage_client: storage.Client, now: datetime, bucket_name: str) -> dict[str, object] | None:
+    try:
+        blob = storage_client.bucket(bucket_name).blob("health/poller/feed-status.json")
+        data = blob.download_as_bytes(start=0, end=REPORT_MAX_BYTES)
+        if not data:
+            return None
+        return serving_snapshot(decode_json(data, REPORT_MAX_BYTES), now)
+    except NotFound:
+        return None
+    except Exception:  # noqa: BLE001 - optional telemetry must not prevent publishing existing facts
+        LOGGER.warning("Poller feed-health snapshot unavailable or invalid")
+        return {"status": "unknown", "vehicle_types": {}}
+
+
+def _poller_heartbeat_status(storage_client: storage.Client, now: datetime, bucket_name: str) -> dict[str, object]:
     path = os.getenv("POLLER_HEARTBEAT_GCS_PATH", POLLER_HEARTBEAT_GCS_PATH).strip("/")
     try:
         payload = json.loads(storage_client.bucket(bucket_name).blob(path).download_as_bytes().decode("utf-8"))

@@ -9,6 +9,7 @@ Orchestrates collection, reconstruction, warehouse modelling, and serving public
 | `dag_gtfs_poll` | Hourly | Store changed GTFS ZIPs; emit `gtfs_snapshot`. |
 | `dag_gtfs_load` | `gtfs_snapshot` | Load the exact snapshot; rebuild staging, dimensions, and schedule versions. |
 | `dag_gps_raw_load` | Hourly | Load available GPS parts; emit `raw_gps_date`. |
+| `poller_health` | Hourly, at :25 UTC | Evaluate poller feed health independently; persist per-mode raw rows and status reports. |
 | `dag_daily_gps` | Nightly, 04:00 Warsaw | Reconstruct the previous GPS date; publish facts, coverage, and marts; emit `gps_models_date`. |
 | `dag_serving_export` | `gps_models_date` or manual | Validate and publish the frontend export. |
 | `dag_weekly_audit` | Weekly | Refresh audit evidence and run audit-tagged dbt tests. |
@@ -17,7 +18,7 @@ Orchestrates collection, reconstruction, warehouse modelling, and serving public
 
 The nightly DAG selects the persisted GTFS snapshot, validates staging, invokes the matcher, and promotes its outputs before dbt publishes service-date facts. Airflow checks schemas, hashes, lineage, row uniqueness, mode coverage, and resource use. The four stable matcher-input partitions are replaced in one BigQuery transaction; downstream fact and mart rebuilds are separate steps.
 
-Schedule-writing tasks share the one-slot `schedule_ledger_writer` pool. Reconstruction requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, and a writable matcher workspace. [Operations](../docs/operations.md) covers initial setup, deployment, and recovery.
+Schedule-writing tasks share the one-slot `schedule_ledger_writer` pool. Reconstruction requires `MATCHER_ENABLED=true`, an isolated `BIGQUERY_MATCHER_STAGING_DATASET`, and a writable matcher workspace. [Operations](../docs/operations.md) covers initial setup, deployment, and recovery, including the poller-health-first rollout and one-time view installation.
 
 ## Image
 

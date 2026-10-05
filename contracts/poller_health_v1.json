@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "description": "Private poll-health summaries. UTC hour keys avoid repeated Warsaw-local hours at DST transitions. Metrics describe API attempts, not GPS event timestamps or operated service.",
+  "gcs_prefix": "health/poller/hourly",
+  "object_key": "YYYY-MM-DD/HH.json",
+  "hour_fields": {
+    "version": "integer, exactly 1",
+    "hour_start": "UTC ISO timestamp at start of hour",
+    "collection_started_at": "UTC ISO timestamp of first retained attempt, preserved across restarts",
+    "poll_interval_seconds": "positive number",
+    "vehicle_types": "object keyed by bus and tram"
+  },
+  "mode_fields": {
+    "minutes": "array of observed minute objects; absent minutes are unmonitored, not zero"
+  },
+  "minute_fields": {
+    "minute": "integer 0..59, relative to hour_start",
+    "attempts": "number of API attempts including failures",
+    "successes": "number of successfully parsed API responses",
+    "parsed_rows": "sum of valid parsed records before freshness filtering",
+    "accepted_rows": "sum of fresh accepted records",
+    "dropped_stale_rows": "sum of stale records rejected",
+    "dropped_future_rows": "sum of future records rejected",
+    "accepted_vehicle_count_sum": "sum of distinct accepted vehicle counts per successful poll",
+    "accepted_line_count_sum": "sum of distinct accepted line counts per successful poll"
+  },
+  "invariants": [
+    "successes <= attempts",
+    "parsed_rows = accepted_rows + dropped_stale_rows + dropped_future_rows",
+    "failed attempts contribute no record counts",
+    "counts are nonnegative integers",
+    "one entry per observed minute and mode",
+    "hourly objects are cumulative snapshots, not append-only parts; retrying a snapshot must not double-count it",
+    "local health state is separate from the GPS buffer spool and retains pending uploads"
+  ]
+}
