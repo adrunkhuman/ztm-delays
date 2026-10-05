@@ -24,39 +24,37 @@
       </dl>
     </section>
     {% set feed = poller.get('feed_health') or {} %}
-    <section class="status-history" aria-label="Hourly GPS feed health">
-      <h2 class="label">GPS feed health · hourly snapshot</h2>
-      <p class="status-range">Separate from service coverage. Captured at export time, not live monitoring.
-        {% if feed.get('hour_start') %}Hour {{ timestamp(feed.get('hour_start')) }} → {{ timestamp(feed.get('hour_end')) }}.{% endif %}
-      </p>
-      <div class="status-scroll" role="region" aria-label="Bus and tram GPS feed health" tabindex="0">
-        <table class="mono">
-          <caption class="status-table-caption">Fresh API records and monitoring confidence</caption>
-          <thead><tr><th scope="col">Mode</th><th scope="col">Feed state</th><th scope="col">Monitored minutes</th><th scope="col">Baseline hours</th><th scope="col">Fresh / parsed records</th></tr></thead>
-          <tbody>
-            {% for mode in ['bus', 'tram'] %}
-              {% set health = (feed.get('vehicle_types') or {}).get(mode) or {} %}
-              {% set state = health.get('status') or feed.get('status') or 'not_monitored' %}
-              <tr>
-                <th scope="row">{{ mode|upper }}</th>
-                <td class="{{ 'problem' if state in ['degraded', 'stale', 'monitoring_gap'] else '' }}">{{ state|replace('_', ' ') }}</td>
-                <td>{{ health.get('monitored_minutes') if health.get('monitored_minutes') is not none else 'n/a' }}</td>
-                <td>{{ health.get('baseline_samples') if health.get('baseline_samples') is not none else 'n/a' }}</td>
-                <td>{{ health.get('accepted_rows')|integer if health.get('accepted_rows') is not none else 'n/a' }} / {{ health.get('parsed_rows')|integer if health.get('parsed_rows') is not none else 'n/a' }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+    <section class="status-history status-feed" aria-label="Hourly GPS feed health">
+      <h2 class="label">GPS feed health</h2>
+      <p class="status-range">{% if feed.get('hour_start') %}{{ timestamp(feed.get('hour_start')) }} → {{ timestamp(feed.get('hour_end')) }} · {% endif %}hourly snapshot at export time, not live monitoring · separate from service coverage</p>
+      <div class="two-up status-summary">
+        {% for mode in ['bus', 'tram'] %}
+          {% set health = (feed.get('vehicle_types') or {}).get(mode) or {} %}
+          {% set state = health.get('status') or feed.get('status') or 'not_monitored' %}
+          <section class="widget">
+            <div class="status-mode">
+              <span class="tag {{ mode }}">{{ mode|upper }}</span>
+              <span class="status-state {{ 'problem' if state in ['degraded', 'stale', 'monitoring_gap'] else 'quiet' if state in ['not_monitored', 'unknown', 'warming_up'] else '' }}">{{ state|replace('_', ' ') }}</span>
+              {% if state == 'stale' and health.get('status_at_evaluation') %}<span class="status-range">was {{ health.get('status_at_evaluation')|replace('_', ' ') }}</span>{% endif %}
+            </div>
+            <dl class="status-counts">
+              <div><dt class="label">monitored minutes</dt><dd class="mono">{{ health.get('monitored_minutes') if health.get('monitored_minutes') is not none else 'n/a' }}</dd></div>
+              <div><dt class="label">baseline hours</dt><dd class="mono">{{ health.get('baseline_samples') if health.get('baseline_samples') is not none else 'n/a' }}</dd></div>
+              <div><dt class="label">fresh / parsed records</dt><dd class="mono">{{ health.get('accepted_rows')|integer if health.get('accepted_rows') is not none else 'n/a' }} / {{ health.get('parsed_rows')|integer if health.get('parsed_rows') is not none else 'n/a' }}</dd></div>
+            </dl>
+          </section>
+        {% endfor %}
       </div>
       {% if feed.get('recent_intervals') %}
-        <h3 class="label">Recent degraded intervals</h3>
+        <h3 class="label">recent degraded intervals</h3>
+        <p class="status-range">GPS evidence only, not service cancellations · ongoing intervals end at the evaluated hour</p>
         <div class="status-scroll" role="region" aria-label="Recent GPS feed degradation" tabindex="0">
           <table class="mono">
-            <caption class="status-table-caption">GPS evidence only; these are not service cancellations. Ongoing intervals end at the evaluated hour boundary.</caption>
+            <caption class="status-table-caption">Recent degraded GPS feed intervals</caption>
             <thead><tr><th scope="col">Mode</th><th scope="col">From</th><th scope="col">Through</th><th scope="col">Reason</th></tr></thead>
             <tbody>
               {% for interval in (feed.get('recent_intervals') or [])|reverse %}
-                <tr><th scope="row">{{ interval.mode|upper }}</th><td>{{ timestamp(interval.start_at) }}</td><td>{{ timestamp(interval.end_at) }}</td><td>{{ interval.reason|replace('_', ' ') }}</td></tr>
+                <tr><th scope="row">{{ interval.mode|upper }}</th><td class="sval">{{ timestamp(interval.start_at) }}</td><td class="sval">{{ timestamp(interval.end_at) }}</td><td class="sval problem">{{ interval.reason|replace('_', ' ') }}</td></tr>
               {% endfor %}
             </tbody>
           </table>

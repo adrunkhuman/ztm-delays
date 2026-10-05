@@ -96,3 +96,17 @@ def test_sidecar_feed_health_requires_matching_export_id_and_filters_extra_field
     assert result["vehicle_types"]["bus"]["status"] == "degraded"
     assert result["recent_intervals"] == feed["recent_intervals"]
     assert "private-host" not in json.dumps(result)
+
+
+def test_stale_snapshot_shows_the_state_it_was_evaluated_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    feed = _feed()
+    feed["vehicle_types"]["bus"].update(status="stale", status_at_evaluation="degraded")  # type: ignore[index]
+    monkeypatch.setattr(queries, "get_export_metadata", lambda _: {})
+    monkeypatch.setattr(queries, "grouped_windows_available", lambda _: False)
+    monkeypatch.setattr(
+        queries,
+        "get_status",
+        lambda _: {"metadata": {"poller_status": {"feed_health": feed}}, "status_summary": {}, "status_days": []},
+    )
+    html = create_app().test_client().get("/status").get_data(as_text=True)
+    assert "was degraded" in html

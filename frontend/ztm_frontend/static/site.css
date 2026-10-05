@@ -2557,6 +2557,13 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 .status-page .status-counts dt { margin-bottom: .32rem; }
 .status-page .status-counts dd { font-size: .85rem; }
 .status-page .status-history > .label { margin: 0 0 .6rem; font-weight: 400; }
+.status-page .status-feed > .status-range { margin: 0; }
+.status-page .status-feed .status-summary { padding-block: 1rem 0; border-top: 0; }
+.status-page .status-feed h3.label { margin: 1.3rem 0 .3rem; font-weight: 400; }
+.status-page .status-feed h3 + .status-range { margin: 0 0 .5rem; }
+.status-page .status-state { font-family: var(--mono); font-size: .78rem; font-weight: 500; }
+.status-page .status-state.quiet { color: var(--muted); }
+.status-page .status-feed dd { white-space: nowrap; }
 .status-page .status-scroll { max-width: 100%; overflow-x: auto; }
 .status-page .status-scroll:focus-visible { outline: 1px solid var(--blue); outline-offset: 3px; }
 .status-page table { min-width: 690px; font-variant-numeric: tabular-nums; }
@@ -2573,6 +2580,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   .status-page .main { padding-inline: 1rem; }
   .status-page .status-ops dl, .status-page .status-summary { grid-template-columns: 1fr; }
   .status-page .status-summary { row-gap: 1.1rem; }
+  .status-page .status-feed .status-counts { grid-template-columns: 1fr 1fr max-content; }
 }
 
 .map-minis { margin-top: 1.3rem; }
