@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import zipfile
 from datetime import date, timedelta
 from itertools import pairwise
 from pathlib import Path
@@ -126,6 +127,7 @@ def test_artifact_contract_matches_the_repository_contract() -> None:
         for table, fields in contract["tables"].items()
     }
     assert expected == artifact.CONTRACT
+    assert {table: tuple(key) for table, key in contract["keys"].items()} == artifact.KEYS
     assert artifact.search_key("  Łomianki  Kampinoska ") == "lomianki kampinoska"
     assert artifact.search_key("Żółkiewskiego") == "zolkiewskiego"
 
@@ -138,6 +140,39 @@ def test_artifact_refuses_nulls_where_the_frontend_expects_values(tmp_path: Path
     with pytest.raises(ValueError, match="nulls"):
         artifact.write(con, tmp_path / "planner.duckdb", sources)
     assert not (tmp_path / "planner.duckdb").exists()
+
+
+def test_artifact_refuses_a_trip_key_shared_by_two_trips(tmp_path: Path) -> None:
+    literal = {"VARCHAR[]": "['x']", "VARCHAR": "'x'", "TIMESTAMP": "now()", "DATE": "current_date", "BOOLEAN": "true"}
+    sources = {
+        table: "select " + ", ".join(f"{literal.get(kind, '1')} as {c}" for c, kind, _ in cols)
+        for table, cols in artifact.CONTRACT.items()
+    }
+    sources["planner_trip"] += " union all " + sources["planner_trip"]
+    with pytest.raises(ValueError, match="duplicated"):
+        artifact.write(duckdb.connect(), tmp_path / "planner.duckdb", sources)
+    assert not (tmp_path / "planner.duckdb").exists()
+
+
+def test_gtfs_trip_keys_tell_apart_trips_whose_ids_differ_in_two_digits(tmp_path: Path) -> None:
+    # DuckDB's hash() gave these two trips of the 2026-10-05 Warsaw feed the same key.
+    ids = ["2026-10-06:10:PcS:017:2319", "2026-10-06:19:PcS:018:2319"]
+    files = {
+        "routes.txt": "route_id,route_type\n10,0\n19,0\n",
+        "trips.txt": "route_id,service_id,trip_id,trip_headsign,direction_id\n"
+        + "".join(f"{i[11:13]},PcS,{i},B,0\n" for i in ids),
+        "stop_times.txt": "trip_id,arrival_time,stop_id,stop_sequence,pickup_type,drop_off_type\n"
+        + "".join(f"{i},23:19:00,A,0,0,0\n{i},23:21:00,B,1,0,0\n" for i in ids),
+        "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nA,A,52.2,21.0\nB,B,52.21,21.0\n",
+        "calendar_dates.txt": "service_id,date,exception_type\nPcS,20261006,1\n",
+    }
+    gtfs_zip = tmp_path / "gtfs.zip"
+    with zipfile.ZipFile(gtfs_zip, "w") as archive:
+        for name, text in files.items():
+            archive.writestr(name, text)
+    con = duckdb.connect()
+    gtfs.load_schedule(con, gtfs_zip, tmp_path, date(2026, 10, 6), date(2026, 10, 6))
+    assert one(con, "select count(distinct trip_key), count(distinct line) from sched_stop") == (2, 2)
 
 
 @pytest.fixture(scope="module")
