@@ -205,7 +205,8 @@ def validate_minute(item: dict[str, Any]) -> None:
 
 def comparable_hours(hour: datetime, config: Config) -> list[datetime]:
     """Return unique UTC candidates for same local weekday/hour, at most five."""
-    local = hour.astimezone(WARSAW)
+    # Pendulum arithmetic with ZoneInfo can drop the timezone and shift the wall clock.
+    local = datetime.fromtimestamp(hour.timestamp(), WARSAW)
     candidates = set()
     for days in range(7, config.lookback_days + 1, 7):
         wall = (local - timedelta(days=days)).replace(tzinfo=None)
