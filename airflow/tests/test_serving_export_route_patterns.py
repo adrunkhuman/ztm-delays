@@ -140,10 +140,6 @@ def test_accepts_patterns_with_repeated_groups_scheduled_calls_and_unclassified_
             "route_pattern_stop_contract",
         ),
         (
-            "update mart_line_course_stop_window set delay_histogram = [] where arrival_count = 0",
-            "route_pattern_stop_contract",
-        ),
-        (
             "update mart_line_course_stop_window set on_time_count = 1 where arrival_count = 0",
             "route_pattern_stop_contract",
         ),
@@ -167,6 +163,7 @@ def test_rejects_material_pattern_corruption(
         "update mart_line_course_stop_window set arrival_count = 1, on_time_count = 1 where arrival_count = 0",
         "update mart_line_course_stop_window set on_time_count = 0 where arrival_count > 0",
         "update mart_line_course_stop_window set delay_histogram = [{'bucket_label': 'on_time_late_30_60s', 'n': 0}] where arrival_count > 0",
+        "update mart_line_course_stop_window set delay_histogram = [{'bucket_label': 'on_time_late_30_60s', 'n': 0}] where arrival_count = 0",
     ],
 )
 def test_unobserved_calls_cannot_be_counted_as_delay_samples(
@@ -175,6 +172,12 @@ def test_unobserved_calls_cannot_be_counted_as_delay_samples(
     pattern_connection.execute(mutation)
     with pytest.raises(validator.SemanticValidationError, match="route_pattern_stop_contract"):
         validator._validate_route_patterns(pattern_connection, ("2026-07-02",))
+
+
+def test_unobserved_calls_accept_empty_histograms_from_bigquery(validator: Any, pattern_connection: Any) -> None:
+    # BigQuery cannot store NULL arrays, so exported unobserved calls carry [] rather than NULL.
+    pattern_connection.execute("update mart_line_course_stop_window set delay_histogram = [] where arrival_count = 0")
+    validator._validate_route_patterns(pattern_connection, ("2026-07-02",))
 
 
 def test_nullable_direction_and_headsign_still_match_calls(validator: Any, pattern_connection: Any) -> None:

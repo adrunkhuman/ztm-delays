@@ -321,7 +321,8 @@ def _validate_route_patterns(connection: Connection, checked_dates: tuple[str, .
                 mean_delay_seconds is not null or median_delay_seconds is not null
                 or p90_delay_seconds is not null or delay_spread_seconds is not null
                 or early_rate is not null or on_time_rate is not null or late_rate is not null
-                or delay_histogram is not null
+                -- BigQuery stores a NULL array as [], so an empty histogram also means no samples.
+                or coalesce(len(delay_histogram), 0) > 0
                 or coalesce(early_count, 0) != 0 or coalesce(on_time_count, 0) != 0 or coalesce(late_count, 0) != 0
             ))
           )
