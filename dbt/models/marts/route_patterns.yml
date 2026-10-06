@@ -1,0 +1,159 @@
+version: 2
+
+models:
+  - name: mart_line_course_window
+    description: >-
+      Complete-trip summaries by scheduled stop-group itinerary and destination.
+      Each historical anchor retains its own window membership and schedule-version filter.
+      Unclassified complete trips remain explicit, without an invented itinerary.
+  - name: mart_line_course_stop_window
+    description: >-
+      Scheduled passenger-call statistics by route pattern and occurrence position.
+      Repeated stop groups are separate calls. Zero-observation calls remain visible with
+      zero counts and null delay statistics; post variants aggregate within an occurrence.
+
+unit_tests:
+  - name: route_pattern_courses_bulk_rebuild_preserves_each_anchor_and_window
+    model: mart_line_course_window
+    overrides: &bulk_scope
+      vars:
+        processing_date: '2026-01-15'
+        serving_rebuild_start_date: '2026-01-14'
+        serving_rebuild_end_date: '2026-01-15'
+      macros:
+        is_incremental: false
+    given:
+      - input: ref('int_serving_trip_route_pattern')
+        format: sql
+        rows: &pattern_rows |
+          with trips as (
+            select date '2026-01-14' as service_date, 'same-trip' as trip_id, 'full' as pattern,
+              ['A', 'B', 'B', 'C'] as stop_groups
+            union all select date '2026-01-15', 'same-trip', 'full', ['A', 'B', 'B', 'C']
+            union all select date '2026-01-15', 'short', 'short', ['B', 'C']
+            union all select date '2026-01-15', 'alternate', 'alternate', ['A', 'X', 'C']
+            union all select date '2026-01-15', 'unknown', 'unclassified', cast([] as array<string>)
+          )
+          select 'snapshot' as gtfs_snapshot_id, service_date as gps_date, service_date,
+            trip_id, '1001' as vehicle_number, '143' as line, 'bus' as mode,
+            '143' as route_short_name, 0 as direction_id, 'Charlie' as trip_headsign,
+            if(service_date = date '2026-01-14', 'old', 'current') as schedule_version_id,
+            pattern as route_pattern_id,
+            if(pattern = 'unclassified', 'unclassified', 'classified') as pattern_status,
+            array_length(stop_groups) as stop_call_count,
+            stop_groups[safe_offset(0)] as origin_stop_name,
+            stop_groups[safe_offset(array_length(stop_groups)-1)] as destination_stop_name,
+            array(
+              select as struct pos+1 as call_position, (pos+1)*10 as stop_sequence,
+                grp as stop_group_id, concat(grp, format('%02d',pos+1)) as stop_id,
+                format('%02d',pos+1) as stop_post_code, grp as stop_name
+              from unnest(stop_groups) grp with offset pos order by pos
+            ) as stops
+          from trips
+      - input: ref('dim_serving_window_date')
+        format: sql
+        rows: &window_rows |
+          select window_type, if(window_type = 'month','2026-01',cast(source_end_date as string)) as window_key,
+            source_end_date, service_date
+          from unnest([date '2026-01-14',date '2026-01-15']) source_end_date
+          cross join unnest(['day','month','weekdays']) window_type
+          cross join unnest([date '2026-01-14',date '2026-01-15']) service_date
+          where service_date <= source_end_date and (window_type != 'day' or service_date = source_end_date)
+      - input: ref('dim_schedule_version')
+        format: sql
+        rows: &version_rows |
+          select 'old' as schedule_version_id, date '2026-01-01' as valid_from_date,
+            date '2026-01-14' as valid_to_date
+          union all select 'current', date '2026-01-15', cast(null as date)
+    expect:
+      rows:
+        - {source_end_date: '2026-01-14', window_type: day, route_pattern_id: full, trip_count: 1, stop_call_count: 4}
+        - {source_end_date: '2026-01-14', window_type: month, route_pattern_id: full, trip_count: 1, stop_call_count: 4}
+        - {source_end_date: '2026-01-14', window_type: weekdays, route_pattern_id: full, trip_count: 1, stop_call_count: 4}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: full, trip_count: 1, stop_call_count: 4}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: full, trip_count: 2, stop_call_count: 4}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: full, trip_count: 1, stop_call_count: 4}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: short, trip_count: 1, stop_call_count: 2}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: short, trip_count: 1, stop_call_count: 2}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: short, trip_count: 1, stop_call_count: 2}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: alternate, trip_count: 1, stop_call_count: 3}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: alternate, trip_count: 1, stop_call_count: 3}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: alternate, trip_count: 1, stop_call_count: 3}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: unclassified, trip_count: 1, stop_call_count: 0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: unclassified, trip_count: 1, stop_call_count: 0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: unclassified, trip_count: 1, stop_call_count: 0}
+
+  - name: route_pattern_calls_keep_repeats_missing_samples_and_exact_execution_lineage
+    model: mart_line_course_stop_window
+    overrides: *bulk_scope
+    given:
+      - input: ref('int_serving_trip_route_pattern')
+        format: sql
+        rows: *pattern_rows
+      - input: ref('dim_serving_window_date')
+        format: sql
+        rows: *window_rows
+      - input: ref('dim_schedule_version')
+        format: sql
+        rows: *version_rows
+      - input: ref('int_serving_stop_arrival')
+        format: sql
+        rows: |
+          with observed as (
+            select service_date, 'same-trip' as trip_id, pos,
+              case pos when 1 then 'A' else 'B' end as grp,
+              case pos when 1 then -60 when 2 then 70 else 300 end as delay_seconds
+            from unnest([date '2026-01-14',date '2026-01-15']) service_date
+            cross join unnest([1,2,3]) pos
+            union all
+            select date '2026-01-15','short',pos,if(pos=1,'B','C'),150 from unnest([1,2]) pos
+            union all
+            select date '2026-01-15','alternate',pos,
+              case pos when 1 then 'A' when 2 then 'X' else 'C' end,90 from unnest([1,2,3]) pos
+          )
+          select 'snapshot' as gtfs_snapshot_id, service_date as gps_date, service_date,
+            trip_id,'1001' as vehicle_number,pos*10 as stop_sequence,
+            concat(grp,format('%02d',pos)) as stop_id,delay_seconds from observed
+          union all
+          select 'snapshot',date '2026-01-16',date '2026-01-15','same-trip','1001',20,'B02',9999
+    expect:
+      rows:
+        - {source_end_date: '2026-01-14', window_type: day, route_pattern_id: full, call_position: 1, arrival_count: 1, mean_delay_seconds: -60.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-14', window_type: day, route_pattern_id: full, call_position: 2, arrival_count: 1, mean_delay_seconds: 70.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-14', window_type: day, route_pattern_id: full, call_position: 3, arrival_count: 1, mean_delay_seconds: 300.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-14', window_type: day, route_pattern_id: full, call_position: 4, arrival_count: 0, mean_delay_seconds: null, on_time_rate: null}
+        - {source_end_date: '2026-01-14', window_type: month, route_pattern_id: full, call_position: 1, arrival_count: 1, mean_delay_seconds: -60.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-14', window_type: month, route_pattern_id: full, call_position: 2, arrival_count: 1, mean_delay_seconds: 70.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-14', window_type: month, route_pattern_id: full, call_position: 3, arrival_count: 1, mean_delay_seconds: 300.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-14', window_type: month, route_pattern_id: full, call_position: 4, arrival_count: 0, mean_delay_seconds: null, on_time_rate: null}
+        - {source_end_date: '2026-01-14', window_type: weekdays, route_pattern_id: full, call_position: 1, arrival_count: 1, mean_delay_seconds: -60.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-14', window_type: weekdays, route_pattern_id: full, call_position: 2, arrival_count: 1, mean_delay_seconds: 70.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-14', window_type: weekdays, route_pattern_id: full, call_position: 3, arrival_count: 1, mean_delay_seconds: 300.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-14', window_type: weekdays, route_pattern_id: full, call_position: 4, arrival_count: 0, mean_delay_seconds: null, on_time_rate: null}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: full, call_position: 1, arrival_count: 1, mean_delay_seconds: -60.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: full, call_position: 2, arrival_count: 1, mean_delay_seconds: 70.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: full, call_position: 3, arrival_count: 1, mean_delay_seconds: 300.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: full, call_position: 4, arrival_count: 0, mean_delay_seconds: null, on_time_rate: null}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: full, call_position: 1, arrival_count: 2, mean_delay_seconds: -60.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: full, call_position: 2, arrival_count: 2, mean_delay_seconds: 70.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: full, call_position: 3, arrival_count: 2, mean_delay_seconds: 300.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: full, call_position: 4, arrival_count: 0, mean_delay_seconds: null, on_time_rate: null}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: full, call_position: 1, arrival_count: 1, mean_delay_seconds: -60.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: full, call_position: 2, arrival_count: 1, mean_delay_seconds: 70.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: full, call_position: 3, arrival_count: 1, mean_delay_seconds: 300.0, on_time_rate: 0.0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: full, call_position: 4, arrival_count: 0, mean_delay_seconds: null, on_time_rate: null}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: short, call_position: 1, arrival_count: 1, mean_delay_seconds: 150.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: short, call_position: 2, arrival_count: 1, mean_delay_seconds: 150.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: short, call_position: 1, arrival_count: 1, mean_delay_seconds: 150.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: short, call_position: 2, arrival_count: 1, mean_delay_seconds: 150.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: short, call_position: 1, arrival_count: 1, mean_delay_seconds: 150.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: short, call_position: 2, arrival_count: 1, mean_delay_seconds: 150.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: alternate, call_position: 1, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: alternate, call_position: 2, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: day, route_pattern_id: alternate, call_position: 3, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: alternate, call_position: 1, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: alternate, call_position: 2, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: month, route_pattern_id: alternate, call_position: 3, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: alternate, call_position: 1, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: alternate, call_position: 2, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}
+        - {source_end_date: '2026-01-15', window_type: weekdays, route_pattern_id: alternate, call_position: 3, arrival_count: 1, mean_delay_seconds: 90.0, on_time_rate: 1.0}

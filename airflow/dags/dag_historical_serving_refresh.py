@@ -18,7 +18,8 @@ PLAN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_gtfs_processing_snapshot"
 SERVING_UNIVERSE_MODELS = "int_serving_trip_stop_profile int_serving_trip_universe"
 SERVING_PARTITION_MODELS = (
-    "int_serving_trip_execution int_serving_stop_arrival int_serving_observed_date dim_serving_window_date "
+    "int_serving_trip_execution int_serving_trip_route_pattern int_serving_stop_arrival "
+    "int_serving_observed_date dim_serving_window_date "
     "int_serving_entity_window_summary mart_mode_window_summary mart_entity_daily_summary "
     "mart_entity_window_daily_summary mart_line_window_summary mart_stop_group_window_summary "
     "mart_stop_post_window_summary mart_hour_window_summary mart_entity_rankings mart_entity_timeline_daily "

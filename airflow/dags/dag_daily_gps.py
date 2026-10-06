@@ -76,8 +76,8 @@ COVERAGE_SCHEDULE_MODELS = "int_gtfs_trip_schedule int_gtfs_duty_chain"
 SERVING_UNIVERSE_MODELS = "int_serving_trip_stop_profile int_serving_trip_universe"
 SERVING_TRIP_EXECUTION_MODEL = "int_serving_trip_execution"
 SERVING_MODELS = (
-    "int_serving_trip_execution int_serving_stop_arrival int_serving_observed_date dim_serving_window_date "
-    "int_serving_entity_window_summary "
+    "int_serving_trip_execution int_serving_trip_route_pattern int_serving_stop_arrival "
+    "int_serving_observed_date dim_serving_window_date int_serving_entity_window_summary "
     "dim_serving_date "
     "mart_mode_window_summary mart_entity_daily_summary mart_entity_window_daily_summary mart_line_window_summary "
     "mart_stop_group_window_summary mart_stop_post_window_summary mart_hour_window_summary "
@@ -88,8 +88,8 @@ SERVING_MODELS = (
     "mart_stop_post_line_group_window mart_stop_group_line_group_window mart_pipeline_status_recent_summary"
 )
 PRIOR_SERVING_MODELS = (
-    "int_serving_trip_execution int_serving_stop_arrival int_serving_observed_date dim_serving_window_date "
-    "int_serving_entity_window_summary "
+    "int_serving_trip_execution int_serving_trip_route_pattern int_serving_stop_arrival "
+    "int_serving_observed_date dim_serving_window_date int_serving_entity_window_summary "
     "mart_mode_window_summary mart_entity_daily_summary mart_entity_window_daily_summary mart_line_window_summary "
     "mart_stop_group_window_summary mart_stop_post_window_summary mart_hour_window_summary "
     "mart_entity_rankings mart_entity_timeline_daily mart_worst_delay_event "

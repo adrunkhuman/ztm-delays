@@ -2252,6 +2252,13 @@ def _write_minimal_parquet_files(  # noqa: C901, PLR0913
                     duplicate_path.replace(path)
             elif table_name == "fct_expected_stop_event":
                 connection.execute(_copy_minimal_expected_stop_event_sql(escaped_path))
+            elif table_name in {"mart_line_course_window", "mart_line_course_stop_window"}:
+                copy_sql = (
+                    _copy_minimal_course_window_sql
+                    if table_name == "mart_line_course_window"
+                    else _copy_minimal_course_stop_window_sql
+                )
+                connection.execute(copy_sql(escaped_path))
             elif table_name == "dim_serving_date":
                 connection.execute(_copy_minimal_serving_date_sql(escaped_path))
             elif table_name == "mart_mode_window_summary":
@@ -2308,6 +2315,39 @@ def _test_export_config(dag: Any, tmp_path: Path) -> Any:
         cleanup_gcs_staging=False,
         partitioned_store_min_free_bytes=1,
     )
+
+
+def _copy_minimal_course_window_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select '190' as line, 'bus' as mode, '190' as route_short_name,
+                0 as direction_id, 'Boundary Stop' as trip_headsign, 'all_observed' as universe_type,
+                'day' as window_type, '2026-07-02' as window_key, date '2026-07-02' as source_end_date,
+                'pattern-1' as route_pattern_id, 'classified' as pattern_status,
+                'Boundary Stop' as origin_stop_name, 'Boundary Stop' as destination_stop_name,
+                1 as stop_call_count, [date '2026-07-02'] as observed_service_dates,
+                1 as trip_count, 1 as course_rank
+        ) to '{escaped_path}' (format parquet)
+    """
+
+
+def _copy_minimal_course_stop_window_sql(escaped_path: str) -> str:
+    return f"""
+        copy (
+            select '190' as line, 'bus' as mode, '190' as route_short_name,
+                0 as direction_id, 'Boundary Stop' as trip_headsign, 'all_observed' as universe_type,
+                'day' as window_type, '2026-07-02' as window_key, date '2026-07-02' as source_end_date,
+                'pattern-1' as route_pattern_id, 1 as call_position, 1 as display_rank,
+                0 as stop_sequence, '7002' as stop_group_id, '700201' as stop_id,
+                '01' as stop_post_code, ['01']::varchar[] as stop_post_codes, 'Boundary Stop' as stop_name,
+                1 as arrival_count, 60.0 as mean_delay_seconds, 60.0 as median_delay_seconds,
+                60.0 as p90_delay_seconds, 0.0 as delay_spread_seconds,
+                0 as early_count, 1 as on_time_count, 0 as late_count,
+                0.0 as early_rate, 1.0 as on_time_rate, 0.0 as late_rate,
+                [{{'bucket_label': 'on_time_late_30_60s', 'n': 1}}] as delay_histogram,
+                false as has_min_sample
+        ) to '{escaped_path}' (format parquet)
+    """
 
 
 def _copy_minimal_serving_date_sql(escaped_path: str) -> str:

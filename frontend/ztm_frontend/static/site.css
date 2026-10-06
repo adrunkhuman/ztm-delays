@@ -2478,10 +2478,30 @@ td:nth-child(n + 2) {
 .line-worst-row .departure-time .event-time { padding: 0; }
 .reliability-square:hover, .reliability-square:focus-visible { outline: 1px solid var(--fg); outline-offset: 1px; }
 .dirs { align-items: start; gap: 1rem 1.5rem; padding: 1rem 0; }
-.route-pattern { min-width: 0; border: 1px solid var(--border); padding: .7rem; }
-.route-pattern .dirhead { cursor: pointer; display: list-item; list-style-position: inside; margin: 0; padding: 0 0 .5rem; border-bottom: 0; font-weight: 600; }
-.route-pattern .dirstats { display: block; margin-top: .35rem; font-size: .65rem; font-weight: 400; }
-.route-pattern:not([open]) .dirhead { padding-bottom: 0; }
+.route-column { min-width: 0; display: grid; gap: 1rem; align-content: start; }
+.route-group { min-width: 0; border: 1px solid var(--border); }
+.route-group-heading, .route-variant-heading, .route-deviation-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; margin: 0; padding: .65rem .7rem; }
+.route-group-heading { font-size: .85rem; font-weight: 600; }
+.route-title-note { color: var(--muted); font-size: .72rem; font-weight: 400; }
+.route-group-heading > span:first-of-type, .route-variant-heading > span:first-of-type, .route-deviation-heading > span:first-of-type { flex: 1 1 14rem; min-width: 0; }
+.route-group-heading .dirstats, .route-variant-heading .dirstats { flex: none; font-size: .65rem; font-weight: 400; }
+.route-variant { border-top: 1px solid var(--border); }
+.route-variant-heading { color: var(--fg2); font-size: .78rem; font-weight: 500; }
+.route-variant[open] > .route-variant-heading { color: var(--fg); font-weight: 600; }
+.route-pattern > summary { cursor: pointer; list-style: none; }
+.route-pattern > summary::-webkit-details-marker { display: none; }
+.route-pattern > summary::before { content: "▸"; flex: none; width: .7em; color: var(--muted); }
+.route-pattern[open] > summary::before { content: "▾"; }
+.route-pattern > summary:hover::before { color: var(--fg); }
+.route-pattern[open] { padding-bottom: .5rem; }
+.route-pattern > .route-columns, .route-pattern > .stop-row { margin-inline: .7rem; }
+.route-deviations { margin: .5rem .7rem 0; border-top: 1px solid var(--border); }
+.route-deviations-note { padding: .55rem 0 .2rem; color: var(--muted); font: .62rem var(--mono); }
+.route-deviation-heading { padding: .4rem 0; color: var(--fg2); font-size: .72rem; }
+.route-deviation-heading .dirstats { flex: none; font-size: .62rem; }
+.route-deviation > .route-columns, .route-deviation > .stop-row { margin-inline: 0; }
+.route-deviation[open] { margin-bottom: .4rem; padding-left: .6rem; border-left: 1px solid var(--dim); }
+.hist-na { color: var(--muted); font: .6rem var(--mono); text-align: center; }
 .route-columns { display: grid; grid-template-columns: minmax(0, 1fr) 70px 54px 40px; gap: 10px; padding: .5rem 0; border-top: 1px solid var(--border); font-size: .5rem; text-align: right; }
 .route-columns > :first-child { text-align: left; }
 .stop-row { min-height: 28px; column-gap: 7px; }

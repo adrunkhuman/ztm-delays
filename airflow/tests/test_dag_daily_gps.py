@@ -348,8 +348,13 @@ def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
     }
     assert _dbt_selected_models(dag.dbt_run_fct_expected_stop_event_current) == {"fct_expected_stop_event"}
     assert _dbt_selected_models(dag.dbt_run_pipeline_status) == {"mart_pipeline_status"}
+    for selector in (dag.SERVING_MODELS, dag.PRIOR_SERVING_MODELS):
+        models = selector.split()
+        assert models.count("int_serving_trip_route_pattern") == 1
+        assert models.index("int_serving_trip_route_pattern") == models.index("int_serving_trip_execution") + 1
     assert _dbt_selected_models(dag.dbt_run_serving_marts) == {
         "int_serving_trip_execution",
+        "int_serving_trip_route_pattern",
         "int_serving_stop_arrival",
         "int_serving_observed_date",
         "int_serving_entity_window_summary",
