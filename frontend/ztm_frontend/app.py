@@ -23,7 +23,7 @@ from flask import (
     url_for,
 )
 
-from ztm_frontend import db, planner, planner_text, queries
+from ztm_frontend import db, live_status, planner, planner_text, queries
 
 EARLY_DELAY_SECONDS = -60
 LATE_DELAY_SECONDS = 180
@@ -212,11 +212,27 @@ def create_app() -> Flask:  # noqa: C901
             abort(404)
         return send_from_directory(current_app.config["ZTM_MAPS_DIR"] / month, name, max_age=3600)
 
-    @app.get("/status")
-    def status() -> str:
-        return render_template("status.html", **queries.get_status(current_app.config["ZTM_DUCKDB_PATH"]))
+    _add_status_routes(app)
 
     return app
+
+
+def _add_status_routes(app: Flask) -> None:
+    @app.get("/status")
+    def status() -> str:
+        return render_template(
+            "status.html",
+            live=live_status.live_view(),
+            history=live_status.history_view(),
+            **queries.get_status(current_app.config["ZTM_DUCKDB_PATH"]),
+        )
+
+    @app.get("/status/live")
+    def status_live() -> Response:
+        """Live panel fragment, polled by the status page."""
+        response = make_response(render_template("_status_live.html", live=live_status.live_view()))
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 def _add_planner_routes(app: Flask) -> None:

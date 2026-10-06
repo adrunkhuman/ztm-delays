@@ -2548,22 +2548,14 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 .status-page dl { margin: 0; }
 .status-page .status-range { color: var(--muted); }
 .status-page dd { margin: 0; font-family: var(--mono); font-weight: 500; }
-.status-page .status-ops { padding: 1.1rem 0 1.3rem; border-top: 1px solid var(--border); font-size: .72rem; }
-.status-page .status-ops dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem 2rem; }
-.status-page .status-ops dl > div { display: flex; align-items: baseline; flex-wrap: wrap; justify-content: space-between; gap: .3rem .6rem; }
 .status-page .status-summary { padding-block: 1.1rem 1.3rem; column-gap: 1.5rem; }
 .status-page .status-range { font-family: var(--mono); font-size: .72rem; }
 .status-page .status-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; }
 .status-page .status-counts dt { margin-bottom: .32rem; }
 .status-page .status-counts dd { font-size: .85rem; }
 .status-page .status-history > .label { margin: 0 0 .6rem; font-weight: 400; }
-.status-page .status-feed > .status-range { margin: 0; }
-.status-page .status-feed .status-summary { padding-block: 1rem 0; border-top: 0; }
-.status-page .status-feed h3.label { margin: 1.3rem 0 .3rem; font-weight: 400; }
-.status-page .status-feed h3 + .status-range { margin: 0 0 .5rem; }
 .status-page .status-state { font-family: var(--mono); font-size: .78rem; font-weight: 500; }
 .status-page .status-state.quiet { color: var(--muted); }
-.status-page .status-feed dd { white-space: nowrap; }
 .status-page .status-scroll { max-width: 100%; overflow-x: auto; }
 .status-page .status-scroll:focus-visible { outline: 1px solid var(--blue); outline-offset: 3px; }
 .status-page table { min-width: 690px; font-variant-numeric: tabular-nums; }
@@ -2576,11 +2568,66 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 .status-page colgroup + colgroup { border-left: 1px solid var(--hair); }
 .status-page tbody a { color: var(--fg2); }
 .status-page tbody a:hover { color: var(--blue); }
+
+/* Live poller panel, status pill and feed-history charts. */
+.status-page { --status-ok: #3fb950; --status-warn: #d6a23a; --status-band: #2c2c2c; --status-usual: #8a8a8a; }
+.status-page .status-title { align-items: center; justify-content: space-between; gap: .8rem 1.5rem; }
+.status-page .status-pill { --tone: var(--status-ok); display: inline-flex; align-items: center; gap: .5rem; margin: 0; padding: .3rem .7rem .3rem .55rem; border: 1px solid var(--border); border-radius: 999px; font: 500 .74rem var(--mono); color: var(--fg2); }
+.status-page .status-pill[hidden] { display: none; }
+.status-page .status-pill.problems { --tone: var(--status-warn); }
+.status-page .status-pill.offline { --tone: var(--red); }
+.status-page .status-dot { position: relative; width: 9px; height: 9px; border-radius: 50%; background: var(--tone); }
+.status-page .status-pill.offline .status-dot { border-radius: 1px; }
+.status-page .status-pill.online .status-dot::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid var(--tone); opacity: 0; animation: status-pulse 2.4s ease-out infinite; }
+@keyframes status-pulse { 0% { transform: scale(.5); opacity: .7; } 100% { transform: scale(1.4); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .status-page .status-pill.online .status-dot::after { animation: none; } }
+.status-page .status-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .3rem 1rem; }
+.status-page .status-head h2 { margin: 0; font-weight: 400; }
+.status-page .status-head .status-range { margin: 0; }
+.status-page section.status-live, .status-page section.status-trend { padding: 1.1rem 0 1.3rem; border-top: 1px solid var(--border); }
+.status-page .live-figure { display: flex; align-items: baseline; gap: .6rem; margin: .9rem 0 .5rem; }
+.status-page .live-big { font: 600 2.1rem/1 var(--sans); color: var(--fg); }
+.status-page .live-meter { position: relative; height: 10px; margin: .2rem 0 .45rem; background: var(--hair); border-radius: 2px; }
+.status-page .live-range { position: absolute; top: 0; bottom: 0; background: var(--status-band); }
+.status-page .live-usual { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--status-usual); }
+.status-page .live-now { position: absolute; top: -2px; width: 14px; height: 14px; margin-left: -7px; border: 2px solid var(--bg); border-radius: 50%; background: var(--blue); }
+.status-page .live-now.problem { background: var(--red); }
+.status-page .live-note { margin: 0 0 .9rem; }
+.status-page .live-dim { color: var(--dim); }
+.status-page .status-live .status-counts { margin-top: .4rem; }
+.status-page .status-rules { margin: .2rem 0 0; color: var(--muted); font: .72rem/1.6 var(--mono); }
+.status-page .status-legend { display: flex; flex-wrap: wrap; gap: .3rem 1.1rem; margin: .7rem 0 .2rem; font: .7rem var(--mono); color: var(--muted); }
+.status-page .status-legend i { display: inline-block; vertical-align: middle; margin-right: .4rem; }
+.status-page .key-actual { width: 16px; height: 2px; background: var(--blue); }
+.status-page .key-usual { width: 16px; height: 2px; background: var(--status-usual); }
+.status-page .key-band { width: 14px; height: 10px; background: var(--status-band); }
+.status-page .key-incident { width: 14px; height: 10px; background: rgba(224, 85, 85, .22); border-left: 2px solid var(--red); }
+.status-page .status-charts .status-mode { margin-top: 1.1rem; }
+.status-page .status-chart { position: relative; margin: .9rem 0 0; }
+.status-page .status-chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.status-page .status-chart .grid { stroke: var(--hair); stroke-width: 1; }
+.status-page .status-chart .axis { fill: var(--muted); font: 10px var(--mono); }
+.status-page .status-chart .band { fill: var(--status-band); }
+.status-page .status-chart .usual { fill: none; stroke: var(--status-usual); stroke-width: 1.5; stroke-linejoin: round; }
+.status-page .status-chart .actual { fill: none; stroke: var(--blue); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.status-page .status-chart .shade { fill: rgba(224, 85, 85, .16); }
+.status-page .status-chart .shade.gap { fill: rgba(138, 138, 138, .16); }
+.status-page .status-chart .shade-edge { stroke: var(--red); stroke-width: 2; }
+.status-page .status-chart .shade-edge.gap { stroke: var(--status-usual); }
+.status-page .status-chart .cross { stroke: var(--muted); stroke-width: 1; visibility: hidden; }
+.status-page .status-tip { position: absolute; top: 0; pointer-events: none; visibility: hidden; padding: .35rem .5rem; background: var(--panel); border: 1px solid var(--border); font: .7rem/1.5 var(--mono); color: var(--muted); white-space: nowrap; }
+.status-page .status-tip b { color: var(--fg); font-weight: 600; }
+.status-page .status-tip i { display: inline-block; width: 10px; height: 2px; margin-right: .35rem; vertical-align: middle; }
+.status-page .status-flagged { margin: 1.4rem 0 .5rem; font-weight: 400; }
+.status-page .status-trend table { min-width: 620px; }
+.status-page .status-trend thead th:last-child, .status-page .status-trend td.what { text-align: left; white-space: normal; }
+.status-page .status-trend td.gap { color: var(--fg2); }
 @media (max-width: 700px) {
   .status-page .main { padding-inline: 1rem; }
-  .status-page .status-ops dl, .status-page .status-summary { grid-template-columns: 1fr; }
+  .status-page .status-summary { grid-template-columns: 1fr; }
   .status-page .status-summary { row-gap: 1.1rem; }
-  .status-page .status-feed .status-counts { grid-template-columns: 1fr 1fr max-content; }
+  .status-page .status-chart { overflow-x: auto; }
+  .status-page .status-chart svg { min-width: 680px; }
 }
 
 .map-minis { margin-top: 1.3rem; }

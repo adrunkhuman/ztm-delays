@@ -3,62 +3,74 @@
 {% macro timestamp(value) -%}
   <span title="{{ value or '' }}">{{ value|utc_timestamp }}</span>
 {%- endmacro %}
-{% block footer %}<span>archive · {{ meta.source_row_count|integer if meta.source_row_count else 'n/a' }} rows · built {{ timestamp(meta.exported_at) }}</span>{% endblock %}
+{% block footer %}<span>archive · {{ meta.source_row_count|integer if meta.source_row_count else 'n/a' }} rows · built {{ timestamp(meta.exported_at) }}{% if metadata.get('last_export_at') %} · last export {{ timestamp(metadata.last_export_at) }}{% endif %}</span>{% endblock %}
 {% block body %}
 <div class="body status-page">
   <aside class="rail"></aside>
   <main class="main">
-    <header class="head"><h1 class="hero-title">status</h1></header>
-    {% set poller = metadata.get('poller_status') or {} %}
-    <section class="status-ops" aria-label="Export and poller snapshot">
-      <dl>
-        <div><dt class="label">last export</dt><dd>{{ timestamp(metadata.get('last_export_at') or metadata.get('exported_at')) }}</dd></div>
-        <div><dt class="label">poller snapshot</dt><dd class="{{ 'problem' if poller.get('status') in ['degraded', 'down', 'stale'] else '' }}">{{ poller.get('status') or 'unknown' }}</dd></div>
-        <div><dt class="label">heartbeat</dt><dd>{{ timestamp(poller.get('updated_at')) }}</dd></div>
-        <div><dt class="label">last success</dt><dd>{{ timestamp(poller.get('last_success_at')) }}</dd></div>
-        {% for mode in ['bus', 'tram'] %}
-          {% set vehicle = (poller.get('vehicle_types') or {}).get(mode) or {} %}
-          {% set failures = vehicle.get('consecutive_failures') %}
-          <div><dt class="label">{{ mode }} consecutive failures</dt><dd class="{{ 'problem' if failures else '' }}">{{ failures if failures is not none else 'n/a' }}</dd></div>
-        {% endfor %}
-      </dl>
-    </section>
-    {% set feed = poller.get('feed_health') or {} %}
-    <section class="status-history status-feed" aria-label="Hourly GPS feed health">
-      <h2 class="label">GPS feed health</h2>
-      <p class="status-range">{% if feed.get('hour_start') %}{{ timestamp(feed.get('hour_start')) }} → {{ timestamp(feed.get('hour_end')) }} · {% endif %}hourly snapshot at export time, not live monitoring · separate from service coverage</p>
-      <div class="two-up status-summary">
-        {% for mode in ['bus', 'tram'] %}
-          {% set health = (feed.get('vehicle_types') or {}).get(mode) or {} %}
-          {% set state = health.get('status') or feed.get('status') or 'not_monitored' %}
-          <section class="widget">
-            <div class="status-mode">
-              <span class="tag {{ mode }}">{{ mode|upper }}</span>
-              <span class="status-state {{ 'problem' if state in ['degraded', 'stale', 'monitoring_gap'] else 'quiet' if state in ['not_monitored', 'unknown', 'warming_up'] else '' }}">{{ state|replace('_', ' ') }}</span>
-              {% if state == 'stale' and health.get('status_at_evaluation') %}<span class="status-range">was {{ health.get('status_at_evaluation')|replace('_', ' ') }}</span>{% endif %}
-            </div>
-            <dl class="status-counts">
-              <div><dt class="label">monitored minutes</dt><dd class="mono">{{ health.get('monitored_minutes') if health.get('monitored_minutes') is not none else 'n/a' }}</dd></div>
-              <div><dt class="label">baseline hours</dt><dd class="mono">{{ health.get('baseline_samples') if health.get('baseline_samples') is not none else 'n/a' }}</dd></div>
-              <div><dt class="label">fresh / parsed records</dt><dd class="mono">{{ health.get('accepted_rows')|integer if health.get('accepted_rows') is not none else 'n/a' }} / {{ health.get('parsed_rows')|integer if health.get('parsed_rows') is not none else 'n/a' }}</dd></div>
-            </dl>
-          </section>
-        {% endfor %}
+    <header class="head status-title">
+      <h1 class="hero-title">status</h1>
+      {% set overall = live.overall if live.available else ('', '') %}
+      <p class="status-pill {{ overall[0] }}" id="status-pill" role="status" {{ 'hidden' if not live.available }}><span class="status-dot" aria-hidden="true"></span><span class="status-pill-label">{{ overall[1] }}</span></p>
+    </header>
+
+    {% include "_status_live.html" %}
+
+    <section class="status-trend" aria-label="GPS feed history">
+      <div class="status-head">
+        <h2 class="label">feed history</h2>
+        {% if history.available %}<p class="status-range">last {{ history.hours }} h · {% if history.stale_since %}<span class="problem">not updated since {{ history.stale_since.strftime('%a %H:%M') }}</span>{% else %}checked hourly{% endif %} · times in Warsaw time</p>{% endif %}
       </div>
-      {% if feed.get('recent_intervals') %}
-        <h3 class="label">recent degraded intervals</h3>
-        <p class="status-range">GPS evidence only, not service cancellations · ongoing intervals end at the evaluated hour</p>
-        <div class="status-scroll" role="region" aria-label="Recent GPS feed degradation" tabindex="0">
-          <table class="mono">
-            <caption class="status-table-caption">Recent degraded GPS feed intervals</caption>
-            <thead><tr><th scope="col">Mode</th><th scope="col">From</th><th scope="col">Through</th><th scope="col">Reason</th></tr></thead>
-            <tbody>
-              {% for interval in (feed.get('recent_intervals') or [])|reverse %}
-                <tr><th scope="row">{{ interval.mode|upper }}</th><td class="sval">{{ timestamp(interval.start_at) }}</td><td class="sval">{{ timestamp(interval.end_at) }}</td><td class="sval problem">{{ interval.reason|replace('_', ' ') }}</td></tr>
-              {% endfor %}
-            </tbody>
-          </table>
+      {% if history.available %}
+        <p class="status-rules">A stretch is flagged when the number of fresh vehicles stays below {{ history.rules.ratio }}% of the usual count for {{ history.rules.run }}+ minutes. The usual count comes from the same weekday and minute over the last {{ history.rules.weeks }} weeks. Minutes where fewer than {{ history.rules.floor }} vehicles usually run are never flagged, so quiet nights don't trip it.</p>
+        <div class="status-legend" aria-hidden="true">
+          <span><i class="key-actual"></i>fresh vehicles</span>
+          <span><i class="key-usual"></i>usual ({{ history.rules.weeks }}-week median)</span>
+          <span><i class="key-band"></i>{{ history.rules.weeks }}-week range</span>
+          <span><i class="key-incident"></i>flagged</span>
         </div>
+        <div class="status-charts">
+          {% for mode, c in history.charts.items() %}
+            <div class="status-mode"><span class="tag {{ mode }}">{{ mode|upper }}</span><span class="status-range">fresh {{ 'buses' if mode == 'bus' else 'trams' }} per minute</span></div>
+            <figure class="status-chart" data-start="{{ c.start }}" data-left="{{ c.left }}" data-right="{{ c.right }}" data-w="{{ c.w }}" data-points="{{ c.data|to_json }}">
+              <svg viewBox="0 0 {{ c.w }} {{ c.h }}" role="img" aria-label="{{ mode }} fresh vehicles per minute against the usual range, last {{ history.hours }} hours">
+                {% for t in c.ticks_y %}<line class="grid" x1="{{ c.left }}" x2="{{ c.w - c.right }}" y1="{{ t.y }}" y2="{{ t.y }}"/><text class="axis" x="{{ c.left - 6 }}" y="{{ t.y + 3 }}" text-anchor="end">{{ t.label }}</text>{% endfor %}
+                {% for s in c.shades %}<rect class="shade {{ 'gap' if s.gap }}" x="{{ s.x }}" y="{{ c.top }}" width="{{ s.w }}" height="{{ c.h - c.top - c.bottom }}"/><line class="shade-edge {{ 'gap' if s.gap }}" x1="{{ s.x }}" x2="{{ s.x }}" y1="{{ c.top }}" y2="{{ c.h - c.bottom }}"/>{% endfor %}
+                <path class="band" d="{{ c.band }}"/>
+                <path class="usual" d="{{ c.usual }}"/>
+                <path class="actual" d="{{ c.actual }}"/>
+                {% for t in c.ticks_x %}<text class="axis" x="{{ t.x }}" y="{{ c.h - 6 }}" text-anchor="middle">{{ t.label }}</text>{% endfor %}
+                <line class="cross" y1="{{ c.top }}" y2="{{ c.h - c.bottom }}"/>
+              </svg>
+              <div class="status-tip"></div>
+            </figure>
+          {% endfor %}
+        </div>
+        <h3 class="label status-flagged">flagged in the last {{ history.days }} days</h3>
+        {% if history.incidents %}
+          <div class="status-scroll" role="region" aria-label="Flagged GPS feed intervals" tabindex="0">
+            <table class="mono">
+              <caption class="status-table-caption">Flagged GPS feed intervals</caption>
+              <thead><tr><th scope="col">Mode</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Length</th><th scope="col">Fresh / usual</th><th scope="col">What</th></tr></thead>
+              <tbody>
+                {% for i in history.incidents %}
+                  <tr>
+                    <th scope="row">{{ i.mode|upper }}</th>
+                    <td class="sval">{{ i.start.strftime('%a %d %b %H:%M') }}</td>
+                    <td class="sval">{{ 'ongoing' if i.ongoing else (i.end.strftime('%H:%M') if i.end.date() == i.start.date() else i.end.strftime('%a %H:%M')) }}</td>
+                    <td class="sval">{{ '%dh %02dm'|format(i.minutes // 60, i.minutes % 60) if i.minutes >= 60 else '%d min'|format(i.minutes) }}</td>
+                    <td class="sval">{{ '{:,} / {:,}'.format(i.fresh|round|int, i.usual|round|int) if i.fresh is not none else '—' }}</td>
+                    <td class="what {{ 'gap' if i.gap else 'problem' }}">{{ i.what }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="status-range">nothing flagged</p>
+        {% endif %}
+      {% else %}
+        <p class="status-range">feed history unavailable</p>
       {% endif %}
     </section>
     <section class="two-up status-summary" aria-label="Recent coverage and trip quality">
@@ -118,4 +130,5 @@
     </section>
   </main>
 </div>
+<script src="{{ url_for('static', filename='status.js') }}"></script>
 {% endblock %}
