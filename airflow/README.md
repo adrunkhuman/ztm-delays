@@ -33,7 +33,7 @@ From the repository root, without cloud credentials:
 
 ```sh
 uvx --with tzdata==2026.3 --with duckdb==1.5.4 --with pyarrow==25.0.0 \
-  --with jinja2==3.1.6 pytest==9.1.1 airflow/tests
+  --with jinja2==3.1.6 --with pendulum==3.2.0 pytest==9.1.1 airflow/tests
 ```
 
 The tests exercise DAG boundaries and helpers, not a running scheduler. To check the image:
