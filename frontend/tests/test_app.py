@@ -75,7 +75,8 @@ def test_status_page_renders_current_pipeline_contract(tmp_path: Path, monkeypat
     assert b'<th scope="col">Broken</th>' in response.data
     assert b"/?date=2026-07-13&amp;window=day" in response.data
     assert b"2026-07-14 03:12:00 UTC" in response.data
-    assert b"poller snapshot" in response.data
+    assert b"live status unavailable" in response.data
+    assert b"feed history unavailable" in response.data
     github_link = b'href="https://github.com/adrunkhuman/ztm-delays"'
     assert github_link in response.data
     github_anchor = response.data.split(github_link, 1)[1].split(b"</a>", 1)[0]

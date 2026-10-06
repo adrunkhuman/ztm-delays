@@ -1,8 +1,8 @@
 # Frontend
 
-Server-rendered Flask app for the transit archive. Overview, line, stop, and trip views expose delays and reconstructed service; the status page shows archive coverage and export freshness.
+Server-rendered Flask app for the transit archive. Overview, line, stop, and trip views expose delays and reconstructed service; the status page shows archive coverage, export freshness and, when configured, the live poller and GPS feed history.
 
-The app reads a local DuckDB serving artifact in read-only mode. It does not refresh data or connect to BigQuery, GCS, or the city API. Monthly route maps are read from `maps/` beside the DuckDB file, or from `ZTM_MAPS_DIR`. The map page loads MapLibre and OpenFreeMap tiles in the browser.
+The app reads a local DuckDB serving artifact in read-only mode. It does not refresh data or connect to BigQuery or the city API. The only GCS reads are the two public status objects below. Monthly route maps are read from `maps/` beside the DuckDB file, or from `ZTM_MAPS_DIR`. The map page loads MapLibre and OpenFreeMap tiles in the browser.
 
 ## Run
 
@@ -42,7 +42,15 @@ Entity rankings use qualifying zone-1 public-service trips and minimum observati
 
 The route map shows **net delay change** between consecutive scheduled stops: the downstream stop's signed arrival delay minus the upstream stop's. Red means delay grows over that segment; blue means time is recovered. It uses complete trips with both scheduled arrivals between 06:00 and 22:00, and corridors with at least 100 traversals in the period. Weekdays and weekends are calendar days. A segment's change includes dwell time at the upstream stop. It does not show where inside the segment the delay arose. `scripts/build_map_style.py` regenerates the dark basemap style.
 
-Status coverage uses observed/expected service minutes in the summary and observed/expected trips in daily rows. Poller status is captured at export time, not live. Sidecar metadata is accepted only when its export ID matches the database.
+Status coverage uses observed/expected service minutes in the summary and observed/expected trips in daily rows. Sidecar metadata is accepted only when its export ID matches the database.
+
+## Live status
+
+`/status` shows a live poller panel and 24 h feed-history charts from two small JSON objects the pipeline publishes under `health/poller/public/`: `live.json` (poller heartbeat, about every minute) and `feed-history.json` (hourly). Set `ZTM_STATUS_GCS_BUCKET` to the bucket name to enable it; without it the page says "live status unavailable" and nothing else changes.
+
+The pill and per-mode states are derived on read: the poller is silent after 180 s without a heartbeat, a mode is failing after 3 failed polls in a row, and its feed is thin when the fresh fleet is below half of the usual count for that weekday and minute (usual counts come from `feed-history.json`; minutes with fewer than 20 usual vehicles count as night service). Objects are cached in process (30 s and 5 min), size-limited (16 KiB and 1 MiB) and read with a 5 s timeout. A missing `live.json` shows "poller offline"; unreadable or malformed objects show "unavailable" for that section and never fail the page.
+
+Credentials use the standard Google application default mechanism. Mount a service-account key at runtime and point `GOOGLE_APPLICATION_CREDENTIALS` at it. Never bake the key into the image. Grant the account read-only access (`roles/storage.objectViewer`) limited to the `health/poller/public/` prefix, for example with an IAM condition on `resource.name`, since nothing private lives there.
 
 ## Planner
 

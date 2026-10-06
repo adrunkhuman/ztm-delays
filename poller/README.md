@@ -22,6 +22,7 @@ This contacts the live API but does not initialise GCS or upload data. Omit both
 | `POLLER_HEALTH_GCS_PREFIX` | Private cumulative UTC hourly summaries; default `health/poller/hourly`. |
 | `POLLER_HEALTH_MAX_BYTES` | Health checkpoint/pending-counter cap, separate from the GPS cap; default 8 MiB. Reserves 1 KiB before each API attempt. |
 | `POLLER_HEARTBEAT_INTERVAL_SECONDS` | Heartbeat and closed-hour diagnostic upload/retry tick; default 60 seconds. |
+| `POLLER_PUBLIC_STATUS_GCS_PATH` | Sanitized public heartbeat object; default `health/poller/public/live.json`. |
 | `ZTM_API_PROXY` | Optional SOCKS proxy for city API traffic. |
 
 Timing, freshness, and buffer limits are defined in [poller.py](poller.py).
@@ -37,7 +38,9 @@ Multiple parts per hour are expected. A batch's row digest gives retries the sam
 
 Stale and far-future pings are rejected before buffering. By default, flushing runs every 15 minutes and holds recent rows for five minutes. Graceful shutdown flushes the remaining buffer. Failed uploads stay buffered for retry; persisted spool state survives container replacement. The default 100 MiB spool cap fails loudly rather than allowing unbounded disk growth.
 
-A private GCS heartbeat records per-mode attempts, successes, and failures. Optional per-mode `feed_status` and `feed_reason` describe freshness separately: more than half of parsed rows rejected as stale/future is `degraded`; other nonempty responses are freshness-`healthy`. Empty responses and request failures are `unknown`. Request success, `last_success_at`, and the top-level heartbeat status keep their existing meaning. Freshness-healthy does **not** prove normal fleet coverage; baseline-dependent vehicle/line collapse detection belongs to the downstream monitor. The frontend sees only the sanitized snapshot captured during serving export.
+A private GCS heartbeat records per-mode attempts, successes, and failures, plus the parsed, accepted and stale/future-dropped row counts of the last successful poll. The poller issues no freshness verdict: the city API keeps serving parked vehicles' last positions overnight, so a high stale share is normal and says nothing about feed health. Baseline-dependent detection of fleet collapse belongs to the downstream monitor. The private heartbeat is read by the monitor and the serving export, never by the frontend.
+
+Each heartbeat tick also uploads a sanitized public copy, `health/poller/public/live.json` (override with `POLLER_PUBLIC_STATUS_GCS_PATH`), with `Cache-Control: no-cache`. It is built from an explicit allowlist: `version`, `updated_at`, the poll and heartbeat intervals, and per mode `last_attempt_at`, `last_success_at`, `consecutive_failures`, `fresh_vehicles` and `fresh_lines`. Timestamps are UTC with a `Z` suffix, or `null`; the fresh counts come from the last successful poll and are `null` before the first one. Hostnames, paths and error text stay private. A failed public upload is logged and does not affect the private heartbeat, and the reverse.
 
 ## Durable feed diagnostics
 

@@ -1,9 +1,17 @@
 """Evaluate private v1 poll summaries without Airflow, GPS scans, or service assumptions.
 
-Baselines use the SAME Warsaw weekday and wall-clock hour in the preceding 28
-local dates (DST folds are averaged into one daily sample). Only fully monitored,
-successful, reasonably fresh hours with an evaluated clean report qualify. Zero
-historical fleet does not imply expected service. Gaps never count as zero feed.
+The signal is the fresh fleet: distinct vehicles with a ping younger than the
+poller's age cutoff, per successful poll. Each minute is compared with the SAME
+Warsaw weekday and wall-clock minute in the preceding 28 local dates (DST folds
+are folded into one daily sample). Weeks that were themselves outages at that
+minute are dropped, so a past incident cannot lower the bar. Minutes where fewer
+than ``minimum_fleet`` vehicles usually run are never flagged: quiet nights are
+not outages. The share of stale rows is not a signal; the API keeps serving the
+last positions of parked vehicles, so it tracks how much of the fleet is idle.
+
+Before collection began, raw-GPS seeds (``baseline-seed/``) stand in for missing
+summaries, so baselines exist from the first monitored hour. Gaps never count as
+zero feed.
 
 Reports retain private incident state; ``snapshot`` is the public allowlist. Use
 GCS lifecycle rules for 90-day report archives and at least 28 days of summaries;
@@ -37,6 +45,9 @@ MAXIMUM_LOOKBACK_DAYS = 28
 MAX_TIMESTAMP_LENGTH = 40
 MAX_RECENT_INTERVALS = 48
 MAX_REPORT_EVENTS = MINUTES_PER_HOUR * len(MODES) * 2 + len(MODES)
+REPORT_VERSION = 2
+SEED_MAX_BYTES = 64 * 1024
+MAX_MINIMUM_FLEET = 1000
 COUNT_FIELDS = (
     "attempts",
     "successes",
@@ -60,14 +71,14 @@ PUBLIC_MODE_FIELDS = ("status", "reasons", "intervals", "monitored_minutes", "ba
 
 @dataclass(frozen=True)
 class Config:
-    """Detection controls; samples require >=80% fresh rows independently of detection."""
+    """Detection controls; ``threshold`` bounds both poll success and fleet share."""
 
     duration_minutes: int = 15
     coverage_fraction: float = 0.8
     threshold: float = 0.5
     minimum_samples: int = 3
     lookback_days: int = 28
-    sample_fresh_ratio: float = 0.8
+    minimum_fleet: int = 20
 
     def __post_init__(self) -> None:
         """Reject unsafe or unbounded configuration."""
@@ -80,8 +91,8 @@ class Config:
             or not MINIMUM_LOOKBACK_DAYS <= self.lookback_days <= MAXIMUM_LOOKBACK_DAYS
         ):
             raise ValueError("need >=3 samples within a bounded 21..28 day lookback")
-        if not MINIMUM_COVERAGE <= self.sample_fresh_ratio <= 1:
-            raise ValueError("baseline samples must be reasonably fresh")
+        if not 1 <= self.minimum_fleet <= MAX_MINIMUM_FLEET:
+            raise ValueError("minimum_fleet must be 1..1000")
 
 
 DEFAULT_CONFIG = Config()
@@ -227,74 +238,143 @@ def monitored(item: dict[str, int] | None, interval: float, config: Config) -> b
     return item is not None and item["attempts"] >= math.ceil(60 / interval * config.coverage_fraction)
 
 
+def validate_seed(data: dict[str, Any], hour: datetime) -> dict[str, Any]:
+    """Raw-GPS stand-in for a pre-collection summary: fresh fleet per UTC minute only."""
+    if set(data) != {"version", "hour_start", "source", "vehicle_types"} or data["source"] != "raw_gps_pings":
+        raise ValueError("invalid seed fields")
+    if type(data["version"]) is not int or data["version"] != 1 or timestamp(data["hour_start"]) != hour:
+        raise ValueError("invalid seed header")
+    if not isinstance(data["vehicle_types"], dict) or set(data["vehicle_types"]) != set(MODES):
+        raise ValueError("invalid seed vehicle types")
+    for mode in MODES:
+        minutes = data["vehicle_types"][mode]
+        if not isinstance(minutes, dict) or set(minutes) != {"minutes"} or not isinstance(minutes["minutes"], list):
+            raise ValueError("invalid seed mode")
+        seen = set()
+        for item in minutes["minutes"]:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"minute", "fresh_vehicles"}
+                or type(item["minute"]) is not int
+                or not 0 <= item["minute"] < MINUTES_PER_HOUR
+                or item["minute"] in seen
+                or type(item["fresh_vehicles"]) is not int
+                or not 0 <= item["fresh_vehicles"] <= MAX_COUNTER
+            ):
+                raise ValueError("invalid seed minute")
+            seen.add(item["minute"])
+    return data
+
+
+def build_seeds(rows: list[tuple[str, datetime, int]]) -> dict[datetime, dict[str, Any]]:
+    """Group raw-GPS fresh fleet per (mode, UTC minute) into hourly seed objects."""
+    seeds: dict[datetime, dict[str, Any]] = {}
+    for mode, minute_at, fresh in sorted(rows, key=lambda row: (row[1], row[0])):
+        if mode not in MODES:
+            raise ValueError("unknown seed mode")
+        at = minute_at.astimezone(UTC)
+        hour = at.replace(minute=0, second=0, microsecond=0)
+        seed = seeds.setdefault(
+            hour,
+            {
+                "version": 1,
+                "hour_start": iso(hour),
+                "source": "raw_gps_pings",
+                "vehicle_types": {name: {"minutes": []} for name in MODES},
+            },
+        )
+        seed["vehicle_types"][mode]["minutes"].append({"minute": at.minute, "fresh_vehicles": int(fresh)})
+    for hour, seed in seeds.items():
+        validate_seed(seed, hour)
+    return seeds
+
+
+def fresh_fleet(item: dict[str, int]) -> float:
+    """Mean distinct fresh vehicles per successful poll; callers ensure successes."""
+    return item["accepted_vehicle_count_sum"] / item["successes"]
+
+
+def sample_minutes(source: dict[str, Any], mode: str, config: Config) -> dict[int, float]:
+    """Fresh fleet for minutes trustworthy enough to describe normal service.
+
+    Summaries contribute only minutes whose polls mostly succeeded; seeds were
+    built from raw pings, where a minute present for either mode was collected.
+    """
+    minutes = source["vehicle_types"][mode]["minutes"]
+    if "source" in source:
+        present = {item["minute"] for other in MODES for item in source["vehicle_types"][other]["minutes"]}
+        values = {item["minute"]: float(item["fresh_vehicles"]) for item in minutes}
+        return {minute: values.get(minute, 0.0) for minute in present}
+    interval = source["poll_interval_seconds"]
+    hour = timestamp(source["hour_start"])
+    collection = timestamp(source["collection_started_at"])
+    needed = math.ceil(60 / interval * config.coverage_fraction)
+    return {
+        item["minute"]: fresh_fleet(item)
+        for item in minutes
+        if item["successes"] >= needed
+        and monitored(item, interval, config)
+        and hour + timedelta(minutes=item["minute"]) >= collection
+    }
+
+
 def baseline(
-    samples: list[tuple[dict[str, Any], dict[str, Any]]],
+    samples: list[dict[str, Any]],
     mode: str,
     config: Config,
     *,
     reset_at: str | None = None,
 ) -> dict[str, Any]:
-    """Use one sample per local date, excluding known incidents and telemetry gaps."""
-    daily: dict[str, list[tuple[float, float, float | None]]] = {}
+    """Per-minute usual fleet from one sample per local date, dropping outage weeks."""
     epoch = timestamp(reset_at) if reset_at else None
-    for summary, report in samples:
-        hour = timestamp(summary["hour_start"])
+    daily: dict[str, dict[int, list[float]]] = {}
+    for source in samples:
+        hour = timestamp(source["hour_start"])
         if epoch is not None and hour < epoch:
             continue
-        row = report["vehicle_types"][mode]
-        if report["hour_start"] != summary["hour_start"] or row["status"] not in {"healthy", "warming_up"}:
+        date = daily.setdefault(hour.astimezone(WARSAW).date().isoformat(), {})
+        for minute, value in sample_minutes(source, mode, config).items():
+            date.setdefault(minute, []).append(value)
+    usual: list[float | None] = []
+    low: list[float | None] = []
+    high: list[float | None] = []
+    for minute in range(MINUTES_PER_HOUR):
+        values = [median(day[minute]) for day in daily.values() if minute in day]
+        if len(values) < config.minimum_samples:
+            usual.append(None)
+            low.append(None)
+            high.append(None)
             continue
-        if row["intervals"] or row.get("state", {}).get("active") or row.get("state", {}).get("bad_tail"):
-            continue
-        minutes = summary["vehicle_types"][mode]["minutes"]
-        interval = summary["poll_interval_seconds"]
-        if timestamp(summary["collection_started_at"]) > hour or len(minutes) != MINUTES_PER_HOUR:
-            continue
-        if not all(
-            monitored(item, interval, config)
-            and item["successes"] >= math.ceil(60 / interval * config.coverage_fraction)
-            for item in minutes
-        ):
-            continue
-        values = metrics(minutes)
-        ratio = values["accepted_rows"] / values["parsed_rows"] if values["parsed_rows"] else None
-        if ratio is not None and ratio < config.sample_fresh_ratio:
-            continue
-        daily.setdefault(hour.astimezone(WARSAW).date().isoformat(), []).append(
-            (values["mean_accepted_vehicles"], values["mean_accepted_lines"], ratio),
-        )
-    values = [
-        tuple(
-            median(entry[i] for entry in entries if entry[i] is not None)
-            if any(entry[i] is not None for entry in entries)
-            else None
-            for i in range(3)
-        )
-        for entries in daily.values()
-    ]
-    result = {"samples": len(values), "vehicles": None, "lines": None, "ratio": None}
-    if len(values) >= config.minimum_samples:
-        result["vehicles"] = median(value[0] for value in values)
-        result["lines"] = median(value[1] for value in values)
-        ratios = [value[2] for value in values if value[2] is not None]
-        if len(ratios) >= config.minimum_samples:
-            result["ratio"] = median(ratios)
-    return result
+        typical = median(values)
+        kept = [value for value in values if value >= config.threshold * typical] or values
+        usual.append(round(median(kept), 1))
+        low.append(round(min(kept), 1))
+        high.append(round(max(kept), 1))
+    samples_used = sum(1 for day in daily.values() if day)
+    return {"samples": min(samples_used, MAXIMUM_SAMPLES), "vehicles": usual, "low": low, "high": high}
 
 
-def bad_reason(item: dict[str, int], expected: dict[str, Any], config: Config) -> str | None:
-    """Stale-heavy success needs no fleet baseline; low fleet needs positive history."""
+def empty_baseline() -> dict[str, Any]:
+    """No usual fleet known for any minute."""
+    return {"samples": 0, **{key: [None] * MINUTES_PER_HOUR for key in ("vehicles", "low", "high")}}
+
+
+def counts_for_fleet(expected: float | None, config: Config) -> bool:
+    """Only minutes with real usual service can show a fleet outage or prove recovery."""
+    return expected is not None and expected >= config.minimum_fleet
+
+
+def bad_reason(item: dict[str, int], expected: float | None, config: Config) -> str | None:
+    """API failure needs no history; fleet loss needs a usual fleet of at least ``minimum_fleet``."""
     if not item["attempts"] or item["successes"] / item["attempts"] < config.threshold:
         return "api_failures"
-    ratio = item["accepted_rows"] / item["parsed_rows"] if item["parsed_rows"] else None
-    if ratio is not None and ratio < config.threshold * (expected["ratio"] or 1):
-        return "stale_heavy"
-    positive = (expected["vehicles"] or 0) > 0 or (expected["lines"] or 0) > 0
-    if positive and not item["accepted_rows"]:
+    if not counts_for_fleet(expected, config):
+        return None
+    fleet = fresh_fleet(item)
+    if not fleet:
         return "no_accepted"
-    for field, count in (("vehicles", "accepted_vehicle_count_sum"), ("lines", "accepted_line_count_sum")):
-        if expected[field] and item[count] / item["successes"] < expected[field] * config.threshold:
-            return "low_fleet"
+    if fleet < config.threshold * expected:
+        return "low_fleet"
     return None
 
 
@@ -323,13 +403,15 @@ def preceding_bad_tail(
     """Recheck the preceding hour's trailing evidence using its own fleet baseline."""
     if source is None:
         return []
-    expected = prior.get("baseline", {"vehicles": None, "lines": None, "ratio": None})
+    expected = prior.get("baseline", empty_baseline())["vehicles"]
     minutes = {item["minute"]: item for item in source["vehicle_types"][mode]["minutes"]}
     tail = []
     for minute in range(MINUTES_PER_HOUR):
         item = minutes.get(minute)
         reason = (
-            bad_reason(item, expected, config) if monitored(item, source["poll_interval_seconds"], config) else None
+            bad_reason(item, expected[minute], config)
+            if monitored(item, source["poll_interval_seconds"], config)
+            else None
         )
         if reason:
             tail.append({"at": iso(hour - timedelta(hours=1) + timedelta(minutes=minute)), "reason": reason})
@@ -338,24 +420,29 @@ def preceding_bad_tail(
     return tail[-config.duration_minutes :]
 
 
-def mode_status(  # noqa: PLR0913
+def mode_status(  # noqa: PLR0911, PLR0913 - one ordered decision table
     *,
     hour: datetime,
     collection: datetime | None,
     active: dict[str, str] | None,
     monitored_minutes: int,
     gaps: bool,
+    has_baseline: bool,
     positive_baseline: bool,
     has_bad_minutes: bool,
     reasons: set[str],
 ) -> str:
-    """Choose a confidence-aware status without equating missing telemetry to zero."""
+    """Choose a confidence-aware status without equating missing telemetry to zero.
+
+    ``has_baseline`` means some minute has a usual fleet at all; ``positive_baseline``
+    means some minute's usual fleet is large enough to judge (quiet nights are not).
+    """
     end = hour + timedelta(hours=1)
     partial = collection is not None and hour < collection < end
     if collection is None or collection >= end:
         reasons.add("collection_not_confirmed" if collection is None else "before_collection")
         return "not_monitored"
-    if active and not positive_baseline and active["reason"] in {"low_fleet", "no_accepted"}:
+    if active and not positive_baseline and active["reason"] in FLEET_REASONS:
         reasons.add("recovery_unconfirmed")
     if active and monitored_minutes and (positive_baseline or has_bad_minutes):
         return "degraded"
@@ -363,20 +450,38 @@ def mode_status(  # noqa: PLR0913
         return "partial" if partial else "monitoring_gap"
     if partial:
         return "partial"
-    if not positive_baseline:
+    if not has_baseline:
         reasons.add("recovery_unconfirmed" if active else "no_positive_fleet_baseline")
         return "warming_up"
+    if active:
+        # An outage carried into quiet hours stays open until normal service proves recovery.
+        return "degraded"
     return "healthy"
 
 
-def recovery_evidence(item: dict[str, int], active: dict[str, str] | None, expected: dict[str, Any]) -> bool:
-    """Fleet recovery needs this hour's baseline; fresh replies alone prove only freshness."""
-    if active and active["reason"] in {"low_fleet", "no_accepted"}:
-        positive_baseline = (expected["vehicles"] or 0) > 0 or (expected["lines"] or 0) > 0
-        if not positive_baseline:
-            return False
-    # The caller has already ruled out API failure, low fleet and a bad fresh ratio.
-    return item["successes"] > 0 and item["parsed_rows"] > 0 and item["accepted_rows"] > 0
+def recovery_evidence(
+    item: dict[str, int], active: dict[str, str] | None, expected: float | None, config: Config
+) -> bool:
+    """Fleet recovery needs a judgeable usual fleet; answered polls alone prove only the API."""
+    if active and active["reason"] in FLEET_REASONS:
+        return counts_for_fleet(expected, config)
+    # The caller has already ruled out API failure and fleet loss.
+    return item["successes"] > 0
+
+
+def minute_fresh(
+    summary: dict[str, Any] | None,
+    item: dict[str, int] | None,
+    at: datetime,
+    collection: datetime | None,
+    config: Config,
+) -> float | None:
+    """Public chart value: null for unmonitored minutes, never a fake zero."""
+    if summary is None or collection is None or at + timedelta(minutes=1) <= collection:
+        return None
+    if not monitored(item, summary["poll_interval_seconds"], config) or not item["successes"]:
+        return None
+    return round(fresh_fleet(item), 1)
 
 
 def summary_after_reset(source: dict[str, Any] | None, reset_at: str | None) -> dict[str, Any] | None:
@@ -431,7 +536,26 @@ def monitoring_transitions(  # noqa: PLR0913 - independent telemetry evidence an
     return {"active": active, "gap_tail": gap_tail, "good_tail": good_tail}, events
 
 
-def evaluate_mode(  # noqa: C901, PLR0913, PLR0915 - keep the minute state walk in one place
+def retire_legacy_incident(
+    hour: datetime,
+    mode: str,
+    active: dict[str, str] | None,
+    intervals: list[dict[str, str]],
+    events: list[dict[str, Any]],
+) -> bool:
+    """Close an incident opened by a retired rule at the first evaluation under the new rules.
+
+    Left open, it would absorb a real fleet outage at deploy time: new bad
+    minutes cannot open their own incident while one is active.
+    """
+    if not active or active["reason"] not in LEGACY_REASONS:
+        return False
+    intervals.append({**active, "end_at": iso(hour)})
+    events.append(event(mode, active, "recovered", iso(hour)))
+    return True
+
+
+def evaluate_mode(  # noqa: C901, PLR0912, PLR0913, PLR0915 - keep the minute state walk in one place
     hour: datetime,
     mode: str,
     summary: dict[str, Any] | None,
@@ -454,6 +578,8 @@ def evaluate_mode(  # noqa: C901, PLR0913, PLR0915 - keep the minute state walk 
     by_minute = {item["minute"]: item for item in minutes or []}
     intervals = []
     monitoring, events = monitoring_transitions(hour, mode, summary, collection, prior.get("state", {}), config)
+    if retire_legacy_incident(hour, mode, active, intervals, events):
+        active, good_tail = None, []
     reasons = set()
     monitored_minutes = 0
     gaps = False
@@ -470,7 +596,7 @@ def evaluate_mode(  # noqa: C901, PLR0913, PLR0915 - keep the minute state walk 
             bad_tail, good_tail = [], []
             continue
         monitored_minutes += 1
-        reason = bad_reason(item, expected, config)
+        reason = bad_reason(item, expected["vehicles"][minute], config)
         if reason:
             has_bad_minutes = True
             good_tail = []
@@ -484,7 +610,9 @@ def evaluate_mode(  # noqa: C901, PLR0913, PLR0915 - keep the minute state walk 
         else:
             bad_tail = []
             good_tail = (
-                [*good_tail, iso(at)][-config.duration_minutes :] if recovery_evidence(item, active, expected) else []
+                [*good_tail, iso(at)][-config.duration_minutes :]
+                if recovery_evidence(item, active, expected["vehicles"][minute], config)
+                else []
             )
             if active and len(good_tail) >= config.duration_minutes:
                 intervals.append({**active, "end_at": good_tail[0]})
@@ -506,7 +634,8 @@ def evaluate_mode(  # noqa: C901, PLR0913, PLR0915 - keep the minute state walk 
             active=active,
             monitored_minutes=monitored_minutes,
             gaps=gaps,
-            positive_baseline=(expected["vehicles"] or 0) > 0 or (expected["lines"] or 0) > 0,
+            has_baseline=any(value is not None for value in expected["vehicles"]),
+            positive_baseline=any(counts_for_fleet(value, config) for value in expected["vehicles"]),
             has_bad_minutes=has_bad_minutes,
             reasons=reasons,
         ),
@@ -515,6 +644,10 @@ def evaluate_mode(  # noqa: C901, PLR0913, PLR0915 - keep the minute state walk 
         "monitored_minutes": monitored_minutes,
         "baseline_samples": expected["samples"],
         **metrics(minutes),
+        "fresh": [
+            minute_fresh(summary, by_minute.get(minute), hour + timedelta(minutes=minute), collection, config)
+            for minute in range(MINUTES_PER_HOUR)
+        ],
         "baseline": expected,
         "state": {
             "active": active,
@@ -560,7 +693,7 @@ def rebaseline_prior_report(
 def evaluate(  # noqa: PLR0913
     hour: datetime,
     summary: dict[str, Any] | None,
-    samples: list[tuple[dict[str, Any], dict[str, Any]]],
+    samples: list[dict[str, Any]],
     *,
     previous_summary: dict[str, Any] | None = None,
     previous_report: dict[str, Any] | None = None,
@@ -587,7 +720,7 @@ def evaluate(  # noqa: PLR0913
     ]
     collection = min(starts) if starts else None
     report = {
-        "version": 1,
+        "version": REPORT_VERSION,
         "evaluated_at": iso(evaluated_at or datetime.now(UTC)),
         "hour_start": iso(hour),
         "collection_started_at": iso(collection) if collection else None,
@@ -595,7 +728,7 @@ def evaluate(  # noqa: PLR0913
         "events": reset_events,
     }
     candidates = set(comparable_hours(hour, config))
-    samples = [(source, prior) for source, prior in samples if timestamp(source["hour_start"]) in candidates]
+    samples = [source for source in samples if timestamp(source["hour_start"]) in candidates]
     for mode in MODES:
         prior_state = previous_report["vehicle_types"][mode]["state"] if previous_report else {}
         row, events = evaluate_mode(
@@ -622,7 +755,10 @@ def evaluate(  # noqa: PLR0913
     return report
 
 
-INCIDENT_REASONS = {"api_failures", "stale_heavy", "low_fleet", "no_accepted"}
+FLEET_REASONS = {"low_fleet", "no_accepted"}
+# stale_heavy is no longer produced; reports from before the fleet-based rules may still carry it.
+LEGACY_REASONS = {"stale_heavy"}
+INCIDENT_REASONS = {"api_failures", *FLEET_REASONS, *LEGACY_REASONS}
 REPORT_REASONS = INCIDENT_REASONS | {
     "collection_not_confirmed",
     "before_collection",
@@ -708,7 +844,7 @@ def validate_report_tail(tail: list[Any], end: datetime, *, bad: bool) -> None:
 
 def validate_report_mode(row: dict[str, Any], end: datetime) -> None:  # noqa: C901 - explicit persisted schema checks
     """Check snapshot fields, baseline metadata and private transition state."""
-    if not isinstance(row, dict) or set(row) != {*PUBLIC_MODE_FIELDS, "baseline", "state"}:
+    if not isinstance(row, dict) or set(row) != {*PUBLIC_MODE_FIELDS, "fresh", "baseline", "state"}:
         raise ValueError("invalid persisted poller report mode fields")
     if not isinstance(row["status"], str) or row["status"] not in STATUSES:
         raise ValueError("invalid persisted poller report status")
@@ -726,15 +862,24 @@ def validate_report_mode(row: dict[str, Any], end: datetime) -> None:  # noqa: C
     for interval in intervals:
         validate_report_interval(interval, end)
     expected = row["baseline"]
-    if not isinstance(expected, dict) or set(expected) != {"samples", "vehicles", "lines", "ratio"}:
+    if not isinstance(expected, dict) or set(expected) != {"samples", "vehicles", "low", "high"}:
         raise ValueError("invalid persisted poller report baseline")
     if type(expected["samples"]) is not int or expected["samples"] != row["baseline_samples"]:
         raise ValueError("invalid persisted poller report baseline samples")
-    for field, maximum in (("vehicles", MAX_COUNTER), ("lines", MAX_COUNTER), ("ratio", 1)):
-        value = expected[field]
-        if value is not None and (type(value) not in (int, float) or not 0 <= value <= maximum):
-            raise ValueError("invalid persisted poller report baseline value")
+    for series in (row["fresh"], expected["vehicles"], expected["low"], expected["high"]):
+        validate_minute_series(series)
     validate_report_state(row["state"], end)
+
+
+def validate_minute_series(series: object) -> None:
+    """Sixty nullable, finite, bounded per-minute fleet values."""
+    if not isinstance(series, list) or len(series) != MINUTES_PER_HOUR:
+        raise ValueError("invalid persisted poller report minute series")
+    for value in series:
+        if value is not None and (
+            type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= MAX_COUNTER
+        ):
+            raise ValueError("invalid persisted poller report minute value")
 
 
 def validate_report_metrics(row: dict[str, Any]) -> None:
@@ -756,6 +901,25 @@ def validate_report_metrics(row: dict[str, Any]) -> None:
         raise ValueError("invalid persisted poller report count invariant")
 
 
+def upgrade_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Read a report from the stale-share rules (v1) as v2 with unknown minute series.
+
+    Its hourly baseline is not comparable with per-minute baselines, so the
+    preceding-hour recheck finds no fleet loss in a v1 predecessor; only
+    api_failures can carry a bad tail across the deploy. Incidents and the
+    alert outbox survive unchanged.
+    """
+    if report.get("version") != 1 or not isinstance(report.get("vehicle_types"), dict):
+        return report
+    upgraded = deepcopy(report)
+    upgraded["version"] = REPORT_VERSION
+    for row in upgraded["vehicle_types"].values():
+        if isinstance(row, dict):
+            row["baseline"] = {**empty_baseline(), "samples": row.get("baseline_samples")}
+            row["fresh"] = [None] * MINUTES_PER_HOUR
+    return upgraded
+
+
 def validate_report(report: dict[str, Any], hour: datetime) -> None:
     """Reject corrupt persisted JSON with ValueError, not incidental type/key errors."""
     fields = {
@@ -770,7 +934,7 @@ def validate_report(report: dict[str, Any], hour: datetime) -> None:
     if (
         set(report) != fields
         or type(report["version"]) is not int
-        or report["version"] != 1
+        or report["version"] != REPORT_VERSION
         or timestamp(report["hour_start"]) != hour
     ):
         raise ValueError("invalid persisted poller report header")

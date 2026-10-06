@@ -1,0 +1,43 @@
+<section class="status-live" id="status-live" aria-label="Live poller status" aria-live="polite"{% if live.available %} data-overall="{{ live.overall[0] }}" data-overall-label="{{ live.overall[1] }}"{% endif %}>
+  <div class="status-head">
+    <h2 class="label">live poller</h2>
+    {% if live.available %}
+      <p class="status-range">
+        {% if live.heartbeat_age is none %}<span class="problem">no heartbeat readable</span>
+        {% else %}heartbeat <span class="{{ 'problem' if live.silent else '' }}">{{ live.heartbeat_age }} s ago</span>{% endif %}
+        · checked {{ live.now.strftime('%H:%M:%S') }} · refreshes every 30 s
+      </p>
+    {% endif %}
+  </div>
+  {% if live.available %}
+    <div class="two-up status-summary">
+      {% for mode, m in live.modes.items() %}
+        <section class="widget">
+          <div class="status-mode">
+            <span class="tag {{ mode }}">{{ mode|upper }}</span>
+            <span class="status-state {{ m.tone }}">{% if m.tone == 'problem' %}<span aria-hidden="true">▲ </span>{% endif %}{{ m.state }}</span>
+          </div>
+          <div class="live-figure">
+            <span class="live-big">{{ '{:,}'.format(m.fresh) if m.fresh is not none else 'n/a' }}</span>
+            <span class="status-range">fresh {{ 'buses' if mode == 'bus' else 'trams' }} in feed</span>
+          </div>
+          {% if m.meter %}
+            <div class="live-meter" role="img" aria-label="{{ m.fresh if m.fresh is not none else 'no' }} fresh against a usual {{ m.usual }}">
+              <span class="live-range" style="left: {{ m.meter.low }}%; width: {{ m.meter.width }}%"></span>
+              <span class="live-usual" style="left: {{ m.meter.usual }}%"></span>
+              {% if m.meter.now is not none %}<span class="live-now {{ m.tone }}" style="left: {{ m.meter.now }}%"></span>{% endif %}
+            </div>
+            <p class="status-range live-note">usual at {{ live.now.strftime('%a %H:%M') }}: {{ '{:,}'.format(m.usual) }} <span class="live-dim">(range {{ '{:,}'.format(m.low) }}–{{ '{:,}'.format(m.high) }}, last {{ live.weeks }} {{ live.now.strftime('%A') }}s)</span></p>
+          {% endif %}
+          <dl class="status-counts">
+            <div><dt class="label">lines reporting</dt><dd class="mono">{{ m.lines if m.lines is not none else 'n/a' }}</dd></div>
+            <div><dt class="label">last good poll</dt><dd class="mono">{{ '%d s ago'|format(m.success_age) if m.success_age is not none else 'n/a' }}</dd></div>
+            <div><dt class="label">failed in a row</dt><dd class="mono {{ 'problem' if m.failures else '' }}">{{ m.failures }}</dd></div>
+          </dl>
+        </section>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="status-range">live status unavailable</p>
+  {% endif %}
+</section>

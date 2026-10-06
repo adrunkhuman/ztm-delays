@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.4.0",
     "flask>=3.1.0",
+    "google-cloud-storage>=3.16.0",
     "pytz>=2025.2",
     "waitress>=3.0.2",
 ]

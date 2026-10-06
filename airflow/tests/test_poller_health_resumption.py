@@ -7,7 +7,7 @@ import pytest
 
 from . import test_dag_poller_health as helpers
 from .test_dag_poller_health import FakeBucket, FakeClient
-from .test_poller_health import HOUR, health, row, summary
+from .test_poller_health import HOUR, failing, health, row, summary
 
 dag_module = helpers.dag_module
 
@@ -18,12 +18,12 @@ def test_resume_discovers_durable_incident_even_when_warehouse_publication_faile
     before = HOUR - timedelta(hours=1)
     bucket.put(health.hour_path("hourly", before), summary(before))
     dag_module.run_monitor(bucket, client, before, health.Config())
-    bucket.put(health.hour_path("hourly", HOUR), summary(HOUR, ratio=0.2, vehicles=20, lines=2))
+    bucket.put(health.hour_path("hourly", HOUR), failing())
     client.fail = True
     with pytest.raises(RuntimeError, match="BQ transport"):
         dag_module.run_monitor(bucket, client, HOUR, health.Config())
     assert row(bucket.get(health.hour_path("reports", HOUR)))["state"]["active"]
-    assert bucket.get(dag_module.SNAPSHOT_PATH)["hour_start"] == health.iso(before)
+    assert bucket.get(dag_module.HISTORY_PATH)["hour_start"] == health.iso(before)
     client.fail = False
     resumed_hour = HOUR + timedelta(hours=2)
     bucket.put(health.hour_path("hourly", resumed_hour), summary(resumed_hour))

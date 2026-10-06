@@ -6,7 +6,7 @@ The pipeline separates collection, reconstruction, warehouse modelling, and serv
 
 The poller collects buses and trams from the [Warsaw vehicle-location API](../poller/poller.py). It buffers accepted positions in a durable spool and writes append-safe Parquet parts, partitioned by mode and Warsaw-local date/hour. GPS timestamps are stored in UTC. The shared [raw GPS schema](../contracts/raw_gps_v1.json) is checked across collection and ingestion.
 
-An independent hourly monitor evaluates sanitized collector counters and publishes per-mode health reports. BigQuery stores those rows in `ztm_raw.raw_poller_hourly_health`; separate `mart_poller_hourly_health` and `mart_poller_daily_health` views expose UTC hours with Warsaw-local date/hour and daily summaries. This health feed does not modify `mart_pipeline_status`, the serving shard schema, or nightly model selections. Optional frontend/export consumption is separate from the normal snapshot export, and does not make that export live.
+An independent hourly monitor compares each minute's fresh fleet with the usual fleet for that weekday and minute. It publishes per-mode health reports. BigQuery stores those rows in `ztm_raw.raw_poller_hourly_health`; separate `mart_poller_hourly_health` and `mart_poller_daily_health` views expose UTC hours with Warsaw-local date/hour and daily summaries. This health feed does not modify `mart_pipeline_status`, the serving shard schema, or nightly model selections. The collector and the monitor also write small public objects under `health/poller/public/`, which the status page reads live with a read-only service account.
 
 Airflow polls the [mkuran GTFS feed](https://mkuran.pl/gtfs/warsaw.zip) hourly and stores changed ZIPs with timestamp-and-hash snapshot IDs. GTFS is the timetable: routes, stops, scheduled trips, service dates, and vehicle duties. The feed is a rolling window, so historical schedules are known only from collected snapshots onward.
 
@@ -74,4 +74,4 @@ Delay is actual minus scheduled arrival time: positive is late. Delay summaries 
 
 Ingestion completeness measures raw GPS presence. Service coverage compares scheduled service with observed complete/partial trips. A missing coverage row means no scheduled service for that slice; zero coverage means scheduled service was not observed. Neither ingestion gaps nor unmatched trips establish cancellations.
 
-The frontend's [metric and period definitions](../frontend/README.md#reading-the-archive) further constrain comparisons. Poller status is a heartbeat captured at export time, not live monitoring.
+The frontend's [metric and period definitions](../frontend/README.md#reading-the-archive) further constrain comparisons. The status page shows the poller and GPS feed live; coverage and trip quality come from the nightly export.

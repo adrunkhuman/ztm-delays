@@ -10,6 +10,7 @@ Orchestrates collection, reconstruction, warehouse modelling, and serving public
 | `dag_gtfs_load` | `gtfs_snapshot` | Load the exact snapshot; rebuild staging, dimensions, and schedule versions. |
 | `dag_gps_raw_load` | Hourly | Load available GPS parts; emit `raw_gps_date`. |
 | `poller_health` | Hourly, at :25 UTC | Evaluate poller feed health independently; persist per-mode raw rows and status reports. |
+| `poller_health_seed` | Manual, once | Seed per-minute fleet baselines from raw GPS for the 28 days before collection began. |
 | `dag_daily_gps` | Nightly, 04:00 Warsaw | Reconstruct the previous GPS date; publish facts, coverage, and marts; emit `gps_models_date`. |
 | `dag_serving_export` | `gps_models_date` or manual | Validate and publish the frontend export. |
 | `dag_weekly_audit` | Weekly | Refresh audit evidence and run audit-tagged dbt tests. |

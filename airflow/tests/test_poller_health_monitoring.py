@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from .test_poller_health import HOUR, START, health, row, samples, summary
+from .test_poller_health import HOUR, START, failing, health, row, samples, summary
 
 
 def missing_minutes(source: dict[str, Any], start: int, end: int) -> None:
@@ -24,7 +24,7 @@ def transitions(report: dict[str, Any], mode: str = "bus") -> list[str]:
 def test_sustained_telemetry_loss_alerts_without_claiming_zero_feed(source_kind: str) -> None:
     source = None
     if source_kind == "insufficient":
-        source = summary(vehicles=20, lines=2)
+        source = summary()
         for mode in health.MODES:
             for item in source["vehicle_types"][mode]["minutes"]:
                 for field in health.COUNT_FIELDS:
@@ -85,11 +85,11 @@ def test_missing_hours_do_not_repeat_alert_and_restoration_is_not_feed_recovery(
 
 def test_restored_monitoring_does_not_clear_an_active_feed_incident() -> None:
     previous_hour = HOUR - timedelta(hours=1)
-    previous = summary(previous_hour, ratio=0.2, vehicles=20, lines=2)
+    previous = failing(previous_hour)
     prior = health.evaluate(previous_hour, previous, [])
     gap = health.evaluate(HOUR, None, [], previous_report=prior, previous_summary=previous)
     next_hour = HOUR + timedelta(hours=1)
-    restored = health.evaluate(next_hour, summary(next_hour, ratio=0.2, vehicles=20, lines=2), [], previous_report=gap)
+    restored = health.evaluate(next_hour, failing(next_hour), [], previous_report=gap)
     health.validate_report(restored, next_hour)
     assert transitions(restored) == ["monitoring_restored"]
     assert row(restored)["status"] == "degraded"

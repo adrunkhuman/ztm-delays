@@ -34,6 +34,7 @@ API_URL = "https://dane.um.warszawa.pl/api/action/get_ztm_lokalizacja_pojazdow"
 WARSAW_TZ = ZoneInfo("Europe/Warsaw")
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SPOOL_MAX_BYTES = 100 * 1024 * 1024
+DEFAULT_PUBLIC_STATUS_GCS_PATH = "health/poller/public/live.json"
 SPOOL_FILE_NAME = "buffers.json"
 
 SCHEMA = pa.schema(
@@ -86,6 +87,7 @@ class Config:
     no_upload: bool
     health_gcs_prefix: str = DEFAULT_PREFIX
     health_max_bytes: int = DEFAULT_MAX_BYTES
+    public_status_gcs_path: str = DEFAULT_PUBLIC_STATUS_GCS_PATH
 
 
 @dataclass(frozen=True)
@@ -128,8 +130,6 @@ class PollState:
     last_parsed_rows: int = 0
     last_accepted_vehicle_count: int = 0
     last_accepted_line_count: int = 0
-    feed_status: str = "unknown"
-    feed_reason: str | None = None
 
 
 class GpsRow(TypedDict):
@@ -248,6 +248,7 @@ def _load_config(args: Namespace) -> Config:
     heartbeat_interval_seconds = _positive_float_env("POLLER_HEARTBEAT_INTERVAL_SECONDS", "60")
     api_proxy = os.getenv("ZTM_API_PROXY", "").strip() or None
     heartbeat_gcs_path = os.getenv("POLLER_HEARTBEAT_GCS_PATH", "health/poller/latest.json").strip("/")
+    public_status_gcs_path = os.getenv("POLLER_PUBLIC_STATUS_GCS_PATH", DEFAULT_PUBLIC_STATUS_GCS_PATH).strip("/")
     require_polish_egress = _bool_env("POLLER_REQUIRE_POLISH_EGRESS", default=False)
     egress_check_url = os.getenv("POLLER_EGRESS_CHECK_URL", "https://ipinfo.io/json").strip()
     spool_dir = Path(os.getenv("POLLER_SPOOL_DIR", "/var/lib/ztm-poller-spool")).expanduser()
@@ -283,6 +284,7 @@ def _load_config(args: Namespace) -> Config:
         no_upload=args.no_upload,
         health_gcs_prefix=health_gcs_prefix,
         health_max_bytes=health_max_bytes,
+        public_status_gcs_path=public_status_gcs_path,
     )
 
 
@@ -462,7 +464,6 @@ def _flush_health_shutdown(runtime: RuntimeState) -> bool:
 
 def _update_poll_state(state: PollState, result: PollResult) -> None:
     state.last_attempt_at = result.attempted_at
-    state.feed_status, state.feed_reason = _feed_health(result)
     if result.succeeded:
         state.last_success_at = result.attempted_at
         state.last_accepted_rows = result.accepted_rows
@@ -476,17 +477,6 @@ def _update_poll_state(state: PollState, result: PollResult) -> None:
         return
     state.consecutive_failures += 1
     state.last_error_type = result.error_type
-
-
-def _feed_health(result: PollResult) -> tuple[str, str | None]:
-    """Report only demonstrable freshness loss, not baseline-dependent fleet coverage."""
-    if not result.succeeded or result.parsed_rows == 0:
-        return "unknown", None
-    if (result.dropped_stale + result.dropped_future) * 2 > result.parsed_rows:
-        if result.dropped_stale and result.dropped_future:
-            return "degraded", "stale_and_future_heavy"
-        return "degraded", "stale_heavy" if result.dropped_stale else "future_heavy"
-    return "healthy", None
 
 
 def _assert_polish_egress(session: requests.Session, config: Config) -> None:
@@ -841,7 +831,8 @@ def _write_heartbeat(
     poll_states: dict[str, PollState],
     collection_started_at: str | None = None,
 ) -> bool:
-    payload = _heartbeat_payload(config, poll_states, datetime.now(UTC), collection_started_at)
+    now = datetime.now(UTC)
+    payload = _heartbeat_payload(config, poll_states, now, collection_started_at)
     data = json.dumps(payload, sort_keys=True).encode()
     try:
         bucket.blob(config.heartbeat_gcs_path).upload_from_string(data, content_type="application/json")
@@ -849,14 +840,59 @@ def _write_heartbeat(
         LOGGER.exception(
             "failed to upload poller heartbeat gcs_path=gs://%s/%s", config.gcs_bucket, config.heartbeat_gcs_path
         )
+        heartbeat_uploaded = False
+    else:
+        LOGGER.info(
+            "uploaded poller heartbeat gcs_path=gs://%s/%s status=%s",
+            config.gcs_bucket,
+            config.heartbeat_gcs_path,
+            payload["status"],
+        )
+        heartbeat_uploaded = True
+    # The public copy is best-effort and independent: neither upload blocks the other.
+    _write_public_status(bucket, config, _public_status_payload(config, poll_states, now))
+    return heartbeat_uploaded
+
+
+def _write_public_status(bucket: storage.Bucket, config: Config, payload: dict[str, object]) -> bool:
+    data = json.dumps(payload, sort_keys=True).encode()
+    try:
+        blob = bucket.blob(config.public_status_gcs_path)
+        # No-cache keeps GCS and intermediaries from serving a stale public copy.
+        blob.cache_control = "no-cache"
+        blob.upload_from_string(data, content_type="application/json")
+    except (GoogleAPIError, OSError):
+        LOGGER.exception(
+            "failed to upload public poller status gcs_path=gs://%s/%s",
+            config.gcs_bucket,
+            config.public_status_gcs_path,
+        )
         return False
-    LOGGER.info(
-        "uploaded poller heartbeat gcs_path=gs://%s/%s status=%s",
-        config.gcs_bucket,
-        config.heartbeat_gcs_path,
-        payload["status"],
-    )
+    LOGGER.info("uploaded public poller status gcs_path=gs://%s/%s", config.gcs_bucket, config.public_status_gcs_path)
     return True
+
+
+def _public_status_payload(
+    config: Config, poll_states: dict[str, PollState], updated_at: datetime
+) -> dict[str, object]:
+    """Build the public heartbeat from an explicit allowlist; never copy the private heartbeat wholesale."""
+    return {
+        "version": 1,
+        "updated_at": _isoformat_utc(updated_at),
+        "poll_interval_seconds": config.poll_interval_seconds,
+        "heartbeat_interval_seconds": config.heartbeat_interval_seconds,
+        "vehicle_types": {
+            name: {
+                "last_attempt_at": _isoformat_utc(state.last_attempt_at),
+                "last_success_at": _isoformat_utc(state.last_success_at),
+                "consecutive_failures": state.consecutive_failures,
+                # Counts describe the last successful poll, so they are unknown until one succeeds.
+                "fresh_vehicles": state.last_accepted_vehicle_count if state.last_success_at else None,
+                "fresh_lines": state.last_accepted_line_count if state.last_success_at else None,
+            }
+            for name, state in sorted(poll_states.items())
+        },
+    }
 
 
 def _heartbeat_payload(
@@ -882,8 +918,6 @@ def _heartbeat_payload(
                 "last_parsed_rows": state.last_parsed_rows,
                 "last_accepted_vehicle_count": state.last_accepted_vehicle_count,
                 "last_accepted_line_count": state.last_accepted_line_count,
-                "feed_status": state.feed_status,
-                "feed_reason": state.feed_reason,
                 "consecutive_failures": state.consecutive_failures,
                 "last_error_type": state.last_error_type,
             }

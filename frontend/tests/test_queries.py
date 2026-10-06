@@ -62,13 +62,13 @@ def test_get_export_metadata_ignores_stale_sidecar(tmp_path: Path) -> None:
             """
         )
     Path(f"{db_path}.meta.json").write_text(
-        json.dumps({"export_id": "old-export", "poller_status": {"status": "ok"}}), encoding="utf-8"
+        json.dumps({"export_id": "old-export", "last_export_at": "2026-07-02T11:00:00Z"}), encoding="utf-8"
     )
 
     metadata = queries.get_export_metadata(db_path)
 
     assert metadata["export_id"] == "new-export"
-    assert "poller_status" not in metadata
+    assert "last_export_at" not in metadata
 
 
 def test_trip_stops_use_selected_trip_snapshot(tmp_path: Path) -> None:

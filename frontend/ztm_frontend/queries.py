@@ -69,7 +69,6 @@ def get_export_metadata(db_path: Path) -> dict[str, Any]:
     sidecar_metadata = _export_metadata_sidecar(db_path)
     if sidecar_metadata and sidecar_metadata.get("export_id") == metadata.get("export_id"):
         metadata["last_export_at"] = sidecar_metadata.get("last_export_at") or sidecar_metadata.get("exported_at")
-        metadata["poller_status"] = _poller_status_metadata(sidecar_metadata.get("poller_status"))
     return metadata
 
 
@@ -2036,72 +2035,3 @@ def _export_metadata_sidecar(db_path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _poller_status_metadata(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {"status": "unknown", "vehicle_types": {}}
-    status = (
-        value.get("status")
-        if value.get("status") in {"ok", "starting", "degraded", "down", "stale", "unknown"}
-        else "unknown"
-    )
-    vehicle_types = value.get("vehicle_types") if isinstance(value.get("vehicle_types"), dict) else {}
-    return {
-        "status": status,
-        "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,
-        "last_success_at": value.get("last_success_at") if isinstance(value.get("last_success_at"), str) else None,
-        "stale_after_seconds": value.get("stale_after_seconds")
-        if isinstance(value.get("stale_after_seconds"), int)
-        else None,
-        "vehicle_types": vehicle_types,
-        "feed_health": _feed_health_metadata(value.get("feed_health")),
-    }
-
-
-def _feed_health_metadata(value: object) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    fields = (
-        "status",
-        "version",
-        "evaluated_at",
-        "hour_start",
-        "hour_end",
-        "collection_started_at",
-        "stale_after_seconds",
-    )
-    result: dict[str, Any] = {key: value.get(key) for key in fields if key in value}
-    mode_fields = (
-        "status",
-        "status_at_evaluation",
-        "reasons",
-        "intervals",
-        "monitored_minutes",
-        "baseline_samples",
-        "parsed_rows",
-        "accepted_rows",
-        "dropped_stale_rows",
-        "dropped_future_rows",
-        "mean_accepted_vehicles",
-        "mean_accepted_lines",
-    )
-    modes = value.get("vehicle_types")
-    clean_modes = {}
-    if isinstance(modes, dict):
-        for mode in ("bus", "tram"):
-            item = modes.get(mode)
-            if isinstance(item, dict):
-                clean_modes[mode] = {key: item.get(key) for key in mode_fields if key in item}
-    result["vehicle_types"] = clean_modes
-    recent = value.get("recent_intervals")
-    result["recent_intervals"] = (
-        [
-            {key: item.get(key) for key in ("mode", "start_at", "end_at", "reason") if key in item}
-            for item in recent[-48:]
-            if isinstance(item, dict)
-        ]
-        if isinstance(recent, list)
-        else []
-    )
-    return result

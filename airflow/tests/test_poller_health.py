@@ -48,50 +48,72 @@ def summary(hour: datetime = HOUR, vehicles: int = 100, lines: int = 10, ratio: 
     }
 
 
-def samples(hour: datetime = HOUR, vehicles: int = 100, lines: int = 10) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    result = []
-    for days in (7, 14, 21):
-        candidate = hour - timedelta(days=days)
-        source = summary(candidate, vehicles=vehicles, lines=lines)
-        report = health.evaluate(candidate, source, [], evaluated_at=hour)
-        result.append((source, report))
-    return result
+def failing(hour: datetime = HOUR) -> dict[str, Any]:
+    """Every poll failed: an API outage that needs no fleet history to detect."""
+    source = summary(hour)
+    for mode in health.MODES:
+        for item in source["vehicle_types"][mode]["minutes"]:
+            item.update(dict.fromkeys(health.COUNT_FIELDS[1:], 0))
+    return source
+
+
+def set_fleet(source: dict[str, Any], fleet: Any, modes: tuple[str, ...] = health.MODES) -> dict[str, Any]:
+    """Give each minute the fresh fleet ``fleet(minute)``; row counts stay valid."""
+    for mode in modes:
+        for item in source["vehicle_types"][mode]["minutes"]:
+            item["accepted_vehicle_count_sum"] = fleet(item["minute"]) * item["successes"]
+    return source
+
+
+def samples(hour: datetime = HOUR, vehicles: int = 100) -> list[dict[str, Any]]:
+    return [summary(hour - timedelta(days=days), vehicles=vehicles) for days in (7, 14, 21)]
 
 
 def row(report: dict[str, Any], mode: str = "bus") -> dict[str, Any]:
     return report["vehicle_types"][mode]
 
 
-def test_healthy_medial_baseline_and_sanitized_snapshot() -> None:
+def test_healthy_median_baseline_and_sanitized_snapshot() -> None:
     history = samples()
-    history[0] = (summary(HOUR - timedelta(days=7), vehicles=900, lines=100), history[0][1])
+    history[0] = summary(HOUR - timedelta(days=7), vehicles=900)
     report = health.evaluate(HOUR, summary(), history)
     assert row(report)["status"] == "healthy"
-    assert row(report)["baseline"]["vehicles"] == 100
+    assert row(report)["baseline"] == {"samples": 3, "vehicles": [100] * 60, "low": [100] * 60, "high": [900] * 60}
     assert row(report)["baseline_samples"] == 3
     assert row(report)["mean_accepted_vehicles"] == 100
+    assert row(report)["fresh"] == [100] * 60
     report["private_hostname"] = "private-host"
     public = health.snapshot(report)
     assert set(public["vehicle_types"]["bus"]) == set(health.PUBLIC_MODE_FIELDS)
     assert "private-host" not in json.dumps(public)
     assert "state" not in public["vehicle_types"]["bus"]
+    assert "fresh" not in public["vehicle_types"]["bus"]
 
 
-def test_stale_heavy_successes_need_no_fleet_history() -> None:
-    source = summary(ratio=0.2, vehicles=20, lines=2)
-    report = health.evaluate(HOUR, source, [])
-    assert row(report)["status"] == "degraded"
-    assert row(report)["reasons"] == ["stale_heavy"]
+def test_stale_share_is_not_a_signal() -> None:
+    stale = summary(ratio=0.2)
+    assert row(health.evaluate(HOUR, stale, samples()))["status"] == "healthy"
+    report = health.evaluate(HOUR, stale, [])
+    assert row(report)["status"] == "warming_up"
     assert row(report)["dropped_stale_rows"] == 576000
+    assert report["events"] == []
+
+
+def test_api_failures_need_no_fleet_history() -> None:
+    report = health.evaluate(HOUR, failing(), [])
+    assert row(report)["status"] == "degraded"
+    assert row(report)["reasons"] == ["api_failures"]
     assert row(report)["baseline_samples"] == 0
-    assert len(report["events"]) == 2
-    assert all(entry["transition"] == "degraded" for entry in report["events"])
+    assert row(report)["fresh"] == [None] * 60
+    assert [entry["transition"] for entry in report["events"]] == ["degraded", "degraded"]
+    assert all(entry["reason"] == "api_failures" for entry in report["events"])
 
 
-def test_zero_counts_require_positive_historical_fleet() -> None:
+def test_zero_fleet_needs_a_usual_fleet_above_the_floor() -> None:
     zero = summary(vehicles=0, lines=0)
     assert row(health.evaluate(HOUR, zero, []))["status"] == "warming_up"
-    assert row(health.evaluate(HOUR, zero, samples(vehicles=0, lines=0)))["status"] == "warming_up"
+    # A baseline of zero is a quiet slot, not a missing one.
+    assert row(health.evaluate(HOUR, zero, samples(vehicles=0)))["status"] == "healthy"
     report = health.evaluate(HOUR, zero, samples())
     assert row(report)["status"] == "degraded"
     assert row(report)["reasons"] == ["no_accepted"]
@@ -103,8 +125,9 @@ def test_zero_counts_require_positive_historical_fleet() -> None:
 def test_low_overnight_service_is_not_a_daytime_outage() -> None:
     hour = HOUR.replace(hour=1)
     source = summary(hour, vehicles=2, lines=1)
-    report = health.evaluate(hour, source, samples(hour, vehicles=2, lines=1))
+    report = health.evaluate(hour, source, samples(hour, vehicles=2))
     assert row(report)["status"] == "healthy"
+    assert report["events"] == []
 
 
 def test_fewer_than_three_samples_warm_up_and_missing_minutes_are_gaps() -> None:
@@ -115,6 +138,7 @@ def test_fewer_than_three_samples_warm_up_and_missing_minutes_are_gaps() -> None
     assert row(report)["status"] == "monitoring_gap"
     assert row(report)["monitored_minutes"] == 0
     assert row(report)["intervals"] == []
+    assert row(report)["fresh"] == [None] * 60
     assert row(report, "tram")["status"] == "degraded"
 
 
@@ -137,18 +161,19 @@ def test_rollout_no_source_before_collection_and_mid_hour_partial() -> None:
     assert partial["status"] == "partial"
     assert partial["monitored_minutes"] == 30
     assert "collection_started_mid_hour" in partial["reasons"]
+    assert partial["fresh"] == [None] * 30 + [100] * 30
 
 
 def test_bad_minutes_require_coverage_and_consecutive_duration() -> None:
-    source = summary(ratio=0.2, vehicles=20, lines=2)
+    source = failing()
     for mode in health.MODES:
         for item in source["vehicle_types"][mode]["minutes"]:
             if item["minute"] % 14 == 0:
-                item["attempts"] = item["successes"] = 9
+                item["attempts"] = 9
     report = health.evaluate(HOUR, source, [])
     assert row(report)["status"] == "monitoring_gap"
     assert row(report)["intervals"] == []
-    source = summary(ratio=0.2, vehicles=20, lines=2)
+    source = failing()
     for mode in health.MODES:
         source["vehicle_types"][mode]["minutes"] = source["vehicle_types"][mode]["minutes"][:14]
     report = health.evaluate(HOUR, source, [], config=health.Config(duration_minutes=10))
@@ -159,18 +184,18 @@ def test_bad_minutes_require_coverage_and_consecutive_duration() -> None:
 def test_cross_hour_detection_repeated_degradation_and_sustained_recovery() -> None:
     previous_hour = HOUR - timedelta(hours=1)
     previous = summary(previous_hour)
-    bad = summary(previous_hour, vehicles=20, lines=2, ratio=0.2)
+    bad = failing(previous_hour)
     for mode in health.MODES:
         previous["vehicle_types"][mode]["minutes"][50:] = bad["vehicle_types"][mode]["minutes"][50:]
     previous_report = health.evaluate(previous_hour, previous, [])
     assert row(previous_report)["intervals"] == []
-    current = summary(vehicles=20, lines=2, ratio=0.2)
+    current = failing()
     report = health.evaluate(HOUR, current, [], previous_summary=previous, previous_report=previous_report)
     assert row(report)["status"] == "degraded"
     incident_start = health.iso(previous_hour + timedelta(minutes=50))
     assert row(report)["intervals"][0]["start_at"] == incident_start
     next_hour = HOUR + timedelta(hours=1)
-    next_summary = summary(next_hour, vehicles=20, lines=2, ratio=0.2)
+    next_summary = failing(next_hour)
     ongoing = health.evaluate(next_hour, next_summary, [], previous_summary=current, previous_report=report)
     assert row(ongoing)["status"] == "degraded"
     assert ongoing["events"] == []
@@ -204,7 +229,7 @@ def test_cross_hour_detection_repeated_degradation_and_sustained_recovery() -> N
 
 
 def test_gaps_do_not_recover_active_incident() -> None:
-    previous = summary(HOUR - timedelta(hours=1), ratio=0.2, vehicles=20, lines=2)
+    previous = failing(HOUR - timedelta(hours=1))
     previous_report = health.evaluate(HOUR - timedelta(hours=1), previous, [])
     report = health.evaluate(HOUR, None, [], previous_summary=previous, previous_report=previous_report)
     assert row(report)["status"] == "monitoring_gap"
@@ -212,18 +237,24 @@ def test_gaps_do_not_recover_active_incident() -> None:
     assert {entry["transition"] for entry in report["events"]} == {"monitoring_gap"}
 
 
-def test_prior_degraded_gap_partial_or_stale_hours_do_not_normalize_outage() -> None:
+def test_outage_weeks_and_unreliable_minutes_do_not_lower_the_baseline() -> None:
     history = samples()
-    history[0][1]["vehicle_types"]["bus"]["status"] = "degraded"
-    assert health.baseline(history, "bus", health.Config())["samples"] == 2
-    history[0][1]["vehicle_types"]["bus"]["status"] = "monitoring_gap"
-    assert health.baseline(history, "bus", health.Config())["samples"] == 2
-    history[0][1]["vehicle_types"]["bus"]["status"] = "warming_up"
-    history[0][0]["vehicle_types"]["bus"]["minutes"].pop()
-    assert health.baseline(history, "bus", health.Config())["samples"] == 2
+    history[0] = summary(HOUR - timedelta(days=7), vehicles=10)
+    expected = health.baseline(history, "bus", health.Config())
+    assert expected == {"samples": 3, "vehicles": [100] * 60, "low": [100] * 60, "high": [100] * 60}
+    assert row(health.evaluate(HOUR, summary(vehicles=40), history))["reasons"] == ["low_fleet"]
     history = samples()
-    history[0] = (summary(HOUR - timedelta(days=7), vehicles=20, lines=2, ratio=0.2), history[0][1])
-    assert health.baseline(history, "bus", health.Config())["samples"] == 2
+    first = history[0]["vehicle_types"]["bus"]["minutes"]
+    first[0]["successes"] = 9
+    first[0]["accepted_vehicle_count_sum"] = 900
+    first[1]["attempts"] = first[1]["successes"] = 9
+    del first[2]
+    expected = health.baseline(history, "bus", health.Config())
+    assert expected["vehicles"][:4] == [None, None, None, 100]
+    assert expected["samples"] == 3
+    history = samples()
+    history[0]["collection_started_at"] = health.iso(health.timestamp(history[0]["hour_start"]) + timedelta(minutes=1))
+    assert health.baseline(history, "bus", health.Config())["vehicles"][:2] == [None, 100]
 
 
 def test_dst_fold_and_nonexistent_hour_local_comparability() -> None:
@@ -237,10 +268,17 @@ def test_dst_fold_and_nonexistent_hour_local_comparability() -> None:
     assert second in candidates
     historical = []
     for candidate in candidates:
-        source = summary(candidate)
+        source = summary(candidate, vehicles=200 if candidate == second else 100)
         source["collection_started_at"] = health.iso(candidate - timedelta(days=30))
-        historical.append((source, health.evaluate(candidate, source, [])))
-    assert health.baseline(historical, "bus", health.Config())["samples"] == 4
+        historical.append(source)
+    expected = health.baseline(historical, "bus", health.Config())
+    assert expected["samples"] == 4
+    assert expected["high"][0] == 150
+    # Both folds are one local date: with a single other date there are only two samples.
+    folds = [source for source in historical if health.timestamp(source["hour_start"]) in {first, second}]
+    expected = health.baseline([*folds, historical[0]], "bus", health.Config())
+    assert expected["samples"] == 2
+    assert expected["vehicles"] == [None] * 60
     spring = health.comparable_hours(datetime(2026, 4, 5, 0, tzinfo=UTC), health.Config())
     assert len(spring) == 3
     assert all(candidate.astimezone(health.WARSAW).hour == 2 for candidate in spring)
@@ -298,7 +336,7 @@ def test_json_payload_bounded_and_recent_intervals_bounded() -> None:
             "mode": "bus",
             "start_at": health.iso(HOUR - timedelta(hours=100 - i)),
             "end_at": health.iso(HOUR),
-            "reason": "stale_heavy",
+            "reason": "api_failures",
         }
         for i in range(80)
     ]
