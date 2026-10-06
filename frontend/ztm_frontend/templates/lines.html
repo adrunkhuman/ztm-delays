@@ -91,12 +91,8 @@
 
         <nav class="route-nav" aria-label="Line detail sections"><a href="#patterns">Route patterns · {{ courses|length }}</a><a href="#departures">Worst departures</a><a href="{{ url_for('schedule', line=selected_line, mode=selected_mode, date=selected_date) }}">Browse trips →</a></nav>
         <section class="dirs" id="patterns">
-          {% for course in courses %}
-            <details class="route-pattern" {% if loop.index <= 2 %}open{% endif %}>
-              <summary class="dirhead">
-                <span>→ {{ course.trip_headsign }}</span>
-                <span class="dirstats">{{ course.stops|length }} stops · {{ course.trip_count|integer }} trips</span>
-              </summary>
+          {% macro pattern_stops(course) %}
+            {% if course.pattern_status == 'classified' %}
               <div class="route-columns label"><span>Stop</span><span>Distribution</span><span>Mean</span><span>On time</span></div>
               {% for stop in course.stops %}
                 <div class="stop-row">
@@ -104,13 +100,58 @@
                     <div class="rline" style="top: {% if loop.first %}50%{% else %}0{% endif %}; bottom: {% if loop.last %}50%{% else %}0{% endif %}"></div>
                     <div class="dot {% if loop.first or loop.last %}term{% endif %}"></div>
                   </div>
-                  <a class="sname" href="{{ url_for('stops', stop_group_id=stop.stop_group_id, mode=summary.mode, date=selected_date) }}" style="font-weight: {% if loop.first or loop.last %}700{% else %}400{% endif %}">{{ stop.stop_name }}</a>
-                  {{ ui.hist(stop.shape, true) }}
+                  <a class="sname" href="{{ url_for('stops', stop_group_id=stop.stop_group_id, mode=summary.mode, date=selected_date) }}" style="font-weight: {% if loop.first or loop.last %}700{% else %}400{% endif %}">{{ stop.stop_name }}{% if stop.show_post_codes %} <span class="post-suffix">[{{ stop.stop_post_codes|join(', ') }}]</span>{% endif %}</a>
+                  {% if stop.shape %}
+                    {{ ui.hist(stop.shape, true) }}
+                  {% else %}
+                    <div class="hist-na" title="Delay distribution unavailable">n/a</div>
+                  {% endif %}
                   <div class="sval {{ stop.mean_delay_seconds|delay_class }}">{{ stop.mean_delay_seconds|delay }}</div>
                   <div class="spct {{ stop.on_time_rate|percent_class }}">{{ stop.on_time_rate|percent }}</div>
                 </div>
               {% endfor %}
-            </details>
+            {% endif %}
+          {% endmacro %}
+          {% macro family_stats(family) %}
+            <span class="dirstats">{% if family.main.pattern_status == 'classified' %}{{ family.main.stop_call_count|integer }} stops · {% endif %}{{ family.trip_count|integer }} trips</span>
+          {% endmacro %}
+          {% macro family_body(family) %}
+            {{ pattern_stops(family.main) }}
+            {% if family.deviations %}
+              <div class="route-deviations">
+                <div class="route-deviations-note">{{ family.main.trip_count|integer }} of {{ family.trip_count|integer }} trips shown · other patterns:</div>
+                {% for deviation in family.deviations %}
+                  <details class="route-pattern route-deviation">
+                    <summary class="route-deviation-heading"><span>{{ deviation.deviation_label }}</span><span class="dirstats">{{ deviation.stop_call_count|integer }} stops · {{ deviation.trip_count|integer }} trips</span></summary>
+                    {{ pattern_stops(deviation) }}
+                  </details>
+                {% endfor %}
+              </div>
+            {% endif %}
+          {% endmacro %}
+          {% for column in route_columns %}
+            <div class="route-column">
+              {% for group in column %}
+                {% set expand = loop.first %}
+                {% if group.families|length == 1 %}
+                  {% set family = group.families[0] %}
+                  <details class="route-group route-pattern" {% if expand %}open{% endif %}>
+                    <summary class="route-group-heading"><span>{{ group.title }}{% if group.title_note %} <span class="route-title-note">{{ group.title_note }}</span>{% endif %}</span>{{ family_stats(family) }}</summary>
+                    {{ family_body(family) }}
+                  </details>
+                {% else %}
+                  <div class="route-group">
+                    <h3 class="route-group-heading"><span>{{ group.title }}{% if group.title_note %} <span class="route-title-note">{{ group.title_note }}</span>{% endif %}</span><span class="dirstats">{{ group.families|length }} routes · {{ group.trip_count|integer }} trips</span></h3>
+                    {% for family in group.families %}
+                      <details class="route-pattern route-variant" {% if expand and loop.first %}open{% endif %}>
+                        <summary class="route-variant-heading"><span>{{ family.label or 'Route ' ~ loop.index }}</span>{{ family_stats(family) }}</summary>
+                        {{ family_body(family) }}
+                      </details>
+                    {% endfor %}
+                  </div>
+                {% endif %}
+              {% endfor %}
+            </div>
           {% endfor %}
         </section>
 

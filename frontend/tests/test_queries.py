@@ -25,7 +25,8 @@ def test_get_lines_keeps_same_line_bus_and_tram_separate(tmp_path: Path) -> None
         "Bus destination 2",
         "Bus destination 3",
     ]
-    assert result["courses"][2]["stops"][0]["display_rank"] == first_previously_hidden_stop_rank
+    assert result["courses"][2]["stops"][-1]["call_position"] == first_previously_hidden_stop_rank
+    assert len(result["courses"][2]["stops"]) == first_previously_hidden_stop_rank
     assert result["line_widgets"]["worst"][0]["direction"] == "Bus destination"
 
 
@@ -513,7 +514,11 @@ def _line_window_summary_sql() -> str:
 def _line_course_window_sql() -> str:
     return """
         create table mart_line_course_window as
-        select * from (
+        select *, 'pattern-' || course_rank as route_pattern_id, 'classified' as pattern_status,
+            'Origin' as origin_stop_name, trip_headsign as destination_stop_name,
+            case when course_rank = 3 then 37 else 1 end as stop_call_count,
+            [source_end_date] as observed_service_dates
+        from (
             values
                 ('1', 'bus', 0, 'Bus destination', 'day', '2026-06-30', date '2026-06-30', 4, 1),
                 ('1', 'bus', 1, 'Bus destination 2', 'day', '2026-06-30', date '2026-06-30', 3, 2),
@@ -527,7 +532,10 @@ def _line_course_window_sql() -> str:
 def _line_course_stop_window_sql() -> str:
     return """
         create table mart_line_course_stop_window as
-        select * from (
+        select rows.* replace (call_position as display_rank),
+            'pattern-' || (direction_id + 1) as route_pattern_id, call_position,
+            [stop_post_code] as stop_post_codes
+        from (
             values
                 ('1', 'bus', 0, 'Bus destination', '7002', '700201', '01', 'Bus Stop', 'day', '2026-06-30', date '2026-06-30', 1, 4, 20.0, 30.0, 60.0, 30.0, 0, 4, 0, 0.0, 1.0, 0.0, [], true),
                 ('1', 'bus', 2, 'Bus destination 3', '7003', '700301', '01', 'Bus Stop 37', 'day', '2026-06-30', date '2026-06-30', 37, 1, 20.0, 30.0, 60.0, 30.0, 0, 1, 0, 0.0, 1.0, 0.0, [], false),
@@ -539,6 +547,7 @@ def _line_course_stop_window_sql() -> str:
             delay_spread_seconds, early_count, on_time_count, late_count, early_rate, on_time_rate, late_rate,
             delay_histogram, has_min_sample
         )
+        cross join lateral range(1, case when direction_id = 2 then 38 else 2 end) as calls(call_position)
     """
 
 

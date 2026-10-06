@@ -3,7 +3,9 @@ from __future__ import annotations
 # ruff: noqa: S608
 import json
 import re
+from collections import Counter
 from datetime import date, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ ON_TIME_LATE_SECONDS = 180
 SERVICE_DAY_HOURS = (*range(4, 24), *range(4))
 HISTOGRAM_BUCKET_COUNT = 12
 HISTOGRAM_MAX_HEIGHT = 38
+VARIANT_LABEL_ITEMS = 2
 HISTOGRAM_MINI_MAX_HEIGHT = 20
 EARLY_BUCKET_COUNT = 2
 LATE_BUCKET_START = 8
@@ -179,7 +182,8 @@ def get_lines(  # noqa: PLR0913
         courses = fetch_all(
             db_path,
             """
-            select direction_id, trip_headsign, trip_count
+            select direction_id, trip_headsign, route_pattern_id, pattern_status,
+                origin_stop_name, destination_stop_name, stop_call_count, trip_count
             from mart_line_course_window
             where window_type = ?
               and window_key = ?
@@ -200,13 +204,17 @@ def get_lines(  # noqa: PLR0913
               and source_end_date = cast(? as date)
               and mode = ?
               and line = ?
-            order by direction_id, trip_headsign, display_rank, stop_group_id, stop_id
+            order by direction_id, trip_headsign, route_pattern_id, call_position
             """,
             [selected_window, window_key, selected_date, selected_mode, selected_line],
         )
         stops_by_course = _course_rows(stops)
         for course in courses:
-            course["stops"] = stops_by_course.get((course["direction_id"], course["trip_headsign"]), [])
+            course["stops"] = (
+                stops_by_course.get((course["direction_id"], course["trip_headsign"], course["route_pattern_id"]), [])
+                if course["pattern_status"] == "classified"
+                else []
+            )
     return {
         "date_options": date_options,
         "selected_date": selected_date,
@@ -226,6 +234,7 @@ def get_lines(  # noqa: PLR0913
         "selected_rank": selected_rank,
         "summary": summary,
         "courses": courses,
+        "route_columns": _route_columns(courses),
         "line_widgets": _line_widgets(
             db_path, selected_line, selected_date, summary, courses, selected_window, window_key
         ),
@@ -978,7 +987,6 @@ def _line_widgets(  # noqa: PLR0913
         return {}
     for course in courses:
         for stop in course.get("stops", []):
-            _attach_shape(stop)
             stop["direction"] = course["trip_headsign"]
     scope_params = _window_scope_params(summary, selected_date)
     worst_rows = fetch_all(
@@ -1539,12 +1547,148 @@ def _stop_line_group_posts(stop_group_id: str, posts: list[dict[str, Any]]) -> l
     ]
 
 
-def _course_rows(rows: list[dict[str, Any]]) -> dict[tuple[int, str], list[dict[str, Any]]]:
-    result: dict[tuple[int, str], list[dict[str, Any]]] = {}
+def _course_rows(rows: list[dict[str, Any]]) -> dict[tuple[int, str, str], list[dict[str, Any]]]:
+    result: dict[tuple[int, str, str], list[dict[str, Any]]] = {}
     for row in rows:
-        _attach_shape(row)
-        result.setdefault((row["direction_id"], row["trip_headsign"]), []).append(row)
+        if row["arrival_count"] > 0 and row["delay_histogram"] is not None:
+            _attach_shape(row)
+        else:
+            row["shape"] = None
+        result.setdefault((row["direction_id"], row["trip_headsign"], row["route_pattern_id"]), []).append(row)
+    for stops in result.values():
+        group_counts = Counter(stop["stop_group_id"] for stop in stops)
+        for stop in stops:
+            stop["show_post_codes"] = group_counts[stop["stop_group_id"]] > 1
     return result
+
+
+def _route_columns(courses: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group courses by endpoints into one column per direction, busiest direction and group first."""
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for course in courses:
+        classified = course["pattern_status"] == "classified"
+        origin, destination = course["origin_stop_name"], course["destination_stop_name"]
+        headsign = None if classified else course["trip_headsign"]
+        key = (course["direction_id"], classified, origin, destination, headsign)
+        # Titled by what the bus displays; the busiest course comes first, so its headsign names the group.
+        title = f"→ {course['trip_headsign']}" if classified else f"Route unavailable · {headsign}"
+        group = groups.setdefault(
+            key,
+            {
+                "title": title,
+                "title_note": None,
+                "origin": origin,
+                "destination": destination,
+                "trip_count": 0,
+                "courses": [],
+            },
+        )
+        group["courses"].append(course)
+        group["trip_count"] += course["trip_count"]
+    columns: dict[int, list[dict[str, Any]]] = {}
+    for (direction_id, *_), group in groups.items():
+        group["families"] = _route_families(group["courses"])
+        columns.setdefault(direction_id, []).append(group)
+    for column in columns.values():
+        _disambiguate_titles(column)
+    return list(columns.values())
+
+
+def _disambiguate_titles(groups: list[dict[str, Any]]) -> None:
+    # Short-turns often share a headsign with the full route; the busiest keeps the bare headsign.
+    used: set[tuple[str, str | None]] = set()
+    for group in sorted(groups, key=lambda group: -group["trip_count"]):
+        headsign, origin = group["title"], group["origin"]
+        options = [(headsign, None), (headsign, f"from {origin}"), (f"{origin} → {group['destination']}", None)]
+        group["title"], group["title_note"] = next((option for option in options if option not in used), options[-1])
+        used.add((group["title"], group["title_note"]))
+
+
+def _route_families(courses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # A family is one stop order once back-to-back calls at a stop group are merged: patterns that differ only
+    # in how often they call at one stop (Wiatraczna [51] then [09] vs. once) are one route to a rider.
+    # Its busiest pattern is shown with exact stats; the rest stay separate patterns listed as deviations.
+    families: dict[Any, dict[str, Any]] = {}
+    for course in courses:
+        runs = _call_runs(course["stops"])
+        key = tuple(run[0]["stop_group_id"] for run in runs) if runs else course["route_pattern_id"]
+        family = families.get(key)
+        if family is None:
+            families[key] = {"main": course, "runs": runs, "deviations": [], "trip_count": course["trip_count"]}
+            continue
+        family["trip_count"] += course["trip_count"]
+        family["deviations"].append(course)
+        course["deviation_label"] = " · ".join(
+            f"{'One call' if len(run) == 1 else f'{len(run)} calls'} at {run[0]['stop_name']}"
+            f" [{', '.join(sorted({post for call in run for post in call['stop_post_codes']}))}]"
+            for main_run, run in zip(family["runs"], runs, strict=True)
+            if len(run) != len(main_run)
+        )
+    ordered = sorted(families.values(), key=lambda family: -family["trip_count"])
+    _label_families(ordered)
+    return ordered
+
+
+def _call_runs(stops: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    runs: list[list[dict[str, Any]]] = []
+    for stop in stops:
+        if runs and runs[-1][-1]["stop_group_id"] == stop["stop_group_id"]:
+            runs[-1].append(stop)
+        else:
+            runs.append([stop])
+    return runs
+
+
+def _label_families(families: list[dict[str, Any]]) -> None:
+    # Families share endpoints, so each is named by how its stop order differs from the busiest one,
+    # using only as many differences as it takes to tell the families apart.
+    for family in families:
+        family["label"] = None
+    main, *others = families
+    if not others or not main["runs"]:
+        return
+    changes = [_run_changes(main["runs"], family["runs"]) for family in others]
+    branch = next((change[0] for change in changes if change and change[0][0] == "replace"), None)
+    phrases = [[f"via {branch[1][0][0]['stop_name']}" if branch else "main route"]]
+    phrases += [
+        _change_phrases(change) or [f"{family['main']['stop_call_count']} stops"]
+        for family, change in zip(others, changes, strict=True)
+    ]
+    for family, own in zip(families, phrases, strict=True):
+        count = 1
+        while count < len(own) and any(other[:count] == own[:count] for other in phrases if other is not own):
+            count += 1
+        label = " · ".join(own[:count])
+        family["label"] = label[:1].upper() + label[1:]
+
+
+def _run_changes(
+    base: list[list[dict[str, Any]]], other: list[list[dict[str, Any]]]
+) -> list[tuple[str, list[list[dict[str, Any]]], list[list[dict[str, Any]]]]]:
+    """Return (opcode, base runs, other runs) where the interior stop orders differ; terminals are shared."""
+    base, other = base[1:-1], other[1:-1]
+    matcher = SequenceMatcher(
+        None, [run[0]["stop_group_id"] for run in base], [run[0]["stop_group_id"] for run in other], autojunk=False
+    )
+    return [(tag, base[i1:i2], other[j1:j2]) for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != "equal"]
+
+
+def _change_phrases(changes: list[tuple[str, list[list[dict[str, Any]]], list[list[dict[str, Any]]]]]) -> list[str]:
+    phrases = []
+    for tag, removed, added in changes:
+        if tag == "replace":
+            phrases.append(f"via {added[0][0]['stop_name']}")
+        elif tag == "insert":
+            phrases.append(f"also calls at {_run_names(added)}")
+        else:
+            phrases.append(f"skips {_run_names(removed)}")
+    return phrases
+
+
+def _run_names(runs: list[list[dict[str, Any]]]) -> str:
+    names = ", ".join(run[0]["stop_name"] for run in runs[:VARIANT_LABEL_ITEMS])
+    hidden = len(runs) - VARIANT_LABEL_ITEMS
+    return f"{names} +{hidden}" if hidden > 0 else names
 
 
 def _status_summary_by_mode(db_path: Path) -> dict[str, dict[str, Any]]:

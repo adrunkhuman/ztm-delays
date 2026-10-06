@@ -88,7 +88,20 @@ def test_period_layout_renders_across_views(window: str, view: str, monkeypatch:
         "line_groups": [],
         "stop_list": [],
         "trip_groups": [],
-        "courses": [{"trip_headsign": f"Destination {i}", "trip_count": 100 - i, "stops": []} for i in range(3)],
+        "courses": [
+            {
+                "direction_id": i % 2,
+                "route_pattern_id": f"pattern-{i}",
+                "trip_headsign": f"Destination {i}",
+                "pattern_status": "classified",
+                "origin_stop_name": "Origin",
+                "destination_stop_name": f"Destination {i}",
+                "stop_call_count": 0,
+                "trip_count": 100 - i,
+                "stops": [],
+            }
+            for i in range(3)
+        ],
         "line_landing_summary": {},
         "stop_landing_summary": {},
         "trip_landing_summary": {},
@@ -108,6 +121,7 @@ def test_period_layout_renders_across_views(window: str, view: str, monkeypatch:
             "anchor": "2026-07-31",
         },
     }
+    context["route_columns"] = queries._route_columns(context["courses"])  # noqa: SLF001
     template = {"line": "lines", "stop": "stops", "post": "stops", "runs": "schedule"}.get(view, view)
     path = {"overview": "/", "line": "/lines/148", "stop": "/stops/1001", "post": "/stops/1001/02"}.get(
         view, f"/{template}/"
@@ -115,8 +129,7 @@ def test_period_layout_renders_across_views(window: str, view: str, monkeypatch:
     with app.test_request_context(f"{path}?window={window}&date=2026-07-31&mode=bus&q=central&sort=departure"):
         html = render_template(f"{template}.html", **context)
     assert f"<b>{context['window_context']['label']}</b>" in html
-    assert "period-note" not in html
-    assert "period-range" not in html
+    assert all(label not in html for label in ("period-note", "period-range"))
     assert "GTFS" not in html
     assert "Linear scale" not in html
     assert "Previous period anchor" in html
@@ -131,8 +144,8 @@ def test_period_layout_renders_across_views(window: str, view: str, monkeypatch:
         else:
             assert 'href="/lines/148?mode=bus&amp;date=2026-07-31' in html
     if view == "line":
-        assert html.count('class="route-pattern" open') == 2  # noqa: PLR2004
-        assert 'class="route-pattern" >' in html
+        assert html.count('route-pattern" open') == 2  # noqa: PLR2004
+        assert 'route-pattern" >' in html
         assert "Destination 2" in html
         assert 'href="#departures"' in html
     if window != "day":
