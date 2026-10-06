@@ -4,7 +4,7 @@ import io
 import json
 from argparse import Namespace
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -259,6 +259,19 @@ def test_load_config_uses_heartbeat_env(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert config.heartbeat_gcs_path == "private/heartbeat.json"
     assert config.heartbeat_interval_seconds == CUSTOM_HEARTBEAT_SECONDS
+
+
+def test_load_config_uses_public_status_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    monkeypatch.delenv("POLLER_PUBLIC_STATUS_GCS_PATH", raising=False)
+
+    assert poller._load_config(Namespace(once=True, no_upload=True)).public_status_gcs_path == (
+        "health/poller/public/live.json"
+    )
+
+    monkeypatch.setenv("POLLER_PUBLIC_STATUS_GCS_PATH", "/public/live-test.json")
+
+    assert poller._load_config(Namespace(once=True, no_upload=True)).public_status_gcs_path == "public/live-test.json"
 
 
 def test_load_config_uses_api_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -516,6 +529,7 @@ def test_main_once_uploads_bus_and_tram_to_separate_partitions(monkeypatch: pyte
     assert pq.read_table(io.BytesIO(bucket.blobs[bus_path].data)).to_pylist()[0]["vehicle_type"] == EXPECTED_BUS_TYPE
     assert pq.read_table(io.BytesIO(bucket.blobs[tram_path].data)).to_pylist()[0]["vehicle_type"] == EXPECTED_TRAM_TYPE
     assert bucket.blobs[heartbeat_path].content_type == "application/json"
+    assert bucket.blobs["health/poller/public/live.json"].content_type == "application/json"
 
 
 def test_main_uploads_seeded_spool_and_removes_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -617,7 +631,7 @@ def test_heartbeat_payload_reports_degraded_and_down_states() -> None:
     assert recovered_payload["vehicle_types"]["bus"]["last_error_type"] is None
 
 
-def test_write_heartbeat_uploads_private_gcs_json() -> None:
+def test_write_heartbeat_uploads_private_and_public_gcs_json() -> None:
     bucket = FakeBucket()
     config = _config()
     states = {"bus": poller.PollState("bus"), "tram": poller.PollState("tram")}
@@ -627,9 +641,75 @@ def test_write_heartbeat_uploads_private_gcs_json() -> None:
 
     assert poller._write_heartbeat(cast("storage.Bucket", bucket), config, states) is True
 
-    assert bucket.path == "health/poller/latest.json"
-    assert bucket.blob_obj.content_type == "application/json"
-    assert json.loads(bucket.blob_obj.data)["status"] == "ok"
+    private = bucket.blobs["health/poller/latest.json"]
+    public = bucket.blobs["health/poller/public/live.json"]
+    assert private.content_type == public.content_type == "application/json"
+    assert json.loads(private.data)["status"] == "ok"
+    assert public.cache_control == "no-cache"
+    assert json.loads(public.data)["version"] == 1
+
+
+def test_public_status_payload_is_an_allowlist_with_utc_z_timestamps() -> None:
+    attempted = datetime(2026, 1, 15, 12, 0, 43, tzinfo=timezone(timedelta(hours=1)))
+    updated_at = datetime(2026, 1, 15, 11, 1, 5, tzinfo=UTC)
+    states = {"tram": poller.PollState("tram"), "bus": poller.PollState("bus")}
+    poller._update_poll_state(
+        states["bus"],
+        poller.PollResult(
+            "bus",
+            attempted,
+            succeeded=True,
+            accepted_rows=HEARTBEAT_ACCEPTED_ROWS,
+            parsed_rows=HEARTBEAT_ACCEPTED_ROWS + 3,
+            dropped_stale=3,
+            accepted_vehicle_count=7,
+            accepted_line_count=4,
+        ),
+    )
+
+    payload = poller._public_status_payload(_config(), states, updated_at)
+
+    assert payload == {
+        "version": 1,
+        "updated_at": "2026-01-15T11:01:05Z",
+        "poll_interval_seconds": 10,
+        "heartbeat_interval_seconds": 60,
+        "vehicle_types": {
+            "bus": {
+                "last_attempt_at": "2026-01-15T11:00:43Z",
+                "last_success_at": "2026-01-15T11:00:43Z",
+                "consecutive_failures": 0,
+                "fresh_vehicles": 7,
+                "fresh_lines": 4,
+            },
+            "tram": {
+                "last_attempt_at": None,
+                "last_success_at": None,
+                "consecutive_failures": 0,
+                "fresh_vehicles": None,
+                "fresh_lines": None,
+            },
+        },
+    }
+
+
+def test_public_status_payload_keeps_last_success_counts_after_failure() -> None:
+    now = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    state = poller.PollState("bus")
+    poller._update_poll_state(
+        state, poller.PollResult("bus", now, succeeded=True, accepted_vehicle_count=7, accepted_line_count=4)
+    )
+    poller._update_poll_state(
+        state, poller.PollResult("bus", now + timedelta(seconds=10), succeeded=False, error_type="request_error")
+    )
+
+    bus = poller._public_status_payload(_config(), {"bus": state}, now)["vehicle_types"]["bus"]
+
+    assert bus["consecutive_failures"] == 1
+    assert bus["last_attempt_at"] == "2026-01-15T12:00:10Z"
+    assert bus["last_success_at"] == "2026-01-15T12:00:00Z"
+    assert (bus["fresh_vehicles"], bus["fresh_lines"]) == (7, 4)
+    assert "last_error_type" not in bus
 
 
 def test_write_heartbeat_returns_false_when_upload_fails() -> None:
@@ -639,13 +719,29 @@ def test_write_heartbeat_returns_false_when_upload_fails() -> None:
             raise GoogleAPIError("transient failure")
 
     class FailingBucket:
-        def blob(self, path: str) -> FailingBlob:
-            assert path == "health/poller/latest.json"
+        def blob(self, _path: str) -> FailingBlob:
             return FailingBlob()
 
     states = {"bus": poller.PollState("bus"), "tram": poller.PollState("tram")}
 
     assert poller._write_heartbeat(cast("storage.Bucket", FailingBucket()), _config(), states) is False
+
+
+def test_public_upload_failure_does_not_fail_private_heartbeat() -> None:
+    bucket = FakeBucket(fail_upload_paths={"health/poller/public/live.json"})
+    states = {"bus": poller.PollState("bus"), "tram": poller.PollState("tram")}
+
+    assert poller._write_heartbeat(cast("storage.Bucket", bucket), _config(), states) is True
+    assert json.loads(bucket.blobs["health/poller/latest.json"].data)["status"] == "starting"
+    assert bucket.blobs["health/poller/public/live.json"].data == b""
+
+
+def test_private_upload_failure_still_attempts_public_status() -> None:
+    bucket = FakeBucket(fail_upload_paths={"health/poller/latest.json"})
+    states = {"bus": poller.PollState("bus"), "tram": poller.PollState("tram")}
+
+    assert poller._write_heartbeat(cast("storage.Bucket", bucket), _config(), states) is False
+    assert json.loads(bucket.blobs["health/poller/public/live.json"].data)["version"] == 1
 
 
 def test_main_returns_failure_when_shutdown_flush_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -942,9 +1038,11 @@ def _gps_row(time: datetime | None = None, vehicle_type: int = 1) -> poller.GpsR
 
 
 class FakeBlob:
-    def __init__(self, *, raise_precondition_failed: bool = False) -> None:
+    def __init__(self, *, raise_precondition_failed: bool = False, fail_upload: bool = False) -> None:
         self.data = b""
         self.content_type = ""
+        self.cache_control: str | None = None
+        self.fail_upload = fail_upload
         self.if_generation_match: int | None = None
         self.raise_precondition_failed = raise_precondition_failed
 
@@ -956,20 +1054,25 @@ class FakeBlob:
         self.content_type = content_type
 
     def upload_from_string(self, data: bytes, content_type: str) -> None:
+        if self.fail_upload:
+            raise GoogleAPIError("simulated upload failure")
         self.data = data
         self.content_type = content_type
 
 
 class FakeBucket:
-    def __init__(self, *, raise_precondition_failed: bool = False) -> None:
+    def __init__(self, *, raise_precondition_failed: bool = False, fail_upload_paths: set[str] | None = None) -> None:
         self.raise_precondition_failed = raise_precondition_failed
+        self.fail_upload_paths = fail_upload_paths or set()
         self.blob_obj = FakeBlob(raise_precondition_failed=raise_precondition_failed)
         self.path: str | None = None
         self.blobs: dict[str, FakeBlob] = {}
 
     def blob(self, path: str) -> FakeBlob:
         self.path = path
-        self.blob_obj = FakeBlob(raise_precondition_failed=self.raise_precondition_failed)
+        self.blob_obj = FakeBlob(
+            raise_precondition_failed=self.raise_precondition_failed, fail_upload=path in self.fail_upload_paths
+        )
         self.blobs[path] = self.blob_obj
         return self.blob_obj
 

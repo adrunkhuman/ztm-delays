@@ -154,35 +154,14 @@ def test_poll_stats_are_unique_fresh_per_poll_not_raw_history(monkeypatch: pytes
         assert observed.attempted_at >= now
 
 
-@pytest.mark.parametrize(
-    ("parsed", "stale", "future", "status", "reason"),
-    [
-        (0, 0, 0, "unknown", None),
-        (10, 0, 0, "healthy", None),
-        (10, 5, 0, "healthy", None),
-        (10, 6, 0, "degraded", "stale_heavy"),
-        (10, 0, 6, "degraded", "future_heavy"),
-        (10, 3, 3, "degraded", "stale_and_future_heavy"),
-        (10, 10, 0, "degraded", "stale_heavy"),
-    ],
-)
-def test_feed_health_ratios_do_not_redefine_request_success(
-    parsed: int, stale: int, future: int, status: str, reason: str | None
-) -> None:
+def test_stale_rows_do_not_change_request_success_or_heartbeat_status() -> None:
     state = poller.PollState("bus")
-    poller._update_poll_state(
-        state,
-        result(parsed_rows=parsed, accepted_rows=parsed - stale - future, dropped_stale=stale, dropped_future=future),
-    )
+    poller._update_poll_state(state, result(parsed_rows=10, accepted_rows=1, dropped_stale=9))
     payload = poller._heartbeat_payload(_config(), {"bus": state}, START)
     assert payload["status"] == "ok"
-    assert state.last_success_at == START
-    assert state.consecutive_failures == 0
-    assert (state.feed_status, state.feed_reason) == (status, reason)
-    assert state.last_parsed_rows == parsed
-    poller._update_poll_state(state, poller.PollResult("bus", START + timedelta(seconds=10), succeeded=False))
-    assert state.last_success_at == START
-    assert (state.feed_status, state.feed_reason) == ("unknown", None)
+    assert "feed_status" not in payload["vehicle_types"]["bus"]
+    assert "feed_reason" not in payload["vehicle_types"]["bus"]
+    assert (state.last_parsed_rows, state.last_dropped_stale_rows) == (10, 9)
 
 
 def test_attempts_checkpointed_even_when_no_gps_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -491,7 +470,7 @@ def test_heartbeat_root_marker_survives_restart_after_closed_hour_retirement(tmp
     bucket = FakeBucket()
     states = {"bus": poller.PollState("bus")}
     assert poller._write_heartbeat(cast("storage.Bucket", bucket), _config(), states, restarted.collection_started_at)
-    payload = json.loads(bucket.blob_obj.data)
+    payload = json.loads(bucket.blobs["health/poller/latest.json"].data)
     assert payload["collection_started_at"] == "2026-10-25T00:37:12Z"
     assert payload["collection_started_at"] == health.collection_started_at
     assert "collection_started_at" not in payload["vehicle_types"]["bus"]
@@ -507,7 +486,7 @@ def test_legacy_heartbeat_callers_work_without_root_marker() -> None:
     assert poller._heartbeat_payload(config, states, START, None) == legacy
     bucket = FakeBucket()
     assert poller._write_heartbeat(cast("storage.Bucket", bucket), config, states)
-    uploaded = json.loads(bucket.blob_obj.data)
+    uploaded = json.loads(bucket.blobs["health/poller/latest.json"].data)
     assert "collection_started_at" not in uploaded
     assert uploaded["status"] == legacy["status"]
 
