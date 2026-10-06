@@ -54,25 +54,31 @@ def _collect(tmp_path: Path, hour: datetime, *, low: bool = False, restart: bool
     return json.loads(next(iter(bucket.objects.values())))
 
 
-def test_collector_restart_to_monitor_to_serving_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_collector_restart_to_monitor_to_public_history_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monitor = _load("poller_health", ROOT / "airflow/dags/poller_health.py", monkeypatch)
-    serving = _load("poller_health_serving", ROOT / "airflow/dags/poller_health_serving.py", monkeypatch)
+    public = _load("poller_health_public", ROOT / "airflow/dags/poller_health_public.py", monkeypatch)
     hour = datetime(2026, 10, 5, 12, tzinfo=UTC)
     samples = []
     for days in (21, 14, 7):
         candidate = hour - timedelta(days=days)
         source = _collect(tmp_path / str(days), candidate)
         monitor.validate_summary(source, candidate)
-        historical = monitor.evaluate(candidate, source, [], evaluated_at=candidate + timedelta(hours=1, minutes=25))
-        samples.append((source, historical))
+        samples.append(source)
     current = _collect(tmp_path / "current", hour, low=True, restart=True)
     monitor.validate_summary(current, hour)
     report = monitor.evaluate(hour, current, samples, evaluated_at=hour + timedelta(hours=1, minutes=25))
-    public = serving.serving_snapshot(monitor.snapshot(report), hour + timedelta(hours=1, minutes=30))
-    assert public["vehicle_types"]["bus"]["status"] == "degraded"
-    assert public["vehicle_types"]["bus"]["baseline_samples"] == len(samples)
-    assert public["vehicle_types"]["bus"]["parsed_rows"] == 60 * 100
-    assert public["vehicle_types"]["bus"]["accepted_rows"] == 60 * 20
-    assert public["vehicle_types"]["bus"]["mean_accepted_vehicles"] == 20
-    assert public["recent_intervals"][0]["reason"] == "stale_heavy"
-    assert "state" not in json.dumps(public)
+    monitor.validate_report(json.loads(json.dumps(report)), hour)
+    config = monitor.DEFAULT_CONFIG
+    ahead = {mode: [monitor.baseline(samples, mode, config)] * 3 for mode in monitor.MODES}
+    history = public.feed_history(report, [None] * 23, ahead, config)
+    bus = history["vehicle_types"]["bus"]
+    assert bus["status"] == "degraded"
+    assert bus["baseline_samples"] == len(samples)
+    assert bus["fresh"][-60:] == [20.0] * 60
+    assert bus["usual"][-240:-180] == [100.0] * 60
+    assert len(bus["usual"]) == 24 * 60 + 180
+    assert history["incidents"][0]["reason"] == "low_fleet"
+    assert history["incidents"][0]["ongoing"] is True
+    assert "state" not in json.dumps(history)

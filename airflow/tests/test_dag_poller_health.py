@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 
-from .test_poller_health import HOUR, START, health, row, samples, summary
+from .test_poller_health import HOUR, START, failing, health, row, samples, summary
+from .test_poller_health_public import public
 
 
 class NotFound(Exception):
@@ -28,6 +29,7 @@ class FakeBlob:
         self.path = path
         self.size = None
         self.generation = None
+        self.cache_control = None
 
     def reload(self) -> None:
         self.bucket.reads.append(self.path)
@@ -39,16 +41,17 @@ class FakeBlob:
     def download_as_bytes(self, **kwargs: Any) -> bytes:
         data, generation = self.bucket.objects[self.path]
         assert kwargs["if_generation_match"] == generation
-        assert kwargs["end"] <= health.REPORT_MAX_BYTES
+        assert kwargs["end"] <= public.HISTORY_MAX_BYTES
         return data[kwargs["start"] : kwargs["end"] + 1]
 
     def upload_from_string(self, payload: str, **kwargs: Any) -> None:
         generation = self.bucket.objects.get(self.path, (b"", 0))[1]
-        if kwargs["if_generation_match"] != generation:
+        if kwargs.get("if_generation_match", generation) != generation:
             raise PreconditionFailed
         self.generation = generation + 1
         self.bucket.objects[self.path] = (payload.encode(), self.generation)
         self.bucket.uploads.append(self.path)
+        self.bucket.cache_control[self.path] = self.cache_control
 
 
 class FakeBucket:
@@ -58,6 +61,7 @@ class FakeBucket:
         self.list_calls: list[str] = []
         self.list_parameters: list[dict[str, Any]] = []
         self.reads: list[str] = []
+        self.cache_control: dict[str, str | None] = {}
 
     def blob(self, path: str) -> FakeBlob:
         return FakeBlob(self, path)
@@ -188,6 +192,7 @@ def dag_module(monkeypatch: Any) -> types.ModuleType:
         "google.cloud.storage": cloud.storage,
         "ztm_airflow_common": common,
         "poller_health": health,
+        "poller_health_public": public,
         "requests": requests,
     }.items():
         monkeypatch.setitem(sys.modules, key, module)
@@ -202,11 +207,15 @@ def dag_module(monkeypatch: Any) -> types.ModuleType:
     return module
 
 
-def seed_history(bucket: FakeBucket) -> None:
-    for source, report in samples():
-        hour = health.timestamp(source["hour_start"])
-        bucket.put(health.hour_path("hourly", hour), source)
-        bucket.put(health.hour_path("reports", hour), report)
+def seed_history(bucket: FakeBucket, hour: Any = HOUR, vehicles: int = 100) -> None:
+    for source in samples(hour, vehicles=vehicles):
+        bucket.put(health.hour_path("hourly", health.timestamp(source["hour_start"])), source)
+
+
+def history_for(report: dict[str, Any]) -> dict[str, Any]:
+    """A published history whose newest hour is ``report``'s."""
+    lookahead = {mode: [health.empty_baseline()] * 3 for mode in health.MODES}
+    return public.feed_history(report, [None] * 23, lookahead, health.Config())
 
 
 def test_dag_import_schedule_and_failure_callback(dag_module: Any, monkeypatch: Any) -> None:
@@ -219,6 +228,7 @@ def test_dag_import_schedule_and_failure_callback(dag_module: Any, monkeypatch: 
     assert dag.kwargs["default_args"] == {"retries": 2}
     assert dag_module.alert_transitions.calls == [(dag_module.evaluate_hour,)]
     assert dag_module.publish_hour.calls == [(dag_module.evaluate_hour,)]
+    assert dag_module.persist_hour.calls == [(dag_module.evaluate_hour,)]
     hours = []
     monkeypatch.setattr(
         dag_module.storage,
@@ -237,7 +247,7 @@ def test_dag_import_schedule_and_failure_callback(dag_module: Any, monkeypatch: 
     assert hours == [HOUR - timedelta(hours=1)]
 
 
-def test_hourly_report_raw_partition_transaction_and_snapshot(dag_module: Any) -> None:
+def test_hourly_report_raw_partition_transaction_and_public_history(dag_module: Any) -> None:
     bucket, client = FakeBucket(), FakeClient()
     seed_history(bucket)
     previous = HOUR - timedelta(hours=1)
@@ -248,7 +258,13 @@ def test_hourly_report_raw_partition_transaction_and_snapshot(dag_module: Any) -
     report = dag_module.run_monitor(bucket, client, HOUR, health.Config())
     assert row(report)["status"] == "healthy"
     assert bucket.get(health.hour_path("reports", HOUR)) == report
-    assert bucket.get(dag_module.SNAPSHOT_PATH) == health.snapshot(report)
+    history = bucket.get(dag_module.HISTORY_PATH)
+    assert dag_module.HISTORY_PATH == "health/poller/public/feed-history.json"
+    assert bucket.cache_control[dag_module.HISTORY_PATH] == "no-cache"
+    assert history["hour_start"] == health.iso(HOUR)
+    assert history["vehicle_types"]["bus"]["fresh"][-120:] == [100] * 120
+    assert history["vehicle_types"]["bus"]["usual"][1380:1440] == [100] * 60
+    assert bucket.cache_control[health.hour_path("reports", HOUR)] is None
     table = client.tables[0]
     assert table.table_id == "ztm-data.ztm_raw.raw_poller_hourly_health"
     assert table.time_partitioning.field == "hour_start"
@@ -272,7 +288,9 @@ def test_hourly_report_raw_partition_transaction_and_snapshot(dag_module: Any) -
 
 def test_absent_and_invalid_summaries_nullable_metrics(dag_module: Any) -> None:
     bucket, client = FakeBucket(), FakeClient()
-    bucket.put(dag_module.HEARTBEAT_PATH, {"collection_started_at": START, "hostname": "secret-host"})
+    bucket.put(
+        sys.modules["poller_health_gcs"].HEARTBEAT_PATH, {"collection_started_at": START, "hostname": "secret-host"}
+    )
     report = dag_module.run_monitor(bucket, client, HOUR, health.Config())
     assert row(report)["status"] == "monitoring_gap"
     params = client.queries[0][1]["job_config"].query_parameters
@@ -282,19 +300,19 @@ def test_absent_and_invalid_summaries_nullable_metrics(dag_module: Any) -> None:
     source = summary()
     source["version"] = 2
     bucket.put(health.hour_path("hourly", HOUR), source)
-    bucket.put(dag_module.HEARTBEAT_PATH, {"collection_started_at": START})
+    bucket.put(sys.modules["poller_health_gcs"].HEARTBEAT_PATH, {"collection_started_at": START})
     report = dag_module.run_monitor(bucket, client, HOUR, health.Config())
     assert row(report)["reasons"] == ["invalid_summary"]
 
 
 def test_retry_reuses_frozen_evaluation_after_warehouse_failure(dag_module: Any) -> None:
     bucket, client = FakeBucket(), FakeClient()
-    bucket.put(health.hour_path("hourly", HOUR), summary(ratio=0.2, vehicles=20, lines=2))
+    bucket.put(health.hour_path("hourly", HOUR), failing())
     client.fail = True
     with pytest.raises(RuntimeError, match="BQ transport"):
         dag_module.run_monitor(bucket, client, HOUR, health.Config())
     original = bucket.get(health.hour_path("reports", HOUR))
-    assert dag_module.SNAPSHOT_PATH not in bucket.objects
+    assert dag_module.HISTORY_PATH not in bucket.objects
     bucket.put(health.hour_path("hourly", HOUR), summary())
     client.fail = False
     retried = dag_module.run_monitor(bucket, client, HOUR, health.Config())
@@ -304,9 +322,9 @@ def test_retry_reuses_frozen_evaluation_after_warehouse_failure(dag_module: Any)
     assert bucket.uploads.count(health.hour_path("reports", HOUR)) == 1
 
 
-def test_persisted_alerts_are_delivered_while_warehouse_publication_fails(dag_module: Any, monkeypatch: Any) -> None:
+def test_alerts_and_history_are_published_while_warehouse_publication_fails(dag_module: Any, monkeypatch: Any) -> None:
     bucket, client = FakeBucket(), FakeClient()
-    bucket.put(health.hour_path("hourly", HOUR), summary(ratio=0.2, vehicles=20, lines=2))
+    bucket.put(health.hour_path("hourly", HOUR), failing())
     client.fail = True
     monkeypatch.setattr(
         dag_module.storage, "Client", lambda **kwargs: types.SimpleNamespace(bucket=lambda name: bucket), raising=False
@@ -326,43 +344,48 @@ def test_persisted_alerts_are_delivered_while_warehouse_publication_fails(dag_mo
     assert hour == health.iso(HOUR)
     assert client.queries == []
     with pytest.raises(RuntimeError, match="BQ transport"):
-        dag_module.publish_hour.function(hour)
-    assert dag_module.SNAPSHOT_PATH not in bucket.objects
+        dag_module.persist_hour.function(hour)
+    dag_module.publish_hour.function(hour)
+    assert bucket.get(dag_module.HISTORY_PATH)["hour_start"] == health.iso(HOUR)
     dag_module.alert_transitions.function(hour)
     stored = bucket.get(health.hour_path("reports", HOUR))
     assert len(delivered) == 2
     assert all(entry["delivered_at"] is not None for entry in stored["events"])
     assert all("delivered_at" not in entry for entry in delivered)
-    # Publication retry must not overwrite the alert task's acknowledgements.
+    # Publication retries must not overwrite the alert task's acknowledgements.
     client.fail = False
+    dag_module.persist_hour.function(hour)
     dag_module.publish_hour.function(hour)
     assert bucket.get(health.hour_path("reports", HOUR)) == stored
-    assert bucket.get(dag_module.SNAPSHOT_PATH) == health.snapshot(stored)
+    history = bucket.get(dag_module.HISTORY_PATH)
+    assert history["hour_start"] == stored["hour_start"]
+    assert history["vehicle_types"]["bus"]["status"] == "degraded"
 
 
-def test_backfill_uses_previous_hour_not_latest_state_and_cannot_regress_snapshot(dag_module: Any) -> None:
+def test_backfill_uses_previous_hour_not_latest_state_and_cannot_regress_history(dag_module: Any) -> None:
     bucket, client = FakeBucket(), FakeClient()
     previous_hour = HOUR - timedelta(hours=1)
-    previous = summary(previous_hour, ratio=0.2, vehicles=20, lines=2)
+    previous = failing(previous_hour)
     previous_report = health.evaluate(previous_hour, previous, [])
     bucket.put(health.hour_path("hourly", previous_hour), previous)
     bucket.put(health.hour_path("reports", previous_hour), previous_report)
-    bucket.put(health.hour_path("hourly", HOUR), summary(ratio=0.2, vehicles=20, lines=2))
+    bucket.put(health.hour_path("hourly", HOUR), failing())
     future_hour = HOUR + timedelta(days=1)
-    future = health.evaluate(future_hour, summary(future_hour), [])
-    bucket.put(dag_module.SNAPSHOT_PATH, health.snapshot(future))
+    future = history_for(health.evaluate(future_hour, summary(future_hour), []))
+    bucket.put(dag_module.HISTORY_PATH, future)
     report = dag_module.run_monitor(bucket, client, HOUR, health.Config())
     assert row(report)["status"] == "degraded"
     assert report["events"] == []
     assert row(report)["state"]["active"]["start_at"] == health.iso(previous_hour)
-    assert bucket.get(dag_module.SNAPSHOT_PATH) == health.snapshot(future)
+    assert bucket.get(dag_module.HISTORY_PATH) == future
+    assert dag_module.HISTORY_PATH not in bucket.uploads
 
 
 def test_alert_transport_retry_ack_and_disabled_not_claiming_delivery(
     dag_module: Any, monkeypatch: Any, caplog: Any
 ) -> None:
     bucket = FakeBucket()
-    report = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    report = health.evaluate(HOUR, failing(), [])
     path = health.hour_path("reports", HOUR)
     bucket.put(path, report)
     dag_module.deliver_alerts(bucket, HOUR, "")
@@ -404,7 +427,7 @@ def test_alert_transport_retry_ack_and_disabled_not_claiming_delivery(
 @pytest.mark.parametrize("status", [301, 400, 500])
 def test_non_success_response_remains_pending(dag_module: Any, monkeypatch: Any, status: int) -> None:
     bucket = FakeBucket()
-    report = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    report = health.evaluate(HOUR, failing(), [])
     path = health.hour_path("reports", HOUR)
     bucket.put(path, report)
     monkeypatch.setattr(dag_module.requests, "post", lambda *args, **kwargs: types.SimpleNamespace(status_code=status))
@@ -426,9 +449,10 @@ def test_cloud_read_bounds_payload_and_validates_versions(dag_module: Any) -> No
     path = health.hour_path("hourly", HOUR)
     bucket.objects[path] = (b" " * (health.SUMMARY_MAX_BYTES + 1), 1)
     assert dag_module.read_summary(bucket, HOUR) == (None, "invalid_summary")
-    bucket.put(health.hour_path("reports", HOUR), {"version": 2})
-    with pytest.raises(ValueError, match="persisted"):
-        dag_module.read_report(bucket, HOUR)
+    for version in (2, 3):
+        bucket.put(health.hour_path("reports", HOUR), {"version": version})
+        with pytest.raises(ValueError, match="persisted"):
+            dag_module.read_report(bucket, HOUR)
 
 
 def test_runtime_config_bounded(dag_module: Any, monkeypatch: Any) -> None:
@@ -436,6 +460,14 @@ def test_runtime_config_bounded(dag_module: Any, monkeypatch: Any) -> None:
     monkeypatch.setenv("POLLER_HEALTH_THRESHOLD", "0.4")
     assert dag_module.config_from_env().duration_minutes == 20
     assert dag_module.config_from_env().threshold == 0.4
+    assert dag_module.config_from_env().minimum_fleet == 20
+    monkeypatch.setenv("POLLER_HEALTH_MINIMUM_FLEET", "5")
+    assert dag_module.config_from_env().minimum_fleet == 5
+    for value in ("0", "1001"):
+        monkeypatch.setenv("POLLER_HEALTH_MINIMUM_FLEET", value)
+        with pytest.raises(ValueError, match="minimum_fleet"):
+            dag_module.config_from_env()
+    monkeypatch.setenv("POLLER_HEALTH_MINIMUM_FLEET", "20")
     monkeypatch.setenv("POLLER_HEALTH_LOOKBACK_DAYS", "365")
     with pytest.raises(ValueError, match="bounded"):
         dag_module.config_from_env()
@@ -456,26 +488,26 @@ def test_first_retained_summary_confirms_rollout_without_current_source(dag_modu
 def test_concurrent_report_create_uses_winning_frozen_report(dag_module: Any, monkeypatch: Any) -> None:
     bucket, client = FakeBucket(), FakeClient()
     bucket.put(health.hour_path("hourly", HOUR), summary())
-    winner = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    winner = health.evaluate(HOUR, failing(), [])
     path = health.hour_path("reports", HOUR)
     original_write = dag_module.write_object
 
-    def race_write(target: Any, name: str, data: Any, generation: int) -> int:
+    def race_write(target: Any, name: str, data: Any, generation: int, **kwargs: Any) -> int:
         if name == path and generation == 0:
             bucket.put(path, winner)
             raise PreconditionFailed
-        return original_write(target, name, data, generation)
+        return original_write(target, name, data, generation, **kwargs)
 
     monkeypatch.setattr(dag_module, "write_object", race_write)
     result = dag_module.run_monitor(bucket, client, HOUR, health.Config())
     assert result == winner
-    assert bucket.get(dag_module.SNAPSHOT_PATH) == health.snapshot(winner)
+    assert bucket.get(dag_module.HISTORY_PATH)["vehicle_types"]["bus"]["status"] == "degraded"
 
 
 def test_alert_success_with_failed_ack_still_retries_same_event(dag_module: Any, monkeypatch: Any) -> None:
     bucket = FakeBucket()
     path = health.hour_path("reports", HOUR)
-    bucket.put(path, health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), []))
+    bucket.put(path, health.evaluate(HOUR, failing(), []))
     calls = []
     monkeypatch.setattr(
         dag_module.requests,
@@ -502,14 +534,14 @@ def test_configurable_summary_prefix_and_first_retained_marker(dag_module: Any, 
     bucket = FakeBucket()
     path = "custom/[poller].hourly/2026-10-05/12.json"
     bucket.put(path, summary())
-    assert dag_module.summary_path(HOUR) == path
+    assert sys.modules["poller_health_gcs"].summary_path(HOUR) == path
     assert dag_module.read_summary(bucket, HOUR)[0] == summary()
     assert dag_module.first_collection_start(bucket) == START
     assert bucket.list_calls == ["custom/[poller].hourly/"]
     report = dag_module.run_monitor(bucket, FakeClient(), HOUR, health.Config())
     assert row(report)["parsed_rows"] == 720000
     assert health.hour_path("reports", HOUR) in bucket.objects
-    assert dag_module.SNAPSHOT_PATH in bucket.objects
+    assert dag_module.HISTORY_PATH in bucket.objects
 
 
 def test_configurable_heartbeat_root_collection_marker(dag_module: Any, monkeypatch: Any) -> None:
@@ -571,7 +603,7 @@ def test_persisted_report_malformed_types_are_value_errors(dag_module: Any, muta
 def test_persisted_report_outbox_identity_and_tail_timestamps(dag_module: Any) -> None:
     bucket = FakeBucket()
     path = health.hour_path("reports", HOUR)
-    report = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    report = health.evaluate(HOUR, failing(), [])
     report["events"][0]["event_id"] = "changed"
     bucket.put(path, report)
     with pytest.raises(ValueError, match="event identity"):
@@ -586,23 +618,23 @@ def test_persisted_report_outbox_identity_and_tail_timestamps(dag_module: Any) -
 def test_skipped_monitor_hour_preserves_active_incident_and_history(dag_module: Any) -> None:
     bucket, client = FakeBucket(), FakeClient()
     older_hour = HOUR - timedelta(hours=1)
-    closed_source = summary(older_hour, ratio=0.2, vehicles=20, lines=2)
+    closed_source = failing(older_hour)
     healthy_tail = summary(older_hour)
     for mode in health.MODES:
         closed_source["vehicle_types"][mode]["minutes"][45:] = healthy_tail["vehicle_types"][mode]["minutes"][45:]
     closed_report = health.evaluate(older_hour, closed_source, [])
     bucket.put(health.hour_path("hourly", older_hour), closed_source)
     bucket.put(health.hour_path("reports", older_hour), closed_report)
-    first = summary(ratio=0.2, vehicles=20, lines=2)
+    first = failing()
     bucket.put(health.hour_path("hourly", HOUR), first)
     original = dag_module.run_monitor(bucket, client, HOUR, health.Config())
     first_path = health.hour_path("reports", HOUR)
     original_ids = [entry["event_id"] for entry in original["events"]]
     # The collector still ran, but the next monitor evaluation never produced a report.
     missed_hour = HOUR + timedelta(hours=1)
-    bucket.put(health.hour_path("hourly", missed_hour), summary(missed_hour, ratio=0.2, vehicles=20, lines=2))
+    bucket.put(health.hour_path("hourly", missed_hour), failing(missed_hour))
     resumed_hour = HOUR + timedelta(hours=2)
-    bucket.put(health.hour_path("hourly", resumed_hour), summary(resumed_hour, ratio=0.2, vehicles=20, lines=2))
+    bucket.put(health.hour_path("hourly", resumed_hour), failing(resumed_hour))
     resumed = dag_module.run_monitor(bucket, client, resumed_hour, health.Config())
     assert row(resumed)["status"] == "degraded"
     assert row(resumed)["state"]["active"] == row(original)["state"]["active"]
@@ -622,8 +654,8 @@ def test_skipped_monitor_hour_preserves_active_incident_and_history(dag_module: 
 @pytest.mark.parametrize("active", [False, True])
 def test_evaluation_gap_cannot_bridge_detection_or_recovery_tails(dag_module: Any, active: bool) -> None:
     bucket, client = FakeBucket(), FakeClient()
-    first = summary(ratio=0.2, vehicles=20, lines=2) if active else summary()
-    other = summary() if active else summary(ratio=0.2, vehicles=20, lines=2)
+    first = failing() if active else summary()
+    other = summary() if active else failing()
     for mode in health.MODES:
         first["vehicle_types"][mode]["minutes"][50:] = other["vehicle_types"][mode]["minutes"][50:]
     bucket.put(health.hour_path("hourly", HOUR), first)
@@ -632,11 +664,11 @@ def test_evaluation_gap_cannot_bridge_detection_or_recovery_tails(dag_module: An
     missed_hour = HOUR + timedelta(hours=1)
     bucket.put(
         health.hour_path("hourly", missed_hour),
-        summary(missed_hour) if active else summary(missed_hour, ratio=0.2, vehicles=20, lines=2),
+        summary(missed_hour) if active else failing(missed_hour),
     )
     resumed_hour = HOUR + timedelta(hours=2)
-    current = summary(resumed_hour, ratio=0.2, vehicles=20, lines=2) if active else summary(resumed_hour)
-    prefix = summary(resumed_hour) if active else summary(resumed_hour, ratio=0.2, vehicles=20, lines=2)
+    current = failing(resumed_hour) if active else summary(resumed_hour)
+    prefix = summary(resumed_hour) if active else failing(resumed_hour)
     for mode in health.MODES:
         current["vehicle_types"][mode]["minutes"][:5] = prefix["vehicle_types"][mode]["minutes"][:5]
     bucket.put(health.hour_path("hourly", resumed_hour), current)
@@ -646,17 +678,17 @@ def test_evaluation_gap_cannot_bridge_detection_or_recovery_tails(dag_module: An
     assert "monitoring_evaluation_gap" in row(resumed)["reasons"]
 
 
-def test_state_fallback_lists_bounded_names_and_reads_newest_durable_not_public_snapshot(dag_module: Any) -> None:
+def test_state_fallback_lists_bounded_names_and_reads_newest_durable_not_public_history(dag_module: Any) -> None:
     bucket = FakeBucket()
     older_hour = HOUR - timedelta(hours=4)
     older = health.evaluate(older_hour, summary(older_hour), [])
     newest_hour = HOUR - timedelta(hours=2)
-    newest = health.evaluate(newest_hour, summary(newest_hour, ratio=0.2, vehicles=20, lines=2), [])
+    newest = health.evaluate(newest_hour, failing(newest_hour), [])
     future_hour = HOUR + timedelta(hours=1)
     future = health.evaluate(future_hour, summary(future_hour), [])
     for hour, report in ((older_hour, older), (newest_hour, newest), (future_hour, future)):
         bucket.put(health.hour_path("reports", hour), report)
-    bucket.put(dag_module.SNAPSHOT_PATH, health.snapshot(older))
+    bucket.put(dag_module.HISTORY_PATH, history_for(older))
     restored, gap = dag_module.preceding_report(bucket, HOUR)
     assert gap
     assert restored["hour_start"] == health.iso(HOUR - timedelta(hours=1))
@@ -677,7 +709,7 @@ def test_state_fallback_lists_bounded_names_and_reads_newest_durable_not_public_
             "fields": "items(name),nextPageToken",
         }
     ]
-    bucket.put(dag_module.SNAPSHOT_PATH, health.snapshot(future))
+    bucket.put(dag_module.HISTORY_PATH, history_for(future))
     bucket.reads.clear()
     restored, gap = dag_module.preceding_report(bucket, HOUR)
     assert gap
@@ -687,7 +719,7 @@ def test_state_fallback_lists_bounded_names_and_reads_newest_durable_not_public_
 
 def test_later_hour_retries_original_failed_outbox_without_copying_events(dag_module: Any, monkeypatch: Any) -> None:
     bucket, client = FakeBucket(), FakeClient()
-    bucket.put(health.hour_path("hourly", HOUR), summary(ratio=0.2, vehicles=20, lines=2))
+    bucket.put(health.hour_path("hourly", HOUR), failing())
     original = dag_module.run_monitor(bucket, client, HOUR, health.Config())
     calls = []
 
@@ -699,7 +731,7 @@ def test_later_hour_retries_original_failed_outbox_without_copying_events(dag_mo
     with pytest.raises(RuntimeError, match="pending"):
         dag_module.retry_alert_outbox(bucket, HOUR, "https://example.test/health")
     later = HOUR + timedelta(hours=2)
-    bucket.put(health.hour_path("hourly", later), summary(later, ratio=0.2, vehicles=20, lines=2))
+    bucket.put(health.hour_path("hourly", later), failing(later))
     current = dag_module.run_monitor(bucket, client, later, health.Config())
     assert current["events"] == []
     monkeypatch.setattr(
@@ -718,7 +750,7 @@ def test_later_hour_retries_original_failed_outbox_without_copying_events(dag_mo
 
 def test_disabled_webhook_log_ack_is_terminal_and_bounded(dag_module: Any, monkeypatch: Any, caplog: Any) -> None:
     bucket = FakeBucket()
-    report = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    report = health.evaluate(HOUR, failing(), [])
     path = health.hour_path("reports", HOUR)
     bucket.put(path, report)
     dag_module.retry_alert_outbox(bucket, HOUR, "")
@@ -743,7 +775,7 @@ def test_outbox_horizon_warns_without_deleting_pending_and_supports_manual_repla
 ) -> None:
     bucket = FakeBucket()
     current_hour = HOUR + timedelta(hours=dag_module.OUTBOX_RETRY_HOURS - 1)
-    original = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    original = health.evaluate(HOUR, failing(), [])
     original_path = health.hour_path("reports", HOUR)
     bucket.put(original_path, original)
     bucket.put(health.hour_path("reports", current_hour), health.evaluate(current_hour, summary(current_hour), []))
@@ -767,9 +799,9 @@ def test_outbox_horizon_warns_without_deleting_pending_and_supports_manual_repla
 def test_gap_beyond_outbox_horizon_warns_about_older_manual_handling(dag_module: Any, caplog: Any) -> None:
     bucket = FakeBucket()
     older_hour = HOUR - timedelta(hours=60)
-    older = health.evaluate(older_hour, summary(older_hour, ratio=0.2, vehicles=20, lines=2), [])
+    older = health.evaluate(older_hour, failing(older_hour), [])
     bucket.put(health.hour_path("reports", older_hour), older)
-    bucket.put(dag_module.SNAPSHOT_PATH, health.snapshot(older))
+    bucket.put(dag_module.HISTORY_PATH, history_for(older))
     restored, gap = dag_module.preceding_report(bucket, HOUR)
     assert gap
     assert row(restored)["state"]["active"] == row(older)["state"]["active"]
@@ -779,7 +811,7 @@ def test_gap_beyond_outbox_horizon_warns_about_older_manual_handling(dag_module:
 
 def test_legacy_outbox_events_without_logged_at_still_replay(dag_module: Any, monkeypatch: Any) -> None:
     bucket = FakeBucket()
-    report = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    report = health.evaluate(HOUR, failing(), [])
     for entry in report["events"]:
         entry.pop("logged_at")
     bucket.put(health.hour_path("reports", HOUR), report)
@@ -793,7 +825,7 @@ def test_outbox_deduplicates_shared_event_ids_across_reports(
     dag_module: Any, monkeypatch: Any, already_acknowledged: bool
 ) -> None:
     bucket = FakeBucket()
-    original = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    original = health.evaluate(HOUR, failing(), [])
     later = HOUR + timedelta(hours=1)
     duplicate = health.evaluate(later, summary(later), [])
     duplicate["events"] = copy.deepcopy(original["events"])
@@ -818,7 +850,7 @@ def test_outbox_deduplicates_shared_event_ids_across_reports(
 
 def test_duplicate_event_ids_in_one_report_rejected(dag_module: Any) -> None:
     bucket = FakeBucket()
-    report = health.evaluate(HOUR, summary(ratio=0.2, vehicles=20, lines=2), [])
+    report = health.evaluate(HOUR, failing(), [])
     report["events"].append(copy.deepcopy(report["events"][0]))
     bucket.put(health.hour_path("reports", HOUR), report)
     with pytest.raises(ValueError, match="duplicate event_id"):
@@ -861,7 +893,7 @@ def active_fleet_bucket(dag_module: Any) -> tuple[FakeBucket, dict[str, Any]]:
     report = health.evaluate(previous, summary(previous, vehicles=1, lines=1), samples(previous))
     bucket.put(health.hour_path("reports", previous), report)
     bucket.put(health.hour_path("hourly", previous), summary(previous, vehicles=1, lines=1))
-    bucket.put(dag_module.SNAPSHOT_PATH, health.snapshot(report))
+    bucket.put(dag_module.HISTORY_PATH, history_for(report))
     bucket.put(health.hour_path("hourly", HOUR), summary())
     return bucket, report
 
@@ -909,7 +941,7 @@ def test_operator_rebaseline_rejects_backfill_even_if_newer_durable_not_publishe
     future = HOUR + timedelta(hours=1)
     report = health.evaluate(future, summary(future), [])
     if published:
-        bucket.put(dag_module.SNAPSHOT_PATH, health.snapshot(report))
+        bucket.put(dag_module.HISTORY_PATH, history_for(report))
     else:
         bucket.put(health.hour_path("reports", future), report)
     with pytest.raises(ValueError, match="chronological"):
@@ -954,9 +986,13 @@ def test_rebaseline_epoch_survives_durable_gap_and_excludes_old_baseline(dag_mod
     reset = dag_module.run_monitor(bucket, FakeClient(), HOUR, health.Config(), reset_modes=("bus",))
     assert row(reset)["baseline_samples"] == 0
     assert row(reset)["status"] == "warming_up"
+    assert row(reset, "tram")["baseline_samples"] == 3
     later = HOUR + timedelta(hours=2)
+    seed_history(bucket, later)
     bucket.put(health.hour_path("hourly", later), summary(later))
     resumed = dag_module.run_monitor(bucket, FakeClient(), later, health.Config())
+    assert row(resumed)["baseline_samples"] == 0
+    assert row(resumed, "tram")["baseline_samples"] == 3
     assert row(resumed)["state"]["baseline_reset_at"] == health.iso(HOUR)
     assert row(resumed)["state"]["active"] is None
     assert resumed["events"] == []

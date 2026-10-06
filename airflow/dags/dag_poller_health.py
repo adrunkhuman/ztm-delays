@@ -2,14 +2,16 @@
 
 Environment controls: POLLER_HEALTH_DURATION_MINUTES (15),
 POLLER_HEALTH_COVERAGE_FRACTION (0.8 minimum), POLLER_HEALTH_THRESHOLD (0.5),
-POLLER_HEALTH_LOOKBACK_DAYS (28, bounded to 21..28), and optional
-POLLER_HEALTH_WEBHOOK_URL (HTTPS). Baselines require three same-weekday samples.
+POLLER_HEALTH_LOOKBACK_DAYS (28, bounded to 21..28), POLLER_HEALTH_MINIMUM_FLEET
+(20), and optional POLLER_HEALTH_WEBHOOK_URL (HTTPS). Baselines require three
+same-weekday samples per minute; raw-GPS seeds (dag_poller_health_seed) stand in
+for summaries from before collection began.
 Source paths: POLLER_HEALTH_GCS_PREFIX (health/poller/hourly) and
 POLLER_HEARTBEAT_GCS_PATH (health/poller/latest.json), both stripped and nonempty.
 
 Hourly reports are the durable evaluation and alert outbox. Retries reuse them,
-not a mutable wall-clock latest snapshot. Warehouse/snapshot publication and alert
-delivery are parallel tasks after persistence; BigQuery failure cannot gate alerts.
+not a mutable wall-clock latest snapshot. Warehouse rows, public history and alert
+delivery are parallel tasks after persistence; BigQuery failure gates neither.
 Missing/insufficient telemetry has separate monitoring_gap/monitoring_restored
 transitions, never a claim of zero feed or fleet recovery. Alert delivery is at-least-once; the
 receiver must deduplicate event_id. delivered_at acknowledges only successful
@@ -30,9 +32,13 @@ After inspecting recent metrics, an operator may use DAG run conf
 Only active low_fleet/no_accepted incidents can be administratively rebaselined.
 A rebaseline event, not recovery, records the action; a private per-mode epoch
 excludes pre-reset baseline samples. Matching frozen-action retries resume safely;
-other existing reports/backfills reject reset requests. No historical report is rewritten.
-Configure bucket lifecycle retention: hourly summaries >=28 days, reports >=90
-days. Do not apply archive expiry to feed-status.json or latest.json.
+other existing reports/backfills reject reset requests. Rebaselining rewrites no
+historical report. Acknowledging a pending alert in a version 1 report (from the
+retired stale-share rules) saves that report as version 2, dropping its hourly
+baseline; incidents and events are kept.
+Publication writes the public status-page history (poller_health_public) after
+each evaluation. Configure bucket lifecycle retention: hourly summaries >=28
+days, reports >=90 days. Do not expire latest.json or anything under public/.
 """
 
 from __future__ import annotations
@@ -48,26 +54,34 @@ from urllib.parse import urlsplit
 
 import requests
 from airflow.sdk import DAG, get_current_context, task
-from google.api_core.exceptions import NotFound, PreconditionFailed
+from google.api_core.exceptions import PreconditionFailed
 from google.cloud import bigquery, storage
 from poller_health import (
     METRIC_FIELDS,
     MODES,
     REPORT_MAX_BYTES,
-    SUMMARY_MAX_BYTES,
+    SEED_MAX_BYTES,
     Config,
+    baseline,
     comparable_hours,
     completed_hour,
-    decode_json,
     evaluate,
     hour_path,
     iso,
     snapshot,
     timestamp,
+    upgrade_report,
     validate_report,
     validate_reset_modes,
-    validate_summary,
+    validate_seed,
 )
+from poller_health_gcs import (
+    collection_start,
+    first_collection_start,
+    read_object,
+    read_summary,
+)
+from poller_health_public import HISTORY_HOURS, HISTORY_MAX_BYTES, HISTORY_PATH, LOOKAHEAD_HOURS, feed_history
 from ztm_airflow_common import (
     AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
     BIGQUERY_LOCATION,
@@ -79,10 +93,6 @@ from ztm_airflow_common import (
 
 LOGGER = logging.getLogger(__name__)
 RAW_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_poller_hourly_health"
-SNAPSHOT_PATH = "health/poller/feed-status.json"
-HEARTBEAT_PATH = "health/poller/latest.json"
-SUMMARY_PREFIX = "health/poller/hourly"
-HEARTBEAT_MAX_BYTES = 16 * 1024
 RAW_RETENTION_DAYS = 90
 OUTBOX_RETRY_HOURS = 48
 REPORT_PREFIX = "health/poller/reports/"
@@ -111,61 +121,51 @@ def config_from_env() -> Config:
         coverage_fraction=float(os.getenv("POLLER_HEALTH_COVERAGE_FRACTION", "0.8")),
         threshold=float(os.getenv("POLLER_HEALTH_THRESHOLD", "0.5")),
         lookback_days=int(os.getenv("POLLER_HEALTH_LOOKBACK_DAYS", "28")),
+        minimum_fleet=int(os.getenv("POLLER_HEALTH_MINIMUM_FLEET", "20")),
     )
 
 
-def configured_path(name: str, default: str) -> str:
-    """Normalize object keys/prefixes, failing explicitly for empty configuration."""
-    path = os.getenv(name, default).strip().strip("/")
-    if not path.strip():
-        raise ValueError(f"{name} must not be empty")
-    return path
-
-
-def summary_path(hour: datetime) -> str:
-    """Use the collector's configurable prefix with the unchanged UTC hour suffix."""
-    prefix = configured_path("POLLER_HEALTH_GCS_PREFIX", SUMMARY_PREFIX)
-    return f"{prefix}/{hour.astimezone(UTC):%Y-%m-%d/%H}.json"
-
-
-def read_object(bucket: storage.Bucket, path: str, limit: int) -> tuple[dict[str, Any] | None, int]:
-    """Read only a bounded JSON object with a generation-consistent byte range."""
-    blob = bucket.blob(path)
-    try:
-        blob.reload()
-        if blob.size is None or blob.size > limit:
-            raise ValueError("health object too large or missing size")
-        data = blob.download_as_bytes(start=0, end=limit, if_generation_match=blob.generation, raw_download=True)
-    except NotFound:
-        return None, 0
-    return decode_json(data, limit), int(blob.generation)
-
-
-def write_object(bucket: storage.Bucket, path: str, data: dict[str, Any], generation: int) -> int:
+def write_object(  # noqa: PLR0913 - bounds and cache policy are per object
+    bucket: storage.Bucket,
+    path: str,
+    data: dict[str, Any],
+    generation: int,
+    *,
+    limit: int = REPORT_MAX_BYTES,
+    cache_control: str | None = None,
+) -> int:
     """Generation guards protect report/outbox updates from overlapping manual runs."""
-    payload = json.dumps(data, sort_keys=True, allow_nan=False)
-    if len(payload.encode()) > REPORT_MAX_BYTES:
+    payload = json.dumps(data, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    if len(payload.encode()) > limit:
         raise ValueError("evaluated report exceeds bound")
     blob = bucket.blob(path)
+    if cache_control:
+        blob.cache_control = cache_control
     blob.upload_from_string(payload, content_type="application/json", if_generation_match=generation)
     return int(blob.generation)
 
 
-def read_summary(bucket: storage.Bucket, hour: datetime) -> tuple[dict[str, Any] | None, str]:
-    """Malformed telemetry is a monitoring gap, never evidence of zero service."""
-    path = summary_path(hour)
+def read_seed(bucket: storage.Bucket, hour: datetime) -> dict[str, Any] | None:
+    """Pre-collection baseline evidence; a bad seed is skipped, not trusted."""
     try:
-        data, _ = read_object(bucket, path, SUMMARY_MAX_BYTES)
-        return (validate_summary(data, hour), "") if data is not None else (None, "summary_absent")
+        data, _ = read_object(bucket, hour_path("baseline-seed", hour), SEED_MAX_BYTES)
+        return validate_seed(data, hour) if data is not None else None
     except ValueError:
-        LOGGER.warning("Invalid poller summary for %s", iso(hour))
-        return None, "invalid_summary"
+        LOGGER.warning("Invalid poller baseline seed for %s", iso(hour))
+        return None
+
+
+def read_sample(bucket: storage.Bucket, hour: datetime) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return (summary, sample): the summary when collected, else its raw-GPS seed."""
+    summary, _ = read_summary(bucket, hour)
+    return summary, summary or read_seed(bucket, hour)
 
 
 def read_report(bucket: storage.Bucket, hour: datetime) -> tuple[dict[str, Any] | None, int]:
     """Reject incompatible/corrupt persisted state rather than invent transitions."""
     report, generation = read_object(bucket, hour_path("reports", hour), REPORT_MAX_BYTES)
     if report is not None:
+        report = upgrade_report(report)
         validate_report(report, hour)
     return report, generation
 
@@ -249,35 +249,6 @@ def preceding_report(bucket: storage.Bucket, hour: datetime) -> tuple[dict[str, 
     return restored, True
 
 
-def collection_start(bucket: storage.Bucket) -> str | None:
-    """Older heartbeats have no collection marker; absence is not an outage."""
-    path = configured_path("POLLER_HEARTBEAT_GCS_PATH", HEARTBEAT_PATH)
-    try:
-        heartbeat, _ = read_object(bucket, path, HEARTBEAT_MAX_BYTES)
-        value = heartbeat.get("collection_started_at") if heartbeat else None
-        return iso(timestamp(value)) if value else None
-    except ValueError:
-        LOGGER.warning("Invalid poller collection marker")
-        return None
-
-
-def first_collection_start(bucket: storage.Bucket) -> str | None:
-    """Rollout fallback: inspect one retained summary, never list the GPS archive."""
-    prefix = configured_path("POLLER_HEALTH_GCS_PREFIX", SUMMARY_PREFIX) + "/"
-    first = next(iter(bucket.list_blobs(prefix=prefix, max_results=1)), None)
-    if first is None or not first.name.startswith(prefix):
-        return None
-    suffix = first.name.removeprefix(prefix)
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}/\d{2}\.json", suffix):
-        return None
-    try:
-        hour = datetime.strptime(suffix, "%Y-%m-%d/%H.json").replace(tzinfo=UTC)
-    except ValueError:
-        return None
-    source, _ = read_summary(bucket, hour)
-    return source["collection_started_at"] if source else None
-
-
 def persist_rows(client: bigquery.Client, report: dict[str, Any]) -> None:
     """Replace just two rows for one hour transactionally; reasons/intervals are JSON STRINGs."""
     if not re.fullmatch(r"[a-zA-Z0-9_-]+\.[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+", RAW_TABLE):
@@ -322,12 +293,44 @@ def persist_rows(client: bigquery.Client, report: dict[str, Any]) -> None:
     client.query(query, job_config=job_config, location=BIGQUERY_LOCATION).result()
 
 
-def publish_snapshot(bucket: storage.Bucket, report: dict[str, Any]) -> None:
-    """Backfills must not regress the public snapshot or overwrite concurrent writes."""
-    latest, generation = read_object(bucket, SNAPSHOT_PATH, REPORT_MAX_BYTES)
-    if latest and timestamp(latest["hour_start"]) > timestamp(report["hour_start"]):
+def lookahead_baselines(
+    bucket: storage.Bucket, report: dict[str, Any], config: Config
+) -> dict[str, list[dict[str, Any]]]:
+    """Baselines for the hours after the evaluated one, so live readers know "usual now"."""
+    hour = timestamp(report["hour_start"])
+    result: dict[str, list[dict[str, Any]]] = {mode: [] for mode in MODES}
+    for offset in range(1, LOOKAHEAD_HOURS + 1):
+        candidates = comparable_hours(hour + timedelta(hours=offset), config)
+        samples = [sample for candidate in candidates if (sample := read_sample(bucket, candidate)[1])]
+        for mode in MODES:
+            reset_at = report["vehicle_types"][mode]["state"].get("baseline_reset_at")
+            result[mode].append(baseline(samples, mode, config, reset_at=reset_at))
+    return result
+
+
+def optional_report(bucket: storage.Bucket, hour: datetime) -> dict[str, Any] | None:
+    """Chart context only: one corrupt past report shows as a gap instead of blocking a day of publication."""
+    try:
+        return read_report(bucket, hour)[0]
+    except ValueError:
+        LOGGER.warning("Invalid poller report for %s; shown as unknown in public history", iso(hour))
+        return None
+
+
+def publish_history(bucket: storage.Bucket, report: dict[str, Any], config: Config) -> None:
+    """Backfills must not regress the public history or overwrite concurrent writes."""
+    latest, generation = read_object(bucket, HISTORY_PATH, HISTORY_MAX_BYTES)
+    hour = timestamp(report["hour_start"])
+    try:
+        newer = latest is not None and timestamp(latest.get("hour_start")) > hour
+    except ValueError:
+        newer = False  # A corrupt public object is replaced, not trusted.
+    if newer:
         return
-    write_object(bucket, SNAPSHOT_PATH, snapshot(report), generation)
+    previous = [optional_report(bucket, hour - timedelta(hours=offset)) for offset in range(HISTORY_HOURS - 1, 0, -1)]
+    history = feed_history(report, previous, lookahead_baselines(bucket, report, config), config)
+    # Public readers poll this object; GCS must not serve a cached older copy.
+    write_object(bucket, HISTORY_PATH, history, generation, limit=HISTORY_MAX_BYTES, cache_control="no-cache")
 
 
 def evaluate_report(
@@ -349,12 +352,11 @@ def evaluate_report(
     if heartbeat_start:
         collection_markers.append(heartbeat_start)
     for candidate in comparable_hours(hour, config):
-        historical, _ = read_summary(bucket, candidate)
-        historical_report, _ = read_report(bucket, candidate)
+        historical, sample = read_sample(bucket, candidate)
         if historical:
             collection_markers.append(historical["collection_started_at"])
-        if historical and historical_report:
-            samples.append((historical, historical_report))
+        if sample:
+            samples.append(sample)
     known_start = bool(
         collection_markers
         or summary
@@ -384,10 +386,10 @@ def evaluate_report(
 
 def ensure_chronological_reset(bucket: storage.Bucket, hour: datetime) -> None:
     """An operator cannot reset an older/publicly frozen slot or supersede newer durable work."""
-    latest, _ = read_object(bucket, SNAPSHOT_PATH, REPORT_MAX_BYTES)
+    latest, _ = read_object(bucket, HISTORY_PATH, HISTORY_MAX_BYTES)
     if latest is not None:
         if type(latest.get("version")) is not int or latest["version"] != 1:
-            raise ValueError("invalid poller latest snapshot version")
+            raise ValueError("invalid poller public history version")
         if timestamp(latest.get("hour_start")) >= hour:
             raise ValueError("rebaseline requires a new chronological hour; published backfills are forbidden")
     # One name suffices to reject any durable report at/after the requested hour,
@@ -450,7 +452,7 @@ def run_monitor(
     """Evaluate and publish synchronously for operator replay; DAG tasks run independently."""
     report = freeze_report(bucket, hour, config, reset_modes=reset_modes)
     persist_rows(client, report)
-    publish_snapshot(bucket, report)
+    publish_history(bucket, report, config)
     return report
 
 
@@ -539,6 +541,14 @@ def retry_alert_outbox(bucket: storage.Bucket, hour: datetime, webhook_url: str)
         remember_acknowledgements(report, known)
 
 
+def persisted_report(bucket: storage.Bucket, hour_start: str) -> dict[str, Any]:
+    """Publication tasks only ever read the frozen evaluation."""
+    report, _ = read_report(bucket, timestamp(hour_start))
+    if report is None:
+        raise ValueError("publication requires a persisted report")
+    return report
+
+
 def reset_modes_from_context(context: dict[str, Any]) -> tuple[str, ...]:
     """Only explicit DAG-run JSON list configuration requests operator intervention."""
     conf = getattr(context.get("dag_run"), "conf", None)
@@ -571,14 +581,16 @@ with DAG(
         return iso(hour)
 
     @task
-    def publish_hour(hour_start: str) -> None:
-        """Publish frozen warehouse rows and the serving snapshot without gating alerts."""
+    def persist_hour(hour_start: str) -> None:
+        """Persist frozen warehouse rows; a BigQuery failure gates neither alerts nor the status page."""
         bucket = storage.Client(project=GCP_PROJECT).bucket(GCS_BUCKET)
-        report, _ = read_report(bucket, timestamp(hour_start))
-        if report is None:
-            raise ValueError("publication requires a persisted report")
-        persist_rows(bigquery.Client(project=GCP_PROJECT), report)
-        publish_snapshot(bucket, report)
+        persist_rows(bigquery.Client(project=GCP_PROJECT), persisted_report(bucket, hour_start))
+
+    @task
+    def publish_hour(hour_start: str) -> None:
+        """Publish the public status-page history."""
+        bucket = storage.Client(project=GCP_PROJECT).bucket(GCS_BUCKET)
+        publish_history(bucket, persisted_report(bucket, hour_start), config_from_env())
 
     @task
     def alert_transitions(hour_start: str) -> None:
@@ -587,5 +599,6 @@ with DAG(
         retry_alert_outbox(bucket, timestamp(hour_start), os.getenv("POLLER_HEALTH_WEBHOOK_URL", "").strip())
 
     evaluated_hour = evaluate_hour()
+    persist_hour(evaluated_hour)
     publish_hour(evaluated_hour)
     alert_transitions(evaluated_hour)
