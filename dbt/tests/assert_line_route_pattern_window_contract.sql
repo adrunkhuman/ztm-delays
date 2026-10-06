@@ -70,7 +70,9 @@ violations as (
         or has_min_sample != (arrival_count >= 3)
         or (arrival_count = 0 and (
             mean_delay_seconds is not null or median_delay_seconds is not null or p90_delay_seconds is not null
-            or early_rate is not null or on_time_rate is not null or late_rate is not null or delay_histogram is not null
+            or early_rate is not null or on_time_rate is not null or late_rate is not null
+            -- BigQuery cannot store a NULL array; an unobserved call has an empty histogram.
+            or array_length(delay_histogram) > 0
         ))
 )
 
