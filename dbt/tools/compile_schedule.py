@@ -13,6 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from dbt.adapters.bigquery import BigQueryAdapter
 from dbt.cli.main import dbtRunner
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import bigquery
@@ -62,6 +63,8 @@ def main() -> None:
         client = bigquery.Client(project=project, credentials=AnonymousCredentials())
         with (
             patch("dbt.adapters.bigquery.connections.create_bigquery_client", return_value=client),
+            # Offline compilation models an empty target, including is_incremental() checks.
+            patch.object(BigQueryAdapter, "get_relation", new=lambda *_args, **_kwargs: None),
             patch("socket.socket.connect", side_effect=RuntimeError("Offline compile forbids network access")),
             patch("socket.socket.connect_ex", side_effect=RuntimeError("Offline compile forbids network access")),
         ):

@@ -112,6 +112,7 @@ def validate_duckdb(  # noqa: PLR0913
             """,
         )
         _validate_pipeline_status(connection)
+        _validate_route_pattern_ids(connection)
 
         available_dates = {
             str(row[0]) for row in connection.execute("select service_date from dim_serving_date").fetchall()
@@ -119,6 +120,7 @@ def validate_duckdb(  # noqa: PLR0913
         latest_row = connection.execute("select max(service_date)::varchar from dim_serving_date").fetchone()
         latest_date = str(latest_row[0]) if latest_row and latest_row[0] is not None else None
         checked_dates = tuple(dict.fromkeys((*requested_dates, *((latest_date,) if latest_date else ()))))
+        _validate_route_patterns(connection, checked_dates)
         fact_dates = tuple(value for value in checked_dates if value in available_dates)
         if fact_dates:
             _validate_trip_event_relationships(connection, fact_dates)
@@ -128,8 +130,47 @@ def validate_duckdb(  # noqa: PLR0913
 
 
 def _validate_required_columns(connection: Connection) -> None:
+    pattern_key_columns = {
+        "source_end_date",
+        "window_type",
+        "window_key",
+        "mode",
+        "line",
+        "direction_id",
+        "trip_headsign",
+        "route_pattern_id",
+    }
     required = {
         "dim_serving_date": {"service_date", "service_date_key"},
+        "mart_line_course_window": pattern_key_columns
+        | {
+            "pattern_status",
+            "origin_stop_name",
+            "destination_stop_name",
+            "stop_call_count",
+            "observed_service_dates",
+            "trip_count",
+        },
+        "mart_line_course_stop_window": pattern_key_columns
+        | {
+            "call_position",
+            "display_rank",
+            "stop_group_id",
+            "stop_post_codes",
+            "arrival_count",
+            "mean_delay_seconds",
+            "median_delay_seconds",
+            "p90_delay_seconds",
+            "delay_spread_seconds",
+            "early_count",
+            "on_time_count",
+            "late_count",
+            "early_rate",
+            "on_time_rate",
+            "late_rate",
+            "delay_histogram",
+            "has_min_sample",
+        },
         "mart_mode_window_summary": {"source_end_date", "window_type", "mode"},
         "mart_pipeline_status": {
             "service_date",
@@ -184,6 +225,141 @@ def _validate_required_columns(connection: Connection) -> None:
         missing = sorted(required_columns - actual_columns)
         if missing:
             raise SemanticValidationError(f"required_columns:{table_name}: missing {', '.join(missing)}")
+
+
+def _validate_route_pattern_ids(connection: Connection) -> None:
+    # The website can select any retained partition, not just the dates refreshed by this export.
+    expected_types = {
+        ("mart_line_course_window", "route_pattern_id"): "VARCHAR",
+        ("mart_line_course_window", "observed_service_dates"): "DATE[]",
+        ("mart_line_course_stop_window", "route_pattern_id"): "VARCHAR",
+        ("mart_line_course_stop_window", "stop_post_codes"): "VARCHAR[]",
+    }
+    for (table_name, column_name), expected_type in expected_types.items():
+        row = connection.execute(
+            "select data_type from information_schema.columns where table_schema = 'main' "
+            "and table_name = ? and column_name = ?",
+            [table_name, column_name],
+        ).fetchone()
+        if row is None or row[0] != expected_type:
+            raise SemanticValidationError(
+                f"route_pattern_column_type:{table_name}.{column_name}: expected {expected_type}"
+            )
+    for table_name in ("mart_line_course_window", "mart_line_course_stop_window"):
+        _require_zero(
+            connection,
+            f"route_pattern_id:{table_name}",
+            f"select count(*) from {table_name} where route_pattern_id is null or trim(route_pattern_id) = ''",  # noqa: S608
+        )
+
+
+def _validate_route_patterns(connection: Connection, checked_dates: tuple[str, ...]) -> None:
+    parameters: list[object] = [list(checked_dates)]
+    for table_name, extra_key in (("mart_line_course_window", ""), ("mart_line_course_stop_window", ", call_position")):
+        _require_zero(
+            connection,
+            f"route_pattern_unique_key:{table_name}",
+            f"""
+            select count(*) from (
+                select source_end_date, window_type, window_key, mode, line, direction_id,
+                    trip_headsign, route_pattern_id{extra_key}
+                from {table_name}
+                where source_end_date in (select unnest(?::varchar[])::date)
+                group by all having count(*) != 1
+            )
+            """,  # noqa: S608
+            parameters,
+        )
+    _require_zero(
+        connection,
+        "route_pattern_metadata",
+        """
+        select count(*) from mart_line_course_window
+        where source_end_date in (select unnest(?::varchar[])::date)
+          and (
+            pattern_status is null or pattern_status not in ('classified', 'unclassified')
+            or (pattern_status = 'unclassified') != (route_pattern_id = 'unclassified')
+            or trip_count is null or trip_count <= 0
+            or observed_service_dates is null or len(observed_service_dates) = 0
+            or len(observed_service_dates) != len(list_distinct(observed_service_dates))
+            or list_max(observed_service_dates) > source_end_date
+            or (window_type = 'day' and observed_service_dates != [source_end_date])
+            or (pattern_status = 'classified' and (
+                stop_call_count is null or stop_call_count <= 0 or stop_call_count != trunc(stop_call_count)
+                or origin_stop_name is null or destination_stop_name is null
+            ))
+            or (pattern_status = 'unclassified' and (
+                origin_stop_name is not null or destination_stop_name is not null
+                or coalesce(stop_call_count, 0) != 0
+            ))
+          )
+        """,
+        parameters,
+    )
+    _require_zero(
+        connection,
+        "route_pattern_stop_contract",
+        """
+        select count(*) from mart_line_course_stop_window
+        where source_end_date in (select unnest(?::varchar[])::date)
+          and (
+            call_position is null or call_position < 1 or call_position != trunc(call_position)
+            or display_rank is null or display_rank != call_position
+            or stop_group_id is null
+            or stop_post_codes is null or len(stop_post_codes) = 0
+            or len(stop_post_codes) != len(list_distinct(stop_post_codes))
+            or list_contains(stop_post_codes, '')
+            or arrival_count is null or arrival_count < 0 or arrival_count != trunc(arrival_count)
+            or has_min_sample is null or has_min_sample != (arrival_count >= 3)
+            or coalesce(early_count, 0) + coalesce(on_time_count, 0) + coalesce(late_count, 0) != arrival_count
+            or (arrival_count > 0 and (
+                mean_delay_seconds is null or median_delay_seconds is null or p90_delay_seconds is null
+            ))
+            or (delay_histogram is not null
+                and coalesce(list_sum(list_transform(delay_histogram, bucket -> bucket.n)), 0) != arrival_count)
+            or (arrival_count = 0 and (
+                mean_delay_seconds is not null or median_delay_seconds is not null
+                or p90_delay_seconds is not null or delay_spread_seconds is not null
+                or early_rate is not null or on_time_rate is not null or late_rate is not null
+                or delay_histogram is not null
+                or coalesce(early_count, 0) != 0 or coalesce(on_time_count, 0) != 0 or coalesce(late_count, 0) != 0
+            ))
+          )
+        """,
+        parameters,
+    )
+    _require_zero(
+        connection,
+        "route_pattern_calls",
+        """
+        with courses as (
+            select * from mart_line_course_window
+            where source_end_date in (select unnest(?::varchar[])::date)
+        ), calls as (
+            select source_end_date, window_type, window_key, mode, line, direction_id, trip_headsign,
+                route_pattern_id, count(*) as call_count, min(call_position) as first_call,
+                max(call_position) as last_call
+            from mart_line_course_stop_window
+            where source_end_date in (select unnest(?::varchar[])::date)
+            group by all
+        )
+        select count(*) from courses as course
+        full outer join calls as call
+          on course.source_end_date = call.source_end_date
+         and course.window_type = call.window_type and course.window_key = call.window_key
+         and course.mode = call.mode and course.line = call.line
+         and course.direction_id is not distinct from call.direction_id
+         and course.trip_headsign is not distinct from call.trip_headsign
+         and course.route_pattern_id = call.route_pattern_id
+        where course.route_pattern_id is null
+           or (course.pattern_status = 'unclassified' and call.call_count is not null)
+           or (course.pattern_status = 'classified' and (
+               coalesce(call.call_count, 0) != course.stop_call_count
+               or call.first_call != 1 or call.last_call != course.stop_call_count
+           ))
+        """,
+        [*parameters, *parameters],
+    )
 
 
 def _validate_pipeline_status(connection: Connection) -> None:

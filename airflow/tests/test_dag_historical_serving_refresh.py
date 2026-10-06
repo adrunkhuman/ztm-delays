@@ -62,6 +62,9 @@ def test_refresh_runs_partition_models_once_per_day_then_exports_once() -> None:
     assert "{% for day in dag_run.conf['days'] %}" in command
     assert refresh.SERVING_UNIVERSE_MODELS in command
     assert refresh.SERVING_PARTITION_MODELS in command
+    models = refresh.SERVING_PARTITION_MODELS.split()
+    assert models.count("int_serving_trip_route_pattern") == 1
+    assert models.index("int_serving_trip_route_pattern") == models.index("int_serving_trip_execution") + 1
     assert command.count(refresh.SERVING_FULL_MODELS) == 2
     assert "DBT_BIGQUERY_MAXIMUM_BYTES_BILLED" in command
     rendered = Template(command).render(

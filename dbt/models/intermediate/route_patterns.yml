@@ -1,0 +1,108 @@
+version: 2
+
+models:
+  - name: int_serving_trip_route_pattern
+    description: >-
+      One route-pattern mapping per complete canonical execution. Identity is the mode,
+      line, direction and ordered scheduled passenger stop-group occurrences, independent
+      of observations, snapshot IDs, posts, labels, times and raw sequence numbering.
+      Repeated groups are preserved. Unsettled, unknown or missing schedule semantics
+      produce an explicit unclassified mapping with no fabricated itinerary.
+    columns:
+      - name: route_pattern_id
+        description: SHA-256 of the normalized itinerary, or the unclassified sentinel.
+      - name: stops
+        description: Ordered passenger calls with dense call_position and original stop_sequence/post lineage.
+      - name: pattern_status
+        description: Classified or unclassified; only classified mappings contain calls.
+
+unit_tests:
+  - name: route_patterns_use_scheduled_occurrences_and_ignore_snapshot_post_sequence_changes
+    model: int_serving_trip_route_pattern
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+      macros:
+        is_incremental: false
+    given:
+      - input: ref('int_serving_trip_execution')
+        format: sql
+        rows: |
+          select t.snapshot as gtfs_snapshot_id, date '2026-01-15' as gps_date,
+            date '2026-01-15' as service_date, t.trip_id, '1001' as vehicle_number,
+            '143' as line, 'bus' as mode, '143' as route_short_name, 0 as direction_id,
+            'Charlie' as trip_headsign, 'version' as schedule_version_id, 'complete' as trip_quality
+          from unnest([
+            struct('snapshot-a' as snapshot, 'full-a' as trip_id),
+            struct('snapshot-b', 'full-b'), struct('snapshot-a', 'short'),
+            struct('snapshot-a', 'alternate'), struct('snapshot-a', 'missing'),
+            struct('snapshot-a', 'unsettled'), struct('snapshot-a', 'unknown')
+          ]) t
+      - input: ref('fct_expected_stop_event')
+        format: sql
+        rows: |
+          with calls as (
+            select trip_id, if(trip_id = 'full-b', 'snapshot-b', 'snapshot-a') as gtfs_snapshot_id,
+              stop_offset, stop_group_id
+            from unnest(['full-a', 'full-b', 'short', 'alternate', 'unsettled', 'unknown']) as trip_id
+            cross join unnest(case trip_id
+              when 'short' then ['B', 'C'] when 'alternate' then ['A', 'X', 'C']
+              when 'unknown' then ['A', 'C'] else ['A', 'B', 'B', 'C'] end) stop_group_id
+              with offset as stop_offset
+          )
+          select gtfs_snapshot_id, date '2026-01-15' as gps_date,
+            date '2026-01-15' as service_date, trip_id, '1001' as vehicle_number,
+            if(trip_id = 'full-b', 10 * stop_offset + 7, stop_offset + 1) as stop_sequence,
+            stop_group_id, concat(stop_group_id, if(trip_id = 'full-b', '02', '01')) as stop_id,
+            if(trip_id = 'full-b', '02', '01') as stop_post_code,
+            case stop_group_id when 'A' then 'Alpha' when 'B' then 'Bravo'
+              when 'C' then 'Charlie' else 'X-ray' end as stop_name,
+            trip_id != 'unsettled' as are_passenger_boundaries_settled,
+            if(trip_id = 'unknown' and stop_offset = 0, 'unknown', 'passenger') as stop_execution_class,
+            trip_id != 'unsettled' and not (trip_id = 'unknown' and stop_offset = 0) as is_passenger_stop
+          from calls
+          union all
+          select 'snapshot-a', date '2026-01-15', date '2026-01-15', 'full-a', '1001',
+            0, 'DEPOT', 'DEPOT01', '01', 'Depot', true, 'technical_prefix', false
+    expect:
+      rows:
+        - {trip_id: full-a, pattern_status: classified, stop_call_count: 4, route_pattern_id: '3640cc22be206fa2c9c0e7065ed62def2a762a7a3968bcedefdcc94e7121f93e'}
+        - {trip_id: full-b, pattern_status: classified, stop_call_count: 4, route_pattern_id: '3640cc22be206fa2c9c0e7065ed62def2a762a7a3968bcedefdcc94e7121f93e'}
+        - {trip_id: short, pattern_status: classified, stop_call_count: 2, route_pattern_id: 'ab0b033ba2d3f9cd1428807edc581c722cfe86397c6345d69aafaa43aae03e18'}
+        - {trip_id: alternate, pattern_status: classified, stop_call_count: 3, route_pattern_id: 'ad00289c5c100515069256bdcb1f9bf4ab0779ad59a0a39e34334500435847d6'}
+        - {trip_id: missing, pattern_status: unclassified, stop_call_count: 0, route_pattern_id: unclassified}
+        - {trip_id: unsettled, pattern_status: unclassified, stop_call_count: 0, route_pattern_id: unclassified}
+        - {trip_id: unknown, pattern_status: unclassified, stop_call_count: 0, route_pattern_id: unclassified}
+
+  - name: route_pattern_incremental_mapping_only_replaces_processing_service_date
+    model: int_serving_trip_route_pattern
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+      macros:
+        is_incremental: true
+    given:
+      - input: ref('int_serving_trip_execution')
+        format: sql
+        rows: |
+          select 'snapshot' as gtfs_snapshot_id, date '2026-01-16' as gps_date,
+            service_date, 'overnight' as trip_id, '1001' as vehicle_number,
+            '143' as line, 'bus' as mode, '143' as route_short_name, 0 as direction_id,
+            'Charlie' as trip_headsign, 'version' as schedule_version_id, 'complete' as trip_quality
+          from unnest([date '2026-01-14', date '2026-01-15', date '2026-01-16']) as service_date
+      - input: ref('fct_expected_stop_event')
+        format: sql
+        rows: |
+          select 'snapshot' as gtfs_snapshot_id, date '2026-01-16' as gps_date,
+            service_date, 'overnight' as trip_id, '1001' as vehicle_number,
+            1 as stop_sequence, 'C' as stop_group_id, 'C01' as stop_id, '01' as stop_post_code,
+            'Charlie' as stop_name, true as are_passenger_boundaries_settled,
+            'passenger' as stop_execution_class, true as is_passenger_stop
+          from unnest([date '2026-01-14', date '2026-01-15', date '2026-01-16']) as service_date
+      - input: this
+        format: sql
+        rows: |
+          select cast(null as string) as route_pattern_id limit 0
+    expect:
+      rows:
+        - {service_date: '2026-01-15', gps_date: '2026-01-16', trip_id: overnight, stop_call_count: 1, pattern_status: classified}
