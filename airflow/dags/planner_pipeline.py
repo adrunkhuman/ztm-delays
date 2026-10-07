@@ -28,6 +28,7 @@ MODELS_PREFIX = "planner/models"
 CURRENT_POINTER = f"{MODELS_PREFIX}/current.json"
 EXTRACT_PREFIX = "planner/extracts"
 FOOTPATHS_BLOB = "planner/footpaths/footpaths.parquet"
+LIVE_CALIBRATION_BLOB = "planner/live/calibration.json"
 # Geofabrik's regional extract (~300 MB, refreshed daily); it covers every ZTM stop.
 OSM_PBF_URL = "https://download.geofabrik.de/europe/poland/mazowieckie-latest.osm.pbf"
 WARSAW_LAT, WARSAW_LON = 52.23, 21.01
@@ -112,6 +113,36 @@ def download(url: str, path: Path) -> Path:
     with urllib.request.urlopen(url, timeout=120) as response, tmp.open("wb") as out:  # noqa: S310 - fixed https URL
         shutil.copyfileobj(response, out, length=1 << 20)
     tmp.replace(path)
+    return path
+
+
+def query_rows(client: bigquery.Client, sql: str, params: dict[str, date]) -> list[dict[str, Any]]:
+    """Run a query whose small result is wanted as rows."""
+    job = client.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter(k, "DATE", v) for k, v in params.items()],
+            maximum_bytes_billed=MAX_BYTES_BILLED,
+        ),
+        location=BIGQUERY_LOCATION,
+    )
+    rows = [dict(row) for row in job.result()]
+    LOGGER.info("Query billed %s bytes for %d rows", job.total_bytes_billed, len(rows))
+    return rows
+
+
+def upload_live_calibration(bucket: storage.Bucket, calibration: dict[str, Any]) -> None:
+    """Replace the live calibration scoring copies into the artifact."""
+    bucket.blob(LIVE_CALIBRATION_BLOB).upload_from_string(json.dumps(calibration), content_type="application/json")
+
+
+def download_live_calibration(bucket: storage.Bucket, path: Path) -> Path | None:
+    """The latest live calibration, or None before the first weekly run (the artifact then has no live tables)."""
+    blob = bucket.blob(LIVE_CALIBRATION_BLOB)
+    if not blob.exists():
+        LOGGER.warning("No live calibration at %s yet; the planner will not use live positions", LIVE_CALIBRATION_BLOB)
+        return None
+    blob.download_to_filename(str(path))
     return path
 
 

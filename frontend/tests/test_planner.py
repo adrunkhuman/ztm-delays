@@ -83,6 +83,10 @@ def _write_artifact(path: Path) -> None:
 
             create table planner_shape as select 'S1' as shape_id, [52.331, 52.27]::double[] as lat,
                 [20.921, 20.97]::double[] as lon, [0, 7000]::integer[] as dist_m;
+
+            create table planner_live_persistence (is_tram boolean, horizon_min integer, excess_s integer,
+                alpha double, low_s double, mid_s double, high_s double);
+            create table planner_live_turnaround (is_tram boolean, low_s double, mid_s double, high_s double);
             """
         )
 

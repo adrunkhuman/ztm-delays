@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--output", type=Path, required=True)
     s.add_argument("--build-id", default=None)
     s.add_argument("--footpaths", type=Path, help="weekly OSM footpaths parquet; walks are estimated without it")
+    s.add_argument("--live-calibration", type=Path, help="weekly live calibration JSON; no live adjustments without it")
 
     f = sub.add_parser("footpaths", help="OSM extract + GTFS stops -> walking distances between nearby posts")
     f.add_argument("--osm-pbf", type=Path, required=True)
@@ -70,6 +71,6 @@ def main(argv: list[str] | None = None) -> None:
         result = score.score(
             args.bundle, args.gtfs_zip, args.recent_daily, args.weather_json, args.start, args.days,
             args.workdir, args.output, args.build_id or score.build_id_now(), resources, args.previous_gtfs_zip,
-            args.footpaths,
+            args.footpaths, args.live_calibration,
         )  # fmt: skip
     print(json.dumps(result, sort_keys=True))

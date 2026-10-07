@@ -47,6 +47,14 @@ CONTRACT: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("shape_id", "VARCHAR", False), ("lat", "DOUBLE[]", False), ("lon", "DOUBLE[]", False),
         ("dist_m", "INTEGER[]", False),
     ),
+    "planner_live_persistence": (
+        ("is_tram", "BOOLEAN", False), ("horizon_min", "INTEGER", False), ("excess_s", "INTEGER", False),
+        ("alpha", "DOUBLE", False), ("low_s", "DOUBLE", False), ("mid_s", "DOUBLE", False), ("high_s", "DOUBLE", False),
+    ),
+    "planner_live_turnaround": (
+        ("is_tram", "BOOLEAN", False), ("low_s", "DOUBLE", False), ("mid_s", "DOUBLE", False),
+        ("high_s", "DOUBLE", False),
+    ),
 }  # fmt: skip
 # Unique columns, also in the repository contract; a trip key shared by two trips would merge them.
 KEYS: dict[str, tuple[str, ...]] = {
@@ -54,9 +62,11 @@ KEYS: dict[str, tuple[str, ...]] = {
     "planner_stop": ("trip_key", "stop_sequence"),
     "planner_stop_post": ("stop_id",),
     "planner_shape": ("shape_id",),
+    "planner_live_persistence": ("is_tram", "horizon_min", "excess_s"),
+    "planner_live_turnaround": ("is_tram",),
 }
-# A feed without shapes.txt still plans journeys; only live maps need shapes.
-MAY_BE_EMPTY = {"planner_shape"}
+# Without shapes.txt or a live calibration the planner still works, only without live positions.
+MAY_BE_EMPTY = {"planner_shape", "planner_live_persistence", "planner_live_turnaround"}
 ORDER = {
     "planner_stop": "stop_group_id, trip_key, stop_sequence",
     "planner_trip": "trip_key",

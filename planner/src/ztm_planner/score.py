@@ -8,6 +8,7 @@ nearby posts come from the weekly OSM footpaths, estimated from straight lines f
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -55,12 +56,15 @@ def score(
     resources: Resources,
     previous_gtfs_zip: Path | None = None,
     footpaths: Path | None = None,
+    live_calibration: Path | None = None,
 ) -> dict:
     """Build the artifact for service dates [start, start + days) and publish it to ``output``.
 
     A snapshot taken today no longer lists yesterday's service date, whose night trips still run after
     midnight; ``previous_gtfs_zip`` (the last snapshot before today) supplies that date when given.
-    Without ``footpaths`` (the weekly OSM table), every walk is a straight-line estimate.
+    Without ``footpaths`` (the weekly OSM table), every walk is a straight-line estimate. Without
+    ``live_calibration`` (the weekly JSON of how live delays carry on), the live tables are empty and the frontend
+    does not adjust trips to live positions.
     """
     workdir.mkdir(parents=True, exist_ok=True)
     db_path = workdir / "score.duckdb"
@@ -97,6 +101,7 @@ def score(
     _expected_times(con)
     _stop_groups(con)
     _footpaths(con, footpaths)
+    _live_calibration(con, live_calibration)
     artifact.write(
         con,
         output,
@@ -111,6 +116,8 @@ def score(
             "planner_footpath": "select * from out_footpath",
             "planner_stop_post": "select stop_id, lat, lon from post",
             "planner_shape": "select * from sched_shape",
+            "planner_live_persistence": "select * from live_persistence",
+            "planner_live_turnaround": "select * from live_turnaround",
         },
     )
     summary = one(con, "select count(distinct trip_key), count(*) from out_stop")
@@ -119,6 +126,23 @@ def score(
     result = {"build_id": build_id, "model_version": meta["version"], "trips": summary[0], "stops": summary[1]}
     log.info("published %s: %s", output, result)
     return result
+
+
+def _live_calibration(con: duckdb.DuckDBPyConnection, path: Path | None) -> None:
+    """Copy the weekly live calibration (planner_queries.live_persistence / live_turnaround rows) as given."""
+    loaded = json.loads(path.read_text()) if path is not None else {}
+    con.execute(
+        "create or replace table live_persistence (is_tram boolean, horizon_min integer, excess_s integer, "
+        "alpha double, low_s double, mid_s double, high_s double)"
+    )
+    con.execute("create or replace table live_turnaround (is_tram boolean, low_s double, mid_s double, high_s double)")
+    for table, columns in (
+        ("live_persistence", ("is_tram", "horizon_min", "excess_s", "alpha", "low_s", "mid_s", "high_s")),
+        ("live_turnaround", ("is_tram", "low_s", "mid_s", "high_s")),
+    ):
+        rows = [[row[c] for c in columns] for row in loaded.get(table.removeprefix("live_"), [])]
+        if rows:
+            con.executemany(f"insert into {table} values ({', '.join('?' * len(columns))})", rows)
 
 
 def _merge_previous_shapes(con: duckdb.DuckDBPyConnection) -> None:

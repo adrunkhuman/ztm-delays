@@ -2,7 +2,8 @@
 
 dag_planner_train (Sunday 13:00): ten weeks of observed segments and stop arrivals -> model bundle in GCS,
 promoted only if it beats the timetable and the lookup on its own held-out week; then, whatever the model gate
-decided, walking distances between nearby stop posts from the OSM extract -> footpaths in GCS.
+decided, walking distances between nearby stop posts from the OSM extract -> footpaths in GCS. Beside them, how
+live delays carry down a route and through a terminus on the last week -> live calibration in GCS.
 dag_planner_score (06:30, after the 04:00 warehouse run adds yesterday): current timetable + promoted bundle +
 recent conditions + weather forecast -> <serving>/planner/planner.duckdb for the frontend's planner tab.
 """
@@ -26,12 +27,15 @@ from planner_pipeline import (
     download,
     download_current_bundle,
     download_footpaths,
+    download_live_calibration,
     export_parquet,
     fetch_weather,
     promotable,
+    query_rows,
     run_planner,
     upload_bundle,
     upload_footpaths,
+    upload_live_calibration,
     weather_archive_url,
     weather_forecast_url,
 )
@@ -149,6 +153,31 @@ def _footpaths() -> dict[str, Any]:
     return {**summary, "gtfs_snapshot_id": snapshot.snapshot_id}
 
 
+def _calibrate_live() -> dict[str, Any]:
+    """How live delays carry down a route and through a terminus, on the last published week."""
+    client, bucket = bigquery.Client(project=GCP_PROJECT), storage.Client(project=GCP_PROJECT).bucket(GCS_BUCKET)
+    end = _latest_published_date(client)
+    # Usual delays come from stop tables fitted on the weeks before, as in the artifact.
+    window = {
+        "start": end - timedelta(weeks=TRAIN_WEEKS) + timedelta(days=1),
+        "cal_start": end - timedelta(days=CALIBRATION_DAYS - 1),
+        "end": end,
+    }
+    persistence = query_rows(client, queries.live_persistence(MARTS), window)
+    turnaround = query_rows(client, queries.live_turnaround(MARTS), window)
+    if not persistence or not turnaround:
+        raise RuntimeError("Live calibration found no observations; keeping the previous one")
+    calibration = {
+        "version": 1,
+        "window": {k: v.isoformat() for k, v in window.items()},
+        "persistence": persistence,
+        "turnaround": turnaround,
+    }
+    upload_live_calibration(bucket, calibration)
+    LOGGER.info("Published live calibration for %s", calibration["window"])
+    return calibration
+
+
 def _snapshots(client: bigquery.Client, today: date) -> tuple[Any, Any]:
     """Latest GTFS snapshot, and the last one taken before today (it still lists yesterday's night trips)."""
     rows = list(client.query(
@@ -206,12 +235,14 @@ def _score(run_id: str) -> dict[str, Any]:
         _merge_parquet(recent, inputs / "recent.parquet")
     weather = fetch_weather(weather_forecast_url(HORIZON_DAYS), inputs / "forecast.json")
     footpaths = download_footpaths(bucket, inputs / "footpaths.parquet")
-    footpath_args = ["--footpaths", str(footpaths)] if footpaths else []
+    optional_args = ["--footpaths", str(footpaths)] if footpaths else []
+    live = download_live_calibration(bucket, inputs / "live_calibration.json")
+    optional_args += ["--live-calibration", str(live)] if live else []
     output = Path(os.getenv("SERVING_EXPORT_DIR", SERVING_EXPORT_DIR)) / "planner" / "planner.duckdb"
     summary = run_planner(config, [
         "--workdir", str(work / "run"), "score", "--bundle", str(bundle), "--gtfs-zip", str(gtfs_zip), *previous_args,
         "--recent-daily", str(_single(recent, inputs / "recent.parquet")), "--weather-json", str(weather),
-        "--start", today.isoformat(), "--days", str(HORIZON_DAYS), "--output", str(output), *footpath_args,
+        "--start", today.isoformat(), "--days", str(HORIZON_DAYS), "--output", str(output), *optional_args,
     ])  # fmt: skip
     LOGGER.info("Published planner artifact from GTFS %s: %s", snapshot.snapshot_id, summary)
     shutil.rmtree(inputs, ignore_errors=True)
@@ -242,14 +273,21 @@ with DAG(
         """OSM walking distances between nearby posts; scoring keeps the previous ones if this fails."""
         return _footpaths()
 
+    # BigQuery does the work; independent of the model and of the footpaths.
+    @task
+    def calibrate_live() -> dict[str, Any]:
+        """Live delay carry-over and terminus turnaround; scoring keeps the previous ones if this fails."""
+        return _calibrate_live()
+
     @task(trigger_rule=TriggerRule.ALL_SUCCESS)
     def training_complete() -> None:
         """Keep a training failure visible even when the all-done footpath task succeeds."""
 
-    trained, walked, complete = train_model(), build_footpaths(), training_complete()
+    trained, walked, calibrated, complete = train_model(), build_footpaths(), calibrate_live(), training_complete()
     trained >> walked
     trained >> complete
     walked >> complete
+    calibrated >> complete
 
 
 with DAG(

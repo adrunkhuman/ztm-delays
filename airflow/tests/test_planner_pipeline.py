@@ -187,6 +187,10 @@ def test_queries_use_the_planner_settings() -> None:
     assert "@cal_start" in queries.stop_eps("p.d")
     assert "actual_s" in queries.training_segments("p.d")
     assert "GROUP BY 1, 2, 3" in queries.recent_daily("p.d")
+    persistence = queries.live_persistence("p.d")
+    assert all(f"@{p}" in persistence for p in ("start", "cal_start", "end"))
+    assert f"q[SAFE_OFFSET({round(settings.STOP_MISS_TARGET * 1000)})] AS low_s" in persistence
+    assert "@cal_start" in queries.live_turnaround("p.d")
 
 
 def test_dags_run_weekly_training_and_nightly_scoring_after_the_warehouse() -> None:
@@ -197,6 +201,8 @@ def test_dags_run_weekly_training_and_nightly_scoring_after_the_warehouse() -> N
     assert [t.name for t in tasks["train_model"].downstream] == ["build_footpaths", "training_complete"]
     assert tasks["build_footpaths"].kwargs["trigger_rule"] == "all_done"
     assert tasks["build_footpaths"].downstream == [tasks["training_complete"]]
+    # live calibration is BigQuery-only and independent, but its failure must also fail the run
+    assert tasks["calibrate_live"].downstream == [tasks["training_complete"]]
     complete = tasks["training_complete"]
     # An all-done leaf would mark a failed training run successful. The sole
     # training leaf must depend directly on both tasks and require their success.
@@ -253,6 +259,14 @@ def test_footpaths_are_optional_for_scoring(tmp_path: Path) -> None:
     source.write_bytes(b"pq")
     pipeline.upload_footpaths(bucket, source)
     assert pipeline.download_footpaths(bucket, tmp_path / "f.parquet").read_bytes() == b"pq"
+
+
+def test_live_calibration_is_optional_for_scoring(tmp_path: Path) -> None:
+    pipeline = _load("planner_pipeline")
+    bucket = FakeBucket()
+    assert pipeline.download_live_calibration(bucket, tmp_path / "c.json") is None
+    pipeline.upload_live_calibration(bucket, {"version": 1, "persistence": [], "turnaround": []})
+    assert json.loads(pipeline.download_live_calibration(bucket, tmp_path / "c.json").read_text())["version"] == 1
 
 
 def test_planner_command_summary_is_the_last_stdout_line(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
