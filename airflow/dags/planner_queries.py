@@ -12,6 +12,12 @@ STOP_EPS_PER_MILLE = (1, 2, 3, 5, 7, 10, 15, 20)
 STOP_MIN_ARRIVALS = 150
 STOP_TOLERANCE_S = 30
 STOP_MISS_TARGET = 0.01
+# Live adjustments: minutes ahead of the vehicle's position, upper bounds of each horizon bucket.
+LIVE_HORIZONS_MIN = (5, 10, 20, 30, 45, 60, 90)
+# Per-mille quantiles of the live residual: low keeps boarding times as safe as the stop tables (STOP_MISS_TARGET),
+# high matches the late delay (dq90).
+LIVE_LOW_PER_MILLE, LIVE_HIGH_PER_MILLE = 10, 900
+LIVE_TURN_SLACK_S = 120  # the planned break counts as used up when less than this remains
 
 _DAYTYPE = """case when is_holiday or extract(dayofweek from service_date) = 1 then 2
              when extract(dayofweek from service_date) = 7 then 1 else 0 end"""
@@ -69,7 +75,9 @@ FROM seg GROUP BY 1, 2, 3
 def _arrivals(marts_dataset: str) -> str:
     return f"""
 arrivals AS (
-  SELECT service_date, mode = 'tram' AS is_tram, line, direction_id, stop_id, delay_seconds AS delay,
+  SELECT service_date, trip_id, vehicle_number, stop_sequence, mode = 'tram' AS is_tram, line, direction_id, stop_id,
+    delay_seconds AS delay,
+    TIMESTAMP_DIFF(scheduled_arrival_time, TIMESTAMP(service_date, 'Europe/Warsaw'), SECOND) AS sod,
     DIV(TIMESTAMP_DIFF(scheduled_arrival_time, TIMESTAMP(service_date, 'Europe/Warsaw'), SECOND), 3600) AS hr,
     stop_sequence = MIN(stop_sequence) OVER t AS is_origin,
     stop_sequence = MAX(stop_sequence) OVER t AS is_last,
@@ -128,6 +136,83 @@ slots AS ({_slot_tables("keyed")})
 SELECT level, {", ".join(_ALL_KEYS)}, n,
   q_all[SAFE_OFFSET(100)] AS dq10, q_all[SAFE_OFFSET(500)] AS dq50, q_all[SAFE_OFFSET(900)] AS dq90, {eps}
 FROM slots
+"""
+
+
+def _usual_joins(alias: str) -> tuple[str, str]:
+    """LEFT JOINs of fit_slots per level onto ``alias``, and the most specific level's quantiles."""
+    joins, picks = [], []
+    for i, (level, keys) in enumerate(_LEVELS.items()):
+        on = " AND ".join(f"l{i}.{k} = {alias}.{_key_expr(k)}" for k in keys)
+        joins.append(f"LEFT JOIN (SELECT * FROM fit_slots WHERE level = '{level}') l{i} ON {on}")
+        picks.append(f"l{i}.q_all")
+    return "\n  ".join(joins), f"COALESCE({', '.join(picks)})"
+
+
+def live_persistence(marts_dataset: str) -> str:
+    """How a trip's delay beyond its usual one carries down the route, per mode x horizon, on [@cal_start, @end].
+
+    Usual delays are the stop tables' medians fitted on [@start, @cal_start), as in the artifact. For each pair of
+    stops of a trip, x is the earlier stop's delay beyond usual and y the later one's; alpha is the least-squares
+    slope of y on x, and low/mid/high_s quantiles of y - alpha * x.
+    """
+    joins, usual = _usual_joins("c")
+    horizon = " ".join(f"WHEN j.sod - i.sod <= {m * 60} THEN {m}" for m in LIVE_HORIZONS_MIN)
+    return f"""
+WITH {_arrivals(marts_dataset)},
+fit_slots AS ({_slot_tables("(SELECT * FROM keyed WHERE service_date < @cal_start)")}),
+usual AS (
+  SELECT c.*, c.delay - {usual}[SAFE_OFFSET(500)] AS excess
+  FROM (SELECT * FROM keyed WHERE service_date >= @cal_start) c
+  {joins}
+),
+pairs AS (
+  SELECT i.is_tram, CASE {horizon} END AS horizon_min, i.excess AS x, j.excess AS y
+  FROM usual i JOIN usual j ON i.service_date = j.service_date AND i.trip_id = j.trip_id
+    AND i.vehicle_number = j.vehicle_number AND j.stop_sequence > i.stop_sequence
+  WHERE j.sod - i.sod BETWEEN 1 AND {LIVE_HORIZONS_MIN[-1] * 60} AND i.excess IS NOT NULL AND j.excess IS NOT NULL
+),
+slopes AS (SELECT is_tram, horizon_min, COVAR_POP(x, y) / NULLIF(VAR_POP(x), 0) AS alpha FROM pairs GROUP BY 1, 2),
+fitted AS (
+  SELECT is_tram, horizon_min, ANY_VALUE(alpha) AS alpha, COUNT(*) AS n, APPROX_QUANTILES(y - alpha * x, 1000) AS r
+  FROM pairs JOIN slopes USING (is_tram, horizon_min) WHERE alpha IS NOT NULL GROUP BY 1, 2
+)
+SELECT is_tram, horizon_min, n, alpha, r[SAFE_OFFSET({LIVE_LOW_PER_MILLE})] AS low_s,
+  r[SAFE_OFFSET(500)] AS mid_s, r[SAFE_OFFSET({LIVE_HIGH_PER_MILLE})] AS high_s
+FROM fitted ORDER BY 1, 2
+"""
+
+
+def live_turnaround(marts_dataset: str) -> str:
+    """Seconds from a vehicle's arrival at a terminus to its next departure when the planned break is used up.
+
+    Consecutive trips of one vehicle on [@cal_start, @end], both terminals observed; quantiles per mode.
+    """
+    return f"""
+WITH trips AS (
+  SELECT service_date, vehicle_number, mode = 'tram' AS is_tram, scheduled_start_time, scheduled_end_time,
+    start_delay_seconds, end_delay_seconds, is_first_stop_observed, is_last_stop_observed
+  FROM `{marts_dataset}.fct_trip`
+  WHERE service_date BETWEEN @cal_start AND @end AND trip_quality IN ('complete', 'partial')
+),
+pairs AS (
+  SELECT *, LEAD(scheduled_start_time) OVER w AS b_start, LEAD(start_delay_seconds) OVER w AS b_delay,
+    LEAD(is_first_stop_observed) OVER w AS b_observed
+  FROM trips WINDOW w AS (PARTITION BY service_date, vehicle_number ORDER BY scheduled_start_time)
+),
+turns AS (
+  SELECT is_tram, TIMESTAMP_DIFF(b_start, scheduled_end_time, SECOND) AS layover, end_delay_seconds AS a_delay,
+    b_delay
+  FROM pairs
+  WHERE is_last_stop_observed AND b_observed AND TIMESTAMP_DIFF(b_start, scheduled_end_time, SECOND) BETWEEN 0 AND 3600
+),
+fitted AS (
+  SELECT is_tram, COUNT(*) AS n, APPROX_QUANTILES(b_delay + layover - a_delay, 1000) AS turn
+  FROM turns WHERE layover - a_delay < {LIVE_TURN_SLACK_S} GROUP BY 1
+)
+SELECT is_tram, n, turn[SAFE_OFFSET({LIVE_LOW_PER_MILLE})] AS low_s, turn[SAFE_OFFSET(500)] AS mid_s,
+  turn[SAFE_OFFSET({LIVE_HIGH_PER_MILLE})] AS high_s
+FROM fitted ORDER BY 1
 """
 
 

@@ -349,12 +349,20 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
         f"copy (select * from (values {', '.join(map(str, pairs))}) t(from_stop_id, to_stop_id, distance_m)) to '{osm}'"
     )
     monkeypatch.setattr("ztm_planner.score.INTERCHANGES", {("100301", "1001M:P1"): 90, ("100301", "absent"): 90})
+    # The weekly live calibration's rows, as planner_queries.live_persistence and live_turnaround return them.
+    live = tmp_path / "live.json"
+    live.write_text(json.dumps({
+        "version": 1,
+        "persistence": [{"is_tram": False, "horizon_min": 5, "n": 9, "alpha": 1.0, "low_s": -100, "mid_s": 0,
+                         "high_s": 50}],
+        "turnaround": [{"is_tram": True, "n": 9, "low_s": -60, "mid_s": 180, "high_s": 240}],
+    }))
     main([
         "--workdir", str(tmp_path / "work"), "--threads", "2", "--memory-limit", "1GB", "--nice", "0", "score",
         "--bundle", str(trained), "--gtfs-zip", str(world["gtfs_latest"]), "--previous-gtfs-zip", str(world["gtfs"]),
         "--recent-daily", str(world["recent"]),
         "--weather-json", str(world["weather_forecast"]), "--start", SCORE_START.isoformat(), "--days", "7",
-        "--output", str(output), "--build-id", "b-test", "--footpaths", str(osm),
+        "--output", str(output), "--build-id", "b-test", "--footpaths", str(osm), "--live-calibration", str(live),
     ])  # fmt: skip
     con = duckdb.connect(str(output), read_only=True)
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
@@ -362,6 +370,8 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
         assert [r[0] for r in con.execute(f"describe {table}").fetchall()] == [f["name"] for f in fields]
     meta = one(con, "select first_date, last_date, model_version from planner_metadata")
     assert meta == (SCORE_START, SCORE_START + timedelta(days=6), "test-1")
+    assert con.execute("select * from planner_live_persistence").fetchall() == [(False, 5, 1.0, -100.0, 0.0, 50.0)]
+    assert con.execute("select * from planner_live_turnaround").fetchall() == [(True, -60.0, 180.0, 240.0)]
     # The previous service date comes from the previous snapshot, for night trips after midnight.
     assert one(con, "select min(service_date) from planner_trip")[0] == SCORE_START - timedelta(days=1)
     assert one(con, "select count(*) from planner_stop where leave_by_offset_s > 0")[0] == 0

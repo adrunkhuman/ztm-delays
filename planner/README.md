@@ -49,6 +49,17 @@ Every change requires `conservative arrival + walk <= next board_by`. A change a
 
 Weekly footpaths use walkable OSM paths from Geofabrik's Mazowieckie extract, with distances up to 700 m. Nightly scoring puts distances and walking times in `planner_footpath`. If either post is not covered, it estimates distance as straight line × 1.3; if both are covered but no OSM path is in range, it does not invent a connection. Without the weekly file, all walks are estimated. Walking time uses 1.2 m/s, at least 30 s, plus 60 s when either end is a metro or rail platform. Underground interchanges that OSM routes over the street get a fixed time and no distance instead: the Świętokrzyska M1–M2 change takes 3 min (`INTERCHANGES` in `settings.py`). See [operations](../docs/operations.md#trip-planner) for publication and failure handling.
 
+## Live calibration
+
+The frontend adjusts trips running now to live vehicle positions ([live.py](../frontend/ztm_frontend/live.py)). How far it may move times comes from a weekly calibration on the last published week, computed in BigQuery by the training DAG ([queries](../airflow/dags/planner_queries.py)) and copied into the artifact by scoring:
+
+| Table | Rows | Meaning |
+| --- | --- | --- |
+| `planner_live_persistence` | mode x minutes ahead (5, 10, 20, 30, 45, 60, 90) | `alpha`: the share of a trip's delay beyond its usual one that is still there that far down the route; `low_s` / `mid_s` / `high_s`: 1st / 50th / 90th percentile of the error left over. |
+| `planner_live_turnaround` | mode | 1st / 50th / 90th percentile of seconds from reaching a terminus to the next departure when the planned break is used up. |
+
+Usual delays are the stop tables' medians, fitted on the weeks before, as in the artifact. The 1st percentile keeps live boarding times as safe as the stop tables' (`STOP_MISS_TARGET`); the 90th matches the late delay. On 29 Sep–5 Oct 2026 a bus kept 101–105% of its excess delay up to 90 min ahead, a tram 81–97%; once its break was used up, a bus left a median 188 s after reaching the terminus. Without a calibration the tables are empty and the frontend makes no live adjustments.
+
 ## Resources
 
 DuckDB works in an on-disk database capped at 1.5 GB and spills to `--workdir`, which must be on disk: on tmpfs the spill counts as memory. LightGBM trains on a sample of about 3.5M segments and predicts one day at a time. Measured on 43M segments with 4 threads, training peaked at 2.9 GB (maximum RSS) and completed in 139 s inside the Airflow image under a 4 GB limit. Scoring 7 days peaked at 1.8 GB and took 71 s on 2 threads. Threads default to CPU cores minus two, and the process lowers its priority (`--nice`).

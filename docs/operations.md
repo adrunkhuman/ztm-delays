@@ -151,7 +151,7 @@ The task's `report.json` records exclusions and coverage per period. Mini-map st
 
 ## Trip planner
 
-`dag_planner_train` runs on Sundays at 13:00 Warsaw time: `train_model`, then `build_footpaths`. They run one after the other to limit peak memory, and `build_footpaths` runs even when training fails (`all_done`). `dag_planner_score` runs daily at 06:30, after the 04:00 warehouse run has published yesterday. Its recent conditions end on the latest published day, so a late warehouse run makes them a day older but never leaves a gap. The planner tab appears once `planner/planner.duckdb` exists.
+`dag_planner_train` runs on Sundays at 13:00 Warsaw time: `train_model`, then `build_footpaths`. They run one after the other to limit peak memory, and `build_footpaths` runs even when training fails (`all_done`). `calibrate_live` runs beside them, in BigQuery only; `training_complete` fails if any of the three does. `dag_planner_score` runs daily at 06:30, after the 04:00 warehouse run has published yesterday. Its recent conditions end on the latest published day, so a late warehouse run makes them a day older but never leaves a gap. The planner tab appears once `planner/planner.duckdb` exists.
 
 On first deployment, trigger `dag_planner_train`, confirm promotion in its log, then trigger `dag_planner_score`. Scoring fails until a model is promoted. The footpath build holds the regional OSM graph in memory, outside DuckDB's limit; check its peak on the first run.
 
@@ -160,6 +160,7 @@ On first deployment, trigger `dag_planner_train`, confirm promotion in its log, 
 | Output | `$SERVING_EXPORT_DIR/planner/planner.duckdb`, read by the frontend from `planner/` beside `ZTM_DUCKDB_PATH` |
 | Models | `gs://$GCS_BUCKET/planner/models/<version>/`; `planner/models/current.json` names the promoted version |
 | Footpaths | `gs://$GCS_BUCKET/planner/footpaths/footpaths.parquet`, rebuilt weekly and turned into walking times by scoring |
+| Live calibration | `gs://$GCS_BUCKET/planner/live/calibration.json`, rebuilt weekly by `calibrate_live` (about 5 GB billed) and copied into the artifact by scoring; without it the planner ignores live positions |
 | Workspace | `PLANNER_WORKSPACE_ROOT` (default `/opt/airflow/planner-work`), on disk rather than tmpfs, with about 5 GB free. Training clears its folder after every run; scoring keeps only the current bundle. |
 | Command | `PLANNER_COMMAND` (image default `/opt/airflow/planner-venv/bin/ztm-planner`). Global flags go before the subcommand, e.g. `ztm-planner --memory-limit 1000MB`. `PLANNER_TIMEOUT_SECONDS` defaults to 4 hours. Progress and errors stream into the task log. |
 | BigQuery | Training about 16 GB billed per week; scoring about 0.5 GB per night. Each query is capped at 20 GB. |
