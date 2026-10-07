@@ -353,8 +353,8 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
     live = tmp_path / "live.json"
     live.write_text(json.dumps({
         "version": 1,
-        "persistence": [{"is_tram": False, "horizon_min": 5, "n": 9, "alpha": 1.0, "low_s": -100, "mid_s": 0,
-                         "high_s": 50}],
+        "persistence": [{"is_tram": False, "horizon_min": 5, "excess_s": -86400, "n": 9, "alpha": 1.0,
+                         "low_s": -100, "mid_s": 0, "high_s": 50}],
         "turnaround": [{"is_tram": True, "n": 9, "low_s": -60, "mid_s": 180, "high_s": 240}],
     }))
     main([
@@ -370,7 +370,8 @@ def test_scoring_publishes_a_contract_artifact_with_learned_times(
         assert [r[0] for r in con.execute(f"describe {table}").fetchall()] == [f["name"] for f in fields]
     meta = one(con, "select first_date, last_date, model_version from planner_metadata")
     assert meta == (SCORE_START, SCORE_START + timedelta(days=6), "test-1")
-    assert con.execute("select * from planner_live_persistence").fetchall() == [(False, 5, 1.0, -100.0, 0.0, 50.0)]
+    persistence = con.execute("select * from planner_live_persistence").fetchall()
+    assert persistence == [(False, 5, -86400, 1.0, -100.0, 0.0, 50.0)]
     assert con.execute("select * from planner_live_turnaround").fetchall() == [(True, -60.0, 180.0, 240.0)]
     # The previous service date comes from the previous snapshot, for night trips after midnight.
     assert one(con, "select min(service_date) from planner_trip")[0] == SCORE_START - timedelta(days=1)

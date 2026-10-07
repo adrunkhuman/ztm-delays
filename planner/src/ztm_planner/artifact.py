@@ -48,8 +48,8 @@ CONTRACT: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("dist_m", "INTEGER[]", False),
     ),
     "planner_live_persistence": (
-        ("is_tram", "BOOLEAN", False), ("horizon_min", "INTEGER", False), ("alpha", "DOUBLE", False),
-        ("low_s", "DOUBLE", False), ("mid_s", "DOUBLE", False), ("high_s", "DOUBLE", False),
+        ("is_tram", "BOOLEAN", False), ("horizon_min", "INTEGER", False), ("excess_s", "INTEGER", False),
+        ("alpha", "DOUBLE", False), ("low_s", "DOUBLE", False), ("mid_s", "DOUBLE", False), ("high_s", "DOUBLE", False),
     ),
     "planner_live_turnaround": (
         ("is_tram", "BOOLEAN", False), ("low_s", "DOUBLE", False), ("mid_s", "DOUBLE", False),
@@ -62,7 +62,7 @@ KEYS: dict[str, tuple[str, ...]] = {
     "planner_stop": ("trip_key", "stop_sequence"),
     "planner_stop_post": ("stop_id",),
     "planner_shape": ("shape_id",),
-    "planner_live_persistence": ("is_tram", "horizon_min"),
+    "planner_live_persistence": ("is_tram", "horizon_min", "excess_s"),
     "planner_live_turnaround": ("is_tram",),
 }
 # Without shapes.txt or a live calibration the planner still works, only without live positions.

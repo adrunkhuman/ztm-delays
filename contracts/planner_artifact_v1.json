@@ -6,7 +6,7 @@
     "planner_stop": ["trip_key", "stop_sequence"],
     "planner_stop_post": ["stop_id"],
     "planner_shape": ["shape_id"],
-    "planner_live_persistence": ["is_tram", "horizon_min"],
+    "planner_live_persistence": ["is_tram", "horizon_min", "excess_s"],
     "planner_live_turnaround": ["is_tram"]
   },
   "tables": {
@@ -78,6 +78,7 @@
     "planner_live_persistence": [
       {"name": "is_tram", "duckdb_type": "BOOLEAN", "nullable": false},
       {"name": "horizon_min", "duckdb_type": "INTEGER", "nullable": false},
+      {"name": "excess_s", "duckdb_type": "INTEGER", "nullable": false},
       {"name": "alpha", "duckdb_type": "DOUBLE", "nullable": false},
       {"name": "low_s", "duckdb_type": "DOUBLE", "nullable": false},
       {"name": "mid_s", "duckdb_type": "DOUBLE", "nullable": false},

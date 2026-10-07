@@ -18,6 +18,10 @@ LIVE_HORIZONS_MIN = (5, 10, 20, 30, 45, 60, 90)
 # high matches the late delay (dq90).
 LIVE_LOW_PER_MILLE, LIVE_HIGH_PER_MILLE = 10, 900
 LIVE_TURN_SLACK_S = 120  # the planned break counts as used up when less than this remains
+# Lower bounds of the excess-delay bands (-86400: no bound). A very late vehicle is less predictable, so its
+# error quantiles are its band's; a band with fewer than LIVE_MIN_PAIRS pairs takes the pooled ones.
+LIVE_EXCESS_FROM_S = (-86400, -120, 120, 300, 600)
+LIVE_MIN_PAIRS = 1000
 
 _DAYTYPE = """case when is_holiday or extract(dayofweek from service_date) = 1 then 2
              when extract(dayofweek from service_date) = 7 then 1 else 0 end"""
@@ -154,10 +158,11 @@ def live_persistence(marts_dataset: str) -> str:
 
     Usual delays are the stop tables' medians fitted on [@start, @cal_start), as in the artifact. For each pair of
     stops of a trip, x is the earlier stop's delay beyond usual and y the later one's; alpha is the least-squares
-    slope of y on x, and low/mid/high_s quantiles of y - alpha * x.
+    slope of y on x per mode x horizon, and low/mid/high_s quantiles of y - alpha * x per band of x as well.
     """
     joins, usual = _usual_joins("c")
     horizon = " ".join(f"WHEN j.sod - i.sod <= {m * 60} THEN {m}" for m in LIVE_HORIZONS_MIN)
+    band = " ".join(f"WHEN x >= {b} THEN {b}" for b in reversed(LIVE_EXCESS_FROM_S[1:]))
     return f"""
 WITH {_arrivals(marts_dataset)},
 fit_slots AS ({_slot_tables("(SELECT * FROM keyed WHERE service_date < @cal_start)")}),
@@ -173,13 +178,26 @@ pairs AS (
   WHERE j.sod - i.sod BETWEEN 1 AND {LIVE_HORIZONS_MIN[-1] * 60} AND i.excess IS NOT NULL AND j.excess IS NOT NULL
 ),
 slopes AS (SELECT is_tram, horizon_min, COVAR_POP(x, y) / NULLIF(VAR_POP(x), 0) AS alpha FROM pairs GROUP BY 1, 2),
+residuals AS (
+  SELECT is_tram, horizon_min, alpha, CASE {band} ELSE {LIVE_EXCESS_FROM_S[0]} END AS excess_s, y - alpha * x AS r
+  FROM pairs JOIN slopes USING (is_tram, horizon_min) WHERE alpha IS NOT NULL
+),
+pooled AS (
+  SELECT is_tram, horizon_min, ANY_VALUE(alpha) AS alpha, APPROX_QUANTILES(r, 1000) AS q FROM residuals GROUP BY 1, 2
+),
+banded AS (
+  SELECT is_tram, horizon_min, excess_s, COUNT(*) AS n, APPROX_QUANTILES(r, 1000) AS q FROM residuals GROUP BY 1, 2, 3
+),
+bands AS (SELECT excess_s FROM UNNEST({list(LIVE_EXCESS_FROM_S)}) AS excess_s),
 fitted AS (
-  SELECT is_tram, horizon_min, ANY_VALUE(alpha) AS alpha, COUNT(*) AS n, APPROX_QUANTILES(y - alpha * x, 1000) AS r
-  FROM pairs JOIN slopes USING (is_tram, horizon_min) WHERE alpha IS NOT NULL GROUP BY 1, 2
+  SELECT p.is_tram, p.horizon_min, b.excess_s, COALESCE(d.n, 0) AS n, p.alpha,
+    IF(COALESCE(d.n, 0) >= {LIVE_MIN_PAIRS}, d.q, p.q) AS q
+  FROM pooled p CROSS JOIN bands b
+  LEFT JOIN banded d ON d.is_tram = p.is_tram AND d.horizon_min = p.horizon_min AND d.excess_s = b.excess_s
 )
-SELECT is_tram, horizon_min, n, alpha, r[SAFE_OFFSET({LIVE_LOW_PER_MILLE})] AS low_s,
-  r[SAFE_OFFSET(500)] AS mid_s, r[SAFE_OFFSET({LIVE_HIGH_PER_MILLE})] AS high_s
-FROM fitted ORDER BY 1, 2
+SELECT is_tram, horizon_min, excess_s, n, alpha, q[SAFE_OFFSET({LIVE_LOW_PER_MILLE})] AS low_s,
+  q[SAFE_OFFSET(500)] AS mid_s, q[SAFE_OFFSET({LIVE_HIGH_PER_MILLE})] AS high_s
+FROM fitted ORDER BY 1, 2, 3
 """
 
 

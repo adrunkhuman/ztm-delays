@@ -189,7 +189,7 @@ def test_queries_use_the_planner_settings() -> None:
     assert "GROUP BY 1, 2, 3" in queries.recent_daily("p.d")
     persistence = queries.live_persistence("p.d")
     assert all(f"@{p}" in persistence for p in ("start", "cal_start", "end"))
-    assert f"r[SAFE_OFFSET({round(settings.STOP_MISS_TARGET * 1000)})] AS low_s" in persistence
+    assert f"q[SAFE_OFFSET({round(settings.STOP_MISS_TARGET * 1000)})] AS low_s" in persistence
     assert "@cal_start" in queries.live_turnaround("p.d")
 
 

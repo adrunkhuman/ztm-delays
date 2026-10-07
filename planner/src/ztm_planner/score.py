@@ -132,12 +132,12 @@ def _live_calibration(con: duckdb.DuckDBPyConnection, path: Path | None) -> None
     """Copy the weekly live calibration (planner_queries.live_persistence / live_turnaround rows) as given."""
     loaded = json.loads(path.read_text()) if path is not None else {}
     con.execute(
-        "create or replace table live_persistence (is_tram boolean, horizon_min integer, alpha double, low_s double, "
-        "mid_s double, high_s double)"
+        "create or replace table live_persistence (is_tram boolean, horizon_min integer, excess_s integer, "
+        "alpha double, low_s double, mid_s double, high_s double)"
     )
     con.execute("create or replace table live_turnaround (is_tram boolean, low_s double, mid_s double, high_s double)")
     for table, columns in (
-        ("live_persistence", ("is_tram", "horizon_min", "alpha", "low_s", "mid_s", "high_s")),
+        ("live_persistence", ("is_tram", "horizon_min", "excess_s", "alpha", "low_s", "mid_s", "high_s")),
         ("live_turnaround", ("is_tram", "low_s", "mid_s", "high_s")),
     ):
         rows = [[row[c] for c in columns] for row in loaded.get(table.removeprefix("live_"), [])]

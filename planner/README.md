@@ -55,10 +55,10 @@ The frontend adjusts trips running now to live vehicle positions ([live.py](../f
 
 | Table | Rows | Meaning |
 | --- | --- | --- |
-| `planner_live_persistence` | mode x minutes ahead (5, 10, 20, 30, 45, 60, 90) | `alpha`: the share of a trip's delay beyond its usual one that is still there that far down the route; `low_s` / `mid_s` / `high_s`: 1st / 50th / 90th percentile of the error left over. |
+| `planner_live_persistence` | mode x minutes ahead (5, 10, 20, 30, 45, 60, 90) x band of current delay beyond usual (from `excess_s`: any, -2, 2, 5, 10 min) | `alpha`: the share of that delay still there that far down the route; `low_s` / `mid_s` / `high_s`: 1st / 50th / 90th percentile of the error left over, in that band (pooled over bands where it has fewer than 1,000 pairs). |
 | `planner_live_turnaround` | mode | 1st / 50th / 90th percentile of seconds from reaching a terminus to the next departure when the planned break is used up. |
 
-Usual delays are the stop tables' medians, fitted on the weeks before, as in the artifact. The 1st percentile keeps live boarding times as safe as the stop tables' (`STOP_MISS_TARGET`); the 90th matches the late delay. On 29 Sep–5 Oct 2026 a bus kept 101–105% of its excess delay up to 90 min ahead, a tram 81–97%; once its break was used up, a bus left a median 188 s after reaching the terminus. Without a calibration the tables are empty and the frontend makes no live adjustments.
+Usual delays are the stop tables' medians, fitted on the weeks before, as in the artifact. A very late vehicle is less predictable: 30 min ahead, a bus's 1st percentile was -257 s when on its usual time and -423 s when more than 10 min late. The 1st percentile keeps live boarding times as safe as the stop tables' (`STOP_MISS_TARGET`); the 90th matches the late delay. On 29 Sep–5 Oct 2026 a bus kept 101–105% of its excess delay up to 90 min ahead, a tram 81–97%; once its break was used up, a bus left a median 188 s after reaching the terminus. Without a calibration the tables are empty and the frontend makes no live adjustments.
 
 ## Resources
 
