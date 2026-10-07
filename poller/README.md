@@ -23,6 +23,7 @@ This contacts the live API but does not initialise GCS or upload data. Omit both
 | `POLLER_HEALTH_MAX_BYTES` | Health checkpoint/pending-counter cap, separate from the GPS cap; default 8 MiB. Reserves 1 KiB before each API attempt. |
 | `POLLER_HEARTBEAT_INTERVAL_SECONDS` | Heartbeat and closed-hour diagnostic upload/retry tick; default 60 seconds. |
 | `POLLER_PUBLIC_STATUS_GCS_PATH` | Sanitized public heartbeat object; default `health/poller/public/live.json`. |
+| `POLLER_LIVE_VEHICLES_GCS_PATH` | Live positions object for the planner; default `health/poller/public/vehicles.json.gz`. |
 | `ZTM_API_PROXY` | Optional SOCKS proxy for city API traffic. |
 
 Timing, freshness, and buffer limits are defined in [poller.py](poller.py).
@@ -41,6 +42,10 @@ Stale and far-future pings are rejected before buffering. By default, flushing r
 A private GCS heartbeat records per-mode attempts, successes, and failures, plus the parsed, accepted and stale/future-dropped row counts of the last successful poll. The poller issues no freshness verdict: the city API keeps serving parked vehicles' last positions overnight, so a high stale share is normal and says nothing about feed health. Baseline-dependent detection of fleet collapse belongs to the downstream monitor. The private heartbeat is read by the monitor and the serving export, never by the frontend.
 
 Each heartbeat tick also uploads a sanitized public copy, `health/poller/public/live.json` (override with `POLLER_PUBLIC_STATUS_GCS_PATH`), with `Cache-Control: no-cache`. It is built from an explicit allowlist: `version`, `updated_at`, the poll and heartbeat intervals, and per mode `last_attempt_at`, `last_success_at`, `consecutive_failures`, `fresh_vehicles` and `fresh_lines`. Timestamps are UTC with a `Z` suffix, or `null`; the fresh counts come from the last successful poll and are `null` before the first one. Hostnames, paths and error text stay private. A failed public upload is logged and does not affect the private heartbeat, and the reverse.
+
+## Live positions
+
+After every poll the poller replaces `health/poller/public/vehicles.json.gz` with the latest fresh ping of each vehicle: mode, line, brigade, vehicle number, position and GPS time ([contract](../contracts/live_vehicles_v1.json)). The frontend planner reads it to adjust trips running now. A mode whose polls fail keeps its last rows until they are older than `MAX_PING_AGE_SECONDS`. The upload has a short timeout and no retry, since the next poll replaces it; a failure is logged and never delays polling or the GPS archive. At one write per poll this is about 260,000 GCS writes a month, roughly $1.30 on a regional Standard bucket. `--no-upload` skips it.
 
 ## Durable feed diagnostics
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import io
 import json
 from argparse import Namespace
@@ -32,6 +33,7 @@ EGRESS_CHECK_URL = "https://example.test/egress"
 CUSTOM_SPOOL_MAX_BYTES = 12345
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
 RAW_GPS_CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "raw_gps_v1.json"
+LIVE_VEHICLES_CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "live_vehicles_v1.json"
 
 
 @pytest.fixture(autouse=True)
@@ -272,6 +274,17 @@ def test_load_config_uses_public_status_env(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("POLLER_PUBLIC_STATUS_GCS_PATH", "/public/live-test.json")
 
     assert poller._load_config(Namespace(once=True, no_upload=True)).public_status_gcs_path == "public/live-test.json"
+
+
+def test_load_config_uses_live_vehicles_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZTM_API_TOKEN", "token")
+    assert poller._load_config(Namespace(once=True, no_upload=True)).live_vehicles_gcs_path == (
+        "health/poller/public/vehicles.json.gz"
+    )
+    monkeypatch.setenv("POLLER_LIVE_VEHICLES_GCS_PATH", "/public/vehicles-test.json.gz")
+    assert poller._load_config(Namespace(once=True, no_upload=True)).live_vehicles_gcs_path == (
+        "public/vehicles-test.json.gz"
+    )
 
 
 def test_load_config_uses_api_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -727,6 +740,106 @@ def test_write_heartbeat_returns_false_when_upload_fails() -> None:
     assert poller._write_heartbeat(cast("storage.Bucket", FailingBucket()), _config(), states) is False
 
 
+def test_live_vehicles_payload_keeps_latest_fresh_ping_per_vehicle() -> None:
+    now = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    bus = poller.PollState("bus")
+    tram = poller.PollState("tram")
+    old, recent = now - timedelta(seconds=40), now - timedelta(seconds=10)
+    poller._update_poll_state(
+        bus,
+        poller.PollResult(
+            "bus",
+            now,
+            succeeded=True,
+            rows=(
+                _gps_row(old),
+                {**_gps_row(recent), "Lat": 52.25},
+                {**_gps_row(now - timedelta(seconds=301)), "VehicleNumber": "9999"},
+            ),
+        ),
+    )
+    poller._update_poll_state(
+        tram, poller.PollResult("tram", now, succeeded=True, rows=({**_gps_row(recent, 2), "Lines": "17"},))
+    )
+
+    payload = poller._live_vehicles_payload(_config(), {"tram": tram, "bus": bus}, now)
+
+    assert payload == {
+        "version": 1,
+        "updated_at": "2026-01-15T12:00:00Z",
+        "columns": ["mode", "line", "brigade", "vehicle", "lat", "lon", "time"],
+        "vehicles": [
+            ["bus", "187", "01", "1234", 52.25, 21.0122, int(recent.timestamp())],
+            ["tram", "17", "01", "1234", 52.2297, 21.0122, int(recent.timestamp())],
+        ],
+    }
+
+
+def test_live_vehicles_payload_matches_shared_contract() -> None:
+    contract = json.loads(LIVE_VEHICLES_CONTRACT.read_text())
+    payload = poller._live_vehicles_payload(_config(), {}, datetime(2026, 1, 15, 12, tzinfo=UTC))
+
+    assert contract["gcs_object"] == poller.DEFAULT_LIVE_VEHICLES_GCS_PATH
+    assert set(payload) == set(contract["fields"])
+    assert payload["version"] == contract["version"]
+    assert payload["columns"] == list(contract["vehicle_columns"])
+
+
+def test_live_vehicles_survive_failed_polls_until_they_age_out() -> None:
+    now = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    state = poller.PollState("bus")
+    poller._update_poll_state(state, poller.PollResult("bus", now, succeeded=True, rows=(_gps_row(now),)))
+    poller._update_poll_state(state, poller.PollResult("bus", now, succeeded=False, error_type="request_error"))
+
+    assert len(poller._live_vehicles_payload(_config(), {"bus": state}, now + timedelta(seconds=60))["vehicles"]) == 1
+    assert poller._live_vehicles_payload(_config(), {"bus": state}, now + timedelta(seconds=301))["vehicles"] == []
+
+
+def test_write_live_vehicles_uploads_gzip_json_without_blocking_polls() -> None:
+    bucket = FakeBucket()
+    now = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    state = poller.PollState("bus")
+    poller._update_poll_state(state, poller.PollResult("bus", now, succeeded=True, rows=(_gps_row(now),)))
+
+    assert poller._write_live_vehicles(cast("storage.Bucket", bucket), _config(), {"bus": state}, now) is True
+
+    blob = bucket.blobs["health/poller/public/vehicles.json.gz"]
+    assert (blob.content_type, blob.cache_control, blob.timeout, blob.retry) == (
+        "application/gzip",
+        "no-cache",
+        5,
+        None,
+    )
+    assert json.loads(gzip.decompress(blob.data))["vehicles"][0][:4] == ["bus", "187", "01", "1234"]
+
+
+def test_live_vehicles_upload_failure_is_logged_not_raised() -> None:
+    bucket = FakeBucket(fail_upload_paths={"health/poller/public/vehicles.json.gz"})
+    states = {"bus": poller.PollState("bus")}
+
+    assert poller._write_live_vehicles(cast("storage.Bucket", bucket), _config(), states, datetime.now(UTC)) is False
+
+
+def test_handle_uploads_publishes_live_vehicles_every_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    bucket = FakeBucket()
+    monkeypatch.setattr(poller, "_flush_vehicle_buffers", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(poller, "_save_spool", lambda *_args: None)
+    runtime = poller.RuntimeState(
+        session=cast("requests.Session", object()),
+        bucket=cast("storage.Bucket", bucket),
+        config=_config(),
+        buffers={},
+        poll_states={"bus": poller.PollState("bus")},
+        stop_requested=lambda: False,
+        last_partial_flush=100.0,
+        last_heartbeat=100.0,
+    )
+
+    poller._handle_uploads(runtime, 101.0)
+
+    assert set(bucket.blobs) == {"health/poller/public/vehicles.json.gz"}
+
+
 def test_public_upload_failure_does_not_fail_private_heartbeat() -> None:
     bucket = FakeBucket(fail_upload_paths={"health/poller/public/live.json"})
     states = {"bus": poller.PollState("bus"), "tram": poller.PollState("tram")}
@@ -1053,7 +1166,10 @@ class FakeBlob:
         self.data = file_obj.read()
         self.content_type = content_type
 
-    def upload_from_string(self, data: bytes, content_type: str) -> None:
+    def upload_from_string(
+        self, data: bytes, content_type: str, timeout: float | None = None, retry: object = "default"
+    ) -> None:
+        self.timeout, self.retry = timeout, retry
         if self.fail_upload:
             raise GoogleAPIError("simulated upload failure")
         self.data = data

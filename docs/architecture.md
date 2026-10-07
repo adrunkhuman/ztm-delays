@@ -66,7 +66,7 @@ A nightly DAG predicts the latest GTFS snapshot for seven days from the promoted
 
 The frontend's [journey router](../frontend/README.md#planner) searches that artifact per request. A change must still work when the arriving vehicle runs late: its conservative arrival plus the walk must not pass the next vehicle's boarding deadline. [Planner timing](../planner/README.md#journeys-and-walks) defines these bounds; they are per-ride planning margins, not a 90% guarantee for the whole journey.
 
-Predictions describe usual conditions, not live positions. A disruption on the day, such as a detour, crash or event, is invisible to them.
+Predictions describe usual conditions. The poller also publishes each vehicle's latest position every poll ([contract](../contracts/live_vehicles_v1.json)) for live adjustments of trips running now. A disruption the vehicles do not show yet, such as a detour ahead, remains invisible.
 
 ## Interpreting the results
 
