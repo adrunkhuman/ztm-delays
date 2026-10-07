@@ -250,7 +250,7 @@ def _add_planner_routes(app: Flask) -> None:
                 lang=lang,
                 t=planner_text.TEXT[lang],
                 args=args,
-                **planner.get_page(_planner_path(), args, now.date(), now.hour * 3600 + now.minute * 60),
+                **planner.get_page(_planner_path(), args, now.date(), now.hour * 3600 + now.minute * 60, now),
             )
         )
         if request.args.get("lang") in planner_text.LANGS:  # the switch: remember the choice

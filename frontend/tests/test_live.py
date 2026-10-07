@@ -190,6 +190,11 @@ def test_feed_expanding_past_the_limit_is_rejected(monkeypatch: pytest.MonkeyPat
 
 @pytest.fixture
 def published(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Network]:
+    return publish_artifact(tmp_path, monkeypatch)
+
+
+def publish_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Network]:
+    """The duty in a planner artifact with its shapes, today's network of it, and the feed read from tmp_path."""
     path = tmp_path / "planner.duckdb"
     with duckdb.connect(str(path)) as connection:
         _write(connection, _duty(), build_id="b1")
@@ -208,7 +213,7 @@ def published(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Ne
     return path, journey.network(path, DAY)
 
 
-def _publish(path: Path, updated_at: datetime, *pings: live.Ping) -> None:
+def publish_feed(path: Path, updated_at: datetime, *pings: live.Ping) -> None:
     rows = [[p.mode, p.line, p.brigade, p.vehicle, p.lat, p.lon, p.time] for p in pings]
     payload = {"version": 1, "updated_at": updated_at.astimezone(UTC).isoformat(), "columns": list(live.COLUMNS),
                "vehicles": rows}  # fmt: skip
@@ -217,7 +222,7 @@ def _publish(path: Path, updated_at: datetime, *pings: live.Ping) -> None:
 
 def test_current_matches_the_published_feed_for_today_only(published: tuple[Path, Network], tmp_path: Path) -> None:
     path, net = published
-    _publish(tmp_path / "vehicles.json.gz", _at(8, 8), _ping(1500, _at(8, 8)))
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 8), _ping(1500, _at(8, 8)))
 
     now = _at(8, 8, 20)
     found = live.current(path, net, DAY, now)
@@ -230,7 +235,7 @@ def test_current_matches_the_published_feed_for_today_only(published: tuple[Path
 def test_the_matcher_dies_with_its_network(published: tuple[Path, Network], tmp_path: Path) -> None:
     path, _ = published
     net = Network(duckdb.connect(str(path), read_only=True), DAY)
-    _publish(tmp_path / "vehicles.json.gz", _at(8, 8), _ping(1500, _at(8, 8)))
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 8), _ping(1500, _at(8, 8)))
     assert live.current(path, net, DAY, _at(8, 8, 20)) is not None
     gone = weakref.ref(net)
     del net
@@ -242,7 +247,7 @@ def test_shapes_of_another_build_are_not_used(published: tuple[Path, Network], t
     path, net = published
     with duckdb.connect(str(path)) as connection:
         connection.execute("update planner_metadata set build_id = 'b2'")
-    _publish(tmp_path / "vehicles.json.gz", _at(8, 8), _ping(1500, _at(8, 8)))
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 8), _ping(1500, _at(8, 8)))
     found = live.current(path, net, DAY, _at(8, 8, 20))
     assert found is not None
     assert found.fixes == {}
@@ -252,7 +257,7 @@ def test_stale_or_missing_feed_means_no_live_data(
     published: tuple[Path, Network], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path, net = published
-    _publish(tmp_path / "vehicles.json.gz", _at(8, 0), _ping(0, _at(8, 0)))
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 0), _ping(0, _at(8, 0)))
     assert live.current(path, net, DAY, _at(8, 3)) is None
     live.clear_cache()
     (tmp_path / "vehicles.json.gz").unlink()

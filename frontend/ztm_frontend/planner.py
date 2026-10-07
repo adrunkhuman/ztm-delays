@@ -28,10 +28,11 @@ import unicodedata
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
-from ztm_frontend import journey
+from ztm_frontend import journey, live_times
 from ztm_frontend.db import fetch_all, fetch_one
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from pathlib import Path
 
 RESULTS = 6
@@ -94,16 +95,21 @@ def connections(path: Path, origin: str, destination: str, day: date, after_sod:
     return search(path, origin, destination, day, after_sod)[0]
 
 
-def search(
-    path: Path, origin: str, destination: str, day: date, after_sod: int
+def search(  # noqa: PLR0913
+    path: Path, origin: str, destination: str, day: date, after_sod: int, now: datetime | None = None
 ) -> tuple[list[dict[str, Any]], int | None]:
     """Journey cards and where the next page's search starts (None without cards).
+
+    With now, today's trips follow the live positions when there are any (live_times.view).
 
     The router keeps journeys that win on the late-case arrival; a journey is also dropped when another leaves
     no earlier, with no more changes, and is expected to arrive no later (e.g. a change to the metro whose worst
     case is better but whose usual arrival is later than staying on the bus).
     """
     net = journey.network(path, day)
+    current = live_times.view(path, net, day, now) if now is not None else None
+    if current is not None:
+        net = current.net
     results = journey.plan(net, origin, destination, after_sod, RESULTS + EXTRA_CANDIDATES, useful=_unbeaten)
     shown, hidden = results[:RESULTS], results[RESULTS:]
     later = None
@@ -327,8 +333,10 @@ def _ceil_minute(seconds: float) -> int:
     return math.ceil(seconds / 60) * 60
 
 
-def get_page(path: Path, args: dict[str, str], today: date, now_sod: int) -> dict[str, Any]:
-    """Template context for the search form and, with both stops chosen, modelled journeys."""
+def get_page(
+    path: Path, args: dict[str, str], today: date, now_sod: int, now: datetime | None = None
+) -> dict[str, Any]:
+    """Template context for the search form and, with both stops chosen, modelled journeys (live with now)."""
     dates = available_dates(path)
     requested = parse_date(args.get("date"))
     # Default to today; outside the published window fall back to its first day.
@@ -339,7 +347,7 @@ def get_page(path: Path, args: dict[str, str], today: date, now_sod: int) -> dic
     results: list[dict[str, Any]] = []
     later = None
     if origin and destination and origin["stop_group_id"] != destination["stop_group_id"]:
-        results, later = search(path, origin["stop_group_id"], destination["stop_group_id"], day, after)
+        results, later = search(path, origin["stop_group_id"], destination["stop_group_id"], day, after, now)
     return {
         "dates": dates,
         "today": today,
