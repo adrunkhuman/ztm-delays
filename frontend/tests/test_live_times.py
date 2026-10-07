@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING
 
@@ -189,6 +190,17 @@ def test_cards_show_where_the_vehicle_is(published: tuple[Path, Network], tmp_pa
     assert planner.search(path, "101", "102", DAY, _sod(8, 0))[0][0]["live"] is False
 
 
+def test_no_minimap_once_the_vehicle_is_at_the_stop(published: tuple[Path, Network], tmp_path: Path) -> None:
+    path, _ = published
+    _calibrate(path)
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(980, _at(8, 9, 20)))
+
+    cards, _ = planner.search(path, "101", "102", DAY, _sod(8, 0), _at(8, 9, 40))
+    ride = next(item for item in cards[0]["timeline"] if item["kind"] == "ride")
+    assert ride["live"]["status"] == "running"
+    assert ride["live"]["map"] is None
+
+
 def test_planner_page_marks_live_rides_and_refreshes_only_then(
     published: tuple[Path, Network], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -225,6 +237,7 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
     assert ">6 min late</span>" in page
     assert 'class="pl-minimap"' in page
     assert 'hx-trigger="every[plannerShouldRefresh()] 60s"' in page
+    assert re.search(r'src="/static/planner\.js\?v=[0-9a-f]{12}"', page)  # a new version busts caches
     Clock.moment = _at(8, 30)  # the feed is now stale: no live data, no polling
     page = client.get(url).get_data(as_text=True)
     assert "pl-minimap" not in page

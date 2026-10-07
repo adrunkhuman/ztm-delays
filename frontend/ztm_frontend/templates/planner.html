@@ -137,7 +137,7 @@
                       <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span>
                         {%- if item.live %}<span class="pl-live" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
                       </span>
-                      {% if item.live %}
+                      {% if item.live and item.live.map %}
                         <div class="pl-minimap" role="img" aria-label="{{ t.map_label }}" data-map="{{ item.live.map|tojson|forceescape }}" data-mode="{{ item.mode }}" data-line="{{ item.line }}"
                           data-style="{{ url_for('static', filename='map-style.json') }}"></div>
                       {% endif %}
@@ -166,4 +166,4 @@
   </main>
 {% endblock %}
 
-{% block scripts %}<script src="{{ url_for('static', filename='planner.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ asset('planner.js') }}"></script>{% endblock %}

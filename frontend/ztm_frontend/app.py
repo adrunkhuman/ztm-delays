@@ -47,8 +47,15 @@ def create_app() -> Flask:  # noqa: C901
     """Create the Flask app without opening the DuckDB artifact at import time."""
     app = Flask(__name__)
     db_path = Path(os.environ.get("ZTM_DUCKDB_PATH", "ztm/ztm.duckdb"))
-    stylesheet_path = Path(app.static_folder or "") / "site.css"
-    stylesheet_version = sha256(stylesheet_path.read_bytes()).hexdigest()[:12]
+    # Content hashes in static URLs: Cloudflare and browsers cache static files for hours.
+    static_versions = {
+        path.name: sha256(path.read_bytes()).hexdigest()[:12]
+        for path in Path(app.static_folder or "").iterdir()
+        if path.suffix in {".css", ".js"}
+    }
+
+    def asset(filename: str) -> str:
+        return url_for("static", filename=filename, v=static_versions.get(filename))
 
     app.config["ZTM_DUCKDB_PATH"] = db_path
     app.config["ZTM_DUCKDB_META_PATH"] = Path(f"{db_path}.meta.json")
@@ -86,7 +93,7 @@ def create_app() -> Flask:  # noqa: C901
             "navigation_date": _selected_date_arg(),
             "grouped_windows_available": grouped_windows_available,
             "scope_href": _scope_href,
-            "stylesheet_version": stylesheet_version,
+            "asset": asset,
             "map_available": bool(_map_months()),
             "planner_available": current_app.config["ZTM_PLANNER_PATH"].is_file(),
         }
