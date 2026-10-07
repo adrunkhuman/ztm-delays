@@ -33,6 +33,7 @@ from ztm_planner.settings import (
 )
 
 log = logging.getLogger(__name__)
+TRIP_COLUMNS = "trip_key, service_date, mode, line, headsign, duty_id, brigade, shape_id"
 STOP_LEVEL_KEYS = {
     "line_stop_hour": ("line", "direction_id", "stop_id", "daytype", "hr"),
     "line_stop_band": ("line", "direction_id", "stop_id", "daytype", "hb"),
@@ -69,8 +70,9 @@ def score(
     first, last = start - timedelta(days=1), start + timedelta(days=days - 1)
     features.register_holidays(con, first, last)
     if previous_gtfs_zip is not None:
-        gtfs.load_schedule(con, previous_gtfs_zip, workdir / "previous", first, first)
+        gtfs.load_schedule(con, previous_gtfs_zip, workdir / "previous", first, first, shape_prefix="p:")
         gtfs.load_schedule(con, gtfs_zip, workdir, start, last, append=True)
+        _merge_previous_shapes(con)
     else:
         gtfs.load_schedule(con, gtfs_zip, workdir, first, last)
     gtfs.segments(con)
@@ -102,11 +104,13 @@ def score(
             "planner_metadata": f"select '{build_id}' as build_id, now()::timestamp as built_at, "
             f"'{meta['version']}' as model_version, date '{start}' as first_date, date '{last}' as last_date",
             "planner_stop_group": "select * from out_group",
-            "planner_trip": "select distinct trip_key, service_date, mode, line, headsign from sched_stop "
-            "union all select distinct trip_key, service_date, mode, line, headsign from sched_fixed",
+            "planner_trip": f"select distinct {TRIP_COLUMNS} from sched_stop "
+            f"union all select distinct {TRIP_COLUMNS} from sched_fixed",
             "planner_stop": "select * from out_stop",
             "planner_range": "select * from ride_range",
             "planner_footpath": "select * from out_footpath",
+            "planner_stop_post": "select stop_id, lat, lon from post",
+            "planner_shape": "select * from sched_shape",
         },
     )
     summary = one(con, "select count(distinct trip_key), count(*) from out_stop")
@@ -115,6 +119,26 @@ def score(
     result = {"build_id": build_id, "model_version": meta["version"], "trips": summary[0], "stops": summary[1]}
     log.info("published %s: %s", output, result)
     return result
+
+
+def _merge_previous_shapes(con: duckdb.DuckDBPyConnection) -> None:
+    """Point yesterday's trips at an identical shape of today's snapshot, which may number it differently."""
+    con.execute(
+        """
+        create or replace temp table same_shape as
+        with drawn as (
+            select shape_id, md5(lat::varchar || lon::varchar || dist_m::varchar) as geometry from sched_shape
+        )
+        select p.shape_id as old_id, any_value(c.shape_id) as new_id
+        from drawn p join drawn c on p.geometry = c.geometry and c.shape_id not like 'p:%'
+        where p.shape_id like 'p:%'
+        group by p.shape_id
+        """
+    )
+    for table in ("sched_stop", "sched_fixed"):
+        con.execute(f"update {table} set shape_id = m.new_id from same_shape m where {table}.shape_id = m.old_id")
+    con.execute("delete from sched_shape where shape_id in (select old_id from same_shape)")
+    con.execute("drop table same_shape")
 
 
 def _stop_rows(con: duckdb.DuckDBPyConnection) -> None:
@@ -165,7 +189,7 @@ def _stop_rows(con: duckdb.DuckDBPyConnection) -> None:
             case when c.is_last or c.no_pickup then null
                  else floor(least(coalesce({", ".join(picks["eps"])}, 0) + {STOP_TOLERANCE_S}, 0)) end
                 as leave_by_offset_s,
-            c.ride_from_start_s, not c.no_dropoff as can_alight
+            c.ride_from_start_s, not c.no_dropoff as can_alight, c.shape_dist_m
         from stop_ctx c
         left join stop_eps e on e.is_tram = c.is_tram and e.band = c.band
         {" ".join(joins)}
@@ -184,7 +208,7 @@ def _fixed_stop_rows(con: duckdb.DuckDBPyConnection) -> None:
             case when no_pickup or stop_sequence = max(stop_sequence) over (partition by trip_key) then null
                  else 0 end as leave_by_offset_s,
             scheduled_sod - min(scheduled_sod) over (partition by trip_key) as ride_from_start_s,
-            not no_dropoff as can_alight
+            not no_dropoff as can_alight, shape_dist_m
         from sched_fixed
         """
     )
