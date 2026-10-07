@@ -239,6 +239,24 @@ class Shape:
             xs, ys = self.x[start : start + CHUNK + 1], self.y[start : start + CHUNK + 1]
             self.boxes.append((start, min(xs), max(xs), min(ys), max(ys)))
 
+    def path(self, start_m: float, end_m: float, most: int = 150) -> list[list[float]]:
+        """[lon, lat] points from start_m to end_m metres along, thinned to at most ``most``."""
+        inside = [i for i, d in enumerate(self.d) if start_m < d < end_m]
+        step = max(1, math.ceil(len(inside) / most))
+        points = [self._at(start_m), *(self._lonlat(self.x[i], self.y[i]) for i in inside[::step]), self._at(end_m)]
+        return [[round(lon, 6), round(lat, 6)] for lon, lat in points]
+
+    def _at(self, along: float) -> tuple[float, float]:
+        i = min(max(bisect_right(self.d, along), 1), len(self.d) - 1)
+        span = self.d[i] - self.d[i - 1]
+        share = min(max((along - self.d[i - 1]) / span, 0.0), 1.0) if span > 0 else 0.0
+        x0, y0, x1, y1 = self.x[i - 1], self.y[i - 1], self.x[i], self.y[i]
+        return self._lonlat(x0 + share * (x1 - x0), y0 + share * (y1 - y0))
+
+    @staticmethod
+    def _lonlat(x: float, y: float) -> tuple[float, float]:
+        return x / M_PER_DEG_LON + WARSAW_LON, y / M_PER_DEG_LAT + WARSAW_LAT
+
     def project(self, x: float, y: float) -> list[tuple[float, float]]:
         """(metres along, metres off) of the nearest point of each pass within OFF_ROUTE_M.
 
@@ -310,6 +328,7 @@ class Matcher:
         for trips in duties.values():
             trips.sort(key=self.first_sched)
             self.next_trip.update(pairwise(trips))
+        self.previous_trip = {after: before for before, after in self.next_trip.items()}
         self.last: dict[tuple[str, str], Fix] = {}
         self.updated_at: datetime | None = None
         self.fixes: dict[int, Fix] = {}

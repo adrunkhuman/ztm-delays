@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING
 
 import duckdb
@@ -7,7 +8,8 @@ import pytest
 
 from tests.test_journey import Stop, Trip, _network
 from tests.test_live import BACK, DAY, OUT, _at, _duty, _match, _ping, _shapes, _sod, publish_artifact, publish_feed
-from ztm_frontend import live, live_times
+from ztm_frontend import app as app_module
+from ztm_frontend import live, live_times, planner, queries
 from ztm_frontend.journey import NO_BOARD
 
 if TYPE_CHECKING:
@@ -148,3 +150,81 @@ def test_view_needs_a_calibration(published: tuple[Path, Network], tmp_path: Pat
     path, net = published
     publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(900, _at(8, 9, 6)))
     assert live_times.view(path, net, DAY, _at(8, 9, 40)) is None
+
+
+def _calibrate(path: Path) -> None:
+    with duckdb.connect(str(path)) as connection:
+        connection.execute(
+            "create table planner_live_persistence (is_tram boolean, horizon_min integer, excess_s integer, "
+            "alpha double, low_s double, mid_s double, high_s double)"
+        )
+        connection.executemany("insert into planner_live_persistence values (?, ?, ?, ?, ?, ?, ?)", ROWS)
+        connection.execute(
+            "create table planner_live_turnaround (is_tram boolean, low_s double, mid_s double, high_s double)"
+        )
+        connection.executemany("insert into planner_live_turnaround values (?, ?, ?, ?)", TURNAROUND)
+        connection.execute(
+            "create table planner_stop_post as select distinct stop_id, 52.23 as lat, 21.01 as lon from planner_stop"
+        )
+
+
+def test_cards_show_where_the_vehicle_is(published: tuple[Path, Network], tmp_path: Path) -> None:
+    path, _ = published
+    _calibrate(path)
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(900, _at(8, 9, 6)))
+
+    cards, _ = planner.search(path, "101", "102", DAY, _sod(8, 0), _at(8, 9, 40))
+    ride = next(item for item in cards[0]["timeline"] if item["kind"] == "ride")
+    assert cards[0]["live"] is True
+    assert (ride["live"]["status"], ride["live"]["late"]) == ("running", 6)  # 5 min 30 s behind the timetable
+    shown = ride["live"]["map"]
+    assert shown["stop"] == [21.01, 52.23]
+    assert shown["path"][0] == pytest.approx(shown["vehicle"], abs=1e-4)  # the vehicle, placed on its shape
+    # The stop list agrees with the card.
+    stops = planner.trip_stops(
+        path, ride["trip_key"], ride["board_sequence"], ride["alight_sequence"], DAY, _at(8, 9, 40)
+    )
+    assert planner.clock(stops[-1]["expected"]) == "08:14"
+    # Without now, nothing is live.
+    assert planner.search(path, "101", "102", DAY, _sod(8, 0))[0][0]["live"] is False
+
+
+def test_planner_page_marks_live_rides_and_refreshes_only_then(
+    published: tuple[Path, Network], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, _ = published
+    _calibrate(path)
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(900, _at(8, 9, 6)))
+    with duckdb.connect(str(path)) as connection:  # what the page needs beyond the router's tables
+        connection.execute(
+            "create or replace table planner_metadata as select build_id, ?::date as first_date, "
+            "?::date as last_date from planner_metadata",
+            [DAY, DAY],
+        )
+        connection.execute(
+            "create table planner_stop_group as select distinct stop_group_id, stop_group_id as name, "
+            "stop_group_id as search_key, ['175'] as lines, 1 as visits from planner_stop"
+        )
+    monkeypatch.setenv("ZTM_PLANNER_PATH", str(path))
+    monkeypatch.setattr(queries, "get_export_metadata", lambda _path: {})
+
+    class Clock(datetime):
+        moment = _at(8, 9, 40)
+
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return cls.moment.astimezone(tz)
+
+    monkeypatch.setattr(app_module, "datetime", Clock)
+    client = app_module.create_app().test_client()
+    url = f"/planner?date={DAY}&time=08:00&from=101&to=102&lang=en"
+
+    page = client.get(url).get_data(as_text=True)
+    assert 'class="pl-card live"' in page
+    assert "live · 6 min late now" in page
+    assert 'class="pl-minimap"' in page
+    assert 'hx-trigger="every 60s"' in page
+    Clock.moment = _at(8, 30)  # the feed is now stale: no live data, no polling
+    page = client.get(url).get_data(as_text=True)
+    assert "pl-minimap" not in page
+    assert "every 60s" not in page

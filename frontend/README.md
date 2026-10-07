@@ -66,6 +66,8 @@ For today, [live_times.py](ztm_frontend/live_times.py) moves the times of trips 
 
 Replayed on 5 and 6 Oct 2026 with the week before's calibration, expected times at stops up to 10 min ahead of a running vehicle were off by 48-54 s for buses and 35-36 s for trams, against 137-185 s and 83-86 s without live positions. At most 0.7% of vehicles left more than 30 s before the shown "be at the stop by" in any 10-minute band of distance and mode, against up to 1.2% for the stop tables alone; about half of bus boardings within 10 min moved more than 2 min later.
 
+A ride with a live vehicle shows a green dot on its card and, when expanded, how late the vehicle is now (or that it waits at its terminus or finishes its previous trip) and a minimap: the vehicle, the boarding stop and the route between, drawn by [planner.js](ztm_frontend/static/planner.js) with MapLibre and the map page's style, loaded only when such a card opens. While a live card is on screen and the tab is visible, htmx reloads the results every minute and keeps open cards open. The expanded stop list uses the same live times.
+
 The planner is in Polish and English. The PL/EN switch stores the choice in a cookie; without one, browsers preferring English get English and others Polish. Wording lives in [planner_text.py](ztm_frontend/planner_text.py).
 
 ## Checks

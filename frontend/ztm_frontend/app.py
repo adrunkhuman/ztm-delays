@@ -277,7 +277,7 @@ def _add_planner_routes(app: Flask) -> None:
         board, alight = request.args.get("board", type=int), request.args.get("alight", type=int)
         if day is None or board is None or alight is None:
             abort(404)
-        stops = planner.trip_stops(_planner_path(), trip_key, board, alight, day)
+        stops = planner.trip_stops(_planner_path(), trip_key, board, alight, day, datetime.now(WARSAW))
         if not stops:
             abort(404)
         return render_template("_planner_stops.html", stops=stops, t=planner_text.TEXT[_planner_lang()])
