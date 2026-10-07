@@ -221,9 +221,9 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
 
     page = client.get(url).get_data(as_text=True)
     assert 'class="pl-card live"' in page
-    assert "live · 6 min late now" in page
+    assert ">6 min late</span>" in page
     assert 'class="pl-minimap"' in page
-    assert 'hx-trigger="every 60s"' in page
+    assert 'hx-trigger="every[plannerShouldRefresh()] 60s"' in page
     Clock.moment = _at(8, 30)  # the feed is now stale: no live data, no polling
     page = client.get(url).get_data(as_text=True)
     assert "pl-minimap" not in page

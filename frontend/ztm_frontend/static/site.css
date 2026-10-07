@@ -3034,11 +3034,26 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   .pl-live-dot { animation: none; }
 }
 
+/* Beside the headsign, which gives way first. */
 .pl-live {
-  display: block;
-  margin-top: 0.3rem;
+  flex-shrink: 0;
   color: var(--live);
   font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.pl-map-vehicle {
+  background: var(--bg);
+  box-shadow: 0 0 0 2px rgb(0 0 0 / 60%);
+}
+
+.pl-map-stop {
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--fg);
+  box-shadow: 0 0 0 2px var(--fg);
 }
 
 .pl-minimap {

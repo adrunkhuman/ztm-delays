@@ -67,7 +67,7 @@
       {% set live_results = results|selectattr('live')|list %}
       {# While a live card is on screen, the cards refresh every minute (planner.js keeps open ones open). #}
       <section id="pl-results" class="pl-results" aria-label="{{ t.results }}"
-        {%- if live_results %} hx-get="{{ request.full_path }}" hx-trigger="every 60s"
+        {%- if live_results %} hx-get="{{ request.full_path }}" hx-trigger="every[plannerShouldRefresh()] 60s"
         hx-select="#pl-results" hx-swap="outerHTML"{% endif %}>
         {% if earlier_time %}<a class="pl-more" href="{{ planner_href(earlier_time) }}">{{ t.earlier }}</a>{% endif %}
         {% for r in results %}
@@ -134,10 +134,11 @@
                     <span></span>
                     <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
                     <span class="pl-seg-body">
-                      <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span></span>
+                      <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span>
+                        {%- if item.live %}<span class="pl-live" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
+                      </span>
                       {% if item.live %}
-                        <span class="pl-live"><span class="pl-live-dot" aria-hidden="true"></span>{{ t.live }} · {{ live_status(item.live) }}</span>
-                        <div class="pl-minimap" role="img" aria-label="{{ t.map_label }}" data-map="{{ item.live.map|tojson|forceescape }}"
+                        <div class="pl-minimap" role="img" aria-label="{{ t.map_label }}" data-map="{{ item.live.map|tojson|forceescape }}" data-mode="{{ item.mode }}" data-line="{{ item.line }}"
                           data-style="{{ url_for('static', filename='map-style.json') }}"></div>
                       {% endif %}
                       <details class="pl-stops-toggle" data-key="{{ r.key }}-{{ loop.index }}"

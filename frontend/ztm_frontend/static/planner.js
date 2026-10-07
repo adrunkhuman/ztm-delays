@@ -2,22 +2,15 @@
 // refresh and draws each live ride's minimap when its card opens. Cards are server-rendered.
 (() => {
   const MAPLIBRE = "https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl";
-  const VEHICLE = "#ffb02e";
-  const STOP = "#f4f4f4";
-  const PATH = "#9a9a9a";
 
-  // Poll only while the page is visible and a live card is in view. A trigger filter ([...]) is evaluated by
-  // htmx 4.0.0-beta5 but does not stop the request, so the request is cancelled instead.
-  const shouldRefresh = () =>
+  // The results' polling filter (htmx 4 reads it only attached to the event: every[...] 60s): poll while the page
+  // is visible and a live card is in view.
+  window.plannerShouldRefresh = () =>
     document.visibilityState === "visible" &&
     [...document.querySelectorAll(".pl-card.live")].some((card) => {
       const box = card.getBoundingClientRect();
       return box.bottom > 0 && box.top < window.innerHeight;
     });
-
-  document.addEventListener("htmx:before:request", (event) => {
-    if (event.target?.id === "pl-results" && !shouldRefresh()) event.preventDefault();
-  });
 
   let opened = [];
   document.addEventListener("htmx:before:swap", (event) => {
@@ -74,20 +67,31 @@
         container: box,
         style: new URL(box.dataset.style, window.location.href).href,
         bounds,
-        fitBoundsOptions: { padding: 28, maxZoom: 16 },
+        fitBoundsOptions: { padding: 36, maxZoom: 16 },
         interactive: false,
         attributionControl: { compact: true },
       });
+      // The page's own symbols: the timeline's stop dot, the line pill for the vehicle, the ride's mode colour.
+      const stopDot = document.createElement("span");
+      stopDot.className = "pl-map-stop";
+      const pill = document.createElement("span");
+      pill.className = `landing-line-pill mono pl-pill mode-${box.dataset.mode} pl-map-vehicle`;
+      pill.textContent = box.dataset.line;
+      new maplibregl.Marker({ element: stopDot }).setLngLat(stop).addTo(map);
+      new maplibregl.Marker({ element: pill }).setLngLat(vehicle).addTo(map);
+      const colour = getComputedStyle(box).getPropertyValue("--rail").trim() || "#888888";
       map.on("load", () => {
         // Compact attribution opens expanded on wide screens; on a minimap it would cover the route.
         box.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show");
-        const feature = (geometry) => ({ type: "Feature", geometry, properties: {} });
-        map.addSource("path", { type: "geojson", data: feature({ type: "LineString", coordinates: path }) });
-        map.addSource("stop", { type: "geojson", data: feature({ type: "Point", coordinates: stop }) });
-        map.addSource("vehicle", { type: "geojson", data: feature({ type: "Point", coordinates: vehicle }) });
-        map.addLayer({ id: "path", type: "line", source: "path", paint: { "line-color": PATH, "line-width": 3, "line-dasharray": [1.5, 1.5] } });
-        map.addLayer({ id: "stop", type: "circle", source: "stop", paint: { "circle-radius": 6, "circle-color": "#111111", "circle-stroke-color": STOP, "circle-stroke-width": 3 } });
-        map.addLayer({ id: "vehicle", type: "circle", source: "vehicle", paint: { "circle-radius": 7, "circle-color": VEHICLE, "circle-stroke-color": "#111111", "circle-stroke-width": 2 } });
+        const line = { type: "Feature", geometry: { type: "LineString", coordinates: path }, properties: {} };
+        map.addSource("path", { type: "geojson", data: line });
+        map.addLayer({
+          id: "path",
+          type: "line",
+          source: "path",
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: { "line-color": colour, "line-width": 4 },
+        });
       });
     }
   }
