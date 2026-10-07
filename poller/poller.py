@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import logging
@@ -10,7 +11,7 @@ import sys
 import time
 from argparse import ArgumentParser, Namespace
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -35,6 +36,8 @@ WARSAW_TZ = ZoneInfo("Europe/Warsaw")
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SPOOL_MAX_BYTES = 100 * 1024 * 1024
 DEFAULT_PUBLIC_STATUS_GCS_PATH = "health/poller/public/live.json"
+DEFAULT_LIVE_VEHICLES_GCS_PATH = "health/poller/public/vehicles.json.gz"
+LIVE_VEHICLE_COLUMNS = ("mode", "line", "brigade", "vehicle", "lat", "lon", "time")
 SPOOL_FILE_NAME = "buffers.json"
 
 SCHEMA = pa.schema(
@@ -88,6 +91,7 @@ class Config:
     health_gcs_prefix: str = DEFAULT_PREFIX
     health_max_bytes: int = DEFAULT_MAX_BYTES
     public_status_gcs_path: str = DEFAULT_PUBLIC_STATUS_GCS_PATH
+    live_vehicles_gcs_path: str = DEFAULT_LIVE_VEHICLES_GCS_PATH
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,7 @@ class PollResult:
     parsed_rows: int = 0
     accepted_vehicle_count: int = 0
     accepted_line_count: int = 0
+    rows: tuple[GpsRow, ...] = ()
 
 
 @dataclass
@@ -130,6 +135,8 @@ class PollState:
     last_parsed_rows: int = 0
     last_accepted_vehicle_count: int = 0
     last_accepted_line_count: int = 0
+    # Fresh rows of the last successful poll, published as live positions.
+    last_rows: tuple[GpsRow, ...] = field(default=(), repr=False)
 
 
 class GpsRow(TypedDict):
@@ -249,6 +256,7 @@ def _load_config(args: Namespace) -> Config:
     api_proxy = os.getenv("ZTM_API_PROXY", "").strip() or None
     heartbeat_gcs_path = os.getenv("POLLER_HEARTBEAT_GCS_PATH", "health/poller/latest.json").strip("/")
     public_status_gcs_path = os.getenv("POLLER_PUBLIC_STATUS_GCS_PATH", DEFAULT_PUBLIC_STATUS_GCS_PATH).strip("/")
+    live_vehicles_gcs_path = os.getenv("POLLER_LIVE_VEHICLES_GCS_PATH", DEFAULT_LIVE_VEHICLES_GCS_PATH).strip("/")
     require_polish_egress = _bool_env("POLLER_REQUIRE_POLISH_EGRESS", default=False)
     egress_check_url = os.getenv("POLLER_EGRESS_CHECK_URL", "https://ipinfo.io/json").strip()
     spool_dir = Path(os.getenv("POLLER_SPOOL_DIR", "/var/lib/ztm-poller-spool")).expanduser()
@@ -285,6 +293,7 @@ def _load_config(args: Namespace) -> Config:
         health_gcs_prefix=health_gcs_prefix,
         health_max_bytes=health_max_bytes,
         public_status_gcs_path=public_status_gcs_path,
+        live_vehicles_gcs_path=live_vehicles_gcs_path,
     )
 
 
@@ -373,6 +382,7 @@ def _poll_vehicle_type(
             parsed_rows=parsed_rows,
             accepted_vehicle_count=len({row["VehicleNumber"] for row in rows}),
             accepted_line_count=len({row["Lines"] for row in rows}),
+            rows=tuple(rows),
         )
     except requests.RequestException:
         LOGGER.exception("API request failed vehicle_type=%s", vehicle_type.name)
@@ -427,6 +437,7 @@ def _run_poll_loop(runtime: RuntimeState) -> None:
 def _handle_uploads(runtime: RuntimeState, loop_started: float) -> None:
     config = runtime.config
     bucket = cast("storage.Bucket", runtime.bucket)
+    _write_live_vehicles(bucket, config, runtime.poll_states, datetime.now(UTC))
     now = datetime.now(WARSAW_TZ)
     if loop_started - runtime.last_partial_flush >= config.partial_flush_interval_seconds:
         flush_before = now - timedelta(seconds=config.flush_lag_seconds)
@@ -472,6 +483,7 @@ def _update_poll_state(state: PollState, result: PollResult) -> None:
         state.last_parsed_rows = result.parsed_rows
         state.last_accepted_vehicle_count = result.accepted_vehicle_count
         state.last_accepted_line_count = result.accepted_line_count
+        state.last_rows = result.rows
         state.consecutive_failures = 0
         state.last_error_type = None
         return
@@ -870,6 +882,47 @@ def _write_public_status(bucket: storage.Bucket, config: Config, payload: dict[s
         return False
     LOGGER.info("uploaded public poller status gcs_path=gs://%s/%s", config.gcs_bucket, config.public_status_gcs_path)
     return True
+
+
+def _write_live_vehicles(
+    bucket: storage.Bucket, config: Config, poll_states: dict[str, PollState], now: datetime
+) -> bool:
+    data = gzip.compress(
+        json.dumps(_live_vehicles_payload(config, poll_states, now), separators=(",", ":")).encode(), mtime=0
+    )
+    try:
+        blob = bucket.blob(config.live_vehicles_gcs_path)
+        blob.cache_control = "no-cache"
+        # The next poll replaces this object anyway: a short timeout and no retry keep GCS from delaying polls.
+        blob.upload_from_string(data, content_type="application/gzip", timeout=config.api_timeout_seconds, retry=None)
+    except (GoogleAPIError, OSError, requests.RequestException):
+        LOGGER.exception(
+            "failed to upload live vehicles gcs_path=gs://%s/%s", config.gcs_bucket, config.live_vehicles_gcs_path
+        )
+        return False
+    return True
+
+
+def _live_vehicles_payload(
+    config: Config, poll_states: dict[str, PollState], updated_at: datetime
+) -> dict[str, object]:
+    """Latest fresh ping per vehicle; a mode whose polls fail keeps its last rows until they age out."""
+    min_time = updated_at - timedelta(seconds=config.max_ping_age_seconds)
+    latest: dict[tuple[str, str], GpsRow] = {}
+    for name, state in sorted(poll_states.items()):
+        for row in state.last_rows:
+            key = (name, row["VehicleNumber"])
+            if row["Time"] >= min_time and (key not in latest or row["Time"] > latest[key]["Time"]):
+                latest[key] = row
+    return {
+        "version": 1,
+        "updated_at": _isoformat_utc(updated_at),
+        "columns": list(LIVE_VEHICLE_COLUMNS),
+        "vehicles": [
+            [name, row["Lines"], row["Brigade"], vehicle, row["Lat"], row["Lon"], int(row["Time"].timestamp())]
+            for (name, vehicle), row in sorted(latest.items())
+        ],
+    }
 
 
 def _public_status_payload(

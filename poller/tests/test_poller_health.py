@@ -40,7 +40,17 @@ class HealthBlob:
         self.bucket = bucket
         self.key = key
 
-    def upload_from_string(self, data: bytes, content_type: str) -> None:
+    def upload_from_string(
+        self, data: bytes, content_type: str, timeout: float | None = None, retry: object = "default"
+    ) -> None:
+        if content_type == "application/gzip":
+            # Live positions upload every poll; health assertions count only JSON uploads.
+            assert timeout is not None
+            assert retry is None
+            if self.bucket.fail:
+                raise GoogleAPIError("offline simulated failure")
+            self.bucket.objects[self.key] = data
+            return
         assert content_type == "application/json"
         self.bucket.calls.append((self.key, data))
         if self.bucket.ambiguous_failure:

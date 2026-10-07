@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "description": "Live vehicle positions: the latest fresh ping per vehicle, replaced by the poller after every poll (about every 10 s). Written by poller/, read by the frontend planner. Positions are the city API's own public data.",
+  "gcs_object": "health/poller/public/vehicles.json.gz",
+  "encoding": "gzip-compressed UTF-8 JSON, Content-Type application/gzip, Cache-Control no-cache",
+  "fields": {
+    "version": "integer, exactly 1",
+    "updated_at": "UTC ISO timestamp with Z suffix: when this object was built",
+    "columns": "array of column names, exactly as listed under vehicle_columns",
+    "vehicles": "array of rows, one per vehicle, each an array in columns order"
+  },
+  "vehicle_columns": {
+    "mode": "bus or tram",
+    "line": "API Lines value, a string",
+    "brigade": "API Brigade value, a string as sent (may carry leading zeros)",
+    "vehicle": "API VehicleNumber, a string; unique within mode",
+    "lat": "WGS84 latitude",
+    "lon": "WGS84 longitude",
+    "time": "GPS timestamp, integer Unix seconds (UTC)"
+  },
+  "invariants": [
+    "every row's time is at most MAX_PING_AGE_SECONDS (default 300) before updated_at",
+    "a mode whose polls fail keeps its last rows until they age out; an empty vehicles array is valid",
+    "rows are sorted by mode, then vehicle"
+  ]
+}
