@@ -130,7 +130,7 @@ def test_period_layout_renders_across_views(window: str, view: str, monkeypatch:
         html = render_template(f"{template}.html", **context)
     assert f"<b>{context['window_context']['label']}</b>" in html
     assert all(label not in html for label in ("period-note", "period-range"))
-    assert "GTFS" not in html
+    assert "GTFS" not in html.split("<footer")[0]
     assert "Linear scale" not in html
     assert "Previous period anchor" in html
     assert "q=central" in html

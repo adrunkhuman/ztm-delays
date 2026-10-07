@@ -39,6 +39,7 @@
 
       <footer class="foot">
         {% block footer %}<span>archive · {{ meta.source_row_count|integer if meta.source_row_count else "n/a" }} rows · built {{ meta.exported_at or "n/a" }}</span>{% endblock %}
+        <span class="foot-credits">data: <a href="https://ztm.waw.pl">ZTM Warszawa</a> · <a href="https://dane.um.warszawa.pl">Miasto Stołeczne Warszawa</a> · GTFS by <a href="https://mkuran.pl/gtfs/">Mikołaj Kuranowski</a> · © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</span>
       </footer>
     </div>
     {% block scripts %}{% endblock %}
