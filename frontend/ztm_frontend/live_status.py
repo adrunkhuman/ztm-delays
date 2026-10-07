@@ -107,7 +107,7 @@ def enabled() -> bool:
     return bool(os.environ.get(BUCKET_ENV))
 
 
-def _download(bucket: str, name: str, max_bytes: int) -> bytes:
+def download(bucket: str, name: str, max_bytes: int) -> bytes:
     """Fetch at most `max_bytes` of an object; larger objects are rejected before decoding."""
     # The inclusive range reads one byte past the limit, so oversize shows up without a metadata call.
     # No retries: a failed read is simply tried again after the cache TTL.
@@ -132,7 +132,7 @@ def _refresh(
         now = time.monotonic()
         if cached.fetched_at is None or now - cached.fetched_at >= cached.ttl:
             try:
-                value = parse(json.loads(_download(bucket, name, max_bytes)))
+                value = parse(json.loads(download(bucket, name, max_bytes)))
                 cached.value, cached.state, cached.read_at = value, ("ok" if value is not None else "unavailable"), now
             except NotFound:
                 cached.value, cached.state, cached.read_at = None, "missing", now

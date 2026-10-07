@@ -33,6 +33,7 @@ class Stop:
     cumulative: float | None = None
     can_alight: bool = True
     expected: int | None = None  # default: the timetable for metro and rail, else the first departure plus the ride
+    shape_dist: int | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,10 @@ class Trip:
     stops: tuple[Stop, ...]
     day: date = DAY
     mode: str = "bus"
+    line: str = "test"
+    brigade: str | None = None
+    duty: str | None = None
+    shape: str | None = None
 
 
 def _write(
@@ -55,12 +60,14 @@ def _write(
         """
         create table planner_metadata (build_id varchar not null);
         create table planner_trip (
-            trip_key bigint, service_date date, mode varchar, line varchar, headsign varchar
+            trip_key bigint, service_date date, mode varchar, line varchar, headsign varchar,
+            duty_id varchar, brigade varchar, shape_id varchar
         );
         create table planner_stop (
             trip_key bigint, stop_sequence integer, stop_id varchar, stop_group_id varchar,
             stop_name varchar, scheduled_sod integer, usual_delay_s integer, late_delay_s integer,
-            leave_by_offset_s integer, ride_from_start_s double, expected_sod integer, can_alight boolean not null
+            leave_by_offset_s integer, ride_from_start_s double, expected_sod integer, can_alight boolean not null,
+            shape_dist_m integer
         );
         create table planner_footpath (
             from_stop_id varchar, to_stop_id varchar, distance_m integer, walk_s integer
@@ -74,7 +81,8 @@ def _write(
     connection.execute("insert into planner_metadata values (?)", [build_id or str(uuid4())])
     for trip in trips:
         connection.execute(
-            "insert into planner_trip values (?, ?, ?, 'test', 'Destination')", [trip.key, trip.day, trip.mode]
+            "insert into planner_trip values (?, ?, ?, ?, 'Destination', ?, ?, ?)",
+            [trip.key, trip.day, trip.mode, trip.line, trip.duty, trip.brigade, trip.shape],
         )
         first = trip.stops[0]
         start = first.scheduled + max(first.usual, first.usual if first.margin is None else first.margin)
@@ -85,7 +93,7 @@ def _write(
             if expected is None:
                 expected = stop.scheduled if trip.mode in {"metro", "rail"} else round(start + cumulative)
             connection.execute(
-                "insert into planner_stop values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "insert into planner_stop values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     trip.key,
                     10 * (i + 1),
@@ -99,6 +107,7 @@ def _write(
                     cumulative,
                     expected,
                     stop.can_alight,
+                    stop.shape_dist,
                 ],
             )
     if walks:
