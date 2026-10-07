@@ -6,16 +6,19 @@ coming days and is read-only here. Its tables:
 - ``planner_metadata``: ``build_id``, ``built_at``, ``model_version``, ``first_date``, ``last_date``.
 - ``planner_stop_group``: one search entry per stop group (all posts of a stop): ``stop_group_id``, ``name``,
   ``search_key`` (lowercase, accents removed, ``ł`` -> ``l``), ``lines`` (list), ``visits``.
-- ``planner_trip``: ``trip_key``, ``service_date``, ``mode``, ``line``, ``headsign``.
+- ``planner_trip``: ``trip_key``, ``service_date``, ``mode``, ``line``, ``headsign``, ``duty_id`` (GTFS block),
+  ``brigade`` (as in the GPS feed), ``shape_id``; the last three are null where the feed has none.
 - ``planner_stop``: per scheduled stop of a trip: ``trip_key``, ``stop_sequence``, ``stop_id``, ``stop_group_id``,
   ``stop_name``, ``scheduled_sod`` (seconds after service-date midnight, may exceed 24 h), ``usual_delay_s`` (median
   delay there), ``late_delay_s`` (90th percentile), ``leave_by_offset_s`` (<= 0: be at the stop this long before
   the timetable; null where boarding is prohibited), ``ride_from_start_s`` (predicted ride from the trip's first
   stop), ``expected_sod`` (the trip's expected time there, whichever stop it is boarded at), ``can_alight`` (false
-  at pickup-only stops).
+  at pickup-only stops), ``shape_dist_m`` (metres along the trip's shape).
 - ``planner_range``: calibrated ride-time spread, complete for every ``is_tram`` x ``weekday`` x ``hour`` x ride
   bucket ``(min_ride_s, max_ride_s]``: ``low_ratio``/``high_ratio`` are the 10th/90th percentile of actual/predicted.
 - ``planner_footpath``: directed walks between posts, with ``distance_m`` and ``walk_s``.
+- ``planner_stop_post``: ``stop_id``, ``lat``, ``lon``.
+- ``planner_shape``: ``shape_id`` and its polyline as parallel lists ``lat``, ``lon``, ``dist_m``.
 """
 
 from __future__ import annotations

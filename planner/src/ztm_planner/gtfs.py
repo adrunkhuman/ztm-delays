@@ -4,6 +4,9 @@ Same mapping as the warehouse staging models: line = route_id, mode from route_t
 3 bus); stops that are not in passenger service (pickup and drop-off both 1) are skipped. Buses and trams go to
 ``sched_stop`` for the travel-time model; metro and SKM rail have no observations and keep their timetable in
 ``sched_fixed``. Metro trips are templates repeated every headway (``frequencies.txt``).
+
+Duties (``block_id``, with ``block_short_name`` as the GPS feed's brigade) and shapes are kept for live positions;
+feeds without them load with nulls.
 """
 
 from __future__ import annotations
@@ -17,7 +20,12 @@ if TYPE_CHECKING:
     import duckdb
 
 MEMBERS = ("stop_times.txt", "trips.txt", "routes.txt", "stops.txt", "calendar_dates.txt")
-OPTIONAL_MEMBERS = ("frequencies.txt",)
+OPTIONAL_MEMBERS = ("frequencies.txt", "shapes.txt")
+# Optional columns, added as null when a feed lacks them.
+OPTIONAL_COLUMNS = {
+    "gtfs_trips": ("block_id", "block_short_name", "shape_id"),
+    "gtfs_stop_times": ("shape_dist_traveled",),
+}
 MODE_SQL = "case r.route_type when '0' then 'tram' when '1' then 'metro' when '2' then 'rail' else 'bus' end"
 
 
@@ -29,10 +37,20 @@ def _sod(column: str) -> str:
 
 
 def load_schedule(
-    con: duckdb.DuckDBPyConnection, gtfs_zip: Path, workdir: Path, start: date, end: date, append: bool = False
+    con: duckdb.DuckDBPyConnection,
+    gtfs_zip: Path,
+    workdir: Path,
+    start: date,
+    end: date,
+    append: bool = False,
+    shape_prefix: str = "",
 ) -> None:
     """Create (or with ``append``, extend) ``sched_stop`` and ``sched_fixed``: one row per scheduled passenger stop
-    in [start, end]."""
+    in [start, end]; and ``sched_shape``: one polyline per shape those trips use.
+
+    Shape ids are only unique within one snapshot, so a second snapshot in the same tables needs its own
+    ``shape_prefix``.
+    """
     extract = workdir / "gtfs"
     extract.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(gtfs_zip) as archive:
@@ -54,6 +72,14 @@ def load_schedule(
             "create or replace table gtfs_frequencies (trip_id varchar, start_time varchar, end_time varchar, "
             "headway_secs varchar)"
         )
+    if "shapes.txt" not in members:
+        con.execute(
+            "create or replace table gtfs_shapes (shape_id varchar, shape_pt_sequence varchar, shape_pt_lat varchar, "
+            "shape_pt_lon varchar, shape_dist_traveled varchar)"
+        )
+    for table, optional in OPTIONAL_COLUMNS.items():
+        for column in optional:
+            con.execute(f"alter table {table} add column if not exists {column} varchar")
     con.execute(
         f"""
         create or replace temp table gtfs_trip_stop as
@@ -65,12 +91,18 @@ def load_schedule(
         st as (
             select trip_id, stop_id, stop_sequence::integer as stop_sequence, {_sod("arrival_time")} as scheduled_sod,
                 coalesce(nullif(pickup_type, ''), '0') as pickup_type,
-                coalesce(nullif(drop_off_type, ''), '0') as drop_off_type
+                coalesce(nullif(drop_off_type, ''), '0') as drop_off_type,
+                round(nullif(shape_dist_traveled, '')::double * 1000)::integer as shape_dist_m
             from gtfs_stop_times
         )
         select svc.service_date, t.trip_id, r.route_type, {MODE_SQL} as mode,
             t.route_id as line, coalesce(nullif(t.direction_id, '')::integer, 0) as direction_id,
             coalesce(nullif(t.trip_headsign, ''), '') as headsign,
+            nullif(t.block_id, '') as duty_id,
+            -- The matcher's brigade normalization: the GPS feed may drop leading zeros.
+            case when nullif(t.block_id, '') is not null
+                 then coalesce(nullif(ltrim(t.block_short_name, '0'), ''), '0') end as brigade,
+            ? || nullif(t.shape_id, '') as shape_id, st.shape_dist_m,
             st.stop_id, st.stop_sequence, st.scheduled_sod, st.pickup_type = '3' as request,
             s.stop_name, s.stop_lat::double as lat, s.stop_lon::double as lon, st.pickup_type = '1' as no_pickup,
             st.drop_off_type = '1' as no_dropoff
@@ -81,11 +113,11 @@ def load_schedule(
         join gtfs_stops s using (stop_id)
         where r.route_type in ('0', '1', '2', '3') and not (st.pickup_type = '1' and st.drop_off_type = '1')
         """,
-        [start, end],
+        [start, end, shape_prefix],
     )
     columns = (
-        "service_date, trip_key, mode, line, direction_id, headsign, stop_id, stop_sequence, scheduled_sod, request, "
-        "stop_name, lat, lon, no_pickup, no_dropoff"
+        "service_date, trip_key, mode, line, direction_id, headsign, duty_id, brigade, shape_id, stop_id, "
+        "stop_sequence, scheduled_sod, request, stop_name, lat, lon, shape_dist_m, no_pickup, no_dropoff"
     )
     # Not DuckDB's hash(): it collides on Warsaw trip ids that differ in two digits, a few times a week (e.g.
     # 2026-10-06:10:PcS:017:2319 and 2026-10-06:19:PcS:018:2319), and may change between DuckDB versions.
@@ -119,6 +151,20 @@ def load_schedule(
         select {columns.replace("trip_key", trip_key.format(id="trip_id || ':' || coalesce(run_start, -1)"))}
         from fixed
         """
+    )
+    con.execute(
+        f"""
+        {"insert into sched_shape" if append else "create or replace table sched_shape as"}
+        select ? || shape_id as shape_id,
+            list(shape_pt_lat::double order by shape_pt_sequence::integer) as lat,
+            list(shape_pt_lon::double order by shape_pt_sequence::integer) as lon,
+            list(round(nullif(shape_dist_traveled, '')::double * 1000)::integer
+                order by shape_pt_sequence::integer) as dist_m
+        from gtfs_shapes
+        where ? || shape_id in (select distinct shape_id from gtfs_trip_stop)
+        group by shape_id
+        """,
+        [shape_prefix, shape_prefix],
     )
     for member in (*MEMBERS, *OPTIONAL_MEMBERS):
         con.execute(f"drop table if exists gtfs_{member.removesuffix('.txt')}")

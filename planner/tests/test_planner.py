@@ -175,6 +175,55 @@ def test_gtfs_trip_keys_tell_apart_trips_whose_ids_differ_in_two_digits(tmp_path
     assert one(con, "select count(distinct trip_key), count(distinct line) from sched_stop") == (2, 2)
 
 
+def test_gtfs_keeps_duties_brigades_and_shapes_for_live_positions(tmp_path: Path) -> None:
+    files = {
+        "routes.txt": "route_id,route_type\n175,3\n",
+        "trips.txt": "route_id,service_id,trip_id,trip_headsign,direction_id,block_id,block_short_name,shape_id\n"
+        "175,S,T1,B,0,D9,007,SH\n175,S,T2,A,1,D9,007,\n",
+        "stop_times.txt": "trip_id,arrival_time,stop_id,stop_sequence,pickup_type,drop_off_type,shape_dist_traveled\n"
+        "T1,10:00:00,A,0,0,0,0\nT1,10:02:00,B,1,0,0,0.75\nT2,10:10:00,B,0,0,0,\nT2,10:12:00,A,1,0,0,\n",
+        "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nA,A,52.2,21.0\nB,B,52.21,21.0\n",
+        "calendar_dates.txt": "service_id,date,exception_type\nS,20261006,1\n",
+        "shapes.txt": "shape_id,shape_pt_sequence,shape_pt_lat,shape_pt_lon,shape_dist_traveled\n"
+        "SH,1,52.205,21.001,0.4\nSH,0,52.2,21.0,0\nSH,2,52.21,21.0,0.75\nUNUSED,0,50.0,20.0,0\n",
+    }
+    gtfs_zip = tmp_path / "gtfs.zip"
+    with zipfile.ZipFile(gtfs_zip, "w") as archive:
+        for name, text in files.items():
+            archive.writestr(name, text)
+    con = duckdb.connect()
+    gtfs.load_schedule(con, gtfs_zip, tmp_path, date(2026, 10, 6), date(2026, 10, 6), shape_prefix="p:")
+
+    rows = con.execute(
+        "select duty_id, brigade, shape_id, shape_dist_m from sched_stop order by scheduled_sod"
+    ).fetchall()
+    # The GPS feed's brigade drops leading zeros, as in the matcher.
+    assert rows == [
+        ("D9", "7", "p:SH", 0),
+        ("D9", "7", "p:SH", 750),
+        ("D9", "7", None, None),
+        ("D9", "7", None, None),
+    ]
+    assert con.execute("select * from sched_shape").fetchall() == [
+        ("p:SH", [52.2, 52.205, 52.21], [21.0, 21.001, 21.0], [0, 400, 750])
+    ]
+
+
+def test_yesterdays_trips_reuse_identical_shapes_that_today_numbers_differently() -> None:
+    con = duckdb.connect()
+    con.execute(
+        "create table sched_shape as select * from (values ('p:1', [1.0], [2.0], [0]), ('p:2', [5.0], [5.0], [0]),"
+        " ('9', [1.0], [2.0], [0]), ('1', [3.0], [3.0], [0])) t(shape_id, lat, lon, dist_m)"
+    )
+    con.execute("create table sched_stop as select * from (values ('p:1'), ('p:2'), ('9')) t(shape_id)")
+    con.execute("create table sched_fixed as select * from sched_stop where false")
+
+    score._merge_previous_shapes(con)
+
+    assert con.execute("select shape_id from sched_stop order by all").fetchall() == [("9",), ("9",), ("p:2",)]
+    assert con.execute("select shape_id from sched_shape order by all").fetchall() == [("1",), ("9",), ("p:2",)]
+
+
 @pytest.fixture(scope="module")
 def trained(tmp_path_factory: pytest.TempPathFactory, world: dict[str, Path]) -> Path:
     root = tmp_path_factory.mktemp("train")
@@ -194,17 +243,23 @@ def test_gtfs_alighting_restrictions_survive_scoring(
     # The last platform is near the origin, so the synthetic artifact also has a valid footpath.
     stops = ["100101", "100201", "100301", "100401", "200101", "200201", "1001M:P1"]
     monkeypatch.setattr(
-        conftest, "ROUTES",
+        conftest,
+        "ROUTES",
         {line: (kind, stops, 4) for line, kind in (("110", "3"), ("17", "0"), ("M1", "1"), ("S1", "2"))},
     )
     timetable = tmp_path / "restricted.zip"
-    write_gtfs(timetable, SCORE_START, 1, stop_types={
-        "100201": ("0", "1"),  # pickup-only intermediate stop: keep boarding and through-riding
-        "100301": ("1", "0"),  # drop-off-only stop: keep alighting
-        "100401": ("2", "2"),  # coordination remains supported
-        "200101": ("3", "3"),  # request stop remains supported
-        "200201": ("", ""),  # blanks mean normal passenger service
-    })
+    write_gtfs(
+        timetable,
+        SCORE_START,
+        1,
+        stop_types={
+            "100201": ("0", "1"),  # pickup-only intermediate stop: keep boarding and through-riding
+            "100301": ("1", "0"),  # drop-off-only stop: keep alighting
+            "100401": ("2", "2"),  # coordination remains supported
+            "200101": ("3", "3"),  # request stop remains supported
+            "200201": ("", ""),  # blanks mean normal passenger service
+        },
+    )
     with duckdb.connect() as con:
         gtfs.load_schedule(con, timetable, tmp_path / "schedule", SCORE_START, SCORE_START)
         for table, modes in (("sched_stop", {"bus", "tram"}), ("sched_fixed", {"metro", "rail"})):
@@ -223,15 +278,16 @@ def test_gtfs_alighting_restrictions_survive_scoring(
         "--output", str(output), "--build-id", "restricted",
     ])  # fmt: skip
     with duckdb.connect(str(output), read_only=True) as con:
-        columns = con.execute("describe planner_stop").fetchall()
-        assert columns[-1][:2] == ("can_alight", "BOOLEAN")
+        columns = {row[0]: row[1] for row in con.execute("describe planner_stop").fetchall()}
+        assert columns["can_alight"] == "BOOLEAN"
         assert one(con, "select count(*) from planner_stop where can_alight is null")[0] == 0
         for mode in ("bus", "tram", "metro", "rail"):
             rows = con.execute(
                 "select s.stop_id, s.can_alight, s.leave_by_offset_s, s.ride_from_start_s "
                 "from planner_stop s join planner_trip t using (trip_key) "
                 "where t.mode = ? and t.trip_key = (select min(trip_key) from planner_trip where mode = ?) "
-                "order by s.stop_sequence", [mode, mode],
+                "order by s.stop_sequence",
+                [mode, mode],
             ).fetchall()
             assert [r[0] for r in rows] == stops
             assert [r[1] for r in rows] == [True, False, True, True, True, True, True]

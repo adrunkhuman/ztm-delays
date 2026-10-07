@@ -23,14 +23,15 @@ CONTRACT: dict[str, tuple[tuple[str, str, bool], ...]] = {
     ),
     "planner_trip": (
         ("trip_key", "BIGINT", False), ("service_date", "DATE", False), ("mode", "VARCHAR", False),
-        ("line", "VARCHAR", False), ("headsign", "VARCHAR", False),
+        ("line", "VARCHAR", False), ("headsign", "VARCHAR", False), ("duty_id", "VARCHAR", True),
+        ("brigade", "VARCHAR", True), ("shape_id", "VARCHAR", True),
     ),
     "planner_stop": (
         ("trip_key", "BIGINT", False), ("stop_sequence", "INTEGER", False), ("stop_id", "VARCHAR", False),
         ("stop_group_id", "VARCHAR", False), ("stop_name", "VARCHAR", False), ("scheduled_sod", "INTEGER", False),
         ("usual_delay_s", "INTEGER", False), ("late_delay_s", "INTEGER", False),
         ("leave_by_offset_s", "INTEGER", True), ("ride_from_start_s", "DOUBLE", False),
-        ("expected_sod", "INTEGER", False), ("can_alight", "BOOLEAN", False),
+        ("expected_sod", "INTEGER", False), ("can_alight", "BOOLEAN", False), ("shape_dist_m", "INTEGER", True),
     ),
     "planner_range": (
         ("is_tram", "BOOLEAN", False), ("weekday", "BOOLEAN", False), ("hour", "INTEGER", False),
@@ -41,9 +42,21 @@ CONTRACT: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("from_stop_id", "VARCHAR", False), ("to_stop_id", "VARCHAR", False), ("distance_m", "INTEGER", True),
         ("walk_s", "INTEGER", False),
     ),
+    "planner_stop_post": (("stop_id", "VARCHAR", False), ("lat", "DOUBLE", False), ("lon", "DOUBLE", False)),
+    "planner_shape": (
+        ("shape_id", "VARCHAR", False), ("lat", "DOUBLE[]", False), ("lon", "DOUBLE[]", False),
+        ("dist_m", "INTEGER[]", False),
+    ),
 }  # fmt: skip
 # Unique columns, also in the repository contract; a trip key shared by two trips would merge them.
-KEYS: dict[str, tuple[str, ...]] = {"planner_trip": ("trip_key",), "planner_stop": ("trip_key", "stop_sequence")}
+KEYS: dict[str, tuple[str, ...]] = {
+    "planner_trip": ("trip_key",),
+    "planner_stop": ("trip_key", "stop_sequence"),
+    "planner_stop_post": ("stop_id",),
+    "planner_shape": ("shape_id",),
+}
+# A feed without shapes.txt still plans journeys; only live maps need shapes.
+MAY_BE_EMPTY = {"planner_shape"}
 ORDER = {
     "planner_stop": "stop_group_id, trip_key, stop_sequence",
     "planner_trip": "trip_key",
@@ -79,7 +92,7 @@ def write(con: duckdb.DuckDBPyConnection, output: Path, sources: dict[str, str])
 
 def _validate(con: duckdb.DuckDBPyConnection, table: str, columns: tuple[tuple[str, str, bool], ...]) -> None:
     rows = one(con, f"select count(*) from artifact.{table}")[0]
-    if rows == 0:
+    if rows == 0 and table not in MAY_BE_EMPTY:
         raise ValueError(f"artifact table {table} is empty")
     for name, _, nullable in columns:
         if not nullable:

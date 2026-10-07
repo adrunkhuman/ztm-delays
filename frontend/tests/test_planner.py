@@ -40,15 +40,15 @@ def _write_artifact(path: Path) -> None:
             ) t(stop_group_id, name, search_key, lines, visits);
 
             create table planner_trip as select * from (values
-                (1::bigint, date '2026-09-23', 'bus', '110', 'Metro Marymont'),
-                (-5::bigint, date '2026-09-23', 'bus', '110', 'Metro Marymont'),
-                (7::bigint, date '2026-09-22', 'bus', 'N50', 'Metro Marymont'),
-                (10::bigint, date '2026-09-23', 'metro', 'M1', 'Centrum'),
-                (11::bigint, date '2026-09-23', 'metro', 'M1', 'Centrum')
-            ) t(trip_key, service_date, mode, line, headsign);
+                (1::bigint, date '2026-09-23', 'bus', '110', 'Metro Marymont', 'D1', '3', 'S1'),
+                (-5::bigint, date '2026-09-23', 'bus', '110', 'Metro Marymont', 'D1', '3', 'S1'),
+                (7::bigint, date '2026-09-22', 'bus', 'N50', 'Metro Marymont', 'D2', '1', null),
+                (10::bigint, date '2026-09-23', 'metro', 'M1', 'Centrum', null, null, null),
+                (11::bigint, date '2026-09-23', 'metro', 'M1', 'Centrum', null, null, null)
+            ) t(trip_key, service_date, mode, line, headsign, duty_id, brigade, shape_id);
 
             create table planner_stop as select * replace (ride_from_start_s::double as ride_from_start_s),
-                true as can_alight from (values
+                true as can_alight, null::integer as shape_dist_m from (values
                 -- 07:30 -> 07:50 scheduled; usually 60 s late at boarding; predicted ride 25 min
                 (1::bigint, 0, '100103', '1001', 'Łomianki', 27000, 60, 180, -30, 0.0, 27060),
                 (1::bigint, 1, '200201', '2002', 'Metro Marymont', 28200, 90, 240, null, 1500.0, 28560),
@@ -74,6 +74,15 @@ def _write_artifact(path: Path) -> None:
             create table planner_footpath as select * from (values
                 ('200201', '200203', 120, 120)
             ) t(from_stop_id, to_stop_id, distance_m, walk_s);
+
+            create table planner_stop_post as select stop_id, lat::double as lat, lon::double as lon from (values
+                ('100101', 52.33, 20.92), ('100103', 52.331, 20.921), ('200201', 52.27, 20.97),
+                ('200202', 52.271, 20.971), ('200203', 52.272, 20.972), ('300301', 52.29, 20.95),
+                ('400401', 52.23, 21.01)
+            ) t(stop_id, lat, lon);
+
+            create table planner_shape as select 'S1' as shape_id, [52.331, 52.27]::double[] as lat,
+                [20.921, 20.97]::double[] as lon, [0, 7000]::integer[] as dist_m;
             """
         )
 
