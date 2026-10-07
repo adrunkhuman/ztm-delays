@@ -135,6 +135,9 @@ class Network:
 
     def __init__(self, connection: duckdb.DuckDBPyConnection, day: date) -> None:
         """Load this service day and the previous day's trips still running after midnight."""
+        build = connection.execute("select build_id from planner_metadata limit 1").fetchone()
+        self.build_id = str(build[0]) if build else ""
+        self.live: object | None = None  # live.Matcher, created on first use and dying with the network
         stops = connection.execute(
             """
             select distinct s.stop_id, s.stop_group_id

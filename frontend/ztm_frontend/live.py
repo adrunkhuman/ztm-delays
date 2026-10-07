@@ -20,7 +20,6 @@ import math
 import os
 import threading
 import time
-import weakref
 import zlib
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -36,7 +35,7 @@ from ztm_frontend import live_status
 from ztm_frontend.db import read_connection
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Sequence
 
     import duckdb
 
@@ -56,6 +55,7 @@ STALE_PING_S: Final = 120  # a vehicle silent this long says nothing about now
 
 OFF_ROUTE_M: Final = 100  # GPS error plus road width; farther than this the vehicle is not on the shape
 TERMINAL_M: Final = 60  # this close to the first or last stop along the shape, the vehicle is at the terminus
+TERMINUS_REACH_M: Final = 300  # shapes may run on past a terminus (to a depot, a loop); that is not the terminus
 EARLIEST_S, LATEST_S = -15 * 60, 60 * 60  # the matcher's own bounds on a plausible departure delay
 BEFORE_TRIP_S, AFTER_TRIP_S = 45 * 60, 60 * 60  # a ping this far around a trip's timetable may belong to it
 MAX_SPEED_MPS: Final = 25.0
@@ -208,8 +208,6 @@ def clear_cache() -> None:
     """Forget the feed and every matcher (tests)."""
     with _feed.lock:
         _feed.fetched_at, _feed.value = None, None
-    with _matchers_lock:
-        _matchers.clear()
 
 
 # --- shapes -------------------------------------------------------------------------------------
@@ -223,7 +221,7 @@ def to_metres(lat: float, lon: float) -> tuple[float, float]:
 class Shape:
     """A polyline in local metres, with distances along it and coarse bounding boxes for projection."""
 
-    def __init__(self, lat: list[float], lon: list[float], dist_m: list[int | None]) -> None:
+    def __init__(self, lat: Sequence[float], lon: Sequence[float], dist_m: Sequence[int | None]) -> None:
         """Project to metres; distances along come from GTFS, or from the geometry when any is missing."""
         points = [to_metres(a, b) for a, b in zip(lat, lon, strict=True)]
         self.x = [p[0] for p in points]
@@ -361,21 +359,21 @@ class Matcher:
         wanted = sorted(m for m in missing if m is not None)
         if wanted:
             self.shapes.update(self.load_shapes(wanted))
-        fixes: dict[int, Fix] = {}
-        last: dict[tuple[str, str], Fix] = {}
+        # Remember vehicles that are silent, stale or unmatched now: a stuck vehicle must not look newly arrived
+        # after a gap, nor a detour start its trip afresh.
+        last = {key: fix for key, fix in self.last.items() if now - fix.seen <= MEMORY_S}
+        held: dict[int, _Reading] = {}
         for seen, trips in candidates:
             reading = self._match(seen, trips)
             if reading is None:
-                # Remember it: a stuck vehicle must not look newly arrived, nor a detour start the trip afresh.
-                if seen.previous is not None and seen.at - seen.previous.seen <= MEMORY_S:
-                    last[seen.ping.mode, seen.ping.vehicle] = seen.previous
                 continue
             last[seen.ping.mode, seen.ping.vehicle] = reading.fix
-            held = fixes.get(reading.fix.trip)
-            # Two vehicles on one trip (a swap or a brigade mix-up): keep the one in service.
-            if held is None or (held.waiting and not reading.fix.waiting):
-                fixes[reading.fix.trip] = reading.fix
-        self.last, self.fixes, self.updated_at = last, fixes, updated_at
+            other = held.get(reading.fix.trip)
+            # Two vehicles on one trip (a swap or a brigade mix-up): the one in service, else the better reading.
+            if other is None or (other.fix.waiting, other.cost) > (reading.fix.waiting, reading.cost):
+                held[reading.fix.trip] = reading
+        self.last, self.updated_at = last, updated_at
+        self.fixes = {trip: reading.fix for trip, reading in held.items()}
 
     def _match(self, seen: _Seen, trips: list[int]) -> _Reading | None:
         net = self.net
@@ -388,19 +386,26 @@ class Matcher:
             if shape is None or first_d < 0 or last_d < 0:
                 continue
             for along, _ in shape.project(x, y):
+                if along > last_d + TERMINUS_REACH_M or along < first_d - TERMINUS_REACH_M:
+                    continue
                 if along >= last_d - TERMINAL_M:
                     # At the end of the trip: waiting for the duty's next one, if any.
                     after = self.next_trip.get(trip)
-                    reading = None if after is None else self._waiting(seen, after, arrived=seen.at)
+                    reading = None if after is None else self._waiting(seen, after)
                 elif along <= first_d + TERMINAL_M:
-                    reading = self._waiting(seen, trip, arrived=None)
+                    reading = self._waiting(seen, trip)
                 else:
                     reading = self._running(seen, trip, along)
                 if reading is not None and (best is None or reading.cost < best.cost):
                     best = reading
         return best
 
-    def _waiting(self, seen: _Seen, trip: int, arrived: int | None) -> _Reading | None:
+    def _waiting(self, seen: _Seen, trip: int) -> _Reading | None:
+        """At the first stop of trip, before it leaves.
+
+        Its arrival comes from history only: when it was first seen here after running the trip before. Without
+        that (a gap, a restart, the start of a duty) it is unknown, and the delay alone decides whether it is stuck.
+        """
         net, previous = self.net, seen.previous
         start = self.rows(trip).start
         delay = seen.at - net.sched[start]
@@ -408,11 +413,13 @@ class Matcher:
             return None
         # A vehicle waiting ahead of time is not early: it will leave when due.
         cost = abs(max(delay, 0) - (net.expected[start] - net.sched[start]))
+        arrived = None
         if previous is not None and previous.trip == trip and previous.waiting:
             cost -= CONTINUES
-            arrived = previous.arrived  # first seen at the terminus, not now
-        elif previous is not None and self.next_trip.get(previous.trip) == trip:
+            arrived = previous.arrived
+        elif previous is not None and not previous.waiting and self.next_trip.get(previous.trip) == trip:
             cost -= CONTINUES
+            arrived = seen.at
         if delay > STUCK_S and (arrived is None or seen.at - arrived > STUCK_S):
             return None
         return _Reading(seen.fix(trip, net.shape_dist[start], delay, waiting=True, arrived=arrived), cost)
@@ -439,15 +446,18 @@ def _seconds(moment: datetime, day: date) -> int:
 
 # --- per network --------------------------------------------------------------------------------
 
-_matchers: weakref.WeakKeyDictionary[Network, Matcher] = weakref.WeakKeyDictionary()
 _matchers_lock = threading.Lock()
 
 
-def _shape_loader(path: Path) -> Callable[[Iterable[str]], dict[str, Shape | None]]:
+def _shape_loader(path: Path, build_id: str) -> Callable[[Iterable[str]], dict[str, Shape | None]]:
     def load(shape_ids: Iterable[str]) -> dict[str, Shape | None]:
         wanted = list(shape_ids)
         found: dict[str, Shape | None] = dict.fromkeys(wanted)
         with read_connection(path) as connection:
+            # A newer build may have replaced the file; its shape ids belong to another snapshot.
+            build = connection.execute("select build_id from planner_metadata limit 1").fetchone()
+            if build is None or str(build[0]) != build_id:
+                return {}
             for shape_id, lat, lon, dist in _shape_rows(connection, wanted):
                 if len(lat) >= 2 and len(lat) == len(lon) == len(dist):  # noqa: PLR2004
                     found[shape_id] = Shape(lat, lon, dist)
@@ -474,8 +484,9 @@ def current(path: Path, net: Network, day: date, now: datetime) -> Live | None:
     if (now - updated_at).total_seconds() > STALE_FEED_S:
         return None
     with _matchers_lock:
-        matcher = _matchers.get(net)
-        if matcher is None:
-            matcher = _matchers[net] = Matcher(net, _shape_loader(path))
+        # Kept on the network, not in a map keyed by it: the matcher refers to its network, so it must die with it.
+        matcher = net.live
+        if not isinstance(matcher, Matcher):
+            matcher = net.live = Matcher(net, _shape_loader(path, net.build_id))
         matcher.update(updated_at, pings, day)
         return Live(updated_at, dict(matcher.fixes))
