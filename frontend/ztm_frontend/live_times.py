@@ -116,6 +116,7 @@ class LiveView:
     net: Network
     fixes: dict[int, live.Fix]
     updated_at: datetime
+    matcher: live.Matcher
 
 
 def view(path: Path, net: Network, day: date, now: datetime) -> LiveView | None:
@@ -136,7 +137,7 @@ def view(path: Path, net: Network, day: date, now: datetime) -> LiveView | None:
             at = live.seconds(found.updated_at, day)
             state.net = net.patched(row_times(net.live, found.fixes, state.calibration, at))
             state.updated_at, state.fixes = found.updated_at, found.fixes
-        return LiveView(state.net, state.fixes or {}, found.updated_at)
+        return LiveView(state.net, state.fixes or {}, found.updated_at, net.live)
 
 
 def row_times(

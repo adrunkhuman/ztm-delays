@@ -15,6 +15,7 @@
   --ontime: #4a4a4a;
   --late: #a03d3d;
   --red: #e05555;
+  --live: #4cc38a;
   --nav-height: 46px;
   --footer-height: 28px;
   --rail-width: 172px;
@@ -3007,6 +3008,61 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
 .pl-pill {
   padding: 0 0.3rem;
+}
+
+/* Live positions: a dot on live rides, a status line and a minimap in the expanded ride. */
+.pl-live-dot {
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-left: 0.25rem;
+  border-radius: 50%;
+  background: var(--live);
+  vertical-align: middle;
+  animation: pl-live-pulse 2s ease-in-out infinite;
+}
+
+.pl-live .pl-live-dot {
+  margin: 0 0.4rem 0 0;
+}
+
+@keyframes pl-live-pulse {
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pl-live-dot { animation: none; }
+}
+
+/* Beside the headsign, which gives way first. */
+.pl-live {
+  flex-shrink: 0;
+  color: var(--live);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.pl-map-vehicle {
+  background: var(--bg);
+  box-shadow: 0 0 0 2px rgb(0 0 0 / 60%);
+}
+
+.pl-map-stop {
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--fg);
+  box-shadow: 0 0 0 2px var(--fg);
+}
+
+.pl-minimap {
+  height: 11rem;
+  margin: 0.5rem 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
 }
 
 .pl-pill.mode-bus {

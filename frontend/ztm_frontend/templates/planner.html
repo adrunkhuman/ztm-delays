@@ -22,6 +22,16 @@
   <span class="landing-line-pill mono pl-pill mode-{{ mode }}" title="{{ t.modes.get(mode, mode) }}">{{ line }}</span>
 {%- endmacro %}
 
+{% macro live_status(live) -%}
+  {%- if live.status == 'running' -%}
+    {{ t.live_late.format(n=live.late) if live.late > 0 else t.live_early.format(n=-live.late) if live.late < 0 else t.live_on_time }}
+  {%- elif live.status == 'waiting' -%}
+    {{ t.live_waiting_late.format(n=live.late) if live.late > 0 else t.live_waiting }}
+  {%- else -%}
+    {{ t.live_previous_late.format(n=live.late) if live.late > 0 else t.live_previous }}
+  {%- endif -%}
+{%- endmacro %}
+
 {% macro walker() -%}
   <svg class="pl-walker" viewBox="0 0 12 16" aria-hidden="true"><circle cx="6.5" cy="2" r="1.6"/><path d="M5 5.5 3.5 9M5 5.5l2.6.6L9 9M5.6 6l-.6 4 2.4 2.2L8 15.5M5 10l-1.6 5.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
 {%- endmacro %}
@@ -54,11 +64,15 @@
     </form>
 
     {% if origin and destination %}
-      <section class="pl-results" aria-label="{{ t.results }}">
+      {% set live_results = results|selectattr('live')|list %}
+      {# While a live card is on screen, the cards refresh every minute (planner.js keeps open ones open). #}
+      <section id="pl-results" class="pl-results" aria-label="{{ t.results }}"
+        {%- if live_results %} hx-get="{{ request.full_path }}" hx-trigger="every[plannerShouldRefresh()] 60s"
+        hx-select="#pl-results" hx-swap="outerHTML"{% endif %}>
         {% if earlier_time %}<a class="pl-more" href="{{ planner_href(earlier_time) }}">{{ t.earlier }}</a>{% endif %}
         {% for r in results %}
           {% set card = loop.index %}
-          <details class="pl-card">
+          <details class="pl-card{% if r.live %} live{% endif %}" data-key="{{ r.key }}">
             <summary class="pl-summary">
               <span class="pl-depart">
                 <span class="pl-label">{{ t.leave_at if r.initial_walk else t.be_at_stop }}</span>
@@ -71,7 +85,7 @@
                     {% if c.kind == 'walk' %}
                       <span class="pl-walk-chip mono" title="{{ t.walk }} {{ c.minutes }} min">{{ walker() }}{{ c.minutes }}</span>
                     {% else %}
-                      {{ pill(c.mode, c.line) }}
+                      {{ pill(c.mode, c.line) }}{% if c.live %}<span class="pl-live-dot" title="{{ t.live }}" aria-label="{{ t.live }}"></span>{% endif %}
                     {% endif %}
                   {% endfor %}
                 </span>
@@ -120,8 +134,14 @@
                     <span></span>
                     <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
                     <span class="pl-seg-body">
-                      <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span></span>
-                      <details class="pl-stops-toggle"
+                      <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span>
+                        {%- if item.live %}<span class="pl-live" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
+                      </span>
+                      {% if item.live %}
+                        <div class="pl-minimap" role="img" aria-label="{{ t.map_label }}" data-map="{{ item.live.map|tojson|forceescape }}" data-mode="{{ item.mode }}" data-line="{{ item.line }}"
+                          data-style="{{ url_for('static', filename='map-style.json') }}"></div>
+                      {% endif %}
+                      <details class="pl-stops-toggle" data-key="{{ r.key }}-{{ loop.index }}"
                         hx-get="{{ url_for('planner_trip', trip_key=item.trip_key, date=day, board=item.board_sequence, alight=item.alight_sequence) }}"
                         hx-trigger="toggle once" hx-target="#pl-trip-{{ card }}-{{ loop.index }}" hx-swap="innerHTML">
                         <summary>{{ item.stop_count }} {{ item.stop_count|plural(t.stops) }} · {{ item.minutes }} min</summary>
@@ -142,6 +162,8 @@
       <p class="pl-empty">{{ t.choose }}</p>
     {% endif %}
 
-    <p class="pl-note">{{ t.note }} <span class="pl-flag">!</span> {{ t.flag_note }}</p>
+    <p class="pl-note">{{ t.note }} <span class="pl-flag">!</span> {{ t.flag_note }}{% if live_results %} {{ t.live_note }}{% endif %}</p>
   </main>
 {% endblock %}
+
+{% block scripts %}<script src="{{ url_for('static', filename='planner.js') }}"></script>{% endblock %}

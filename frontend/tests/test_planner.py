@@ -174,7 +174,8 @@ def test_connections_and_page_use_router_timings(tmp_path: Path) -> None:
     assert planner.clock(first["arrive_by"]) == "08:03"
     assert (alight["arrive_differs"], board["depart_differs"]) == (True, False)
     assert "wait_minutes" not in board  # the first boarding is not a change
-    assert first["chips"] == [{"kind": "ride", "mode": "bus", "line": "110"}]
+    assert first["chips"] == [{"kind": "ride", "mode": "bus", "line": "110", "live": False}]
+    assert first["live"] is False
     assert _items(second, "ride")[0]["trip_key"] == NEGATIVE_TRIP_KEY
     assert planner.clock(second["depart"]) == "08:30"
     # The 08:30 ride has no calibrated cell: 60 s boarding spread + 20 min * fallback 1.1.
@@ -441,7 +442,7 @@ def test_later_page_starts_where_an_unshown_journey_would_be_skipped(monkeypatch
         monkeypatch.setattr(planner.journey, "plan", lambda *_args, **_kwargs: results)
 
     monkeypatch.setattr(planner.journey, "network", lambda *_args: None)
-    monkeypatch.setattr(planner, "_connection", lambda _path, result, _day: {"depart": result.depart})
+    monkeypatch.setattr(planner, "_connection", lambda _path, result, _day, _current: {"depart": result.depart})
     shown = [600 + 60 * i for i in range(planner.RESULTS)]  # the last card leaves at 00:15:00
     found(*shown, shown[-1] + 30)  # an unshown journey at 00:15:30
     assert planner.search(Path(), "1", "2", DAY, 0)[1] == shown[-1]

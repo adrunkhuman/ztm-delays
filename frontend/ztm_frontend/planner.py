@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import unicodedata
+from bisect import bisect_right
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -118,7 +119,7 @@ def search(  # noqa: PLR0913
         # an unshown journey leaving in the same minute (the page then starts there, repeating that minute's cards).
         last = _floor_minute(shown[-1].depart)
         later = last if hidden and _floor_minute(hidden[0].depart) == last > after_sod else last + 60
-    return [_connection(path, result, day) for result in shown], later
+    return [_connection(path, result, day, current) for result in shown], later
 
 
 def _unbeaten(found: list[journey.Journey]) -> list[journey.Journey]:
@@ -193,7 +194,9 @@ def _stop_node(stop_id: str, name: str) -> dict[str, Any]:
     return {"kind": "stop", "stop_id": stop_id, "name": name, "post": post_label(stop_id)}
 
 
-def _connection(path: Path, result: journey.Journey, day: date) -> dict[str, Any]:
+def _connection(
+    path: Path, result: journey.Journey, day: date, current: live_times.LiveView | None = None
+) -> dict[str, Any]:
     """Card model: summary chips and an itinerary of stop nodes joined by ride or walk segments.
 
     Stop times shown are expected times; a boarding node also shows when to be there (the never-early margin).
@@ -238,8 +241,11 @@ def _connection(path: Path, result: journey.Journey, day: date) -> dict[str, Any
             "alight_sequence": ride["alight_sequence"],
             "stop_count": ride["stop_count"],
             "minutes": max(1, round((arrive - depart) / 60)),
+            "live": _live_ride(path, current, leg, ride["board_stop_id"]) if current is not None else None,
         })  # fmt: skip
-        chips.append({"kind": "ride", "mode": ride["mode"], "line": ride["line"]})
+        chips.append(
+            {"kind": "ride", "mode": ride["mode"], "line": ride["line"], "live": segments[-1]["live"] is not None}
+        )
         expected = arrive
         nodes.append({
             **_stop_node(ride["alight_stop_id"], ride["alight_name"]),
@@ -260,11 +266,58 @@ def _connection(path: Path, result: journey.Journey, day: date) -> dict[str, Any
         "changes": result.vehicles - 1,
         "chips": chips,
         "timeline": [item for pair in zip(nodes, [*segments, None], strict=True) for item in pair if item],
+        "live": any(chip.get("live") for chip in chips),
+        "key": next(f"{seg['trip_key']}-{seg['board_sequence']}" for seg in segments if seg["kind"] == "ride"),
     }
 
 
-def trip_stops(path: Path, trip_key: int, board_sequence: int, alight_sequence: int, day: date) -> list[dict[str, Any]]:
-    """Stops from boarding to alighting with the trip's expected times, as the router uses them."""
+def _live_ride(path: Path, current: live_times.LiveView, leg: journey.Ride, board_stop: str) -> dict[str, Any] | None:
+    """Where the ride's vehicle is now: on this trip, waiting at its first stop, or still on its previous trip.
+
+    status picks the wording, late the minutes beyond the timetable there; the map joins the vehicle to the
+    boarding stop along the shapes.
+    """
+    matcher = current.matcher
+    net = matcher.net
+    row, length = net.trip_index[leg.trip_key]
+    trip = bisect_right(net.trip_rows, row) - 1
+    board = row + list(net.seqs[row : row + length]).index(leg.board_sequence)
+    fix, before = current.fixes.get(trip), None
+    if fix is None:
+        before = matcher.previous_trip.get(trip)
+        fix = current.fixes.get(before) if before is not None else None
+        if fix is None or before is None:
+            return None
+    stop = fetch_one(path, "select lon, lat from planner_stop_post where stop_id = ?", [board_stop])
+    if stop is None:
+        return None
+    line: list[list[float]] = []
+    shapes = matcher.shapes
+    if before is not None:
+        shape = shapes.get(net.trip_meta[before][4] or "")
+        if shape is not None:
+            line += shape.path(fix.dist_m, net.shape_dist[matcher.rows(before).stop - 1])
+    shape = shapes.get(net.trip_meta[trip][4] or "")
+    if shape is not None:
+        start = fix.dist_m if before is None else net.shape_dist[row]
+        line += shape.path(start, net.shape_dist[board])
+    late = round(fix.delay_s / 60)
+    status = "previous" if before is not None else "waiting" if fix.waiting else "running"
+    return {
+        "status": status,
+        "late": late,
+        "map": {
+            "vehicle": [round(fix.lon, 6), round(fix.lat, 6)],
+            "stop": [float(stop["lon"]), float(stop["lat"])],
+            "path": line,
+        },
+    }
+
+
+def trip_stops(  # noqa: PLR0913
+    path: Path, trip_key: int, board_sequence: int, alight_sequence: int, day: date, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Stops from boarding to alighting with the trip's expected times, as the router uses them (live with now)."""
     rows = fetch_all(
         path,
         """
@@ -283,6 +336,16 @@ def trip_stops(path: Path, trip_key: int, board_sequence: int, alight_sequence: 
     depart = board["expected_sod"]
     if board["leave_by_offset_s"] is not None:
         depart = max(depart, board["scheduled"] + board["leave_by_offset_s"])
+    current = live_times.view(path, journey.network(path, day), day, now) if now is not None else None
+    if current is not None and trip_key in current.net.trip_index:
+        net = current.net
+        start, length = net.trip_index[trip_key]
+        by_sequence = {net.seqs[row]: row for row in range(start, start + length)}
+        for row in rows:
+            if row["stop_sequence"] in by_sequence:
+                row["expected_sod"] = net.expected[by_sequence[row["stop_sequence"]]]
+        if board["stop_sequence"] in by_sequence:
+            depart = net.depart[by_sequence[board["stop_sequence"]]]
     stops = []
     for row in rows:
         expected = max(row["expected_sod"], depart)
