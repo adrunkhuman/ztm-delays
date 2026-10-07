@@ -33,20 +33,22 @@
     true,
   );
 
+  // Both files: without its stylesheet, MapLibre's markers are not positioned yet and land in the wrong place.
   let loading;
   function loadMapLibre() {
-    if (window.maplibregl) return Promise.resolve();
-    loading ??= new Promise((resolve, reject) => {
-      const css = document.createElement("link");
-      css.rel = "stylesheet";
-      css.href = `${MAPLIBRE}.css`;
-      const tag = document.createElement("script");
-      tag.src = `${MAPLIBRE}.js`;
-      tag.onload = resolve;
-      tag.onerror = () => reject(new Error("MapLibre failed to load"));
-      document.head.append(css, tag);
-    });
+    loading ??= Promise.all([
+      load(Object.assign(document.createElement("link"), { rel: "stylesheet", href: `${MAPLIBRE}.css` })),
+      load(Object.assign(document.createElement("script"), { src: `${MAPLIBRE}.js` })),
+    ]);
     return loading;
+  }
+
+  function load(element) {
+    return new Promise((resolve, reject) => {
+      element.onload = resolve;
+      element.onerror = () => reject(new Error(`${element.src || element.href} failed to load`));
+      document.head.append(element);
+    });
   }
 
   async function draw(card) {

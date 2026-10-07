@@ -275,7 +275,7 @@ def _live_ride(path: Path, current: live_times.LiveView, leg: journey.Ride, boar
     """Where the ride's vehicle is now: on this trip, waiting at its first stop, or still on its previous trip.
 
     status picks the wording, late the minutes beyond the timetable there; the map joins the vehicle to the
-    boarding stop along the shapes.
+    boarding stop along the shapes, and is None once the vehicle is at the stop or past it.
     """
     matcher = current.matcher
     net = matcher.net
@@ -303,15 +303,13 @@ def _live_ride(path: Path, current: live_times.LiveView, leg: journey.Ride, boar
         line += shape.path(start, net.shape_dist[board])
     late = round(fix.delay_s / 60)
     status = "previous" if before is not None else "waiting" if fix.waiting else "running"
-    return {
-        "status": status,
-        "late": late,
-        "map": {
-            "vehicle": [round(fix.lon, 6), round(fix.lat, 6)],
-            "stop": [float(stop["lon"]), float(stop["lat"])],
-            "path": line,
-        },
+    at_stop = before is None and fix.dist_m >= net.shape_dist[board] - live_times.PASSED_M
+    shown = {
+        "vehicle": [round(fix.lon, 6), round(fix.lat, 6)],
+        "stop": [float(stop["lon"]), float(stop["lat"])],
+        "path": line,
     }
+    return {"status": status, "late": late, "map": None if at_stop else shown}
 
 
 def trip_stops(  # noqa: PLR0913

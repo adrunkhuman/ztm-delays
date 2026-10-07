@@ -3019,15 +3019,17 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   border-radius: 50%;
   background: var(--live);
   vertical-align: middle;
-  animation: pl-live-pulse 2s ease-in-out infinite;
+  animation: pl-live-pulse 1.8s ease-out infinite;
 }
 
 .pl-live .pl-live-dot {
   margin: 0 0.4rem 0 0;
 }
 
+/* A ring that grows and fades from the dot: the usual "live" signal. */
 @keyframes pl-live-pulse {
-  50% { opacity: 0.35; }
+  0% { box-shadow: 0 0 0 0 rgb(76 195 138 / 70%); }
+  70%, 100% { box-shadow: 0 0 0 0.4rem rgb(76 195 138 / 0%); }
 }
 
 @media (prefers-reduced-motion: reduce) {
