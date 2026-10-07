@@ -144,17 +144,17 @@ def row_times(
 ) -> dict[int, RowTimes]:
     """New times of every stop row the fixes move, by row; now is the feed's time on the network day."""
     out: dict[int, RowTimes] = {}
-    starts: dict[int, tuple[float, int]] = {}  # trip: predicted start, as of
+    starts: dict[int, float] = {}  # trip: predicted start
     for trip, fix in fixes.items():
         turnaround = calibration.turnaround.get(fix.mode == "tram")
         if fix.waiting:
             if fix.arrived is not None and turnaround is not None:
-                starts[trip] = (fix.arrived + turnaround[1], fix.seen)
+                starts[trip] = fix.arrived + turnaround[1]
             continue
         arrival = _running(matcher, calibration, trip, fix, now, out)
         after = matcher.next_trip.get(trip)
         if arrival is not None and after is not None and after not in fixes and turnaround is not None:
-            starts[after] = (arrival + turnaround[1], fix.seen)
+            starts[after] = arrival + turnaround[1]
     for trip, start in starts.items():
         _starting(matcher, calibration, trip, start, out)
     return out
@@ -184,7 +184,9 @@ def _running(  # noqa: PLR0913
         board = net.board[row]
         if board < NO_BOARD:
             live_board = min(math.floor(base + low + TOLERANCE_S), math.floor(expected))
-            if live_board < board or expected - now <= LEAVE_LATER_WITHIN_S:
+            # Later only for a stop the vehicle has yet to reach: at or just past one, it may already have left.
+            ahead = net.shape_dist[row] > fix.dist_m
+            if live_board < board or (ahead and expected - now <= LEAVE_LATER_WITHIN_S):
                 board = live_board
         out[row] = (board, round(expected), math.ceil(max(base + high, expected)))
         previous = expected
@@ -193,10 +195,12 @@ def _running(  # noqa: PLR0913
 
 
 def _starting(
-    matcher: live.Matcher, calibration: Calibration, trip: int, start: tuple[float, int], out: dict[int, RowTimes]
+    matcher: live.Matcher, calibration: Calibration, trip: int, start_at: float, out: dict[int, RowTimes]
 ) -> None:
-    """Move the expected and late times of a trip that will leave late (start: predicted, as seen at)."""
-    start_at, seen = start
+    """Move the expected and late times of a trip that will leave late, from its predicted start.
+
+    The delay at its first stop carries down the route as a running vehicle's would from there.
+    """
     net = matcher.net
     rows = matcher.rows(trip)
     first = rows.start
@@ -204,10 +208,9 @@ def _starting(
     if excess <= 0:
         return
     tram = net.trip_meta[trip][0] == "tram"
-    lead = max(0.0, start_at - seen)
     previous = -math.inf
     for row in rows:
-        quantiles = calibration.ahead(tram, lead + net.sched[row] - net.sched[first], excess)
+        quantiles = calibration.ahead(tram, net.sched[row] - net.sched[first], excess)
         if quantiles is None:
             _keep_order(net, row, previous, out)
             continue

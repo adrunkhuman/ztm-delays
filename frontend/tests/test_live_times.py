@@ -59,8 +59,8 @@ def test_calibration_picks_the_horizon_and_the_band_of_delay() -> None:
 
 
 def test_running_vehicle_moves_the_stops_ahead_and_closes_the_ones_behind(matcher: live.Matcher) -> None:
-    # 5 min 30 s late at the middle stop (08:04), against a usual 30 s: 5 min beyond usual.
-    _match(matcher, _ping(1000, _at(8, 9, 30)))
+    # 100 m before the middle stop (due 08:03:36 there), 5 min 30 s late against a usual 30 s: 5 min beyond usual.
+    _match(matcher, _ping(900, _at(8, 9, 6)))
     out = _times(matcher, _sod(8, 9) + 30)[OUT]
 
     assert out[0][0] == NO_BOARD  # passed
@@ -69,8 +69,14 @@ def test_running_vehicle_moves_the_stops_ahead_and_closes_the_ones_behind(matche
     assert out[2][1:] == (_sod(8, 13) + 30, _sod(8, 14) + 30)  # last stop: nobody boards there
 
 
-def test_boarding_moves_later_only_close_ahead(matcher: live.Matcher) -> None:
+def test_a_stop_the_vehicle_has_reached_is_not_boarded_later(matcher: live.Matcher) -> None:
+    # At the middle stop itself, 5 min beyond usual: it may leave any moment.
     _match(matcher, _ping(1000, _at(8, 9, 30)))
+    assert _times(matcher, _sod(8, 9) + 30)[OUT][1][0] == _sod(8, 4)
+
+
+def test_boarding_moves_later_only_close_ahead(matcher: live.Matcher) -> None:
+    _match(matcher, _ping(900, _at(8, 9, 6)))
     # Seen from 25 min earlier, the middle stop is too far ahead to tell people to come later...
     assert _times(matcher, _sod(7, 45))[OUT][1][0] == _sod(8, 4)
     # ...while an early vehicle moves it earlier whatever the distance.
@@ -127,7 +133,7 @@ def test_view_patches_today_once_per_feed_object(published: tuple[Path, Network]
             "create table planner_live_turnaround (is_tram boolean, low_s double, mid_s double, high_s double)"
         )
         connection.executemany("insert into planner_live_turnaround values (?, ?, ?, ?)", TURNAROUND)
-    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(1000, _at(8, 9, 30)))
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(900, _at(8, 9, 6)))
 
     found = live_times.view(path, net, DAY, _at(8, 9, 40))
     assert found is not None
@@ -140,5 +146,5 @@ def test_view_patches_today_once_per_feed_object(published: tuple[Path, Network]
 
 def test_view_needs_a_calibration(published: tuple[Path, Network], tmp_path: Path) -> None:
     path, net = published
-    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(1000, _at(8, 9, 30)))
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(900, _at(8, 9, 6)))
     assert live_times.view(path, net, DAY, _at(8, 9, 40)) is None
