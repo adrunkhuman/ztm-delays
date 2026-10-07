@@ -165,6 +165,8 @@ class Network:
             self.envelopes.append(_Envelope(buckets))
 
     def _load_routes(self, connection: duckdb.DuckDBPyConnection, day: date) -> None:
+        # Read first: a new query on the connection would end the stream below.
+        meta = _trip_meta(connection, day)
         cursor = connection.execute(
             f"""
             with ev as (
@@ -178,7 +180,7 @@ class Network:
                 coalesce(sched + leave_by_offset_s, {NO_BOARD}), sched - scheduled_sod + expected_sod,
                 sched + late_delay_s,
                 case when mode in ('bus', 'tram') then ride_from_start_s else sched end,
-                (scheduled_sod // 3600) % 24, can_alight
+                (scheduled_sod // 3600) % 24, can_alight, sched, coalesce(shape_dist_m, -1)
             from ev order by trip_key, stop_sequence
             """,  # noqa: S608 - only integer constants; dates are bound parameters
             [day, day, day - timedelta(days=1)],
@@ -190,6 +192,10 @@ class Network:
         self.cumulative, self.range_ids, self.seqs = array("d"), array("i"), array("i")
         self.trip_keys, self.trip_rows = array("q"), array("i")
         self.trip_index: dict[int, tuple[int, int]] = {}
+        # For live positions: timetable seconds from this day's midnight and metres along the shape (-1: unknown)
+        # per row; per trip, (mode, line, brigade, duty_id, shape_id) as in the artifact.
+        self.sched, self.shape_dist = array("i"), array("i")
+        self.trip_meta: list[tuple[str, str, str | None, str | None, str | None]] = []
         self.patterns: list[list[int]] = []
         self.pattern_alights: list[tuple[int, ...]] = []
         pattern_trips: list[list[int]] = []
@@ -197,7 +203,7 @@ class Network:
         for key, trip_rows in groupby(rows, key=itemgetter(0)):
             events = list(trip_rows)
             mode, weekday = events[0][1:3]
-            stops, seqs, board, expected, late, cumulative, hours, can_alight = zip(
+            stops, seqs, board, expected, late, cumulative, hours, can_alight, sched, shape_dist = zip(
                 *(event[3:] for event in events), strict=True
             )
             pattern_key = (stops, can_alight)
@@ -210,6 +216,9 @@ class Network:
             self.trip_index[key] = (len(self.board), len(stops))
             self.trip_rows.append(len(self.board))
             self.trip_keys.append(key)
+            self.trip_meta.append(meta[key])
+            self.sched.extend(sched)
+            self.shape_dist.extend(shape_dist)
             self.seqs.extend(seqs)
             self.board.extend(board)
             self.expected.extend(expected)
@@ -333,6 +342,21 @@ class Network:
         if not origins or not targets:
             return []
         return [_journey(self, label) for label in _Profile(self, origins, targets).run(after)]
+
+
+def _trip_meta(connection: duckdb.DuckDBPyConnection, day: date) -> dict[int, tuple]:
+    """Return (mode, line, brigade, duty_id, shape_id) by trip key.
+
+    Read apart from the stop stream: repeated on every stop row, these columns would cost it hundreds of megabytes.
+    """
+    return {
+        key: (mode, line, brigade, duty, shape)
+        for key, mode, line, brigade, duty, shape in connection.execute(
+            "select trip_key, mode, line, brigade, duty_id, shape_id from planner_trip "
+            "where service_date in (?::date, ?::date)",
+            [day, day - timedelta(days=1)],
+        ).fetchall()
+    }
 
 
 def _journey(net: Network, label: _Label) -> Journey:

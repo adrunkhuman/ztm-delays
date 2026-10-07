@@ -60,6 +60,8 @@ The [journey router](ztm_frontend/journey.py) searches between stop groups (all 
 
 Each process caches the networks of two service days, keyed by the artifact's `build_id`. Cards show when to be at the stop, the changes and walks, and load a ride's stop list only when expanded. Times differing from the timetable by 2 min or more are flagged with `!`.
 
+[live.py](ztm_frontend/live.py) matches the poller's live positions (`health/poller/public/vehicles.json.gz` in `ZTM_STATUS_GCS_BUCKET`, read at most every 10 s; `ZTM_LIVE_VEHICLES_FILE` reads a local copy) to today's trips: line and brigade name the vehicle's duty, and its position along the trips' shapes gives the trip and its delay there. A vehicle at a terminus waits for its duty's next trip. Replayed on 6 Oct 2026 (07:00–10:00 and 14:00–18:00, 10 s snapshots), 99.8% of fixes on running vehicles named the trip the nightly matcher reconstructed, 99.4% of the vehicles it saw running got one, and the delay was off by 14 s on average for buses and 16 s for trams. Matching a snapshot of about 2,000 vehicles takes about 80 ms.
+
 The planner is in Polish and English. The PL/EN switch stores the choice in a cookie; without one, browsers preferring English get English and others Polish. Wording lives in [planner_text.py](ztm_frontend/planner_text.py).
 
 ## Checks
