@@ -342,10 +342,10 @@ class Matcher:
         """Match a new feed object; pings are placed on the network day by wall-clock seconds from midnight."""
         if updated_at == self.updated_at:
             return
-        now = _seconds(updated_at, day)
+        now = seconds(updated_at, day)
         candidates: list[tuple[_Seen, list[int]]] = []
         for ping in pings:
-            at = _seconds(datetime.fromtimestamp(ping.time, UTC), day)
+            at = seconds(datetime.fromtimestamp(ping.time, UTC), day)
             if now - at > STALE_PING_S:
                 continue
             trips = [
@@ -438,7 +438,7 @@ class Matcher:
         return _Reading(seen.fix(trip, along, delay, waiting=False), cost)
 
 
-def _seconds(moment: datetime, day: date) -> int:
+def seconds(moment: datetime, day: date) -> int:
     """Wall-clock seconds from day's midnight in Warsaw, as GTFS counts them."""
     local = moment.astimezone(live_status.WARSAW).replace(tzinfo=None)
     return round((local - datetime.combine(day, clock())).total_seconds())

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from html import unescape
 from http import HTTPStatus
 from pathlib import Path
@@ -342,13 +342,13 @@ def test_page_keeps_one_generation_when_artifact_is_published_mid_request(
         connection.execute("update planner_stop set trip_key = 21 where trip_key = 1")
     original = planner.search
 
-    def publish_then_search(
-        artifact: Path, origin: str, destination: str, day: date, after_sod: int
+    def publish_then_search(  # noqa: PLR0913
+        artifact: Path, origin: str, destination: str, day: date, after_sod: int, now: datetime | None = None
     ) -> tuple[list[dict[str, Any]], int | None]:
         # Date/stop lookups already opened the old request-scoped connection.
         replacement.replace(path)
         monkeypatch.setattr(planner, "search", original)
-        return original(artifact, origin, destination, day, after_sod)
+        return original(artifact, origin, destination, day, after_sod, now)
 
     monkeypatch.setattr(planner, "search", publish_then_search)
     url = "/planner?date=2026-09-23&time=07:00&from=1001&to=2002"

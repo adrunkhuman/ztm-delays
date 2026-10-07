@@ -11,6 +11,7 @@ reused), pruned by a no-waiting lower bound to the destination.
 
 from __future__ import annotations
 
+import copy
 import heapq
 import math
 import threading
@@ -138,6 +139,7 @@ class Network:
         build = connection.execute("select build_id from planner_metadata limit 1").fetchone()
         self.build_id = str(build[0]) if build else ""
         self.live: object | None = None  # live.Matcher, created on first use and dying with the network
+        self.live_view: object | None = None  # live_times state for the latest feed object
         stops = connection.execute(
             """
             select distinct s.stop_id, s.stop_group_id
@@ -199,6 +201,7 @@ class Network:
         # per row; per trip, (mode, line, brigade, duty_id, shape_id) as in the artifact.
         self.sched, self.shape_dist = array("i"), array("i")
         self.trip_meta: list[tuple[str, str, str | None, str | None, str | None]] = []
+        self.trip_pattern = array("i")
         self.patterns: list[list[int]] = []
         self.pattern_alights: list[tuple[int, ...]] = []
         pattern_trips: list[list[int]] = []
@@ -216,6 +219,7 @@ class Network:
                 self.pattern_alights.append(tuple(pos for pos, allowed in enumerate(can_alight) if allowed))
                 pattern_trips.append([])
             pattern_trips[pattern_index[pattern_key]].append(len(self.trip_keys))
+            self.trip_pattern.append(pattern_index[pattern_key])
             self.trip_index[key] = (len(self.board), len(stops))
             self.trip_rows.append(len(self.board))
             self.trip_keys.append(key)
@@ -235,6 +239,10 @@ class Network:
             self.range_ids.extend(
                 self.range_index.get((mode == "tram", weekday, h), 0) if mode in {"bus", "tram"} else -1 for h in hours
             )
+        self._index(pattern_trips)
+
+    def _index(self, pattern_trips: list[list[int]]) -> None:
+        """Per-pattern ride bounds and per-stop boarding indexes."""
         # Per pattern, the cumulative sum of each segment's shortest ride over its trips: any trip of the pattern
         # needs at least prefix[a] - prefix[p] seconds from position p to a, which bounds the trips worth scanning.
         self.pattern_prefix: list[array] = []
@@ -248,26 +256,60 @@ class Network:
                 prefix.append(total)
             self.pattern_prefix.append(prefix)
         # Each incidence has its own board_by order: no timetable or model FIFO assumption.
+        self.pattern_trips = pattern_trips
         self.incidence: list[list[tuple[int, int, array, array]]] = [[] for _ in self.stop_ids]
-        for pattern, trips_in_pattern in enumerate(pattern_trips):
+        self.incidence_slot: dict[tuple[int, int], tuple[int, int]] = {}  # (pattern, pos) -> (stop, index)
+        for pattern in range(len(pattern_trips)):
             alights = self.pattern_alights[pattern]
             for pos, stop in enumerate(self.patterns[pattern][:-1]):
                 if not alights or pos >= alights[-1]:
                     continue
-                ordered = sorted(
-                    (self.board[self.trip_rows[t] + pos], t)
-                    for t in trips_in_pattern
-                    if self.board[self.trip_rows[t] + pos] < NO_BOARD
-                )
-                self.incidence[stop].append(
-                    (pattern, pos, array("i", (b for b, _ in ordered)), array("i", (t for _, t in ordered)))
-                )
+                self.incidence_slot[pattern, pos] = (stop, len(self.incidence[stop]))
+                self.incidence[stop].append(self._boarding(pattern, pos))
         # First boardable position of each pattern at a stop: a walk must not lead to a trip the rider could
         # already board where the walk started.
         self.board_at: list[dict[int, int]] = [{} for _ in self.stop_ids]
         for stop, entries in enumerate(self.incidence):
             for pattern, pos, _, _ in entries:
                 self.board_at[stop].setdefault(pattern, pos)
+
+    def _boarding(self, pattern: int, pos: int) -> tuple[int, int, array, array]:
+        """The pattern's trips boardable at pos, in board_by order."""
+        ordered = sorted(
+            (self.board[self.trip_rows[t] + pos], t)
+            for t in self.pattern_trips[pattern]
+            if self.board[self.trip_rows[t] + pos] < NO_BOARD
+        )
+        return pattern, pos, array("i", (b for b, _ in ordered)), array("i", (t for _, t in ordered))
+
+    def patched(self, rows: dict[int, tuple[int, int, int]]) -> Network:
+        """A copy with new (board_by, expected, late) times at some rows; this network is left as it was.
+
+        board_by may be NO_BOARD (the trip has passed the stop). Times keep the invariants of the load: departure
+        is the later of expected and board_by, the late base no earlier than either.
+        """
+        net = copy.copy(self)
+        net.board, net.expected = array("i", self.board), array("i", self.expected)
+        net.depart, net.late_base = array("i", self.depart), array("i", self.late_base)
+        net.live = net.live_view = None
+        slots = set()
+        for row, (board, expected, late) in rows.items():
+            depart = max(expected, board) if board < NO_BOARD else expected
+            net.board[row], net.expected[row], net.depart[row] = board, expected, depart
+            net.late_base[row] = max(late, depart, board if board < NO_BOARD else depart)
+            trip = bisect_right(self.trip_rows, row) - 1
+            slots.add((self.trip_pattern[trip], row - self.trip_rows[trip]))
+        net.incidence = list(self.incidence)
+        copied: set[int] = set()
+        for slot in slots:
+            if slot not in self.incidence_slot:
+                continue  # no boarding there (the last alighting position or later)
+            stop, index = self.incidence_slot[slot]
+            if stop not in copied:
+                net.incidence[stop] = list(net.incidence[stop])
+                copied.add(stop)
+            net.incidence[stop][index] = net._boarding(*slot)  # noqa: SLF001
+        return net
 
     def _load_footpaths(self, connection: duckdb.DuckDBPyConnection) -> None:
         self.footpaths: list[list[tuple[int, int]]] = [[] for _ in self.stop_ids]
