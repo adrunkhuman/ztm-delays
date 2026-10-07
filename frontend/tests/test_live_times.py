@@ -207,6 +207,7 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
         )
     monkeypatch.setenv("ZTM_PLANNER_PATH", str(path))
     monkeypatch.setattr(queries, "get_export_metadata", lambda _path: {})
+    monkeypatch.setattr(queries, "grouped_windows_available", lambda _path: True)
 
     class Clock(datetime):
         moment = _at(8, 9, 40)
