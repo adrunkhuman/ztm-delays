@@ -3407,7 +3407,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
   .pl-when {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 6.25rem) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 7rem) auto;
     gap: 0.4rem;
   }
 
