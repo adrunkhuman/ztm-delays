@@ -1,0 +1,61 @@
+{
+  "version": "geocoding-artifact-v1",
+  "description": "Optional SQLite address/road artifact, built manually from a local OSM extract by ztm-planner geocoding. No automatic refresh or downloads.",
+  "keys": {
+    "places": ["id"],
+    "places_fts": ["rowid"],
+    "places_rtree": ["id"],
+    "metadata": ["key"]
+  },
+  "tables": {
+    "places": [
+      {"name": "id", "sqlite_type": "INTEGER", "nullable": false},
+      {"name": "kind", "sqlite_type": "TEXT", "nullable": false},
+      {"name": "street", "sqlite_type": "TEXT", "nullable": false},
+      {"name": "house", "sqlite_type": "TEXT", "nullable": false},
+      {"name": "city", "sqlite_type": "TEXT", "nullable": false},
+      {"name": "lat", "sqlite_type": "REAL", "nullable": false},
+      {"name": "lon", "sqlite_type": "REAL", "nullable": false},
+      {"name": "osm_id", "sqlite_type": "TEXT", "nullable": false},
+      {"name": "geometry", "sqlite_type": "TEXT", "nullable": true}
+    ],
+    "places_fts": [
+      {"name": "text", "sqlite_type": "TEXT", "nullable": false}
+    ],
+    "places_rtree": [
+      {"name": "id", "sqlite_type": "INTEGER", "nullable": false},
+      {"name": "min_lon", "sqlite_type": "REAL", "nullable": false},
+      {"name": "max_lon", "sqlite_type": "REAL", "nullable": false},
+      {"name": "min_lat", "sqlite_type": "REAL", "nullable": false},
+      {"name": "max_lat", "sqlite_type": "REAL", "nullable": false}
+    ],
+    "metadata": [
+      {"name": "key", "sqlite_type": "TEXT", "nullable": false},
+      {"name": "value", "sqlite_type": "TEXT", "nullable": false}
+    ]
+  },
+  "metadata": {
+    "required_keys": ["schema_version", "status", "bbox", "source", "timestamp", "counts", "osm_attribution"],
+    "schema_version": "1",
+    "status": "complete",
+    "bbox": "JSON [west, south, east, north] in WGS84 degrees; default [20.3, 51.8, 21.8, 52.7]. No antimeridian wrap.",
+    "source": "Absolute path of the local OSM PBF or XML source, not a download URL.",
+    "timestamp": "UTC ISO 8601 build timestamp, not the OSM snapshot timestamp.",
+    "counts": "JSON object of address, street, address_nodes, address_ways, street_ways, invalid_address_nodes, invalid_relevant_ways and invalid_address_rings counts.",
+    "osm_attribution": "OpenStreetMap contributors, ODbL 1.0, and https://www.openstreetmap.org/copyright.",
+    "additional_keys": ["source_bytes", "normalization", "city_policy", "build_elapsed_seconds"]
+  },
+  "semantics": {
+    "nullability": "Describes values emitted by the builder, not SQL NOT NULL constraints; the prototype core DDL is preserved.",
+    "kind": ["address", "street"],
+    "display_tags": "Address street/house/city are original addr:street/addr:housenumber/addr:city values. Street rows use name and addr:city, with empty house. Missing tags stay empty; city is never inferred.",
+    "osm_id": "node/<OSM id> or way/<OSM id>. Not a unique key: a building/highway way can emit both address and street rows.",
+    "coordinates": "WGS84 lon/lat. Addresses are nodes or planar building-ring centroids inside bbox; concave centroids may lie outside the building. Streets use an equirectangular length-weighted midpoint of the full road, which may lie outside bbox.",
+    "geometry": "NULL for addresses; street TEXT is a JSON list of [lon, lat] pairs in source order, with at least two distinct points. Complete, unclipped named highway ways whose polylines intersect bbox are retained.",
+    "places_fts": "FTS5(text, tokenize='unicode61', prefix='2 3 4'); rowid equals places.id. Text is street + space + house + space + city, normalized by casefold, ł->l, NFKD and removal of combining characters. Whitespace is preserved.",
+    "places_rtree": "One row per place id. Point bounds for addresses, full geometry bounds for streets. SQLite RTree rounds float32 bounds outward; readers must allow rounding.",
+    "limitations": "No relations, town inference, address interpolation or full polygon topology validation. Missing referenced nodes invalidate the whole way. Open/degenerate building rings are skipped. An artifact with no usable places is rejected.",
+    "publication": "A unique temporary database in the output directory is integrity/completeness checked, closed, chmod 0644 and fsynced before atomic replacement. Failed builds preserve the previous output and remove only their own temporary file.",
+    "legacy": "The unversioned scratch prototype has the same core tables, normalization and road JSON format. Readers may accept missing schema_version as legacy; maintained builds always emit schema_version=1 and status=complete. Legacy building representative points can differ from maintained centroids."
+  }
+}

@@ -30,6 +30,7 @@ Ingestion completeness and observed-service coverage are separate measures. Miss
 | [dbt](dbt/) | Historical dimensions, partitioned facts, schedule versions, serving marts. |
 | [Planner](planner/) | Travel-time models and the nightly journey-planner artifact. |
 | [Frontend](frontend/) | Flask archive, rankings, trip detail, data status, and the planner tab. |
+| [Routing](routing/) | Rust journey search, installed as a Python extension inside the frontend. |
 
 [Architecture](docs/architecture.md) explains date semantics, the data model, and publication. [Local checks](docs/development.md) exercise the code without cloud credentials. [Operations](docs/operations.md) covers deployment and recovery; the full pipeline requires a Warsaw API token, GCS, and BigQuery.
 

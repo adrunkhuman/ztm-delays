@@ -1,0 +1,6 @@
+# Python package build products.
+/build/
+/dist/
+/*.egg-info/
+/*.so
+/*.pyd

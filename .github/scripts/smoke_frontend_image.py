@@ -1,5 +1,6 @@
 """Create a tiny serving fixture and check the image's default HTTP server."""
 
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -51,7 +52,37 @@ def create_fixture() -> None:
     DB_PATH.chmod(0o644)
 
 
+def check_routing() -> None:
+    from ztm_routing import NativeState, PreparedNet, PreparedQuery
+
+    network = PreparedNet(
+        2,
+        [100, 200],
+        [100, 200],
+        [100, 200],
+        [-1, -1],
+        [0],
+        [0],
+        [0.0, 100.0],
+        [[0, 1]],
+        [[1]],
+        [[0.0, 100.0]],
+        [[(0, 0, [100], [0])], []],
+        [[], []],
+        [],
+    )
+    window = NativeState(PreparedQuery(network, [0.0, 0.0], 0), [0], [], [], [(1, -1)], False, 10800)
+    assert window.run(100) == [
+        [(100, 0, -1, -1, -1, -1, -1, 0), (200, 1, 0, 0, 1, -1, -1, 0)],
+    ]
+    assert window.stats()["live_labels_after_return"] == 0
+    assert all(shutil.which(tool) is None for tool in ("cargo", "rustc", "cc", "gcc", "g++"))
+    assert not Path("/app/routing").exists()
+    assert not Path("/app/frontend").exists()
+
+
 def check_server() -> None:
+    check_routing()
     deadline = time.monotonic() + 15
     while True:
         try:
@@ -60,7 +91,10 @@ def check_server() -> None:
                 assert response.status == 200
                 assert b"service-minute coverage" in body
                 assert b"2026-07-14 03:12:00 UTC" in body
-                return
+            with urlopen("http://127.0.0.1:5000/static/site.css", timeout=1) as response:  # noqa: S310
+                assert response.status == 200
+                assert response.read()
+            return
         except URLError:
             if time.monotonic() >= deadline:
                 raise

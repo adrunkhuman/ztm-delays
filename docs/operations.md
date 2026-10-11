@@ -170,7 +170,37 @@ On first deployment, trigger `dag_planner_train`, confirm promotion in its log, 
 
 A failed promotion gate fails `train_model`, logs the held-out errors and keeps the previous model; `training_complete` then fails too, even if footpaths succeed. To roll back, point `current.json` at an earlier version (`{"version": "..."}`) and rerun `dag_planner_score`. A failed scoring run leaves the previous artifact, which still covers the next six days.
 
-The frontend reads the artifact locally. Each process caches the networks of two service days, keyed by the artifact's `build_id`; building one takes about 1.5 s.
+The frontend caches two service-day networks per process by artifact `build_id`; building one takes about 1.5 s. Each network caches 128 raw searches and coalesces identical requests across up to 16 in-flight keys. Artifact replacement and live-feed updates create separate networks, preventing stale route reuse. Cards are rebuilt from the current request's artifact snapshot.
+
+The frontend image builds the required [Rust routing extension](../routing/README.md) with Rust 1.98.0 in its builder stage; compilation or import failures stop the build/startup. The runtime contains installed wheels, including frontend assets, but no compiler or Python routing fallback. Rebuild the image when `routing/` sources change.
+
+Keep the **same Coolify frontend application** and one frontend container. Use repository-root build context (`/`) and `/frontend/Dockerfile`, not `frontend/` as the build context. Ports, command, mounts and environment remain unchanged; routing is an in-process library, not a new service.
+
+The Rust search detaches the GIL and uses owned native memory, so independent requests can run routing in parallel across the existing four Waitress threads. Networks are immutable; permission caches are synchronized across a search's windows, and each mutable window rejects simultaneous use. Before adding threads or processes, measure concurrent search peaks, duplicated network-cache memory, and cold/live-refresh peaks.
+
+## Local address lookup
+
+Set `ZTM_GEOCODING_DB` to a schema-version-1 SQLite file under the container's serving mount, for example `/serving/geocoding/addresses.sqlite`. Address lookup is local-only.
+
+Mount the **directory**, read-only for the frontend. A single-file bind mount can retain an old inode after atomic replacement. UID `10001` needs file read access and directory traversal access. The frontend does not create or modify the database.
+
+Build the database locally with the [manual CLI](../planner/README.md#optional-offline-geocoding). Refresh when needed, independently of nightly scoring.
+
+1. Stage the file, for example `scp /path/to/addresses.sqlite deploy@host:addresses.sqlite.upload`. Compare local and remote `sha256sum` values.
+2. Set `SERVING_HOST_DIR` to the host directory backing the container's serving mount. Keep a rollback copy, then publish by same-directory rename:
+
+   ```sh
+   # Run on the VPS only when deploying; replace the example host path.
+   SERVING_HOST_DIR=/actual/host/serving
+   sudo -n install -d -m 0755 "$SERVING_HOST_DIR/geocoding"
+   sudo -n install -m 0644 "$HOME/addresses.sqlite.upload" "$SERVING_HOST_DIR/geocoding/.addresses.sqlite.new"
+   sudo -n mv "$SERVING_HOST_DIR/geocoding/.addresses.sqlite.new" "$SERVING_HOST_DIR/geocoding/addresses.sqlite"
+   ```
+
+   Never copy or rebuild directly over the active file.
+3. On first deployment, set `ZTM_GEOCODING_DB` and redeploy. Check address suggestions, map-point labels, stop searches and coordinate-endpoint journeys. Later atomic replacements need no restart: active readers finish on the old file.
+
+The reader requires schema version `1` and complete metadata. Invalid data leaves stop search and coordinate selection available. To disable address lookup, unset `ZTM_GEOCODING_DB` and restart. Retain OpenStreetMap attribution and meet ODbL requirements when distributing the database.
 
 ## Monitoring and retention
 

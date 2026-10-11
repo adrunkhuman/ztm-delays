@@ -10,12 +10,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import duckdb
+import pytest
 
 from ztm_frontend import journey, planner, planner_text, queries
 from ztm_frontend.app import create_app
 
 if TYPE_CHECKING:
-    import pytest
     from flask.testing import FlaskClient
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "planner_artifact_v1.json"
@@ -362,11 +362,29 @@ def test_page_keeps_one_generation_when_artifact_is_published_mid_request(
     assert "/planner/trip/1?" not in new.get_data(as_text=True)
 
 
-def test_suggestions_keep_the_rest_of_the_form(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_suggestions_do_not_submit_or_navigate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(tmp_path, monkeypatch)
-    html = client.get("/planner/suggest/to?q_to=metro&from=1001&date=2026-09-23&time=07:00").get_data(as_text=True)
-    assert "/planner?date=2026-09-23&amp;time=07:00&amp;from=1001&amp;to=2002" in html
+    for field, query, stop_id, name in (("from", "lom", "1001", "Łomianki"), ("to", "metro", "2002", "Metro Marymont")):
+        html = client.get(
+            f"/planner/suggest/{field}?q_{field}={query}&from=1001&to=2002&date=2026-09-23&time=07:00",
+        ).get_data(as_text=True)
+        assert f'<button type="button" class="pl-suggestion" data-field="{field}" data-stop-id="{stop_id}">' in re.sub(
+            r"\s+", " ", html
+        )
+        assert f'<span class="pl-suggestion-name">{name}</span>' in html
+        assert "href=" not in html
     assert client.get("/planner/suggest/via?q_via=metro").status_code == HTTPStatus.NOT_FOUND
+
+
+def test_planner_only_search_button_submits_the_form(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    page = client.get("/planner?date=2026-09-23&time=07:00").get_data(as_text=True)
+    form = page.split('<form class="pl-form"', 1)[1].split("</form>", 1)[0]
+    assert 'action="/planner" method="get"' in form
+    assert 'class="pl-swap" type="button"' in form
+    assert 'class="pl-go" type="submit"' in form
+    assert form.count('type="submit"') == 1
+    assert 'href="/planner' not in form
 
 
 def test_planner_ignores_unknown_query_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,3 +468,127 @@ def test_later_page_starts_where_an_unshown_journey_would_be_skipped(monkeypatch
     assert planner.search(Path(), "1", "2", DAY, 0)[1] == shown[-1] + 60
     found(*[600] * (planner.RESULTS + 1))  # a whole page in the requested minute still advances
     assert planner.search(Path(), "1", "2", DAY, 600)[1] == 660
+
+
+def test_coordinate_page_routes_both_walks_with_labels_distances_and_times(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    args = {
+        "from_lat": "52.331",
+        "from_lon": "20.921",
+        "q_from": "Home",
+        "to_lat": "52.27",
+        "to_lon": "20.97",
+        "q_to": "Office",
+        "from": "4004",
+        "to": "1001",
+        "date": DAY.isoformat(),
+        "time": "07:00",
+    }
+    page = planner.get_page(path, args, DAY, 0)
+    assert page["origin"] == {"kind": "point", "stop_group_id": None, "name": "Home", "lat": 52.331, "lon": 20.921}
+    assert page["destination"] == {"kind": "point", "stop_group_id": None, "name": "Office", "lat": 52.27, "lon": 20.97}
+    assert page["endpoint_args"] == {
+        key: value for key, value in args.items() if key not in {"from", "to", "date", "time"}
+    }
+    first = page["results"][0]
+    assert _kinds(first) == ["stop", "walk", "stop", "ride", "stop", "walk", "stop"]
+    start, access, board, ride, alight, egress, end = first["timeline"]
+    assert (start["name"], start["post"], end["name"], end["post"]) == ("Home", "", "Office", "")
+    assert (start["kind"], end["kind"]) == ("stop", "stop")
+    assert access == egress == {"kind": "walk", "minutes": 1, "distance_m": 0}
+    assert ride["trip_key"] == 1
+    assert first["depart"] == 26970 - 30  # boarding deadline minus initial walk
+    assert first["leave_by"] == start["depart"] == 26940
+    assert board["be_by"] == 26940
+    assert alight["arrive"] == 28560
+    assert end["arrive"] == first["arrive"] == round((28560 + 30) / 60) * 60
+    assert first["arrive_by"] == 29040  # ceil(bus late arrival 28980 + egress 30 s)
+    assert (page["earlier_time"], page["later_time"]) == ("06:30", "08:30")
+
+
+def test_point_stop_and_stop_point_search_apis_keep_stop_results_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    baseline = planner.connections(path, "1001", "2002", DAY, 7 * 3600)
+    origin, destination = journey.Point(52.331, 20.921), journey.Point(52.27, 20.97)
+    access = planner.connections(path, origin, "2002", DAY, 7 * 3600)[0]
+    egress = planner.connections(path, "1001", destination, DAY, 7 * 3600)[0]
+    assert _kinds(access) == ["stop", "walk", "stop", "ride", "stop"]
+    assert _kinds(egress) == ["stop", "ride", "stop", "walk", "stop"]
+    assert access["timeline"][0]["name"] == "52.331, 20.921"
+    assert egress["timeline"][-1]["name"] == "52.27, 20.97"
+    assert access["depart"] == baseline[0]["depart"] - 30
+    assert egress["arrive_by"] == baseline[0]["arrive_by"] + 60
+    assert planner.connections(path, "1001", "2002", DAY, 7 * 3600) == baseline
+    page = planner.get_page(path, {"from": "1001", "to": "2002", "time": "07:00"}, DAY, 0)
+    assert page["results"] == baseline
+    assert page["endpoint_args"] == {"from": "1001", "q_from": "Łomianki", "to": "2002", "q_to": "Metro Marymont"}
+
+
+@pytest.mark.parametrize("field", ["from", "to"])
+@pytest.mark.parametrize(
+    "coordinates",
+    [
+        {"lat": "52"},
+        {"lon": "21"},
+        {"lat": "", "lon": "21"},
+        {"lat": "no", "lon": "21"},
+        {"lat": "nan", "lon": "21"},
+        {"lat": "52", "lon": "inf"},
+        {"lat": "91", "lon": "21"},
+        {"lat": "52", "lon": "-181"},
+        {"lat": "1e999", "lon": "21"},
+    ],
+)
+def test_invalid_coordinates_never_fall_back_to_selected_or_typed_stop(
+    tmp_path: Path, field: str, coordinates: dict[str, str]
+) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    args = {"from": "1001", "to": "2002", "q_from": "Łomianki", "q_to": "Metro Marymont", "time": "07:00"}
+    args.update({f"{field}_{key}": value for key, value in coordinates.items()})
+    page = planner.get_page(path, args, DAY, 0)
+    assert page["origin" if field == "from" else "destination"] is None
+    assert page["results"] == []
+    assert page["searched"] is True
+    assert field not in page["endpoint_args"]
+    assert f"q_{field}" not in page["endpoint_args"]
+
+
+def test_valid_but_unreachable_coordinates_keep_point_identity_and_canonical_args(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    args = {"from_lat": "-90", "from_lon": "180", "to": "2002", "time": "07:00"}
+    page = planner.get_page(path, args, DAY, 0)
+    assert page["origin"] == {"kind": "point", "stop_group_id": None, "name": "-90, 180", "lat": -90, "lon": 180}
+    assert page["endpoint_args"] == {
+        "from_lat": "-90.0",
+        "from_lon": "180.0",
+        "q_from": "-90, 180",
+        "to": "2002",
+        "q_to": "Metro Marymont",
+    }
+    assert page["searched"] is True
+    assert page["results"] == []
+    assert page["earlier_time"] is page["later_time"] is None
+
+
+def test_nonzero_point_walk_distances_and_timings_reach_card_nodes(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    origin, destination = journey.Point(52.332, 20.921, "Home"), journey.Point(52.2705, 20.97, "Office")
+    net = journey.network(path, DAY)
+    raw = journey.plan(net, origin, destination, 7 * 3600, results=1)[0]
+    card = planner.connections(path, origin, destination, DAY, 7 * 3600)[0]
+    access, egress = raw.legs[0], raw.legs[-1]
+    assert isinstance(access, journey.Walk)
+    assert isinstance(egress, journey.Walk)
+    assert (access.distance_m, egress.distance_m) == (145, 73)
+    assert (access.walk_s, egress.walk_s) == (121, 61)
+    assert card["timeline"][1] == {"kind": "walk", "distance_m": 145, "minutes": 3}
+    assert card["timeline"][-2] == {"kind": "walk", "distance_m": 73, "minutes": 2}
+    assert card["depart"] == 26970 - 121
+    assert card["timeline"][0]["depart"] == card["leave_by"] == 26820
+    assert card["timeline"][-1]["arrive"] == card["arrive"] == 28620
+    assert card["arrive_by"] == 29100

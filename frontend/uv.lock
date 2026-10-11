@@ -761,13 +761,14 @@ wheels = [
 [[package]]
 name = "ztm-frontend"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
     { name = "flask" },
     { name = "google-cloud-storage" },
     { name = "pytz" },
     { name = "waitress" },
+    { name = "ztm-routing" },
 ]
 
 [package.dev-dependencies]
@@ -784,6 +785,7 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=3.16.0" },
     { name = "pytz", specifier = ">=2025.2" },
     { name = "waitress", specifier = ">=3.0.2" },
+    { name = "ztm-routing", directory = "../routing" },
 ]
 
 [package.metadata.requires-dev]
@@ -792,3 +794,8 @@ dev = [
     { name = "ruff", specifier = ">=0.15.0" },
     { name = "ty", specifier = ">=0.0.15" },
 ]
+
+[[package]]
+name = "ztm-routing"
+version = "0.1.0"
+source = { directory = "../routing" }

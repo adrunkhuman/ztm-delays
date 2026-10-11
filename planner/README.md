@@ -2,7 +2,7 @@
 
 Travel-time models and the nightly artifact for planning journeys in the coming week. Bus and tram trips carry predicted ride times, usual and late delays, and when to be at each stop. Metro and SKM use their timetable; footpaths connect nearby stop posts for journeys with changes.
 
-`ztm-planner train` turns a rolling window of observed segments into a model bundle. `ztm-planner score` turns the current timetable and that bundle into `planner.duckdb` ([contract](../contracts/planner_artifact_v1.json)). `ztm-planner footpaths` builds walking distances from an OSM extract and GTFS stops. All three commands read and write local files only. The [Airflow DAGs](../airflow/dags/dag_planner.py) handle BigQuery, GCS, weather and OSM downloads, and publication.
+`ztm-planner train` turns a rolling window of observed segments into a model bundle. `ztm-planner score` turns the current timetable and that bundle into `planner.duckdb` ([contract](../contracts/planner_artifact_v1.json)). `ztm-planner footpaths` builds walking distances from an OSM extract and GTFS stops. These commands read and write local files only. The [Airflow DAGs](../airflow/dags/dag_planner.py) handle BigQuery, GCS, weather and OSM downloads, and publication for these pipeline jobs. The optional `ztm-planner geocoding` command below is separate: it runs only when invoked manually.
 
 ## Model
 
@@ -60,6 +60,32 @@ The frontend adjusts trips running now to live vehicle positions ([live.py](../f
 
 Usual delays are the stop tables' medians, fitted on the weeks before, as in the artifact. A very late vehicle is less predictable: 30 min ahead, a bus's 1st percentile was -257 s when on its usual time and -423 s when more than 10 min late. The 1st percentile keeps live boarding times as safe as the stop tables' (`STOP_MISS_TARGET`); the 90th matches the late delay. On 29 Sep–5 Oct 2026 a bus kept 101–105% of its excess delay up to 90 min ahead, a tram 81–97%; once its break was used up, a bus left a median 188 s after reaching the terminus. Without a calibration the tables are empty and the frontend makes no live adjustments.
 
+## Optional offline geocoding
+
+`ztm-planner geocoding` builds an address/road SQLite artifact from a local OSM extract ([contract](../contracts/geocoding_artifact_v1.json)). Download the extract separately, for example from [Geofabrik](https://download.geofabrik.de/europe/poland/mazowieckie.html). Builds and refreshes are manual, not Airflow or image-build steps. From `planner/`:
+
+```sh
+uv run ztm-planner --workdir /path/to/workdir geocoding \
+  --osm-pbf /path/to/mazowieckie.osm.pbf \
+  --output /path/to/artifacts/addresses.sqlite
+```
+
+The command prints record counts, output size and elapsed time as JSON. It also accepts OSM XML. `--bbox WEST SOUTH EAST NORTH` defaults to `20.3 51.8 21.8 52.7` in WGS84 longitude/latitude; values must be finite and ordered, without antimeridian wrapping. `--workdir` is required but unused; temporary files live beside `--output`. `--nice` applies, but DuckDB memory limits do not constrain pyosmium's node-location cache. The extract must include referenced nodes; allow RAM for that cache and disk for both database versions.
+
+| Content | Behavior and limitations |
+| --- | --- |
+| Addresses | Addressed nodes and closed building ways. Original street, number and city tags are retained; missing tags stay blank. Building centroids are planar approximations and may fall outside concave footprints. |
+| Roads | Named highway polylines intersecting the bbox, including segments crossing it from outside. Full `[[lon,lat],...]` geometry is retained. Length-weighted midpoints may lie outside the bbox. |
+| Invalid geometry | Missing nodes invalidate the whole way. Invalid coordinates and open/degenerate building rings are skipped and counted; full polygon topology is not checked. |
+| Indexes | FTS5 `unicode61`, prefixes 2/3/4, and RTree. Search folds case and accents, including `ł`; display tags are unchanged. |
+| Not supported | Relations/multipolygons, inferred cities, interpolation or node/building deduplication. |
+
+Metadata includes schema version `1`, completion status, bbox, source path, counts, attribution and UTC build time—not the extract's snapshot date. The frontend requires this version and complete metadata.
+
+The builder validates SQLite/FTS/RTree integrity and rejects empty artifacts before publishing. It fsyncs a unique sibling temporary file, sets mode `0644`, then atomically replaces `--output`. Failure before replacement leaves the old file untouched. The output directory must be writable during builds and traversable by the frontend UID. Existing readers finish on the old file; [deployment](../docs/operations.md#local-address-lookup) is a separate step.
+
+OpenStreetMap data uses [ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/). Display **© OpenStreetMap contributors** with the [copyright link](https://www.openstreetmap.org/copyright). Database redistribution must meet ODbL attribution and share-alike requirements.
+
 ## Resources
 
 DuckDB works in an on-disk database capped at 1.5 GB and spills to `--workdir`, which must be on disk: on tmpfs the spill counts as memory. LightGBM trains on a sample of about 3.5M segments and predicts one day at a time. Measured on 43M segments with 4 threads, training peaked at 2.9 GB (maximum RSS) and completed in 139 s inside the Airflow image under a 4 GB limit. Scoring 7 days peaked at 1.8 GB and took 71 s on 2 threads. Threads default to CPU cores minus two, and the process lowers its priority (`--nice`).
@@ -73,4 +99,4 @@ uv run ty check
 uv run pytest
 ```
 
-Tests build a small synthetic network with a known peak slowdown, train on it, score a week, and check the artifact against the contract. They also cover metro frequencies, timetable-only rail, OSM walking distances and estimated walks.
+Tests build a small synthetic network with a known peak slowdown, train on it, score a week, and check the artifact against the contract. They also cover metro frequencies, timetable-only rail, OSM walking distances and estimated walks. `uv run pytest tests/test_geocoding.py` checks offline geocoding with tiny OSM XML fixtures, including schema/search/geometry, bbox filtering, CLI dispatch and failure-safe replacement.

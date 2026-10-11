@@ -186,6 +186,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: integration_tests/uv.lock
 
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+
       - name: Install locked integration dependencies
         run: uv sync --locked
         working-directory: integration_tests
@@ -216,14 +221,42 @@ jobs:
         uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: frontend/uv.lock
+          cache-dependency-glob: |
+            frontend/uv.lock
+            frontend/pyproject.toml
+            routing/pyproject.toml
+            routing/Cargo.toml
+            routing/Cargo.lock
+            routing/src/**/*.rs
+            routing/python/ztm_routing/**
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.98.0
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+        working-directory: routing
+
+      - name: Lint Rust
+        run: cargo clippy --locked --all-targets -- -D warnings
+        working-directory: routing
+
+      - name: Test Rust
+        run: cargo test --locked
+        working-directory: routing
 
       - name: Install frontend dependencies
         run: uv sync --locked
         working-directory: frontend
 
-      - name: Lint frontend
-        run: uv run ruff check .
+      - name: Lint frontend and routing bindings
+        run: uv run ruff check . ../routing/python ../routing/tests
+        working-directory: frontend
+
+      - name: Test routing bindings
+        run: uv run python -m unittest discover -s ../routing/tests -v
         working-directory: frontend
 
       - name: Test frontend queries
@@ -236,7 +269,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build image
-        run: docker build -t ztm-frontend:ci frontend
+        run: docker build -f frontend/Dockerfile -t ztm-frontend:ci .
       - name: Start and check default server offline
         run: |
           volume="ztm-frontend-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

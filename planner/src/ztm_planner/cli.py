@@ -6,15 +6,16 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 from datetime import date
 from pathlib import Path
 
-from ztm_planner import footpaths, score, train
+from ztm_planner import footpaths, geocoding, score, train
 from ztm_planner.settings import HORIZON_DAYS, Resources
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Parse arguments and run ``train`` or ``score``; prints a JSON summary."""
+    """Run a local artifact/model command and print its JSON summary."""
     parser = argparse.ArgumentParser(prog="ztm-planner")
     parser.add_argument("--workdir", type=Path, required=True)
     parser.add_argument("--threads", type=int, help="default: CPU cores minus two")
@@ -50,6 +51,18 @@ def main(argv: list[str] | None = None) -> None:
     f.add_argument("--gtfs-zip", type=Path, required=True)
     f.add_argument("--output", type=Path, required=True)
 
+    g = sub.add_parser("geocoding", help="manual, offline OSM extract -> address/road SQLite artifact")
+    g.add_argument("--osm-pbf", type=Path, required=True, help="local OSM PBF (or OSM XML)")
+    g.add_argument("--output", type=Path, required=True)
+    g.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        metavar=("WEST", "SOUTH", "EAST", "NORTH"),
+        default=geocoding.DEFAULT_BBOX,
+        help="lon/lat scope; default: 20.3 51.8 21.8 52.7",
+    )
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.nice:
@@ -67,6 +80,12 @@ def main(argv: list[str] | None = None) -> None:
         result = train.train(inputs, args.workdir, args.bundle_out, args.version, resources)
     elif args.command == "footpaths":
         result = footpaths.build(args.osm_pbf, args.gtfs_zip, args.output)
+    elif args.command == "geocoding":
+        west, south, east, north = args.bbox
+        try:
+            result = geocoding.build(args.osm_pbf, args.output, (west, south, east, north))
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            parser.exit(1, f"Geocoding build failed: {error}\n")
     else:
         result = score.score(
             args.bundle, args.gtfs_zip, args.recent_daily, args.weather_json, args.start, args.days,

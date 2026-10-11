@@ -1,0 +1,22 @@
+# Frontend builds from repository root; send only package sources and metadata.
+**
+!frontend/pyproject.toml
+!frontend/uv.lock
+!frontend/ztm_frontend/**/*.py
+!frontend/ztm_frontend/templates/*.html
+!frontend/ztm_frontend/static/*
+!routing/pyproject.toml
+!routing/Cargo.toml
+!routing/Cargo.lock
+!routing/src/**/*.rs
+!routing/python/ztm_routing/**/*.py
+!routing/python/ztm_routing/**/*.pyi
+!routing/python/ztm_routing/py.typed
+!routing/README.md
+**/.env*
+**/*key*.json
+**/credentials*
+**/__pycache__/
+**/.venv/
+**/target/
+**/.git/
