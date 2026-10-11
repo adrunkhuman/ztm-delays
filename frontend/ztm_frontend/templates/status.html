@@ -34,13 +34,16 @@
             <div class="status-mode"><span class="tag {{ mode }}">{{ mode|upper }}</span><span class="status-range">fresh {{ 'buses' if mode == 'bus' else 'trams' }} per minute</span></div>
             <figure class="status-chart" data-start="{{ c.start }}" data-left="{{ c.left }}" data-right="{{ c.right }}" data-w="{{ c.w }}" data-points="{{ c.data|to_json }}">
               <svg viewBox="0 0 {{ c.w }} {{ c.h }}" role="img" aria-label="{{ mode }} fresh vehicles per minute against the usual range, last {{ history.hours }} hours">
-                {% for t in c.ticks_y %}<line class="grid" x1="{{ c.left }}" x2="{{ c.w - c.right }}" y1="{{ t.y }}" y2="{{ t.y }}"/><text class="axis" x="{{ c.left - 6 }}" y="{{ t.y + 3 }}" text-anchor="end">{{ t.label }}</text>{% endfor %}
+                <g class="status-plot">
+                {% for t in c.ticks_y %}<line class="grid" x1="{{ c.left }}" x2="{{ c.w - c.right }}" y1="{{ t.y }}" y2="{{ t.y }}"/>{% endfor %}
                 {% for s in c.shades %}<rect class="shade {{ 'gap' if s.gap }}" x="{{ s.x }}" y="{{ c.top }}" width="{{ s.w }}" height="{{ c.h - c.top - c.bottom }}"/><line class="shade-edge {{ 'gap' if s.gap }}" x1="{{ s.x }}" x2="{{ s.x }}" y1="{{ c.top }}" y2="{{ c.h - c.bottom }}"/>{% endfor %}
                 <path class="band" d="{{ c.band }}"/>
                 <path class="usual" d="{{ c.usual }}"/>
                 <path class="actual" d="{{ c.actual }}"/>
-                {% for t in c.ticks_x %}<text class="axis" x="{{ t.x }}" y="{{ c.h - 6 }}" text-anchor="middle">{{ t.label }}</text>{% endfor %}
                 <line class="cross" y1="{{ c.top }}" y2="{{ c.h - c.bottom }}"/>
+                </g>
+                {% for t in c.ticks_y %}<text class="axis" x="{{ c.left - 6 }}" y="{{ t.y + 3 }}" text-anchor="end">{{ t.label }}</text>{% endfor %}
+                {% for t in c.ticks_x %}<text class="axis time-axis" data-x="{{ t.x }}" x="{{ t.x }}" y="{{ c.h - 6 }}" text-anchor="middle">{{ t.label }}</text>{% endfor %}
               </svg>
               <div class="status-tip"></div>
             </figure>

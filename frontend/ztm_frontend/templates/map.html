@@ -51,7 +51,7 @@
           data-mode="{{ map_view.mode }}" data-period="{{ map_view.period }}"
           data-routes="{{ url_for('map_file', month=map_month, name='routes.geojson', v=map_version) }}"
           data-segments="{{ url_for('map_segments', month=map_month, v=map_version) }}"
-          data-style="{{ url_for('static', filename='map-style.json') }}"
+          data-style="{{ asset('map-style.json') }}"
           data-tram-bounds="{{ map_meta.tram_bounds|to_json }}"></div>
         <div class="map-error" id="map-error" role="alert" hidden></div>
       </div>

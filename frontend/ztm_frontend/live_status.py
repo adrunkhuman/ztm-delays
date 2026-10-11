@@ -407,7 +407,7 @@ def _nice_max(value: float) -> int:
 
 
 def _chart(history: dict[str, Any], mode: str, incidents: list[dict[str, Any]]) -> dict[str, Any]:
-    """Server-side SVG geometry; the client only adds the crosshair readout."""
+    """Server-side SVG geometry; the client adapts its width and adds the crosshair readout."""
     n = history["minutes"]
     start = history["series_start"]
     row = history["modes"][mode]
