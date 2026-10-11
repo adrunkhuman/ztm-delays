@@ -127,7 +127,8 @@ def _server(page: str) -> Iterator[tuple[str, list[str]]]:
 )
 def test_planner_htmx_browser(tmp_path: Path, snapshots: dict[str, str], case: str, lang: str) -> None:
     # The result lives outside #page, so boosted swaps and history cannot overwrite diagnostics.
-    config = json.dumps({"case": case, "lang": lang, "snapshots": snapshots}).replace("</", "<\\/")
+    style = json.loads((PLANNER_JS.parent / "map-style.json").read_text())
+    config = json.dumps({"case": case, "lang": lang, "snapshots": snapshots, "mapStyle": style}).replace("</", "<\\/")
     bootstrap = f"<script>window.browserFixture={config};</script><script>{HARNESS.read_text()}</script>"
     initial = snapshots[lang]
     if case == "results":

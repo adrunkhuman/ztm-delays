@@ -69,7 +69,7 @@
       }));
       record.reject = () => reject(new TypeError('offline network failure'));
       if (record.url.pathname.endsWith('map-style.json')) {
-        record.resolve(JSON.stringify({sources: {}, layers: []}));
+        record.resolve(JSON.stringify(window.browserFixture.mapStyle));
       } else if (record.url.pathname.includes('/reverse')) {
         record.resolve(JSON.stringify({name: 'Map point'}));
       } else if (record.url.pathname.includes('/trip/')) {

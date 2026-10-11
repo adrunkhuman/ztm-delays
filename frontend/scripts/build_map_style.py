@@ -14,8 +14,12 @@ C = {
     "land": "#141414",
     "water": "#050505",
     "road": "#2c2c2c",
+    "road_major": "#565656",
+    "road_secondary": "#454545",
+    "road_tertiary": "#373737",
     "rail": "#3a3a3a",
     "label": "#7a7a7a",
+    "street_label": "#bbbbbb",
     "district": "#a8a8a8",
 }
 DISTRICTS = [
@@ -71,7 +75,32 @@ def dark_style(base: dict) -> dict:
         }
         if rail:
             paint["line-dasharray"] = [3, 3]
-        lines.append({**layer, **({"minzoom": 11} if rail else {}), "paint": paint})
+        else:
+            # The tile classification keeps the same road hierarchy in every map context.
+            paint["line-color"] = [
+                "match",
+                ["get", "class"],
+                ["motorway", "trunk", "primary"],
+                C["road_major"],
+                "secondary",
+                C["road_secondary"],
+                "tertiary",
+                C["road_tertiary"],
+                C["road"],
+            ]
+            paint["line-width"] = [
+                "interpolate",
+                ["linear"],
+                ["zoom"],
+                8,
+                ["match", ["get", "class"], ["motorway", "trunk", "primary"], 0.8, 0.4],
+                12,
+                ["match", ["get", "class"], ["motorway", "trunk", "primary"], 1.8, "secondary", 1.4, 0.8],
+                16,
+                ["match", ["get", "class"], ["motorway", "trunk", "primary"], 4, "secondary", 3, "tertiary", 2.5, 1.8],
+            ]
+        minzoom = 11 if rail else min(layer.get("minzoom", 0), 8)
+        lines.append({**layer, "minzoom": minzoom, "paint": paint})
     labels = [
         {
             **layer,
@@ -85,6 +114,40 @@ def dark_style(base: dict) -> dict:
         }
         for layer in pick(["label_village", "label_town", "label_city", "highway-name-major"])
     ]
+    for layer in labels:
+        if layer["id"] == "highway-name-major":
+            layer["minzoom"] = 11
+            layer["layout"]["text-size"] = 12
+            layer["paint"]["text-color"] = C["street_label"]
+    streets = {
+        "id": "street-names",
+        "type": "symbol",
+        "source": "openmaptiles",
+        "source-layer": "transportation_name",
+        "minzoom": 14,
+        "filter": ["match", ["get", "class"], ["minor", "service", "track", "path"], True, False],
+        "layout": {
+            "symbol-placement": "line",
+            "text-field": ["coalesce", ["get", "name"], ["get", "name_en"]],
+            "text-font": ["Noto Sans Regular"],
+            "text-size": 12,
+        },
+        "paint": {"text-color": C["street_label"], "text-halo-color": C["bg"], "text-halo-width": 2},
+    }
+    city = {
+        "id": "warsaw-name",
+        "type": "symbol",
+        "source": "warsaw",
+        "minzoom": 6,
+        "maxzoom": 12.5,
+        "layout": {
+            "text-field": "Warszawa",
+            "text-font": ["Noto Sans Bold"],
+            "text-size": 20,
+            "text-letter-spacing": 0.05,
+        },
+        "paint": {"text-color": "#eeeeee", "text-halo-color": C["bg"], "text-halo-width": 3},
+    }
     districts = {
         "id": "district-labels",
         "type": "symbol",
@@ -110,8 +173,16 @@ def dark_style(base: dict) -> dict:
         "sources": {
             "openmaptiles": base["sources"]["openmaptiles"],
             "district-labels": {"type": "geojson", "data": {"type": "FeatureCollection", "features": anchors}},
+            "warsaw": {
+                "type": "geojson",
+                "data": {
+                    "type": "Feature",
+                    "properties": {},
+                    "geometry": {"type": "Point", "coordinates": [21.0122, 52.2297]},
+                },
+            },
         },
-        "layers": [*land, *water, *lines, *labels, districts],
+        "layers": [*land, *water, *lines, *labels, districts, streets, city],
     }
 
 

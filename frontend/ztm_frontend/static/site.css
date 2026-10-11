@@ -2651,8 +2651,6 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   .status-page .main { padding-inline: 1rem; }
   .status-page .status-summary { grid-template-columns: 1fr; }
   .status-page .status-summary { row-gap: 1.1rem; }
-  .status-page .status-chart { overflow-x: auto; }
-  .status-page .status-chart svg { min-width: 680px; }
 }
 
 .map-minis { margin-top: 1.3rem; }
@@ -3408,11 +3406,26 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   }
 
   .pl-when {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 6.25rem) auto;
+    gap: 0.4rem;
+  }
+
+  .pl-when select,
+  .pl-when input {
+    min-width: 0;
+    width: 100%;
+    padding-inline: 0.4rem;
   }
 
   .pl-go {
-    flex-basis: 100%;
+    padding-inline: 0.6rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+
+  .pl-go span {
+    display: none;
   }
 
   .pl-summary {

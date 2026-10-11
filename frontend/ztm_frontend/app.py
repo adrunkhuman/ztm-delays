@@ -52,7 +52,7 @@ def create_app() -> Flask:  # noqa: C901
     static_versions = {
         path.name: sha256(path.read_bytes()).hexdigest()[:12]
         for path in Path(app.static_folder or "").iterdir()
-        if path.suffix in {".css", ".js"}
+        if path.suffix in {".css", ".js", ".json"}
     }
 
     def asset(filename: str) -> str:

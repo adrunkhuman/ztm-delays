@@ -205,41 +205,8 @@
     const response = await fetch(url);
     if (!response.ok) throw new Error("map style unavailable");
     const style = await response.json();
-    for (const layer of style.layers) {
-      if (layer.type === "line" && layer.id.startsWith("highway_")) {
-        layer.minzoom = Math.min(layer.minzoom || 0, 8);
-        // Use the tile data's road hierarchy, not a list of Warsaw street names.
-        layer.paint["line-color"] = ["match", ["get", "class"],
-          ["motorway", "trunk", "primary"], "#565656", "secondary", "#454545", "tertiary", "#373737", "#2c2c2c"];
-        layer.paint["line-width"] = ["interpolate", ["linear"], ["zoom"],
-          8, ["match", ["get", "class"], ["motorway", "trunk", "primary"], 0.8, 0.4],
-          12, ["match", ["get", "class"], ["motorway", "trunk", "primary"], 1.8, "secondary", 1.4, 0.8],
-          16, ["match", ["get", "class"], ["motorway", "trunk", "primary"], 4, "secondary", 3, "tertiary", 2.5, 1.8]];
-      } else if (layer.id === "highway-name-major") {
-        layer.minzoom = 11;
-        layer.paint["text-color"] = "#bbbbbb";
-        layer.layout["text-size"] = 12;
-      }
-    }
-    style.layers.push({
-      id: "picker-street-names", type: "symbol", source: "openmaptiles", "source-layer": "transportation_name", minzoom: 14,
-      filter: ["match", ["get", "class"], ["minor", "service", "track", "path"], true, false],
-      layout: {
-        "symbol-placement": "line", "text-field": ["coalesce", ["get", "name"], ["get", "name_en"]],
-        "text-font": ["Noto Sans Regular"], "text-size": 12,
-      },
-      paint: { "text-color": "#bbbbbb", "text-halo-color": "#111111", "text-halo-width": 2 },
-    });
-    style.sources["picker-city"] = {
-      type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [21.0122, 52.2297] } },
-    };
-    style.layers.push({
-      id: "picker-city-name", type: "symbol", source: "picker-city", minzoom: 6, maxzoom: 12.5,
-      layout: {
-        "text-field": cityName, "text-font": ["Noto Sans Bold"], "text-size": 20, "text-letter-spacing": 0.05,
-      },
-      paint: { "text-color": "#eeeeee", "text-halo-color": "#111111", "text-halo-width": 3 },
-    });
+    // Roads and labels come from the shared basemap; only the city name follows the planner language.
+    style.layers.find(layer => layer.id === "warsaw-name").layout["text-field"] = cityName;
     return style;
   }
 

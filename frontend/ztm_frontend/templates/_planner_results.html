@@ -100,7 +100,7 @@
                   </span>
                   {% if item.live and item.live.map %}
                     <div class="pl-minimap" role="img" aria-label="{{ t.map_label }}" data-map="{{ item.live.map|tojson|forceescape }}" data-mode="{{ item.mode }}" data-line="{{ item.line }}"
-                      data-style="{{ url_for('static', filename='map-style.json') }}"></div>
+                      data-style="{{ asset('map-style.json') }}"></div>
                   {% endif %}
                   <details class="pl-stops-toggle" data-key="{{ r.key }}-{{ loop.index }}"
                     hx-get="{{ url_for('planner_trip', trip_key=item.trip_key, date=day, board=item.board_sequence, alight=item.alight_sequence) }}"

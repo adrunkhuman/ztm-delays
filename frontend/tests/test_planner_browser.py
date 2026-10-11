@@ -63,7 +63,9 @@ def test_form_controls_survive_boosted_navigation(tmp_path: Path) -> None:
         + PLANNER_JS.read_text()
         + "</script><script>"
         + PLANNER_JS.read_text()
-        + """</script><script>
+        + "</script><script>const sharedMapStyle = "
+        + (FRONTEND / "ztm_frontend/static/map-style.json").read_text()
+        + """;
         // Mock the external map boundary; points enter through map clicks and marker drags.
         window.testMarkers = {};
         window.maplibregl = {
@@ -100,9 +102,7 @@ def test_form_controls_survive_boosted_navigation(tmp_path: Path) -> None:
         let reverseName = 'Nearby street 11';
         window.fetch = async (url, options = {}) => {
           lookups.push(String(url));
-          if (String(url).includes('map-style.json')) return { ok: true, json: async () => ({
-            sources: {}, layers: [{ id: 'highway_major_inner', type: 'line', minzoom: 11, paint: {} }],
-          }) };
+          if (String(url).includes('map-style.json')) return { ok: true, json: async () => structuredClone(sharedMapStyle) };
           const name = reverseName;
           await new Promise(resolve => setTimeout(resolve, 100));
           if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -153,8 +153,10 @@ def test_form_controls_survive_boosted_navigation(tmp_path: Path) -> None:
           check(!panel.querySelector('input'), 'picker still has editable coordinate inputs');
           check(!panel.querySelector('.pl-picker-use, .pl-picker-cancel'), 'confirmation controls remain');
           await new Promise(resolve => setTimeout(resolve, 0));
-          check(testMap.options.style.layers[0].minzoom === 8, 'main roads hidden at city zoom');
-          const roadColor = testMap.options.style.layers[0].paint['line-color'];
+          const road = testMap.options.style.layers.find(layer => layer.id === 'highway_major_inner');
+          check(road.minzoom <= 8, 'main roads hidden at city zoom');
+          const roadColor = road.paint['line-color'];
+          check(JSON.stringify(road) === JSON.stringify(sharedMapStyle.layers.find(layer => layer.id === road.id)), 'picker restyled the shared roads');
           check(roadColor[0] === 'match' && roadColor[1][1] === 'class', 'road emphasis does not use tile classification');
           check(roadColor.includes('#565656') && roadColor.at(-1) === '#2c2c2c', 'minor roads not subdued');
           const currentMap = testMap;
@@ -163,8 +165,8 @@ def test_form_controls_survive_boosted_navigation(tmp_path: Path) -> None:
           check(form.elements.q_to.closest('.pl-field').classList.contains('is-map-active'), 'destination input did not activate destination');
           form.querySelector('.pl-dot.from').click();
           check(testMap === currentMap && form.elements.q_from.closest('.pl-field').classList.contains('is-map-active'), 'origin row click did not activate origin');
-          check(testMap.options.style.layers.some(layer => layer.id === 'picker-street-names'), 'minor street names missing');
-          check(testMap.options.style.layers.some(layer => layer.id === 'picker-city-name'), 'Warsaw label missing');
+          check(testMap.options.style.layers.some(layer => layer.id === 'street-names'), 'minor street names missing');
+          check(testMap.options.style.layers.find(layer => layer.id === 'warsaw-name').layout['text-field'] === 'Warsaw', 'localized Warsaw label missing');
           testMap.handlers.click({ lngLat: { lat: 95, lng: 21.01 } });
           check(form.elements.from_lat.disabled, 'invalid map point accepted');
           testMap.handlers.click({ lngLat: { lat: 52.23, lng: 21.01 } });

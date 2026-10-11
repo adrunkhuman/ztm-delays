@@ -32,7 +32,7 @@ TEXT: dict[str, dict[str, object]] = {
         "tomorrow": "Tomorrow",
         "weekdays": ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
         "months": ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
-        "go": "Show routes",
+        "go": "Search",
         "results": "Connections",
         "earlier": "Earlier routes",
         "later": "Later routes",
