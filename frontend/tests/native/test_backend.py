@@ -15,10 +15,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from _ztm_routing import NativeState, PreparedNet, PreparedQuery
 from tests.test_journey import DAY, Stop, Trip, _network
 from tests.test_planner import _client
 from ztm_frontend import journey
+from ztm_frontend.routing import NativeState, PreparedNet, PreparedQuery
 
 if TYPE_CHECKING:
     from typing import NoReturn
@@ -194,9 +194,9 @@ def test_invalid_query_bounds_rejected(bounds: list[float]) -> None:
 
 def test_null_native_owners_and_negative_budget_rejected() -> None:
     with pytest.raises(TypeError):
-        PreparedQuery(None, [], 0)  # ty: ignore[invalid-argument-type] - exercise the Cython boundary
+        PreparedQuery(None, [], 0)  # ty: ignore[invalid-argument-type] - exercise the native boundary
     with pytest.raises(TypeError):
-        NativeState(None, None)  # ty: ignore[invalid-argument-type] - exercise the Cython boundary
+        NativeState(None, None)  # ty: ignore[invalid-argument-type] - exercise the native boundary
     with pytest.raises(OverflowError):
         PreparedQuery(PreparedNet(small()), [0, 0], -1)
 
@@ -269,6 +269,31 @@ def test_four_threads_prepare_one_network_and_keep_query_state_private() -> None
     assert len({id(profile.state) for profile in profiles}) == 4
 
 
+def test_shared_query_windows_and_getters_are_safe_across_threads() -> None:
+    # Transfers exercise shared multiword permission masks, not just immutable metadata.
+    net = _network(
+        Trip(100, (Stop("O:1", 100), Stop("A:1", 200)), mode="metro"),
+        *(Trip(key, (Stop("X:1", 400), Stop(f"D:{key}", 500)), mode="metro") for key in range(65)),
+        walks=(("A:1", "X:1", 100),),
+    )
+    expected = net.search("O", "D", 0)
+    template = net.profile("O", "D")
+    query = PreparedQuery(journey._prepared_network(net), template.to_target, journey.WALK_PERMISSION_WORDS)
+    barrier = threading.Barrier(4)
+
+    def window(_: int) -> list[journey.Journey]:
+        profile = journey._Profile(net, template.origins, template.targets, template.to_target, query=query)
+        barrier.wait(timeout=10)
+        labels = profile.run(0)
+        assert profile.state is not None
+        assert profile.state.stats()["live_labels_after_return"] == 0
+        assert 2 <= query.peak_permission_words() <= journey.WALK_PERMISSION_WORDS
+        return [journey._journey(net, label) for label in labels]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert all(result == expected for result in pool.map(window, range(4)))
+
+
 def test_four_threads_ordinary_planner_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = _client(tmp_path, monkeypatch).application
     path = tmp_path / "planner" / "planner.duckdb"
@@ -294,7 +319,7 @@ import sys
 from importlib.abc import MetaPathFinder
 class MissingNative(MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == '_ztm_routing':
+        if fullname == 'ztm_routing._native':
             raise ModuleNotFoundError('native deliberately unavailable')
 sys.meta_path.insert(0, MissingNative())
 import ztm_frontend.journey

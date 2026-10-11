@@ -1,0 +1,4 @@
+/target/
+/dist/
+/python/ztm_routing/*.so
+/python/ztm_routing/*.pyd

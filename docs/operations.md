@@ -172,7 +172,11 @@ A failed promotion gate fails `train_model`, logs the held-out errors and keeps 
 
 The frontend caches two service-day networks per process by artifact `build_id`; building one takes about 1.5 s. Each network caches 128 raw searches and coalesces identical requests across up to 16 in-flight keys. Artifact replacement and live-feed updates create separate networks, preventing stale route reuse. Cards are rebuilt from the current request's artifact snapshot.
 
-The frontend image builds the required C++ routing extension; compilation or import failures stop the build/startup. Its runtime has no compiler or Python routing fallback. Rebuild the image when native sources change. No new Coolify service is needed. The kernel retains the GIL, so four Waitress threads are safe but do not parallelize routing. Before adding processes, measure duplicated network-cache memory and cold/live-refresh peaks.
+The frontend image builds the required [Rust routing extension](../routing/README.md) with Rust 1.98.0 in its builder stage; compilation or import failures stop the build/startup. The runtime contains installed wheels, including frontend assets, but no compiler or Python routing fallback. Rebuild the image when `routing/` sources change.
+
+Keep the **same Coolify frontend application** and one frontend container. Use repository-root build context (`/`) and `/frontend/Dockerfile`, not `frontend/` as the build context. Ports, command, mounts and environment remain unchanged; routing is an in-process library, not a new service.
+
+The Rust search detaches the GIL and uses owned native memory, so independent requests can run routing in parallel across the existing four Waitress threads. Networks are immutable; permission caches are synchronized across a search's windows, and each mutable window rejects simultaneous use. Before adding threads or processes, measure concurrent search peaks, duplicated network-cache memory, and cold/live-refresh peaks.
 
 ## Local address lookup
 

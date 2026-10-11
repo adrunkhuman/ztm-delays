@@ -26,8 +26,8 @@ from operator import itemgetter
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
-from _ztm_routing import NativeState, PreparedNet, PreparedQuery
 from ztm_frontend.db import read_connection
+from ztm_frontend.routing import NativeState, PreparedNet, PreparedQuery
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -572,8 +572,8 @@ class _Profile:
         """Run the required native kernel; departures must be latest first within a window.
 
         Each profile owns its mutable window state. Query permission masks are shared
-        only with subsequent windows of the same search. The extension retains the GIL;
-        independent requests are thread-safe, not parallel CPU execution.
+        only with subsequent windows of the same search. Rust detaches the GIL during
+        search, so independent requests can execute routing in parallel.
         """
         if self.state is None:
             if self.query is None:

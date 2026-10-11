@@ -1,8 +1,6 @@
-# Native extension build products (sources live in native/).
+# Python package build products.
 /build/
 /dist/
 /*.egg-info/
-/_ztm_routing*.so
-/_ztm_routing*.pyd
-/native/kernel.cpp
-/native/kernel.html
+/*.so
+/*.pyd

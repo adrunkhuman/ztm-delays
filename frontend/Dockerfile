@@ -1,22 +1,28 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
+# Build with: docker build -f frontend/Dockerfile -t ztm-frontend .
+FROM rust:1.98.0-slim-bookworm AS rust-toolchain
 
-WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH="/usr/local/cargo/bin:$PATH" \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y g++ \
+    && apt-get install --no-install-recommends -y gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+WORKDIR /app/frontend
+COPY routing /app/routing
+COPY frontend/pyproject.toml frontend/uv.lock ./
+COPY frontend/ztm_frontend ./ztm_frontend
+RUN uv sync --locked --no-dev --no-editable \
+    && /app/.venv/bin/python -c "import ztm_routing._native; import ztm_frontend.journey"
 
-COPY setup.py MANIFEST.in _ztm_routing.pyi ./
-COPY native ./native
-COPY ztm_frontend ./ztm_frontend
-RUN uv sync --frozen --no-dev --no-editable \
-    && .venv/bin/python -c "import _ztm_routing; import ztm_frontend.journey"
-
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+FROM python:3.13-slim-bookworm
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
@@ -24,11 +30,12 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     ZTM_DUCKDB_PATH=/app/serving/ztm.duckdb
 
+# DuckDB's wheel still needs the C++ runtime; this does not install a compiler.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Runtime is wheel-only: no source tree, build tools, or editable-install paths.
+# Installed wheels include templates/static assets. No sources, Rust, or build tools.
 COPY --from=builder /app/.venv /app/.venv
 
 USER 10001

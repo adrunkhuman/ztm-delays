@@ -6,17 +6,23 @@ The app reads a local DuckDB serving artifact in read-only mode. It does not ref
 
 ## Run
 
-From `frontend/`, with an existing serving export:
+Install Rust 1.98.0 (also pinned in CI and the image builder), Python 3.13 and uv. From `frontend/`, with an existing serving export:
 
 ```sh
-uv sync --locked
+RUSTUP_TOOLCHAIN=1.98.0 uv sync --locked
 ZTM_DUCKDB_PATH=/absolute/path/to/ztm.duckdb \
   uv run flask --app ztm_frontend.app run --debug
 ```
 
 The local default is `ztm/ztm.duckdb`. A partitioned export also requires its referenced Parquet files at the paths stored in the catalog; copying only the DuckDB file is insufficient.
 
-The [container](Dockerfile) uses Waitress on port 5000. Mount serving storage read-only and set `ZTM_DUCKDB_PATH` to the catalog. Connections last for one request, so later requests see refreshed data without restarting the app. The [publication procedure](../docs/operations.md#serving-publication) covers shared paths and export replacement.
+Build the [container](Dockerfile) from the **repository root**, so its local `routing/` dependency is available:
+
+```sh
+docker build -f frontend/Dockerfile -t ztm-frontend .
+```
+
+It uses Waitress on port 5000. Mount serving storage read-only and set `ZTM_DUCKDB_PATH` to the catalog. Connections last for one request, so later requests see refreshed data without restarting the app. The [publication procedure](../docs/operations.md#serving-publication) covers shared paths and export replacement.
 
 ## Reading the archive
 
@@ -77,9 +83,9 @@ SQLite search normalizes Polish accents and case, matches prefixes, house number
 
 There is no external geocoding provider. Without valid local data, stop search and coordinate selection still work. Responses use `Cache-Control: no-store`; OpenStreetMap attribution remains in the map and footer.
 
-Routing uses the required [C++ backend](native/README.md), built through Cython. Missing build tools or a missing extension fail the build/startup; there is no Python routing fallback. Python still handles artifact loading, endpoint resolution and itinerary rendering. `uv sync --locked` builds the extension locally; the container compiles it in a builder stage and ships only the installed wheel and runtime libraries.
+Routing uses the required [Rust engine](../routing/README.md), packaged as `ztm-routing` through Maturin/PyO3. Missing build tools or `ztm_routing._native` fail the build/startup; there is no Python routing fallback. Python still handles artifact loading, endpoint resolution and itinerary rendering. [routing.py](ztm_frontend/routing.py) copies primitive inputs into the engine and turns returned paths into frontend labels. `uv sync --locked` builds the non-editable local `../routing` dependency; the container compiles installed wheels, including frontend templates and static assets, in a builder stage. Its runtime contains neither Rust nor Python build tools.
 
-Each process caches two service-day networks by artifact `build_id`, including their immutable native metadata. Each network caches up to 128 raw searches and coalesces duplicate requests across at most 16 in-flight keys. Exact endpoints, time and result/filter settings form the key; new artifacts, days and live-patched networks cannot reuse old routes. Query permission masks stay within one search; mutable window state is not shared between requests. Labels and cards are rebuilt per request. The kernel retains the GIL: four Waitress threads are safe, but do not run routing in parallel.
+Each process caches two service-day networks by artifact `build_id`, including their immutable native metadata. Each network caches up to 128 raw searches and coalesces duplicate requests across at most 16 in-flight keys. Exact endpoints, time and result/filter settings form the key; new artifacts, days and live-patched networks cannot reuse old routes. Query permission masks stay within one search and are synchronized across its windows; mutable window state is not shared between requests. Labels and cards are rebuilt per request. Rust detaches the GIL while searching owned native buffers, so independent Waitress threads can run routing in parallel. A window rejects simultaneous use; failed search or Python materialization invalidates it.
 
 Cards show boarding deadlines, changes and walks. Ride stop lists load on expansion; `!` marks times at least two minutes from the timetable.
 

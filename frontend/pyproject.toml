@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==84.0.0", "Cython==3.3.0"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -19,6 +19,7 @@ dependencies = [
     "google-cloud-storage>=3.16.0",
     "pytz>=2025.2",
     "waitress>=3.0.2",
+    "ztm-routing==0.1.0",
 ]
 
 [dependency-groups]
@@ -28,15 +29,17 @@ dev = [
     "ty>=0.0.15",
 ]
 
-# uv otherwise notices setup metadata changes, but not edits to native sources.
+# Track frontend wheel contents; routing declares its own Rust-input cache keys.
 [tool.uv]
 cache-keys = [
     { file = "pyproject.toml" },
-    { file = "setup.py" },
-    { file = "MANIFEST.in" },
-    { file = "native/*.pyx" },
-    { file = "native/*.hpp" },
+    { file = "ztm_frontend/**/*.py" },
+    { file = "ztm_frontend/templates/*.html" },
+    { file = "ztm_frontend/static/*" },
 ]
+
+[tool.uv.sources]
+ztm-routing = { path = "../routing", editable = false }
 
 [tool.ruff]
 target-version = "py313"
@@ -65,7 +68,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["_ztm_routing", "ztm_frontend"]
+known-first-party = ["ztm_frontend", "ztm_routing"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
