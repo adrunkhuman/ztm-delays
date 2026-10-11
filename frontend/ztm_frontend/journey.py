@@ -27,7 +27,6 @@ from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
 from _ztm_routing import NativeState, PreparedNet, PreparedQuery
-
 from ztm_frontend.db import read_connection
 
 if TYPE_CHECKING:

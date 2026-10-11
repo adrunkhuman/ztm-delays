@@ -64,6 +64,9 @@ ignore = [
     "CPY001",
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["_ztm_routing", "ztm_frontend"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
