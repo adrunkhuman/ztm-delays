@@ -23,7 +23,8 @@ from flask import (
     url_for,
 )
 
-from ztm_frontend import db, live_status, planner, planner_text, queries
+from ztm_frontend import db, live_status, planner, planner_text, queries, sqlite_geocoding
+from ztm_frontend.sqlite_geocoding import GeocodingError
 
 EARLY_DELAY_SECONDS = -60
 LATE_DELAY_SECONDS = 180
@@ -38,7 +39,7 @@ MAP_POPUP_ROWS = 3
 MAP_POPUP_CHIPS = 5
 MAP_NEUTRAL_SECONDS = 10
 # The planner form's query keys; links rebuilt from the request (the language switch) carry only these.
-PLANNER_ARGS = ("date", "time", "from", "to", "q_from", "q_to")
+PLANNER_ARGS = ("date", "time", "from", "to", "q_from", "q_to", "from_lat", "from_lon", "to_lat", "to_lon")
 PLANNER_LANG_COOKIE = "planner_lang"
 PLANNER_LANG_COOKIE_SECONDS = 365 * 86_400
 
@@ -65,6 +66,7 @@ def create_app() -> Flask:  # noqa: C901
     app.config["ZTM_PLANNER_PATH"] = Path(
         os.environ.get("ZTM_PLANNER_PATH", db_path.parent / "planner" / "planner.duckdb")
     )
+    app.config["ZTM_GEOCODING_DB"] = Path(path) if (path := os.environ.get("ZTM_GEOCODING_DB")) else None
     app.add_template_filter(planner.clock, "clock")
     app.teardown_appcontext(db.close_request_connections)
     _add_planner_routes(app)
@@ -243,40 +245,17 @@ def _add_status_routes(app: Flask) -> None:
 
 
 def _add_planner_routes(app: Flask) -> None:
+    _add_planner_location_routes(app)
     app.add_template_filter(planner_text.plural, "plural")
     app.add_template_filter(planner_text.day_label, "day_label")
 
     @app.get("/planner")
     def planner_page() -> Response:
-        now = datetime.now(WARSAW)
-        lang = _planner_lang()
-        args = {key: value for key in PLANNER_ARGS if (value := request.args.get(key))}
-        response = make_response(
-            render_template(
-                "planner.html",
-                lang=lang,
-                t=planner_text.TEXT[lang],
-                args=args,
-                **planner.get_page(_planner_path(), args, now.date(), now.hour * 3600 + now.minute * 60, now),
-            )
-        )
-        if request.args.get("lang") in planner_text.LANGS:  # the switch: remember the choice
-            response.set_cookie(PLANNER_LANG_COOKIE, lang, max_age=PLANNER_LANG_COOKIE_SECONDS, samesite="Lax")
-        response.vary.update(("Accept-Language", "Cookie"))
-        return response
+        return _render_planner("planner.html", remember_language=True)
 
-    @app.get("/planner/suggest/<field>")
-    def planner_suggest(field: str) -> str:
-        if field not in {"from", "to"}:
-            abort(404)
-        # Each suggestion is a link to the planner with that stop chosen and the rest of the form kept.
-        state = {key: value for key in ("date", "time", "from", "to") if (value := request.args.get(key))}
-        return render_template(
-            "_planner_suggest.html",
-            field=field,
-            state=state,
-            groups=planner.suggest(_planner_path(), request.args.get(f"q_{field}", "")),
-        )
+    @app.get("/planner/results")
+    def planner_results() -> Response:
+        return _render_planner("_planner_results.html")
 
     @app.get("/planner/trip/<int(signed=True):trip_key>")
     def planner_trip(trip_key: int) -> str:
@@ -288,6 +267,72 @@ def _add_planner_routes(app: Flask) -> None:
         if not stops:
             abort(404)
         return render_template("_planner_stops.html", stops=stops, t=planner_text.TEXT[_planner_lang()])
+
+
+def _add_planner_location_routes(app: Flask) -> None:
+    @app.get("/planner/suggest/<field>")
+    def planner_suggest(field: str) -> Response:
+        if field not in {"from", "to"}:
+            abort(404)
+        query = request.args.get(f"q_{field}", "")
+        groups = planner.suggest(_planner_path(), query)
+        database = current_app.config["ZTM_GEOCODING_DB"]
+        lang = _planner_lang()
+        message = None
+        if database is not None:
+            try:
+                groups += sqlite_geocoding.search(database, query)
+            except GeocodingError:
+                message = planner_text.TEXT[lang]["address_error"]
+        html = render_template(
+            "_planner_suggest.html", field=field, groups=groups, message=message, t=planner_text.TEXT[lang]
+        )
+        if message and groups:
+            # The fragment renders a notice only for an empty list; retain both stops and the error.
+            html += render_template(
+                "_planner_suggest.html", field=field, groups=[], message=message, t=planner_text.TEXT[lang]
+            )
+        response = make_response(html)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/planner/reverse")
+    def planner_reverse() -> Response:
+        _planner_path()
+        name = None
+        try:
+            lat, lon = float(request.args.get("lat", "")), float(request.args.get("lon", ""))
+            database = current_app.config["ZTM_GEOCODING_DB"]
+            candidate = sqlite_geocoding.reverse(database, lat, lon) if database is not None else None
+            if candidate:
+                name = candidate["name"]
+                if candidate["distance_m"] > 20:  # noqa: PLR2004 - distinguish a nearby address from an exact label
+                    name = str(planner_text.TEXT[_planner_lang()]["near"]).format(name=name)
+        except (ValueError, OverflowError, GeocodingError):
+            pass  # Coordinates remain a usable label if reverse lookup is unavailable.
+        response = make_response({"name": name})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+def _render_planner(template: str, *, remember_language: bool = False) -> Response:
+    """Render either response; only page navigation persists an explicit language choice."""
+    now = datetime.now(WARSAW)
+    lang = _planner_lang()
+    args = {key: request.args[key] for key in PLANNER_ARGS if key in request.args}
+    response = make_response(
+        render_template(
+            template,
+            lang=lang,
+            t=planner_text.TEXT[lang],
+            args=args,
+            **planner.get_page(_planner_path(), args, now.date(), now.hour * 3600 + now.minute * 60, now),
+        )
+    )
+    if remember_language and request.args.get("lang") in planner_text.LANGS:
+        response.set_cookie(PLANNER_LANG_COOKIE, lang, max_age=PLANNER_LANG_COOKIE_SECONDS, samesite="Lax")
+    response.vary.update(("Accept-Language", "Cookie"))
+    return response
 
 
 def _planner_lang() -> str:

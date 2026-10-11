@@ -18,12 +18,15 @@ import threading
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from functools import partial
 from itertools import groupby
 from operator import itemgetter
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
+
+from _ztm_routing import NativeState, PreparedNet, PreparedQuery
 
 from ztm_frontend.db import read_connection
 
@@ -43,7 +46,34 @@ WINDOW_EVENTS = 1500  # most departures a window runs; around a busy stop that c
 WINDOW_SLACK = 1.25  # a further window covers the journeys still missing at the rate seen so far, plus this
 PROFILE_SPAN_S = 8 * 3600  # plan() looks no further past the requested time
 CACHED_DAYS = 2
+WALK_PERMISSION_WORDS = 32_768  # bound cached permission masks by their 64-bit words (at least one per entry)
 DEFAULT_HIGH_RATIO = 1.1
+# Point walks use the pipeline's pace/detour model, but allow a longer endpoint walk.
+# They approximate streets, not pedestrian routing: great-circle distance x detour,
+# at walking pace, plus station stairs/corridors.
+WALK_DETOUR = 1.3
+WALK_SPEED_MPS = 1.2
+WALK_MIN_S = 30
+WALK_MAX_M = 1000
+STATION_ACCESS_S = 60
+ORIGIN_POINT = "@origin"
+DESTINATION_POINT = "@destination"
+
+
+@dataclass(frozen=True)
+class Point:
+    """A geographic endpoint; its name is display-only and never affects routing."""
+
+    lat: float
+    lon: float
+    name: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        """Reject nonfinite or out-of-range coordinates, including direct API callers."""
+        if not (
+            math.isfinite(self.lat) and math.isfinite(self.lon) and -90 <= self.lat <= 90 and -180 <= self.lon <= 180  # noqa: PLR2004
+        ):
+            raise ValueError("invalid geographic coordinates")
 
 
 @dataclass(frozen=True)
@@ -61,11 +91,12 @@ class Ride:
 
 @dataclass(frozen=True)
 class Walk:
-    """Walk between two posts."""
+    """Walk between posts or an endpoint; distance is supplied for approximate point walks."""
 
     from_stop: str
     to_stop: str
     walk_s: int
+    distance_m: int | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +187,29 @@ class Network:
         self._load_ranges(connection)
         self._load_routes(connection, day)
         self._load_footpaths(connection)
+        self.posts = [
+            (self.stop_index[stop], lat, lon, station)
+            for stop, lat, lon, station in self._post_rows(connection, day)
+            if lat is not None and lon is not None
+        ]
+
+    @staticmethod
+    def _post_rows(connection: duckdb.DuckDBPyConnection, day: date) -> list[tuple]:
+        # Stop-only artifacts and minimal fixtures need no coordinates; they remain routable.
+        if not connection.execute(
+            "select 1 from information_schema.tables where table_name = 'planner_stop_post'"
+        ).fetchone():
+            return []
+        return connection.execute(
+            """
+            select p.stop_id, p.lat, p.lon, bool_or(t.mode in ('metro', 'rail'))
+            from planner_stop_post p join planner_stop s using (stop_id)
+            join planner_trip t using (trip_key)
+            where t.service_date in (?::date, ?::date)
+            group by p.stop_id, p.lat, p.lon
+            """,
+            [day, day - timedelta(days=1)],
+        ).fetchall()
 
     def _load_ranges(self, connection: duckdb.DuckDBPyConnection) -> None:
         cells: dict[tuple, list[tuple]] = {}
@@ -332,16 +386,42 @@ class Network:
         for (b, a), seconds in shortest.items():
             self.reverse[b].append((a, seconds))
 
-    def lower_bounds(self, targets: set[int]) -> list[float]:
+    def point_walks(self, point: Point, *, access: bool) -> dict[int, Walk]:
+        """All served posts within 1,000 estimated metres, without changing the cached graph.
+
+        The 1.3 detour factor cannot account for barriers or actual street paths. Distance
+        excludes station access time; the minimum 30 seconds and station 60 seconds affect timing only.
+        """
+        walks = {}
+        for stop, lat, lon, station in self.posts:
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                continue
+            a, b = math.radians(point.lat), math.radians(lat)
+            h = (
+                math.sin((b - a) / 2) ** 2
+                + math.cos(a) * math.cos(b) * math.sin(math.radians(lon - point.lon) / 2) ** 2
+            )
+            distance = WALK_DETOUR * 2 * 6_371_000 * math.asin(math.sqrt(min(1.0, max(0.0, h))))
+            if distance > WALK_MAX_M:
+                continue
+            seconds = max(WALK_MIN_S, math.ceil(distance / WALK_SPEED_MPS)) + (STATION_ACCESS_S if station else 0)
+            start, end = (ORIGIN_POINT, self.stop_ids[stop]) if access else (self.stop_ids[stop], DESTINATION_POINT)
+            walks[stop] = Walk(start, end, seconds, math.ceil(distance))
+        return walks
+
+    def lower_bounds(self, targets: set[int] | dict[int, int]) -> list[float]:
         """Seconds from each stop to the nearest target riding without waiting at each segment's shortest ride.
 
         A late arrival is at least board_by plus the timetabled ride (every ratio is at least one), so no journey
-        is faster. Stops farther than MAX_JOURNEY_S stay infinite.
+        is faster. A target mapping seeds the graph with each post's egress time rather than zero.
+        The reverse graph may chain walks: allowing extra paths only lowers this pruning bound.
+        Stops farther than MAX_JOURNEY_S stay infinite.
         """
         bound = [math.inf] * len(self.stop_ids)
-        heap = [(0.0, t) for t in targets]
-        for t in targets:
-            bound[t] = 0.0
+        heap = [(float(targets[t]) if isinstance(targets, dict) else 0.0, t) for t in targets]
+        heapq.heapify(heap)
+        for seconds, t in heap:
+            bound[t] = seconds
         while heap:
             seconds, stop = heapq.heappop(heap)
             if seconds > bound[stop]:
@@ -380,13 +460,20 @@ class Network:
         depart, arrive = self.depart[board], self._arrive(board, alight)
         return Ride(key, self.seqs[board], self.seqs[alight], self.board[board], depart, arrive, late)
 
-    def search(self, origin_group: str, destination_group: str, after: int) -> list[Journey]:
+    def profile(self, origin: str | Point, destination: str | Point) -> _Profile:
+        """Query-local endpoint walks and labels; cached network columns remain untouched."""
+        origins = self.group_stops.get(origin, []) if isinstance(origin, str) else []
+        access = self.point_walks(origin, access=True) if isinstance(origin, Point) else {}
+        egress = self.point_walks(destination, access=False) if isinstance(destination, Point) else {}
+        targets = set(egress) if isinstance(destination, Point) else set(self.group_stops.get(destination, []))
+        return _Profile(self, origins, targets, access=access, egress=egress)
+
+    def search(self, origin_group: str | Point, destination_group: str | Point, after: int) -> list[Journey]:
         """Earliest-arriving journeys that improve on all smaller vehicle counts, up to five."""
-        origins = self.group_stops.get(origin_group, [])
-        targets = set(self.group_stops.get(destination_group, []))
-        if not origins or not targets:
+        profile = self.profile(origin_group, destination_group)
+        if not (profile.origins or profile.access) or not profile.targets:
             return []
-        return [_journey(self, label) for label in _Profile(self, origins, targets).run(after)]
+        return [_journey(self, label) for label in profile.run(after)]
 
 
 def _trip_meta(connection: duckdb.DuckDBPyConnection, day: date) -> dict[int, tuple]:
@@ -421,26 +508,19 @@ def _journey(net: Network, label: _Label) -> Journey:
     return Journey(first.board_by - walk, arrival, tuple(legs))
 
 
-def _lower(columns: list[list[int]], k: int, stop: int, value: int) -> None:
-    """Lower stop's entry in column k and every later column (each is non-increasing in k)."""
-    for column in columns[k:]:
-        if value >= column[stop]:
-            break
-        column[stop] = value
+# Values own only native copies, never their weak Python keys. Live-patched copies
+# have distinct identities and therefore cannot reuse stale timing metadata.
+_prepared_networks: WeakKeyDictionary[Network, PreparedNet] = WeakKeyDictionary()
+_prepared_lock = threading.Lock()
 
 
-def _lower_walk(columns: list[dict[tuple[int, int], int]], k: int, key: tuple[int, int], value: int) -> None:
-    """Lower a sparse walking state's bound for this and every larger vehicle count."""
-    for column in columns[k:]:
-        if value >= column.get(key, INF):
-            break
-        column[key] = value
-
-
-def _deadline(
-    ride: list[int], downstream: list[int], shortest: list[float], reach: list[float], target_best: int
-) -> float:
-    return max(min(ride[d] - s, target_best - r) for d, s, r in zip(downstream, shortest, reach, strict=True))
+def _prepared_network(net: Network) -> PreparedNet:
+    with _prepared_lock:
+        prepared = _prepared_networks.get(net)
+        if prepared is None:
+            prepared = PreparedNet(net)
+            _prepared_networks[net] = prepared
+        return prepared
 
 
 class _Profile:
@@ -452,171 +532,67 @@ class _Profile:
     many-vehicle label prune an earlier departure's journey with fewer vehicles.
     """
 
-    def __init__(
-        self, net: Network, origins: list[int], targets: set[int], to_target: list[float] | None = None
+    def __init__(  # noqa: PLR0913
+        self,
+        net: Network,
+        origins: list[int],
+        targets: set[int],
+        to_target: list[float] | None = None,
+        *,
+        access: dict[int, Walk] | None = None,
+        egress: dict[int, Walk] | None = None,
+        query: PreparedQuery | None = None,
     ) -> None:
-        n, columns = len(net.stop_ids), range(MAX_VEHICLES + 1)
         self.net, self.origins, self.targets = net, origins, targets
+        self.access, self.egress = access or {}, egress or {}
         # A label that cannot beat the target's even riding on without waiting leads nowhere; the target's
         # labels only fall, so the pruning holds for every later run.
-        self.to_target = net.lower_bounds(targets) if to_target is None else to_target
-        self.best = [[INF] * n for _ in columns]
-        # Unrestricted labels can board every pattern and start a walk. A walked label can do neither,
-        # so it must not hide an unrestricted label even when it arrives earlier.
-        self.best_ride = [[INF] * n for _ in columns]
-        # Walks from different posts forbid different boardings. Keep sparse bounds by (stop, walk origin);
-        # -1 denotes the initial walk, whose restriction covers all origin posts.
-        self.best_walk: list[dict[tuple[int, int], int]] = [{} for _ in columns]
-        # Scan bounds must have the same restrictions as the labels that established them.
-        self.scanned = [[INF] * n for _ in columns]
-        self.scanned_walk: list[dict[tuple[int, int], int]] = [{} for _ in columns]
+        weighted = {stop: self.egress[stop].walk_s if stop in self.egress else 0 for stop in targets}
+        self.to_target = net.lower_bounds(weighted) if to_target is None else to_target
+        # Shared only across this search's windows. Native suffix scans use the
+        # immutable linear pattern arrays directly, not a quadratic suffix cache.
+        self.query = query
+        self.state: NativeState | None = None
         # First boardable position of each pattern at any origin post, for the walking rule in run().
         self.origin_board: dict[int, int] = {}
         for stop in origins:
             for pattern, pos in net.board_at[stop].items():
                 self.origin_board[pattern] = min(pos, self.origin_board.get(pattern, pos))
-
-    def run(self, after: int, boarding: set[int] | None = None) -> list[_Label]:  # noqa: C901, PLR0912, PLR0915
-        """Target labels from a departure no later than any previous run's, per improved vehicle count.
-
-        boarding, after the first run, names the origin or nearby posts that have a departure exactly at after:
-        the others have no trip between this label and the one their trips were last scanned from.
-        """
-        net, origins, targets = self.net, self.origins, self.targets
-        late_base, cumulative, trip_rows = net.late_base, net.cumulative, net.trip_rows
-        best, best_ride, scanned, to_target = self.best, self.best_ride, self.scanned, self.to_target
-        best_walk, scanned_walk = self.best_walk, self.scanned_walk
-        marked: dict[tuple[int, int | None], _Label] = {}
-        origin = _Label(after)
-        for stop in origins:
-            if after < best_ride[0][stop]:
-                _lower(best_ride, 0, stop, after)
-                _lower(best, 0, stop, after)
-                if boarding is None or stop in boarding:
-                    marked[stop, None] = origin
+        # An earlier walk taking no longer to the same post makes a later candidate inert. Keep strict prefix
+        # improvements, not just the shortest walk: the first improvement determines equal-time label order.
+        # departures() must still enumerate every original walk; its events determine window boundaries.
+        self.origin_walks: list[tuple[int, int, int]] = []
+        shortest = {stop: walk.walk_s for stop, walk in self.access.items()}
         for stop in origins:
             for dest, seconds in net.footpaths[stop]:
-                arrival = after + seconds
-                key = (dest, -1)
-                if arrival < best_walk[0].get(key, INF) and arrival < best_ride[0][dest]:
-                    _lower_walk(best_walk, 0, key, arrival)
-                    _lower(best, 0, dest, arrival)
-                    if boarding is None or dest in boarding:
-                        walk = Walk(net.stop_ids[stop], net.stop_ids[dest], seconds)
-                        marked[key] = _Label(arrival, origin, walk)
-        # Not a reachable arrival, only a horizon: without it, every pattern scans the rest of the day until the
-        # destination is first reached.
-        horizon = after + MAX_JOURNEY_S
-        results = []
-        for vehicles in range(1, MAX_VEHICLES + 1):
-            if not marked:
-                break
-            best_k, ride_k, scanned_before = best[vehicles], best_ride[vehicles], scanned[vehicles - 1]
-            target_best = min(horizon, *(best_k[t] for t in targets))
-            rides: dict[int, _Label] = {}
-            improved: dict[tuple[int, int | None], _Label] = {}
-            # Earlier labels tend to establish tighter downstream bounds first.
-            # This changes scan order only; it assumes nothing about trip overtaking.
-            for (stop, walk_origin), previous in sorted(marked.items(), key=lambda item: item[1].time):
-                remaining = target_best - to_target[stop]
-                if previous.time >= remaining:
-                    continue
-                # Trips feasible at an earlier scan's (later) label were already considered, with no more
-                # vehicles; their boarding-specific timings cannot improve the labels now.
-                if walk_origin is None:
-                    until = scanned_before[stop]
-                    _lower(scanned, vehicles - 1, stop, previous.time)
-                else:
-                    key = (stop, walk_origin)
-                    until = min(scanned_walk[vehicles - 1].get(key, INF), scanned_before[stop])
-                    _lower_walk(scanned_walk, vehicles - 1, key, previous.time)
-                # Reached on foot: skip trips that already stop, boardable, where the walk started (for a first
-                # walk, any origin post). The same vehicle boarded later only looks better through the
-                # boarding-dependent late bound; it would also let a rider "chase" a missed vehicle, which the
-                # planner does not offer.
-                walked_from = None
-                if walk_origin is not None:
-                    walked_from = self.origin_board if walk_origin == -1 else net.board_at[walk_origin]
-                for pattern, pos, times, trips in net.incidence[stop]:
-                    if walked_from is not None and walked_from.get(pattern, pos) < pos:
-                        continue
-                    begin = bisect_left(times, previous.time)
-                    end = bisect_left(times, min(until, remaining))
-                    if begin >= end:
-                        continue
-                    stops = net.patterns[pattern]
-                    alights = net.pattern_alights[pattern]
-                    alights = alights[bisect_right(alights, pos) :]
-                    downstream = [stops[p] for p in alights]
-                    prefix = net.pattern_prefix[pattern]
-                    at = prefix[pos]
-                    shortest = [prefix[p] - at for p in alights]
-                    reach = [to_target[d] + ride for d, ride in zip(downstream, shortest, strict=True)]
-                    # A trip boarding at b reaches downstream stop d no earlier than b + its shortest ride there
-                    # (arrival >= board_by + ride, every ratio >= 1), and the target no earlier than b + reach;
-                    # once b passes, for every d, its ride label or the target's less that, no later trip can
-                    # improve one. Ride labels, not walked labels (which cannot start a walk).
-                    deadline = _deadline(ride_k, downstream, shortest, reach, target_best)
-                    for index in range(begin, end):
-                        if times[index] >= deadline:
-                            break
-                        changed = False
-                        trip = trips[index]
-                        row = trip_rows[trip]
-                        board = row + pos
-                        base, start = late_base[board], cumulative[board]
-                        for alight_pos in alights:
-                            # Every calibrated ratio is at least one. This cheap lower
-                            # bound skips envelope lookups, not feasible boardings.
-                            ride_s = cumulative[row + alight_pos] - start
-                            lower = base + ride_s if ride_s > 0 else base
-                            if lower >= target_best:
-                                break
-                            dest = stops[alight_pos]
-                            if lower >= ride_k[dest] or lower + to_target[dest] >= target_best:
-                                continue
-                            arrival = net._late(board, row + alight_pos)  # noqa: SLF001
-                            if arrival >= target_best:
-                                # Durations and the ratio envelope are monotone along a trip.
-                                break
-                            if arrival < ride_k[dest] and arrival + to_target[dest] < target_best:
-                                _lower(best_ride, vehicles, dest, arrival)
-                                changed = True
-                                label = _Label(arrival, previous, (trip, board, row + alight_pos))
-                                rides[dest] = label
-                                improved[dest, None] = label
-                                if arrival < best_k[dest]:
-                                    _lower(best, vehicles, dest, arrival)
-                                if dest in targets:
-                                    target_best = arrival
-                        if changed:
-                            deadline = _deadline(ride_k, downstream, shortest, reach, target_best)
-            for stop, previous in rides.items():
-                for dest, seconds in net.footpaths[stop]:
-                    arrival = previous.time + seconds
-                    key = (dest, stop)
-                    if (
-                        arrival < best_walk[vehicles].get(key, INF)
-                        and arrival < ride_k[dest]
-                        and arrival + to_target[dest] < target_best
-                    ):
-                        _lower_walk(best_walk, vehicles, key, arrival)
-                        _lower(best, vehicles, dest, arrival)
-                        improved[key] = _Label(arrival, previous, Walk(net.stop_ids[stop], net.stop_ids[dest], seconds))
-                        if dest in targets:
-                            target_best = arrival
-            reached = [label for (stop, _), label in improved.items() if stop in targets]
-            if reached:
-                results.append(min(reached, key=lambda label: label.time))
-            marked = improved
-        return results
+                if seconds < shortest.get(dest, INF):
+                    shortest[dest] = seconds
+                    self.origin_walks.append((stop, dest, seconds))
 
-    def departures(self, start: int, end: int) -> list[tuple[int, set[int]]]:
+    def run(self, after: int, boarding: set[int] | None = None) -> list[_Label]:
+        """Run the required native kernel; departures must be latest first within a window.
+
+        Each profile owns its mutable window state. Query permission masks are shared
+        only with subsequent windows of the same search. The extension retains the GIL;
+        independent requests are thread-safe, not parallel CPU execution.
+        """
+        if self.state is None:
+            if self.query is None:
+                self.query = PreparedQuery(_prepared_network(self.net), self.to_target, WALK_PERMISSION_WORDS)
+            self.state = NativeState(self.query, self)
+        return self.state.run(self, after, boarding)
+
+    def departures(self, start: int, end: int) -> list[tuple[int, set[int]]]:  # noqa: C901
         """Times in [start, end) a journey can leave the origin, latest first, with the posts boarded at them.
 
         A post is an origin post or a nearby one walked to.
         """
         net, events = self.net, dict[int, set[int]]()
+        for stop, walk in self.access.items():
+            for _, _, board_times, _ in net.incidence[stop]:
+                first, last = bisect_left(board_times, start + walk.walk_s), bisect_left(board_times, end + walk.walk_s)
+                for b in board_times[first:last]:
+                    events.setdefault(b - walk.walk_s, set()).add(stop)
         for stop in self.origins:
             for _, _, board_times, _ in net.incidence[stop]:
                 for b in board_times[bisect_left(board_times, start) : bisect_left(board_times, end)]:
@@ -658,8 +634,8 @@ def network(path: Path, day: date) -> Network:
 
 def plan(  # noqa: PLR0913
     net: Network,
-    origin_group: str,
-    destination_group: str,
+    origin_group: str | Point,
+    destination_group: str | Point,
     after: int,
     results: int,
     useful: Callable[[list[Journey]], list[Journey]] | None = None,
@@ -670,17 +646,24 @@ def plan(  # noqa: PLR0913
     Departure windows follow one another from after; each runs from its latest departure to its earliest,
     reusing labels (see _Profile), and keeps the journeys leaving within it: the complete front there.
     """
-    origins = net.group_stops.get(origin_group, [])
-    targets = set(net.group_stops.get(destination_group, []))
-    if not origins or not targets:
+    profile = net.profile(origin_group, destination_group)
+    if not (profile.origins or profile.access) or not profile.targets:
         return []
     found: list[Journey] = []
-    to_target = net.lower_bounds(targets)
     start, width, stop = after, PROFILE_WINDOW_S, after + PROFILE_SPAN_S
     kept: list[Journey] = []
     while start < stop and len(kept) < results:
         end = min(start + width, stop)
-        profile = _Profile(net, origins, targets, to_target)
+        if start != after:
+            profile = _Profile(
+                net,
+                profile.origins,
+                profile.targets,
+                profile.to_target,
+                access=profile.access,
+                egress=profile.egress,
+                query=profile.query,
+            )
         events = profile.departures(start, end)
         if len(events) > WINDOW_EVENTS:
             end, events = events[-WINDOW_EVENTS - 1][0], events[-WINDOW_EVENTS:]

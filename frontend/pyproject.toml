@@ -1,3 +1,13 @@
+[build-system]
+requires = ["setuptools==84.0.0", "Cython==3.3.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ztm_frontend"]
+
+[tool.setuptools.package-data]
+ztm_frontend = ["templates/*.html", "static/*"]
+
 [project]
 name = "ztm-frontend"
 version = "0.1.0"
@@ -16,6 +26,16 @@ dev = [
     "pytest>=9.0.0",
     "ruff>=0.15.0",
     "ty>=0.0.15",
+]
+
+# uv otherwise notices setup metadata changes, but not edits to native sources.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "MANIFEST.in" },
+    { file = "native/*.pyx" },
+    { file = "native/*.hpp" },
 ]
 
 [tool.ruff]

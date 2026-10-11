@@ -2732,7 +2732,8 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   background: var(--panel);
 }
 
-.pl-field:focus-within {
+.pl-form:not(.pl-picking) .pl-field:focus-within,
+.pl-field.is-map-active {
   border-color: var(--blue);
 }
 
@@ -2750,6 +2751,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 .pl-stops-line {
+  pointer-events: none;
   position: absolute;
   z-index: 1;
   top: calc(1.4rem + 7px);
@@ -2779,12 +2781,79 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   width: 32px;
   height: 32px;
   place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
   color: var(--muted);
   font-size: 1.05rem;
 }
 
 .pl-swap:hover {
   color: var(--blue);
+}
+
+.pl-swap:focus-visible,
+.pl-location-panel button:focus-visible {
+  outline: 1px solid var(--blue);
+  outline-offset: -2px;
+}
+
+.pl-location-panel {
+  position: relative;
+  border: 1px solid var(--blue);
+  background: var(--panel);
+}
+
+.pl-location-panel[hidden] {
+  display: none;
+}
+
+.pl-picker-note {
+  margin: 0;
+  padding: 0.6rem 0.8rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.pl-picker-error {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--panel);
+  color: var(--red);
+}
+
+.pl-location-map {
+  height: clamp(300px, 45dvh, 400px);
+  background: var(--bg);
+}
+
+.pl-location-map .maplibregl-canvas {
+  cursor: crosshair;
+}
+
+.pl-map-point {
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--fg);
+  border-radius: 50%;
+  background: var(--panel);
+  box-shadow: 0 0 0 5px #eeeeee25;
+  cursor: grab;
+}
+
+.pl-map-point.to {
+  border-color: var(--blue);
+  background: var(--blue);
+  box-shadow: 0 0 0 5px #4a9eff30;
+}
+
+.pl-map-point:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 5px;
 }
 
 .pl-suggestions {
@@ -2804,6 +2873,12 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
 .pl-suggestion {
   display: flex;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
   gap: 0.8rem;
   align-items: baseline;
   justify-content: space-between;

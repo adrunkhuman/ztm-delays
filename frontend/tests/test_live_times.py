@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, tzinfo
+from html import unescape
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlsplit
 
 import duckdb
 import pytest
@@ -230,7 +232,8 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
 
     monkeypatch.setattr(app_module, "datetime", Clock)
     client = app_module.create_app().test_client()
-    url = f"/planner?date={DAY}&time=08:00&from=101&to=102&lang=en"
+    # The typed origin resolves a stale ID, and the unpublished date falls back to DAY.
+    url = "/planner?date=1900-01-01&time=08:00&from=102&to=102&q_from=101&q_to=102&lang=en&ignored=draft"
 
     page = client.get(url).get_data(as_text=True)
     assert 'class="pl-card live"' in page
@@ -238,7 +241,30 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
     assert 'class="pl-minimap"' in page
     assert 'hx-trigger="every[plannerShouldRefresh()] 60s"' in page
     assert re.search(r'src="/static/planner\.js\?v=[0-9a-f]{12}"', page)  # a new version busts caches
+    section = re.search(r'<section id="pl-results".*?</section>', page, re.DOTALL)
+    assert section is not None
+    poll = re.search(r'hx-get="([^"]+)"', section.group())
+    assert poll is not None
+    poll_url = unescape(poll[1])
+    parsed = urlsplit(poll_url)
+    assert parsed.path == "/planner/results"
+    assert parse_qs(parsed.query) == {
+        "date": [str(DAY)],
+        "time": ["08:00"],
+        "lang": ["en"],
+        "from": ["101"],
+        "to": ["102"],
+        "q_from": ["101"],
+        "q_to": ["102"],
+    }
+    assert 'hx-swap="outerHTML"' in section.group()
+    assert "hx-select" not in section.group()
+    fragment = client.get(poll_url).get_data(as_text=True).strip()
+    assert fragment == section.group()
+    assert "<form" not in fragment
+    assert "<script" not in fragment
     Clock.moment = _at(8, 30)  # the feed is now stale: no live data, no polling
-    page = client.get(url).get_data(as_text=True)
-    assert "pl-minimap" not in page
-    assert "every 60s" not in page
+    for refreshed in (client.get(url), client.get(poll_url)):
+        html = refreshed.get_data(as_text=True)
+        assert "pl-minimap" not in html
+        assert 'hx-trigger="every' not in html

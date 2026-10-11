@@ -1,6 +1,9 @@
 {% for g in groups %}
-  <a class="pl-suggestion" href="{{ url_for('planner_page', **dict(state, **{field: g.stop_group_id})) }}">
+  <button type="button" class="pl-suggestion" data-field="{{ field }}"
+    {% if g.stop_group_id is defined %}data-stop-id="{{ g.stop_group_id }}"{% else %}data-lat="{{ g.lat }}" data-lon="{{ g.lon }}"{% endif %}>
     <span class="pl-suggestion-name">{{ g.name }}</span>
-    <span class="pl-suggestion-lines mono">{{ g.lines[:6]|join(' · ') }}{% if g.lines|length > 6 %} · +{{ g.lines|length - 6 }}{% endif %}</span>
-  </a>
+    <span class="pl-suggestion-lines mono">{% if g.lines is defined %}{{ g.lines[:6]|join(' · ') }}{% if g.lines|length > 6 %} · +{{ g.lines|length - 6 }}{% endif %}{% else %}{{ t.address }}{% endif %}</span>
+  </button>
+{% else %}
+  {% if message %}<p class="pl-picker-note" role="status">{{ message }}</p>{% endif %}
 {% endfor %}

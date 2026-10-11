@@ -2,7 +2,7 @@
 
 Server-rendered Flask app for the transit archive. Overview, line, stop, and trip views expose delays and reconstructed service; the status page shows archive coverage, export freshness and, when configured, the live poller and GPS feed history.
 
-The app reads a local DuckDB serving artifact in read-only mode. It does not refresh data or connect to BigQuery or the city API. The only GCS reads are the two public status objects below. Monthly route maps are read from `maps/` beside the DuckDB file, or from `ZTM_MAPS_DIR`. The map page loads MapLibre and OpenFreeMap tiles in the browser.
+The app reads a local DuckDB serving artifact in read-only mode. It does not refresh data or connect to BigQuery or the city API. Optional planner address suggestions and map-point labels read a local SQLite artifact; they make no external geocoding requests. The only GCS reads are the two public status objects below. Monthly route maps are read from `maps/` beside the DuckDB file, or from `ZTM_MAPS_DIR`. The map page loads MapLibre and OpenFreeMap tiles in the browser.
 
 ## Run
 
@@ -58,7 +58,30 @@ The planner tab reads a separate artifact, `planner/planner.duckdb` beside the e
 
 The [journey router](ztm_frontend/journey.py) searches between stop groups (all posts of one stop) with up to five vehicles and walks before, between and after rides. It is a round-based search in the style of RAPTOR, except that it does not assume trips keep their order, because predicted times let them overtake. A profile search (rRAPTOR) lists every journey not beaten on departure, conservative arrival and number of vehicles, leaving up to 8 h after the requested time. It includes previous-day trips running past midnight but not the next day's trips. [Planner timing](../planner/README.md#journeys-and-walks) defines expected and conservative times.
 
-Each process caches the networks of two service days, keyed by the artifact's `build_id`. Cards show when to be at the stop, the changes and walks, and load a ride's stop list only when expanded. Times differing from the timetable by 2 min or more are flagged with `!`.
+The form accepts stops, street addresses with house numbers, and map points. htmx loads suggestions after a 450 ms typing pause; addresses require at least three characters. Click an endpoint box to open the shared Warsaw map. Map clicks select immediately; choosing an origin advances to the destination without moving the view. Both markers are draggable. Typing, Escape or clicking outside closes the map. Only submitting the form searches for journeys; selection and swaps do not. Endpoints survive pagination and language changes.
+
+Point endpoints connect to all served posts within 1,000 estimated walking metres, not just the nearest stop. Access and egress times participate in route selection and appear on the itinerary. Walks use straight-line distance × 1.3 at 1.2 m/s, at least 30 s, plus 60 s for metro/rail station access. These are estimates, not pedestrian routes: barriers, crossings and actual station entrances can differ. The planner still requires at least one vehicle; it does not offer walking-only journeys.
+
+Address lookup reads an optional local SQLite artifact ([contract](../contracts/geocoding_artifact_v1.json)):
+
+```sh
+ZTM_GEOCODING_DB=/absolute/path/to/addresses.sqlite \
+  uv run flask --app ztm_frontend.app run
+```
+
+SQLite lookups need no service, API key or network access. Each lookup opens a read-only snapshot; atomic file replacement takes effect on the next request. Mount the **parent directory**, not just the file, read-only and accessible to container UID `10001`. See [deployment](../docs/operations.md#local-address-lookup).
+
+Build schema-version-1 data from a local OSM extract with the [offline geocoding command](../planner/README.md#optional-offline-geocoding). Unversioned artifacts are rejected. Refreshes are manual and independent of nightly timetable updates.
+
+SQLite search normalizes Polish accents and case, matches prefixes, house numbers and town terms, and favors central Warsaw. It reranks at most 250 candidates and returns five places; it is not fuzzy search. Missing address tags remain missing. Reverse lookup prefers numbered addresses within 80 m, then road polylines within 120 m. Labels farther than 20 m say **Near**. Labels never move the selected point; out-of-range or failed lookups retain coordinates.
+
+There is no external geocoding provider. Without valid local data, stop search and coordinate selection still work. Responses use `Cache-Control: no-store`; OpenStreetMap attribution remains in the map and footer.
+
+Routing uses the required [C++ backend](native/README.md), built through Cython. Missing build tools or a missing extension fail the build/startup; there is no Python routing fallback. Python still handles artifact loading, endpoint resolution and itinerary rendering. `uv sync --locked` builds the extension locally; the container compiles it in a builder stage and ships only the installed wheel and runtime libraries.
+
+Each process caches two service-day networks by artifact `build_id`, including their immutable native metadata. Each network caches up to 128 raw searches and coalesces duplicate requests across at most 16 in-flight keys. Exact endpoints, time and result/filter settings form the key; new artifacts, days and live-patched networks cannot reuse old routes. Query permission masks stay within one search; mutable window state is not shared between requests. Labels and cards are rebuilt per request. The kernel retains the GIL: four Waitress threads are safe, but do not run routing in parallel.
+
+Cards show boarding deadlines, changes and walks. Ride stop lists load on expansion; `!` marks times at least two minutes from the timetable.
 
 [live.py](ztm_frontend/live.py) matches the poller's live positions (`health/poller/public/vehicles.json.gz` in `ZTM_STATUS_GCS_BUCKET`, read at most every 10 s; `ZTM_LIVE_VEHICLES_FILE` reads a local copy) to today's trips: line and brigade name the vehicle's duty, and its position along the trips' shapes gives the trip and its delay there. A vehicle at a terminus waits for its duty's next trip. Replayed on 6 Oct 2026 (07:00–10:00 and 14:00–18:00, 10 s snapshots), 99.8% of fixes on running vehicles named the trip the nightly matcher reconstructed, 99.4% of the vehicles it saw running got one, and the delay was off by 14 s on average for buses and 16 s for trams. Matching a snapshot of about 2,000 vehicles takes about 80 ms.
 
@@ -66,7 +89,7 @@ For today, [live_times.py](ztm_frontend/live_times.py) moves the times of trips 
 
 Replayed on 5 and 6 Oct 2026 with the week before's calibration, expected times at stops up to 10 min ahead of a running vehicle were off by 48-54 s for buses and 35-36 s for trams, against 137-185 s and 83-86 s without live positions. At most 0.7% of vehicles left more than 30 s before the shown "be at the stop by" in any 10-minute band of distance and mode, against up to 1.2% for the stop tables alone; about half of bus boardings within 10 min moved more than 2 min later.
 
-A ride with a live vehicle shows a green dot on its card and, when expanded, how late the vehicle is now (or that it waits at its terminus or finishes its previous trip) and a minimap: the vehicle, the boarding stop and the route between, drawn by [planner.js](ztm_frontend/static/planner.js) with MapLibre and the map page's style, loaded only when such a card opens. While a live card is on screen and the tab is visible, htmx reloads the results every minute and keeps open cards open. The expanded stop list uses the same live times.
+A ride with a live vehicle shows a green dot on its card and, when expanded, how late the vehicle is now (or that it waits at its terminus or finishes its previous trip) and a minimap: the vehicle, the boarding stop and the route between, drawn by [planner.js](ztm_frontend/static/planner.js) with MapLibre and the map page's style, loaded only when such a card opens. While a live card is on screen and the tab is visible, htmx refreshes `/planner/results` every minute without replacing draft form edits or closing expanded trips. Discarded maps are destroyed before replacement. The expanded stop list uses the same live times.
 
 The planner is in Polish and English. The PL/EN switch stores the choice in a cookie; without one, browsers preferring English get English and others Polish. Wording lives in [planner_text.py](ztm_frontend/planner_text.py).
 
@@ -79,4 +102,4 @@ uv run pytest tests
 uv run ruff check .
 ```
 
-Tests create their own DuckDB fixtures; no serving download is needed. [queries.py](ztm_frontend/queries.py) defines page queries; the export's [source allowlist](../airflow/dags/dag_serving_export.py) defines available tables.
+Tests create their own DuckDB fixtures; no serving download is needed. Browser tests use the pinned htmx build, local fixtures and mocked map/network boundaries in headless Chrome or Chromium; they are skipped if neither is available. Native tests compare complete labels with an independent test-only Python oracle. [queries.py](ztm_frontend/queries.py) defines page queries; the export's [source allowlist](../airflow/dags/dag_serving_export.py) defines available tables.

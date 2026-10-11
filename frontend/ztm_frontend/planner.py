@@ -29,7 +29,7 @@ from bisect import bisect_right
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
-from ztm_frontend import journey, live_times
+from ztm_frontend import journey, live_times, route_cache
 from ztm_frontend.db import fetch_all, fetch_one
 
 if TYPE_CHECKING:
@@ -91,13 +91,20 @@ def resolve_stop_group(path: Path, stop_group_id: str | None, typed: str | None)
     return chosen
 
 
-def connections(path: Path, origin: str, destination: str, day: date, after_sod: int) -> list[dict[str, Any]]:
+def connections(
+    path: Path, origin: str | journey.Point, destination: str | journey.Point, day: date, after_sod: int
+) -> list[dict[str, Any]]:
     """Up to RESULTS journey cards, by departure."""
     return search(path, origin, destination, day, after_sod)[0]
 
 
 def search(  # noqa: PLR0913
-    path: Path, origin: str, destination: str, day: date, after_sod: int, now: datetime | None = None
+    path: Path,
+    origin: str | journey.Point,
+    destination: str | journey.Point,
+    day: date,
+    after_sod: int,
+    now: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], int | None]:
     """Journey cards and where the next page's search starts (None without cards).
 
@@ -111,7 +118,13 @@ def search(  # noqa: PLR0913
     current = live_times.view(path, net, day, now) if now is not None else None
     if current is not None:
         net = current.net
-    results = journey.plan(net, origin, destination, after_sod, RESULTS + EXTRA_CANDIDATES, useful=_unbeaten)
+    limit = RESULTS + EXTRA_CANDIDATES
+    useful = _unbeaten
+    results = route_cache.get(
+        net,
+        (origin, destination, after_sod, limit, useful),
+        lambda: journey.plan(net, origin, destination, after_sod, limit, useful=useful),
+    )
     shown, hidden = results[:RESULTS], results[RESULTS:]
     later = None
     if shown:
@@ -119,7 +132,16 @@ def search(  # noqa: PLR0913
         # an unshown journey leaving in the same minute (the page then starts there, repeating that minute's cards).
         last = _floor_minute(shown[-1].depart)
         later = last if hidden and _floor_minute(hidden[0].depart) == last > after_sod else last + 60
-    return [_connection(path, result, day, current) for result in shown], later
+    points = {
+        stop: endpoint.name or f"{endpoint.lat:g}, {endpoint.lon:g}"
+        for stop, endpoint in ((journey.ORIGIN_POINT, origin), (journey.DESTINATION_POINT, destination))
+        if isinstance(endpoint, journey.Point)
+    }
+    cards = [
+        _connection(path, result, day, current, points=points) if points else _connection(path, result, day, current)
+        for result in shown
+    ]
+    return cards, later
 
 
 def _unbeaten(found: list[journey.Journey]) -> list[journey.Journey]:
@@ -166,7 +188,7 @@ def _ride_details(path: Path, leg: journey.Ride, day: date) -> dict[str, Any]:
     return row
 
 
-def _walk_details(path: Path, leg: journey.Walk) -> dict[str, Any]:
+def _walk_details(path: Path, leg: journey.Walk, points: dict[str, str]) -> dict[str, Any]:
     row = fetch_one(
         path,
         """
@@ -176,6 +198,11 @@ def _walk_details(path: Path, leg: journey.Walk) -> dict[str, Any]:
         """,
         [leg.from_stop, leg.to_stop, leg.from_stop, leg.to_stop],
     )
+    if row is not None:
+        row["from_name"] = points.get(leg.from_stop, row["from_name"])
+        row["to_name"] = points.get(leg.to_stop, row["to_name"])
+        if leg.distance_m is not None:
+            row["distance_m"] = leg.distance_m
     if row is None or row["from_name"] is None or row["to_name"] is None:
         raise ValueError("journey walk missing from the planner artifact")
     return row
@@ -191,11 +218,17 @@ def post_label(stop_id: str) -> str:
 
 
 def _stop_node(stop_id: str, name: str) -> dict[str, Any]:
-    return {"kind": "stop", "stop_id": stop_id, "name": name, "post": post_label(stop_id)}
+    post = "" if stop_id in {journey.ORIGIN_POINT, journey.DESTINATION_POINT} else post_label(stop_id)
+    return {"kind": "stop", "stop_id": stop_id, "name": name, "post": post}
 
 
 def _connection(
-    path: Path, result: journey.Journey, day: date, current: live_times.LiveView | None = None
+    path: Path,
+    result: journey.Journey,
+    day: date,
+    current: live_times.LiveView | None = None,
+    *,
+    points: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Card model: summary chips and an itinerary of stop nodes joined by ride or walk segments.
 
@@ -208,7 +241,7 @@ def _connection(
     expected: float = result.depart
     for leg in result.legs:
         if isinstance(leg, journey.Walk):
-            walk = _walk_details(path, leg)
+            walk = _walk_details(path, leg, points or {})
             if not nodes:
                 nodes.append({**_stop_node(leg.from_stop, walk["from_name"]), "depart": _floor_minute(result.depart)})
             minutes = max(1, math.ceil(leg.walk_s / 60))
@@ -397,18 +430,33 @@ def _ceil_minute(seconds: float) -> int:
 def get_page(
     path: Path, args: dict[str, str], today: date, now_sod: int, now: datetime | None = None
 ) -> dict[str, Any]:
-    """Template context for the search form and, with both stops chosen, modelled journeys (live with now)."""
+    """Template context for stop or point endpoints and their journeys (live with now).
+
+    endpoint_args contains canonical endpoint URL parameters for pagination, swap and language links.
+    Invalid or partial coordinates take precedence over stop IDs and cannot fall back to a stop search.
+    """
     dates = available_dates(path)
     requested = parse_date(args.get("date"))
     # Default to today; outside the published window fall back to its first day.
     day = requested if requested in dates else today if today in dates else (dates[0] if dates else today)
     after = parse_clock(args.get("time"), now_sod)
-    origin = resolve_stop_group(path, args.get("from"), args.get("q_from"))
-    destination = resolve_stop_group(path, args.get("to"), args.get("q_to"))
+    origin = resolve_endpoint(path, args, "from")
+    destination = resolve_endpoint(path, args, "to")
+    endpoint_args = {}
+    for field, endpoint in (("from", origin), ("to", destination)):
+        if endpoint:
+            if endpoint.get("kind") == "point":
+                endpoint_args[f"{field}_lat"] = str(endpoint["lat"])
+                endpoint_args[f"{field}_lon"] = str(endpoint["lon"])
+            else:
+                endpoint_args[field] = endpoint["stop_group_id"]
+            endpoint_args[f"q_{field}"] = endpoint["name"]
     results: list[dict[str, Any]] = []
     later = None
-    if origin and destination and origin["stop_group_id"] != destination["stop_group_id"]:
-        results, later = search(path, origin["stop_group_id"], destination["stop_group_id"], day, after, now)
+    if origin and destination:
+        start, end = _router_endpoint(origin), _router_endpoint(destination)
+        if start != end:
+            results, later = search(path, start, end, day, after, now)
     return {
         "dates": dates,
         "today": today,
@@ -416,11 +464,31 @@ def get_page(
         "time": clock(after),
         "origin": origin,
         "destination": destination,
+        "endpoint_args": endpoint_args,
         "results": results,
         "earlier_time": clock(earlier_after(after)) if after > 0 and results else None,
         "later_time": clock(later) if later is not None and later < DAY_SECONDS else None,
-        "searched": bool(args.get("from") or args.get("q_from") or args.get("to") or args.get("q_to")),
+        "searched": any(args.get(key) for key in ("from", "q_from", "to", "q_to"))
+        or any(key in args for key in ("from_lat", "from_lon", "to_lat", "to_lon")),
     }
+
+
+def resolve_endpoint(path: Path, args: dict[str, str], field: str) -> dict[str, Any] | None:
+    """Resolve URL coordinates or a stop group; supplied coordinate keys always take precedence."""
+    if f"{field}_lat" in args or f"{field}_lon" in args:
+        try:
+            point = journey.Point(float(args[f"{field}_lat"]), float(args[f"{field}_lon"]))
+        except (KeyError, ValueError, OverflowError):
+            return None
+        name = (args.get(f"q_{field}") or "").strip() or f"{point.lat:g}, {point.lon:g}"
+        return {"kind": "point", "name": name, "stop_group_id": None, "lat": point.lat, "lon": point.lon}
+    return resolve_stop_group(path, args.get(field), args.get(f"q_{field}"))
+
+
+def _router_endpoint(endpoint: dict[str, Any]) -> str | journey.Point:
+    if endpoint.get("kind") == "point":
+        return journey.Point(endpoint["lat"], endpoint["lon"], endpoint["name"])
+    return endpoint["stop_group_id"]
 
 
 def parse_date(text: str | None) -> date | None:

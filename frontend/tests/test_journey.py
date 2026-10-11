@@ -116,9 +116,12 @@ def _write(
         connection.executemany("insert into planner_range values (?, ?, ?, ?, ?, 1, ?)", ranges)
 
 
-def _network(*trips: Trip, walks: tuple = (), ranges: tuple = ()) -> Network:
+def _network(*trips: Trip, walks: tuple = (), ranges: tuple = (), posts: tuple = ()) -> Network:
     with duckdb.connect() as connection:
         _write(connection, trips, walks, ranges)
+        connection.execute("create table planner_stop_post (stop_id varchar, lat double, lon double)")
+        if posts:
+            connection.executemany("insert into planner_stop_post values (?, ?, ?)", posts)
         return Network(connection, DAY)
 
 
@@ -640,9 +643,88 @@ def test_random_small_networks_match_unpruned_round_oracle(seed: int) -> None:
             )
 
 
-def _front_of_searches(net: Network, until: int) -> list[tuple[int, int, int]]:
+@pytest.mark.parametrize(("previous_departure", "winner"), [(None, 1), (10, 2)])
+def test_initial_walk_prefix_improvements_preserve_dynamic_tie_order(
+    previous_departure: int | None, winner: int
+) -> None:
+    net = _network(
+        Trip(1, (Stop("X:1", 55), Stop("D:1", 155)), mode="metro"),
+        Trip(2, (Stop("Y:1", 55), Stop("D:1", 155)), mode="metro"),
+        Trip(3, (Stop("O:1", 1000), Stop("Q:1", 1100)), mode="metro"),
+        Trip(4, (Stop("O:2", 1000), Stop("Q:2", 1100)), mode="metro"),
+        walks=(("O:1", "X:1", 100), ("O:1", "Y:1", 50), ("O:2", "X:1", 50), ("O:2", "X:1", 70)),
+    )
+    profile = net.profile("O", "D")
+    assert len(profile.origin_walks) == 3
+    if previous_departure is not None:
+        assert profile.run(previous_departure) == []
+    # From scratch the longer X walk inserts X first, then the shorter one replaces its value. After a run
+    # from 10 s, that longer walk cannot improve X's bound, so Y is inserted before X instead.
+    result = journey._journey(net, profile.run(0)[0])  # noqa: SLF001
+    assert _keys(result) == [winner]
+    assert (result.depart, result.arrive_late) == (5, 155)
+
+
+@pytest.mark.parametrize("budget", [0, 1, journey.WALK_PERMISSION_WORDS])
+def test_equivalent_walk_winner_keeps_its_own_position_among_equal_time_labels(
+    monkeypatch: pytest.MonkeyPatch, budget: int
+) -> None:
+    monkeypatch.setattr(journey, "WALK_PERMISSION_WORDS", budget)
+    net = _network(
+        Trip(1, (Stop("O:1", 100), Stop("A:1", 200)), mode="metro"),
+        Trip(2, (Stop("O:1", 100), Stop("B:1", 100)), mode="metro"),
+        Trip(3, (Stop("O:1", 100), Stop("C:1", 100)), mode="metro"),
+        Trip(4, (Stop("X:1", 250), Stop("D:1", 350)), mode="metro"),
+        Trip(5, (Stop("Y:1", 250), Stop("D:1", 350)), mode="metro"),
+        walks=(("A:1", "X:1", 100), ("B:1", "Y:1", 100), ("C:1", "X:1", 100)),
+    )
+    # X-from-A is inserted first, but X-from-C beats it. X-from-C must not inherit X-from-A's position before Y.
+    expected = Journey(100, 350, (net.timing(2, 10, 20), Walk("B:1", "Y:1", 100), net.timing(5, 10, 20)))
+    assert net.search("O", "D", 0) == [expected]
+    assert journey.plan(net, "O", "D", 0, results=10) == [expected]
+
+
+@pytest.mark.parametrize("budget", [0, 2, journey.WALK_PERMISSION_WORDS])
+def test_capped_windows_keep_ties_boundaries_count_and_filter(monkeypatch: pytest.MonkeyPatch, budget: int) -> None:
+    monkeypatch.setattr(journey, "WALK_PERMISSION_WORDS", budget)
+    monkeypatch.setattr(journey, "WINDOW_EVENTS", 2)
+    start = 1000
+    departures = [start + offset for offset in (0, 0, 1, 1799, 1800, 1801, 3599, 3600, 28_799, 28_800)]
+    net = _network(
+        *(
+            Trip(key, (Stop("O:1", departure), Stop("D:1", departure + 100)), mode="metro")
+            for key, departure in enumerate(departures, start=1)
+        )
+    )
+    expected = [
+        Journey(departure, departure + 100, (net.timing(key, 10, 20),))
+        for key, departure in enumerate(departures, start=1)
+        if key not in {2, 10}  # first tied trip wins; the 8-hour span's upper boundary is excluded
+    ]
+    assert journey.plan(net, "O", "D", start, results=100) == expected
+    assert journey.plan(net, "O", "D", start, results=3) == expected[:3]
+
+    def useful(found: list[Journey]) -> list[Journey]:
+        return [result for result in found if _keys(result)[0] % 2]
+
+    assert journey.plan(net, "O", "D", start, results=3, useful=useful) == useful(expected)[:3]
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_three_hour_horizon_is_strict(offset: int) -> None:
+    departure = 100
+    arrival = departure + journey.MAX_JOURNEY_S + offset
+    net = _network(Trip(1, (Stop("O:1", departure), Stop("D:1", arrival)), mode="metro"))
+    expected = [Journey(departure, arrival, (net.timing(1, 10, 20),))] if offset < 0 else []
+    assert net.search("O", "D", departure) == expected
+    assert journey.plan(net, "O", "D", departure, results=10) == expected
+
+
+def _front_of_searches(
+    net: Network, until: int, origin: str | journey.Point = "O", destination: str | journey.Point = "D"
+) -> list[tuple[int, int, int]]:
     """(depart, late arrival, vehicles) of every search from each second, less the dominated."""
-    found = {(j.depart, j.arrive_late, j.vehicles) for t in range(until) for j in net.search("O", "D", t)}
+    found = {(j.depart, j.arrive_late, j.vehicles) for t in range(until) for j in net.search(origin, destination, t)}
     return sorted(j for j in found if not any(o != j and o[0] >= j[0] and o[1] <= j[1] and o[2] <= j[2] for o in found))
 
 
@@ -680,5 +762,156 @@ def test_profile_plan_is_the_front_of_searches_from_every_departure(seed: int) -
         net = _network(*trips, walks=walks)
         planned = journey.plan(net, "O", "D", 0, results=100)
         assert [(j.depart, j.arrive_late, j.vehicles) for j in planned] == _front_of_searches(net, 1000)
+        for result in planned:
+            _assert_feasible(net, result)
+
+
+@pytest.mark.parametrize(("far_arrival", "winner"), [(700, 2), (1000, 1)])
+def test_point_access_considers_multiple_posts_not_the_nearest_group(far_arrival: int, winner: int) -> None:
+    net = _network(
+        Trip(1, (Stop("O:1", 500), Stop("D:1", 900))),
+        Trip(2, (Stop("A:1", 600), Stop("D:1", far_arrival))),
+        posts=(("O:1", 52.0, 21.0), ("A:1", 52.001, 21.0)),
+    )
+    origin = journey.Point(52, 21)
+    walks = net.point_walks(origin, access=True)
+    assert set(walks) == {net.stop_index["O:1"], net.stop_index["A:1"]}
+    result = net.search(origin, "D", 0)[0]
+    assert _keys(result) == [winner]
+    access, ride = result.legs[:2]
+    assert isinstance(access, Walk)
+    assert isinstance(ride, Ride)
+    assert result.depart == ride.board_by - access.walk_s
+    planned = journey.plan(net, origin, "D", 0, results=10)
+    assert winner in {_keys(j)[0] for j in planned}
+    assert all(j.depart >= 0 for j in planned)
+    assert net.search(origin, "D", result.depart) == [result]
+    assert result not in net.search(origin, "D", result.depart + 1)
+
+
+def test_point_egress_costs_choose_a_later_alighting_post_and_bound_profiles() -> None:
+    net = _network(
+        Trip(1, (Stop("O:1", 300), Stop("D:1", 500), Stop("D:2", 520))),
+        posts=(("O:1", 52, 21), ("D:1", 52.012, 21), ("D:2", 52.01, 21)),
+    )
+    start, end = journey.Point(52, 21), journey.Point(52.01, 21)
+    egress = net.point_walks(end, access=False)
+    assert len(egress) == 2
+    profile = net.profile(start, end)
+    assert profile.to_target[net.stop_index["D:2"]] == 30
+    result = Journey(
+        270,
+        572,
+        (
+            Walk(journey.ORIGIN_POINT, "O:1", 30, 0),
+            Ride(1, 10, 30, 300, 300, 520, 542),
+            Walk("D:2", journey.DESTINATION_POINT, 30, 0),
+        ),
+    )
+    assert net.search(start, end, 270) == [result]
+    assert journey.plan(net, start, end, 270, results=10) == [result]
+    assert journey.plan(net, start, end, 271, results=10) == []
+    assert journey.plan(net, "O", end, 300, results=10)[0].arrive_late == 572
+
+
+@pytest.mark.parametrize(("mode", "seconds"), [("bus", 30), ("metro", 90), ("rail", 90)])
+def test_point_walk_station_access_and_minimum_time(mode: str, seconds: int) -> None:
+    net = _network(
+        Trip(1, (Stop("O:1", 300), Stop("D:1", 500)), mode=mode),
+        posts=(("O:1", 52, 21), ("D:1", 52.01, 21)),
+    )
+    origin, destination = journey.Point(52, 21), journey.Point(52.01, 21)
+    result = net.search(origin, destination, 0)[0]
+    assert result.legs[0] == Walk(journey.ORIGIN_POINT, "O:1", seconds, 0)
+    assert result.legs[-1] == Walk("D:1", journey.DESTINATION_POINT, seconds, 0)
+    assert result.depart == 300 - seconds
+    ride = result.legs[1]
+    assert isinstance(ride, Ride)
+    assert ride.arrive_late is not None
+    assert result.arrive_late == ride.arrive_late + seconds
+
+
+@pytest.mark.parametrize("access", [True, False])
+def test_point_radius_is_estimated_distance_and_only_served_posts_are_used(*, access: bool) -> None:
+    metres_per_degree = 1.3 * 6_371_000 * math.pi / 180
+    net = _network(
+        Trip(1, (Stop("O:1", 1000), Stop("D:1", 2000))),
+        posts=(("O:1", 999 / metres_per_degree, 0), ("D:1", 1001 / metres_per_degree, 0), ("unused", 0, 0)),
+    )
+    walks = net.point_walks(journey.Point(0, 0), access=access)
+    assert list(walks) == [net.stop_index["O:1"]]
+    walk = walks[net.stop_index["O:1"]]
+    assert walk.distance_m == 999
+    assert walk.walk_s == math.ceil(999 / 1.2)
+    assert journey.plan(net, journey.Point(0, 0), journey.Point(-10, -10), 0, results=10) == []
+    assert journey.plan(net, journey.Point(-10, -10), "D", 0, results=10) == []
+
+
+def test_point_walks_cannot_chain_artifact_footpaths() -> None:
+    net = _network(
+        Trip(1, (Stop("B:1", 300), Stop("X:1", 500))),
+        Trip(2, (Stop("A:1", 100), Stop("Y:1", 200))),
+        walks=(("A:1", "B:1", 30), ("X:1", "Y:1", 30)),
+        posts=(("A:1", 52, 21), ("B:1", 52.1, 21), ("X:1", 52.2, 21), ("Y:1", 52.3, 21)),
+    )
+    assert journey.plan(net, journey.Point(52, 21), "X", 0, results=10) == []
+    assert journey.plan(net, "B", journey.Point(52.3, 21), 0, results=10) == []
+    assert _keys(journey.plan(net, journey.Point(52.1, 21), journey.Point(52.2, 21), 0, results=10)[0]) == [1]
+
+
+@pytest.mark.parametrize(("lat", "lon"), [(math.nan, 21), (52, math.inf), (-91, 0), (0, 181)])
+def test_direct_point_api_rejects_invalid_coordinates(lat: float, lon: float) -> None:
+    with pytest.raises(ValueError, match="invalid geographic coordinates"):
+        journey.Point(lat, lon)
+
+
+def test_point_queries_do_not_leak_into_cached_network(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    with duckdb.connect(str(path)) as connection:
+        _write(connection, (Trip(1, (Stop("O:1", 300), Stop("D:1", 500))),))
+        connection.execute("create table planner_stop_post (stop_id varchar, lat double, lon double)")
+        connection.execute("insert into planner_stop_post values ('O:1', 52, 21), ('D:1', 52.01, 21)")
+    net = journey.network(path, DAY)
+    stops, footpaths = list(net.stop_ids), [list(walks) for walks in net.footpaths]
+    baseline = journey.plan(net, "O", "D", 0, results=10)
+    for _ in range(2):
+        assert journey.plan(net, journey.Point(52, 21), journey.Point(52.01, 21), 0, results=10)
+        assert journey.plan(net, journey.Point(0, 0), "D", 0, results=10) == []
+        assert journey.plan(net, "O", "D", 0, results=10) == baseline
+        assert journey.network(path, DAY) is net
+        assert (net.stop_ids, net.footpaths) == (stops, footpaths)
+
+
+@pytest.mark.parametrize(("point_origin", "point_destination"), [(True, False), (False, True), (True, True)])
+def test_point_profiles_match_independent_searches_from_every_departure(
+    point_origin: bool, point_destination: bool
+) -> None:
+    rng = random.Random(2026)  # noqa: S311 - reproducible test inputs
+    posts = (("O:1", 52, 21), ("O:2", 52.001, 21), ("A:1", 52.01, 21),
+             ("B:1", 52.02, 21), ("D:1", 52.03, 21), ("D:2", 52.031, 21))  # fmt: skip
+    origin = journey.Point(52, 21) if point_origin else "O"
+    destination = journey.Point(52.03, 21) if point_destination else "D"
+    for _ in range(5):
+        trips = tuple(
+            Trip(
+                key,
+                tuple(
+                    Stop(
+                        post,
+                        200 + rng.randrange(600) + pos * 100,
+                        late=rng.randrange(60),
+                        cumulative=pos * rng.randrange(60, 100),
+                        can_alight=rng.random() < 0.8,
+                    )
+                    for pos, post in enumerate(rng.sample([p[0] for p in posts], 3))
+                ),
+            )
+            for key in range(12)
+        )
+        net = _network(*trips, walks=(("A:1", "B:1", 50), ("O:1", "A:1", 30), ("B:1", "D:1", 20)), posts=posts)
+        planned = journey.plan(net, origin, destination, 0, results=100)
+        assert [(j.depart, j.arrive_late, j.vehicles) for j in planned] == _front_of_searches(
+            net, 1100, origin, destination
+        )
         for result in planned:
             _assert_feasible(net, result)

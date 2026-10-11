@@ -10,50 +10,33 @@
   </span>
 {% endblock %}
 
-{% macro flag(on, scheduled) -%}
-  {% if on %}<span class="pl-flag" title="{{ t.timetable }} {{ scheduled|clock }}" aria-label="{{ t.differs }} {{ scheduled|clock }}">!</span>{% endif %}
-{%- endmacro %}
-
-{% macro planner_href(time_value) -%}
-  {{ url_for('planner_page', date=day, time=time_value, **{'from': origin.stop_group_id, 'to': destination.stop_group_id}) }}
-{%- endmacro %}
-
-{% macro pill(mode, line) -%}
-  <span class="landing-line-pill mono pl-pill mode-{{ mode }}" title="{{ t.modes.get(mode, mode) }}">{{ line }}</span>
-{%- endmacro %}
-
-{% macro live_status(live) -%}
-  {%- if live.status == 'running' -%}
-    {{ t.live_late.format(n=live.late) if live.late > 0 else t.live_early.format(n=-live.late) if live.late < 0 else t.live_on_time }}
-  {%- elif live.status == 'waiting' -%}
-    {{ t.live_waiting_late.format(n=live.late) if live.late > 0 else t.live_waiting }}
-  {%- else -%}
-    {{ t.live_previous_late.format(n=live.late) if live.late > 0 else t.live_previous }}
-  {%- endif -%}
-{%- endmacro %}
-
-{% macro walker() -%}
-  <svg class="pl-walker" viewBox="0 0 12 16" aria-hidden="true"><circle cx="6.5" cy="2" r="1.6"/><path d="M5 5.5 3.5 9M5 5.5l2.6.6L9 9M5.6 6l-.6 4 2.4 2.2L8 15.5M5 10l-1.6 5.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-{%- endmacro %}
-
 {% block body %}
   <main class="main pl-main" lang="{{ lang }}">
     <form class="pl-form" action="{{ url_for('planner_page') }}" method="get" autocomplete="off">
-      <input type="hidden" name="from" value="{{ origin.stop_group_id if origin else '' }}">
-      <input type="hidden" name="to" value="{{ destination.stop_group_id if destination else '' }}">
+      <input type="hidden" name="from" value="{{ origin.stop_group_id if origin and origin.stop_group_id else '' }}">
+      <input type="hidden" name="to" value="{{ destination.stop_group_id if destination and destination.stop_group_id else '' }}">
+      {% for field, chosen in [('from', origin), ('to', destination)] %}
+        {% for axis in ['lat', 'lon'] %}
+          <input type="hidden" name="{{ field }}_{{ axis }}" value="{{ chosen[axis] if chosen and chosen.kind == 'point' else '' }}" {% if not chosen or chosen.kind != 'point' %}disabled{% endif %}>
+        {% endfor %}
+      {% endfor %}
       <div class="pl-stops-line" aria-hidden="true"></div>
       {% for field, chosen in [('from', origin), ('to', destination)] %}
         <div class="pl-field">
           <span class="pl-dot {{ field }}" aria-hidden="true"></span>
-          <input class="pl-input" name="q_{{ field }}" value="{{ chosen.name if chosen else '' }}" placeholder="{{ t[field] }}" aria-label="{{ t[field + '_label'] }}"
-            hx-get="{{ url_for('planner_suggest', field=field) }}" hx-trigger="input changed delay:200ms" hx-include="closest form"
-            hx-target="#pl-suggest-{{ field }}" hx-swap="innerHTML" hx-sync="this:replace">
-          {% if field == 'to' and (origin or destination) %}
-            <a class="pl-swap" href="{{ url_for('planner_page', date=day, time=time, **{'from': destination.stop_group_id if destination else none, 'to': origin.stop_group_id if origin else none}) }}" title="{{ t.swap }}" aria-label="{{ t.swap }}">⇅</a>
+          <input class="pl-input" name="q_{{ field }}" value="{{ chosen.name if chosen else args.get('q_' + field, '') }}" placeholder="{{ t[field + '_placeholder'] }}" aria-label="{{ t[field + '_label'] }}"
+            hx-get="{{ url_for('planner_suggest', field=field) }}" hx-trigger="input delay:450ms"
+            hx-target="#pl-suggest-{{ field }}" hx-sync="this:replace" data-lookup-error="{{ t.address_error }}">
+          {% if field == 'to' %}
+            <button class="pl-swap" type="button" title="{{ t.swap }}" aria-label="{{ t.swap }}">⇅</button>
           {% endif %}
           <div class="pl-suggestions" id="pl-suggest-{{ field }}"></div>
         </div>
       {% endfor %}
+      <section class="pl-location-panel" id="pl-picker" data-style="{{ asset('map-style.json') }}" data-city="{{ t.warsaw }}" data-reverse-url="{{ url_for('planner_reverse') }}" hidden aria-label="{{ t.pick_map }}">
+        <div class="pl-location-map" aria-label="{{ t.pick_map }}"></div>
+        <p class="pl-picker-note pl-picker-error" role="status" hidden>{{ t.map_error }}</p>
+      </section>
       <div class="pl-when">
         <select name="date" aria-label="{{ t.date }}">
           {% for d in dates %}<option value="{{ d }}" {% if d == day %}selected{% endif %}>{{ d|day_label(today, lang) }}</option>{% endfor %}
@@ -63,107 +46,9 @@
       </div>
     </form>
 
-    {% if origin and destination %}
-      {% set live_results = results|selectattr('live')|list %}
-      {# While a live card is on screen, the cards refresh every minute (planner.js keeps open ones open). #}
-      <section id="pl-results" class="pl-results" aria-label="{{ t.results }}"
-        {%- if live_results %} hx-get="{{ request.full_path }}" hx-trigger="every[plannerShouldRefresh()] 60s"
-        hx-select="#pl-results" hx-swap="outerHTML"{% endif %}>
-        {% if earlier_time %}<a class="pl-more" href="{{ planner_href(earlier_time) }}">{{ t.earlier }}</a>{% endif %}
-        {% for r in results %}
-          {% set card = loop.index %}
-          <details class="pl-card{% if r.live %} live{% endif %}" data-key="{{ r.key }}">
-            <summary class="pl-summary">
-              <span class="pl-depart">
-                <span class="pl-label">{{ t.leave_at if r.initial_walk else t.be_at_stop }}</span>
-                <span class="pl-time mono">{{ r.leave_by|clock }}</span>
-              </span>
-              <span class="pl-route">
-                <span class="pl-chips">
-                  {% for c in r.chips %}
-                    {% if not loop.first %}<span class="pl-sep" aria-hidden="true">›</span>{% endif %}
-                    {% if c.kind == 'walk' %}
-                      <span class="pl-walk-chip mono" title="{{ t.walk }} {{ c.minutes }} min">{{ walker() }}{{ c.minutes }}</span>
-                    {% else %}
-                      {{ pill(c.mode, c.line) }}{% if c.live %}<span class="pl-live-dot" title="{{ t.live }}" aria-label="{{ t.live }}"></span>{% endif %}
-                    {% endif %}
-                  {% endfor %}
-                </span>
-                <span class="pl-sub">
-                  {{ t.from_stop }} {{ r.from_name }} <span class="mono">{{ t.posts.get(r.from_post, r.from_post) }}</span>
-                  · {{ t.direct if not r.changes else r.changes|string + ' ' + r.changes|plural(t.changes) }}
-                </span>
-              </span>
-              <span class="pl-trip-time">
-                <span class="pl-duration mono">{{ r.duration_minutes }} min</span>
-                <span class="pl-arrival">{{ t.arrives }} <b class="mono">{{ r.arrive|clock }}</b></span>
-              </span>
-            </summary>
-            <ol class="pl-timeline">
-              {% for item in r.timeline %}
-                {% if item.kind == 'stop' %}
-                  <li class="pl-node{% if loop.first %} first{% endif %}{% if loop.last %} last{% endif %}">
-                    <span class="pl-node-time mono">
-                      {%- if item.depart is defined %}{{ item.depart|clock }}{{ flag(item.depart_differs, item.board_scheduled) }}
-                      {%- else %}{{ item.arrive|clock }}{{ flag(item.arrive_differs, item.alight_scheduled) }}{% endif -%}
-                    </span>
-                    <span class="pl-dot-col" aria-hidden="true"><span class="pl-node-dot"></span></span>
-                    <span class="pl-node-body">
-                      <span class="pl-node-name">{{ item.name }}{% if item.post.isdigit() %} <span class="pl-post mono">{{ item.post }}</span>{% endif %}</span>
-                      {% if loop.last %}
-                        {% if r.arrive_by - r.arrive >= 120 %}<span class="pl-node-note">{{ t.running_late }} <b class="mono">{{ r.arrive_by|clock }}</b></span>{% endif %}
-                      {% elif item.be_by is defined %}
-                        {% set wait, early = item.wait_minutes|default(0) > 0, item.be_by < item.depart %}
-                        {% if wait or early %}
-                          <span class="pl-node-note">
-                            {%- if wait %}{{ t.wait }} {{ item.wait_minutes }} min{% endif %}{% if wait and early %} · {% endif %}
-                            {%- if early %}{{ t.be_here_by }} <b class="mono">{{ item.be_by|clock }}</b>{% endif -%}
-                          </span>
-                        {% endif %}
-                      {% endif %}
-                    </span>
-                  </li>
-                {% elif item.kind == 'walk' %}
-                  <li class="pl-seg walk">
-                    <span></span>
-                    <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
-                    <span class="pl-seg-body">{{ walker() }} {{ t.walk }} {{ item.minutes }} min{% if item.distance_m %} · {{ item.distance_m }} m{% endif %}</span>
-                  </li>
-                {% else %}
-                  <li class="pl-seg ride mode-{{ item.mode }}">
-                    <span></span>
-                    <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
-                    <span class="pl-seg-body">
-                      <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span>
-                        {%- if item.live %}<span class="pl-live" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
-                      </span>
-                      {% if item.live and item.live.map %}
-                        <div class="pl-minimap" role="img" aria-label="{{ t.map_label }}" data-map="{{ item.live.map|tojson|forceescape }}" data-mode="{{ item.mode }}" data-line="{{ item.line }}"
-                          data-style="{{ url_for('static', filename='map-style.json') }}"></div>
-                      {% endif %}
-                      <details class="pl-stops-toggle" data-key="{{ r.key }}-{{ loop.index }}"
-                        hx-get="{{ url_for('planner_trip', trip_key=item.trip_key, date=day, board=item.board_sequence, alight=item.alight_sequence) }}"
-                        hx-trigger="toggle once" hx-target="#pl-trip-{{ card }}-{{ loop.index }}" hx-swap="innerHTML">
-                        <summary>{{ item.stop_count }} {{ item.stop_count|plural(t.stops) }} · {{ item.minutes }} min</summary>
-                        <div id="pl-trip-{{ card }}-{{ loop.index }}" class="pl-trip"><span class="muted">{{ t.loading }}</span></div>
-                      </details>
-                    </span>
-                  </li>
-                {% endif %}
-              {% endfor %}
-            </ol>
-          </details>
-        {% else %}
-          <p class="pl-empty">{{ t.no_route.format(origin=origin.name, destination=destination.name, time=time) }}</p>
-        {% endfor %}
-        {% if later_time %}<a class="pl-more" href="{{ planner_href(later_time) }}">{{ t.later }}</a>{% endif %}
-      </section>
-    {% elif searched %}
-      <p class="pl-empty">{{ t.choose }}</p>
-    {% endif %}
+    {% include "_planner_results.html" %}
 
-    <p class="pl-note">{{ t.note }} <span class="pl-flag">!</span> {{ t.flag_note }}{% if live_results %} {{ t.live_note }}{% endif %}</p>
+    <p class="pl-note">{{ t.note }} <span class="pl-flag">!</span> {{ t.flag_note }}{% if results|selectattr('live')|first %} {{ t.live_note }}{% endif %}</p>
   </main>
+  <script src="{{ asset('planner.js') }}"></script>
 {% endblock %}
-
-{% block scripts %}<script src="{{ asset('planner.js') }}"></script>{% endblock %}
