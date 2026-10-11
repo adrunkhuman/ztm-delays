@@ -186,6 +186,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: integration_tests/uv.lock
 
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+
       - name: Install locked integration dependencies
         run: uv sync --locked
         working-directory: integration_tests

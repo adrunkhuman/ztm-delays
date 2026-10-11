@@ -1,6 +1,6 @@
 # Local checks
 
-Python 3.13 and uv are used throughout. Components have separate environments; there is no root Python package or local full-stack deployment. Frontend builds also need Rust 1.98.0 and a C linker; Rust is not required in the deployed runtime.
+Python 3.13 and uv are used throughout. Components have separate environments; there is no root Python package or local full-stack deployment. Frontend builds, including the pipeline test, also need Rust 1.98.0 and a C linker; Rust is not required in the deployed runtime.
 
 ## Offline pipeline test
 

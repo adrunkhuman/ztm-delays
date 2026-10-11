@@ -818,6 +818,7 @@ dependencies = [
     { name = "google-cloud-storage" },
     { name = "pytz" },
     { name = "waitress" },
+    { name = "ztm-routing" },
 ]
 
 [package.metadata]
@@ -827,6 +828,7 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=3.16.0" },
     { name = "pytz", specifier = ">=2025.2" },
     { name = "waitress", specifier = ">=3.0.2" },
+    { name = "ztm-routing", directory = "../routing" },
 ]
 
 [package.metadata.requires-dev]
@@ -892,3 +894,8 @@ requires-dist = [
     { name = "ztm-frontend", editable = "../frontend" },
     { name = "ztm-matcher", directory = "../matcher" },
 ]
+
+[[package]]
+name = "ztm-routing"
+version = "0.1.0"
+source = { directory = "../routing" }
