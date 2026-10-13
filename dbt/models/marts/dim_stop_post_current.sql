@@ -21,6 +21,10 @@ stop_service as (
         and trips.gtfs_snapshot_id = routes.gtfs_snapshot_id
     inner join selected_snapshot
         on stop_times.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
+    -- Literal filters enable block pruning on the snapshot-clustered GTFS sources.
+    where stop_times.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+      and trips.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+      and routes.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
 ),
 
 served_by as (
