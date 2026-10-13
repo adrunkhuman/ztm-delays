@@ -85,7 +85,29 @@ There is no external geocoding provider. Without valid local data, stop search a
 
 Routing uses the required [Rust engine](../routing/README.md), packaged as `ztm-routing` through Maturin/PyO3. Missing build tools or `ztm_routing._native` fail the build/startup; there is no Python routing fallback. Python still handles artifact loading, endpoint resolution and itinerary rendering. [routing.py](ztm_frontend/routing.py) copies primitive inputs into the engine and turns returned paths into frontend labels. `uv sync --locked` builds the non-editable local `../routing` dependency; the container compiles installed wheels, including frontend templates and static assets, in a builder stage. Its runtime contains neither Rust nor Python build tools.
 
-Each process caches two service-day networks by artifact `build_id`, including their immutable native metadata. Each network caches up to 128 raw searches and coalesces duplicate requests across at most 16 in-flight keys. Exact endpoints, time and result/filter settings form the key; new artifacts, days and live-patched networks cannot reuse old routes. Query permission masks stay within one search and are synchronized across its windows; mutable window state is not shared between requests. Labels and cards are rebuilt per request. Rust detaches the GIL while searching owned native buffers, so independent Waitress threads can run routing in parallel. A window rejects simultaneous use; failed search or Python materialization invalidates it.
+Each process caches up to four service-day networks and their immutable native metadata, keyed by artifact `build_id`:
+
+| Dates | Loaded | Retained |
+| --- | --- | --- |
+| Today and the next two | During warmup | Pinned for the current build |
+| One other date | On first search | Replaced when another extra date is searched |
+
+Each network caches up to 128 raw searches and coalesces duplicate requests across at most 16 in-flight keys. Exact endpoints, time and result/filter settings form the key; new artifacts, days and live-patched networks cannot reuse old routes. Query permission masks stay within one search and are synchronized across its windows; mutable window state is not shared between requests. Labels and cards are rebuilt per request. Rust detaches the GIL while searching owned native buffers, so independent Waitress threads can run routing in parallel. A window rejects simultaneous use; failed search or Python materialization invalidates it.
+
+The container's `create_serving_app` starts one daemon thread. Startup, publication and Warsaw date rollover trigger warmup and replace the pins. Builds run sequentially, within the artifact's date bounds, including native metadata and today's live view when available.
+
+The thread checks file metadata every 30 s. Idle checks do not query DuckDB or fetch live data. Failures are logged and retried on the next check; searches can still load missing networks on demand.
+
+The fourth slot uses another day's network memory only when filled. New live-feed objects still need their usual patch and native preparation. Warmup adds no BigQuery queries, endpoint, secret or Airflow task.
+
+For the same startup behavior outside Docker, run:
+
+```sh
+ZTM_DUCKDB_PATH=/absolute/path/to/ztm.duckdb \
+  uv run waitress-serve --host=127.0.0.1 --port=5000 --threads=4 --call ztm_frontend.app:create_serving_app
+```
+
+Importing `app` or calling `create_app()` does not start the worker; the development Flask commands above remain on-demand only.
 
 Cards show boarding deadlines, changes and walks. Ride stop lists load on expansion; `!` marks times at least two minutes from the timetable.
 

@@ -137,10 +137,8 @@ def search(  # noqa: PLR0913
         for stop, endpoint in ((journey.ORIGIN_POINT, origin), (journey.DESTINATION_POINT, destination))
         if isinstance(endpoint, journey.Point)
     }
-    cards = [
-        _connection(path, result, day, current, points=points) if points else _connection(path, result, day, current)
-        for result in shown
-    ]
+    details = _CardDetails(path, shown, day)
+    cards = [_connection(path, result, day, current, points=points, details=details) for result in shown]
     return cards, later
 
 
@@ -165,47 +163,82 @@ def _beats(key: tuple[int, int, int], other: tuple[int, int, int]) -> bool:
     return key != other and key[0] >= other[0] and key[1] <= other[1] and key[2] <= other[2]
 
 
-def _ride_details(path: Path, leg: journey.Ride, day: date) -> dict[str, Any]:
-    row = fetch_one(
-        path,
-        """
-        select t.trip_key, t.mode, t.line, t.headsign,
-            b.stop_sequence as board_sequence, a.stop_sequence as alight_sequence,
-            b.stop_id as board_stop_id, a.stop_id as alight_stop_id,
-            b.stop_name as board_name, a.stop_name as alight_name,
-            b.scheduled_sod + ? * (t.service_date - ?::date) as board_scheduled,
-            a.scheduled_sod + ? * (t.service_date - ?::date) as alight_scheduled,
-            a.stop_sequence - b.stop_sequence as stop_count
-        from planner_trip t
-        join planner_stop b using (trip_key)
-        join planner_stop a using (trip_key)
-        where t.trip_key = ? and b.stop_sequence = ? and a.stop_sequence = ?
-        """,
-        [DAY_SECONDS, day, DAY_SECONDS, day, leg.trip_key, leg.board_sequence, leg.alight_sequence],
-    )
-    if row is None or leg.depart is None or leg.arrive is None or leg.arrive_late is None:
-        raise ValueError("journey leg missing from the planner artifact")
-    return row
+class _CardDetails:
+    """One request's artifact rows: batch rides, reuse raw walk and boarding-post lookups."""
 
+    def __init__(self, path: Path, results: list[journey.Journey], day: date) -> None:
+        self.path = path
+        self.walks: dict[tuple[str, str], dict[str, Any] | None] = {}
+        self.posts: dict[str, dict[str, Any] | None] = {}
+        keys = list(
+            dict.fromkeys(
+                (leg.trip_key, leg.board_sequence, leg.alight_sequence)
+                for result in results
+                for leg in result.legs
+                if isinstance(leg, journey.Ride)
+            )
+        )
+        self.rides: dict[tuple[int, int, int], dict[str, Any]] = {}
+        if not keys:
+            return
+        values = ",".join("(?, ?, ?)" for _ in keys)
+        rows = fetch_all(
+            path,
+            f"""
+            with requested(trip_key, board_sequence, alight_sequence) as (values {values})
+            select t.trip_key, t.mode, t.line, t.headsign,
+                b.stop_sequence as board_sequence, a.stop_sequence as alight_sequence,
+                b.stop_id as board_stop_id, a.stop_id as alight_stop_id,
+                b.stop_name as board_name, a.stop_name as alight_name,
+                b.scheduled_sod + ? * (t.service_date - ?::date) as board_scheduled,
+                a.scheduled_sod + ? * (t.service_date - ?::date) as alight_scheduled,
+                a.stop_sequence - b.stop_sequence as stop_count
+            from requested r join planner_trip t using (trip_key)
+            join planner_stop b on b.trip_key = r.trip_key and b.stop_sequence = r.board_sequence
+            join planner_stop a on a.trip_key = r.trip_key and a.stop_sequence = r.alight_sequence
+            """,  # noqa: S608 - only placeholder groups are interpolated; all values are bound
+            [*(value for key in keys for value in key), DAY_SECONDS, day, DAY_SECONDS, day],
+        )
+        self.rides = {(row["trip_key"], row["board_sequence"], row["alight_sequence"]): row for row in rows}
 
-def _walk_details(path: Path, leg: journey.Walk, points: dict[str, str]) -> dict[str, Any]:
-    row = fetch_one(
-        path,
-        """
-        select (select any_value(stop_name) from planner_stop where stop_id = ?) as from_name,
-            (select any_value(stop_name) from planner_stop where stop_id = ?) as to_name,
-            (select min(distance_m) from planner_footpath where from_stop_id = ? and to_stop_id = ?) as distance_m
-        """,
-        [leg.from_stop, leg.to_stop, leg.from_stop, leg.to_stop],
-    )
-    if row is not None:
-        row["from_name"] = points.get(leg.from_stop, row["from_name"])
-        row["to_name"] = points.get(leg.to_stop, row["to_name"])
-        if leg.distance_m is not None:
-            row["distance_m"] = leg.distance_m
-    if row is None or row["from_name"] is None or row["to_name"] is None:
-        raise ValueError("journey walk missing from the planner artifact")
-    return row
+    def ride(self, leg: journey.Ride) -> dict[str, Any]:
+        """A leg's static labels and timetable times, retaining the missing-leg error."""
+        row = self.rides.get((leg.trip_key, leg.board_sequence, leg.alight_sequence))
+        if row is None or leg.depart is None or leg.arrive is None or leg.arrive_late is None:
+            raise ValueError("journey leg missing from the planner artifact")
+        return row
+
+    def walk(self, leg: journey.Walk, points: dict[str, str]) -> dict[str, Any]:
+        """Reuse artifact rows, never per-leg distance or point-label overrides."""
+        key = (leg.from_stop, leg.to_stop)
+        if key not in self.walks:
+            self.walks[key] = fetch_one(
+                self.path,
+                """
+                select (select any_value(stop_name) from planner_stop where stop_id = ?) as from_name,
+                    (select any_value(stop_name) from planner_stop where stop_id = ?) as to_name,
+                    (select min(distance_m) from planner_footpath where from_stop_id = ? and to_stop_id = ?) as distance_m
+                """,
+                [leg.from_stop, leg.to_stop, leg.from_stop, leg.to_stop],
+            )
+        raw = self.walks[key]
+        row = dict(raw) if raw is not None else None
+        if row is not None:
+            row["from_name"] = points.get(leg.from_stop, row["from_name"])
+            row["to_name"] = points.get(leg.to_stop, row["to_name"])
+            if leg.distance_m is not None:
+                row["distance_m"] = leg.distance_m
+        if row is None or row["from_name"] is None or row["to_name"] is None:
+            raise ValueError("journey walk missing from the planner artifact")
+        return row
+
+    def post(self, stop_id: str) -> dict[str, Any] | None:
+        """Boarding coordinates shared by live cards in this request."""
+        if stop_id not in self.posts:
+            self.posts[stop_id] = fetch_one(
+                self.path, "select lon, lat from planner_stop_post where stop_id = ?", [stop_id]
+            )
+        return self.posts[stop_id]
 
 
 def post_label(stop_id: str) -> str:
@@ -222,26 +255,29 @@ def _stop_node(stop_id: str, name: str) -> dict[str, Any]:
     return {"kind": "stop", "stop_id": stop_id, "name": name, "post": post}
 
 
-def _connection(
+def _connection(  # noqa: PLR0913
     path: Path,
     result: journey.Journey,
     day: date,
     current: live_times.LiveView | None = None,
     *,
     points: dict[str, str] | None = None,
+    details: _CardDetails | None = None,
 ) -> dict[str, Any]:
     """Card model: summary chips and an itinerary of stop nodes joined by ride or walk segments.
 
     Stop times shown are expected times; a boarding node also shows when to be there (the never-early margin).
     A change at the same post is one node with both an arrival and a departure.
     """
+    if details is None:
+        details = _CardDetails(path, [result], day)
     nodes: list[dict[str, Any]] = []  # nodes[i] and nodes[i + 1] are joined by segments[i]
     segments: list[dict[str, Any]] = []
     chips: list[dict[str, Any]] = []
     expected: float = result.depart
     for leg in result.legs:
         if isinstance(leg, journey.Walk):
-            walk = _walk_details(path, leg, points or {})
+            walk = details.walk(leg, points or {})
             if not nodes:
                 nodes.append({**_stop_node(leg.from_stop, walk["from_name"]), "depart": _floor_minute(result.depart)})
             minutes = max(1, math.ceil(leg.walk_s / 60))
@@ -250,7 +286,7 @@ def _connection(
             expected += leg.walk_s
             nodes.append({**_stop_node(leg.to_stop, walk["to_name"]), "arrive": _round_minute(expected)})
             continue
-        ride = _ride_details(path, leg, day)
+        ride = details.ride(leg)
         depart, arrive = float(leg.depart or 0), float(leg.arrive or 0)
         if not nodes or nodes[-1]["stop_id"] != ride["board_stop_id"]:
             nodes.append(_stop_node(ride["board_stop_id"], ride["board_name"]))
@@ -274,7 +310,7 @@ def _connection(
             "alight_sequence": ride["alight_sequence"],
             "stop_count": ride["stop_count"],
             "minutes": max(1, round((arrive - depart) / 60)),
-            "live": _live_ride(path, current, leg, ride["board_stop_id"]) if current is not None else None,
+            "live": _live_ride(current, leg, ride["board_stop_id"], details) if current is not None else None,
         })  # fmt: skip
         chips.append(
             {"kind": "ride", "mode": ride["mode"], "line": ride["line"], "live": segments[-1]["live"] is not None}
@@ -304,7 +340,9 @@ def _connection(
     }
 
 
-def _live_ride(path: Path, current: live_times.LiveView, leg: journey.Ride, board_stop: str) -> dict[str, Any] | None:
+def _live_ride(
+    current: live_times.LiveView, leg: journey.Ride, board_stop: str, details: _CardDetails
+) -> dict[str, Any] | None:
     """Where the ride's vehicle is now: on this trip, waiting at its first stop, or still on its previous trip.
 
     status picks the wording, late the minutes beyond the timetable there; the map joins the vehicle to the
@@ -321,7 +359,7 @@ def _live_ride(path: Path, current: live_times.LiveView, leg: journey.Ride, boar
         fix = current.fixes.get(before) if before is not None else None
         if fix is None or before is None:
             return None
-    stop = fetch_one(path, "select lon, lat from planner_stop_post where stop_id = ?", [board_stop])
+    stop = details.post(board_stop)
     if stop is None:
         return None
     line: list[list[float]] = []

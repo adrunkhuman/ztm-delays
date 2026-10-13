@@ -77,6 +77,37 @@ def test_query_outside_request_closes_its_connection(monkeypatch: pytest.MonkeyP
     assert connection.closed is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot replace an open DuckDB file")
+def test_app_context_keeps_snapshot_and_closes_it_after_failure(tmp_path: Path) -> None:
+    path, replacement = tmp_path / "serving.duckdb", tmp_path / "replacement.duckdb"
+    for target, generation in ((path, "old"), (replacement, "new")):
+        with duckdb.connect(str(target)) as connection:
+            connection.execute("create table export_generation as select ? as generation", [generation])
+    app = Flask(__name__)
+    app.teardown_appcontext(db.close_request_connections)
+    with pytest.raises(RuntimeError, match="warmup failed"), app.app_context():  # noqa: PT012 - test failure teardown
+        with db.read_connection(path) as held:
+            replacement.replace(path)
+            assert db.fetch_one(path, "select generation from export_generation") == {"generation": "old"}
+        raise RuntimeError("warmup failed")
+    with pytest.raises(duckdb.ConnectionException, match="closed"):
+        held.execute("select 1")
+    with app.app_context():
+        assert db.fetch_one(path, "select generation from export_generation") == {"generation": "new"}
+
+
+def test_fresh_snapshot_is_read_only_and_handles_quoted_filename(tmp_path: Path) -> None:
+    path = tmp_path / "planner's snapshot.duckdb"
+    with duckdb.connect(str(path)) as connection:
+        connection.execute("create table metadata as select 'build' as build_id")
+    with db.read_connection(path, fresh=True) as held:
+        assert held.execute("select build_id from metadata").fetchone() == ("build",)
+        with pytest.raises(duckdb.InvalidInputException, match="read-only"):
+            held.execute("insert into metadata values ('changed')")
+    with pytest.raises(duckdb.ConnectionException, match="closed"):
+        held.execute("select 1")
+
+
 def test_frontend_reads_partitioned_catalog_view(tmp_path: Path) -> None:
     parquet_dir = tmp_path / "parquet" / "mart_trip_daily" / "service_date=2026-07-02" / "generation=test"
     parquet_dir.mkdir(parents=True)

@@ -170,11 +170,21 @@ On first deployment, trigger `dag_planner_train`, confirm promotion in its log, 
 
 A failed promotion gate fails `train_model`, logs the held-out errors and keeps the previous model; `training_complete` then fails too, even if footpaths succeed. To roll back, point `current.json` at an earlier version (`{"version": "..."}`) and rerun `dag_planner_score`. A failed scoring run leaves the previous artifact, which still covers the next six days.
 
-The frontend caches two service-day networks per process by artifact `build_id`; building one takes about 1.5 s. Each network caches 128 raw searches and coalesces identical requests across up to 16 in-flight keys. Artifact replacement and live-feed updates create separate networks, preventing stale route reuse. Cards are rebuilt from the current request's artifact snapshot.
+The frontend caches up to four service-day networks per process by artifact `build_id`. Each network caches 128 raw searches and coalesces identical requests across up to 16 in-flight keys. Artifact replacement and live-feed updates create separate networks, preventing stale route reuse. Cards are rebuilt from the current request's artifact snapshot.
+
+Warmup pins today and the next two covered dates; a fourth slot rotates between other dates loaded on demand. Startup, publication and Warsaw date rollover refresh the pins. Builds run sequentially from one read-only snapshot, including native metadata and today's live view when available. Later feed updates still need the normal live refresh.
+
+A frontend thread checks file metadata every 30 s. Idle checks do not query DuckDB or fetch live data. Failures are logged and retried on the next check; on-demand searches remain available. The fourth slot uses another day's network memory only when filled. No Airflow change, endpoint, shared token or additional warehouse query is needed.
 
 The frontend image builds the required [Rust routing extension](../routing/README.md) with Rust 1.98.0 in its builder stage; compilation or import failures stop the build/startup. The runtime contains installed wheels, including frontend assets, but no compiler or Python routing fallback. Rebuild the image when `routing/` sources change.
 
-Keep the **same Coolify frontend application** and one frontend container. Use repository-root build context (`/`) and `/frontend/Dockerfile`, not `frontend/` as the build context. Ports, command, mounts and environment remain unchanged; routing is an in-process library, not a new service.
+Keep the **same Coolify frontend application** and one frontend container. Use repository-root build context (`/`) and `/frontend/Dockerfile`, not `frontend/` as the build context. Ports, mounts and environment remain unchanged; routing and warmup run in-process.
+
+Use the image's default command. If Coolify overrides it, set:
+
+```sh
+waitress-serve --host=0.0.0.0 --port=5000 --threads=4 --call ztm_frontend.app:create_serving_app
+```
 
 The Rust search detaches the GIL and uses owned native memory, so independent requests can run routing in parallel across the existing four Waitress threads. Networks are immutable; permission caches are synchronized across a search's windows, and each mutable window rejects simultaneous use. Before adding threads or processes, measure concurrent search peaks, duplicated network-cache memory, and cold/live-refresh peaks.
 

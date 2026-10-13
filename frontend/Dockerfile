@@ -40,4 +40,4 @@ COPY --from=builder /app/.venv /app/.venv
 
 USER 10001
 EXPOSE 5000
-CMD ["waitress-serve", "--host=0.0.0.0", "--port=5000", "--threads=4", "ztm_frontend.app:app"]
+CMD ["waitress-serve", "--host=0.0.0.0", "--port=5000", "--threads=4", "--call", "ztm_frontend.app:create_serving_app"]

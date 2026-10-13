@@ -44,7 +44,8 @@ PROFILE_WINDOW_S = 30 * 60  # plan()'s first departure window and the least of a
 WINDOW_EVENTS = 1500  # most departures a window runs; around a busy stop that can be under 30 min
 WINDOW_SLACK = 1.25  # a further window covers the journeys still missing at the rate seen so far, plus this
 PROFILE_SPAN_S = 8 * 3600  # plan() looks no further past the requested time
-CACHED_DAYS = 2
+WARM_DAYS = 3
+CACHED_DAYS = WARM_DAYS + 1
 WALK_PERMISSION_WORDS = 32_768  # bound cached permission masks by their 64-bit words (at least one per entry)
 DEFAULT_HIGH_RATIO = 1.1
 # Point walks use the pipeline's pace/detour model, but allow a longer endpoint walk.
@@ -310,6 +311,7 @@ class Network:
             self.pattern_prefix.append(prefix)
         # Each incidence has its own board_by order: no timetable or model FIFO assumption.
         self.pattern_trips = pattern_trips
+        self.pattern_row_starts = tuple(tuple(self.trip_rows[t] for t in trips) for trips in pattern_trips)
         self.incidence: list[list[tuple[int, int, array, array]]] = [[] for _ in self.stop_ids]
         self.incidence_slot: dict[tuple[int, int], tuple[int, int]] = {}  # (pattern, pos) -> (stop, index)
         for pattern in range(len(pattern_trips)):
@@ -328,12 +330,12 @@ class Network:
 
     def _boarding(self, pattern: int, pos: int) -> tuple[int, int, array, array]:
         """The pattern's trips boardable at pos, in board_by order."""
-        ordered = sorted(
-            (self.board[self.trip_rows[t] + pos], t)
-            for t in self.pattern_trips[pattern]
-            if self.board[self.trip_rows[t] + pos] < NO_BOARD
-        )
-        return pattern, pos, array("i", (b for b, _ in ordered)), array("i", (t for _, t in ordered))
+        times = [self.board[row + pos] for row in self.pattern_row_starts[pattern]]
+        # _load_routes appends ascending trip indexes. Stable integer-key sorting therefore keeps the original
+        # (board_by, trip index) order on ties, without allocating a pair for every boardable trip.
+        ordered = sorted((i for i, b in enumerate(times) if b < NO_BOARD), key=times.__getitem__)
+        trips = self.pattern_trips[pattern]
+        return pattern, pos, array("i", (times[i] for i in ordered)), array("i", (trips[i] for i in ordered))
 
     def patched(self, rows: dict[int, tuple[int, int, int]]) -> Network:
         """A copy with new (board_by, expected, late) times at some rows; this network is left as it was.
@@ -522,6 +524,11 @@ def _prepared_network(net: Network) -> PreparedNet:
         return prepared
 
 
+def prepare(net: Network) -> None:
+    """Build and retain immutable native metadata before the first search."""
+    _prepared_network(net)
+
+
 class _Profile:
     """Round labels of one origin and destination, kept while searching from later to earlier departures.
 
@@ -552,6 +559,7 @@ class _Profile:
         # immutable linear pattern arrays directly, not a quadratic suffix cache.
         self.query = query
         self.state: NativeState | None = None
+        self._departure_streams: tuple[tuple[int, int, array], ...] | None = None
         # First boardable position of each pattern at any origin post, for the walking rule in run().
         self.origin_board: dict[int, int] = {}
         for stop in origins:
@@ -605,9 +613,74 @@ class _Profile:
                         events.setdefault(b - seconds, set()).add(dest)
         return sorted(events.items(), reverse=True)
 
+    def capped_departures(self, start: int, end: int, limit: int) -> list[tuple[int, set[int]]]:
+        """Earliest limit distinct times in [start, end), latest first, unioning all posts at each time.
+
+        The immutable stream eligibility is query-local and shared across windows; only each window's heap
+        advances. No full-horizon events are built. Original walks remain eligible even when redundant in run().
+        """
+        if self._departure_streams is None:
+            self._departure_streams = self._eligible_departure_streams()
+        streams = self._departure_streams
+        heap = []
+        for stream, (_, offset, times) in enumerate(streams):
+            first, last = bisect_left(times, start + offset), bisect_left(times, end + offset)
+            if first < last:
+                heap.append((times[first] - offset, stream, first, last))
+        heapq.heapify(heap)
+        events: list[tuple[int, set[int]]] = []
+        while heap and len(events) < limit:
+            when, boarding = heap[0][0], set()
+            # Consume every equal time, including duplicates within a stream, before applying the cap.
+            while heap and heap[0][0] == when:
+                _, stream, index, last = heapq.heappop(heap)
+                stop, offset, times = streams[stream]
+                boarding.add(stop)
+                index += 1
+                if index < last:
+                    heapq.heappush(heap, (times[index] - offset, stream, index, last))
+            events.append((when, boarding))
+        events.reverse()
+        return events
+
+    def _eligible_departure_streams(self) -> tuple[tuple[int, int, array], ...]:
+        streams = []
+        for stop, walk in self.access.items():
+            streams.extend((stop, walk.walk_s, times) for _, _, times, _ in self.net.incidence[stop])
+        for stop in self.origins:
+            streams.extend((stop, 0, times) for _, _, times, _ in self.net.incidence[stop])
+            for dest, seconds in self.net.footpaths[stop]:
+                streams.extend(
+                    (dest, seconds, times)
+                    for pattern, pos, times, _ in self.net.incidence[dest]
+                    if self.origin_board.get(pattern, pos) >= pos
+                )
+        return tuple(streams)
+
 
 _cache: OrderedDict[tuple[str, str, date], Network] = OrderedDict()
+_pinned_days: set[tuple[str, str, date]] = set()
 _cache_lock = threading.Lock()
+# Serialize cold builds to limit peak memory, without blocking hits on other days.
+_cache_build_lock = threading.Lock()
+
+
+def _trim_cache() -> None:
+    """Evict the oldest unpinned entry; the caller holds _cache_lock."""
+    while len(_cache) > CACHED_DAYS:
+        key = next(key for key in _cache if key not in _pinned_days)
+        del _cache[key]
+
+
+def pin_days(path: Path, build_id: str, days: tuple[date, ...]) -> None:
+    """Protect this publication's warm horizon; release the previous build/date pins."""
+    keys = {(str(path), build_id, day) for day in days}
+    if len(keys) > WARM_DAYS:
+        raise ValueError("cannot pin more than the warm horizon")
+    with _cache_lock:
+        _pinned_days.clear()
+        _pinned_days.update(keys)
+        _trim_cache()
 
 
 def network(path: Path, day: date) -> Network:
@@ -624,10 +697,15 @@ def network(path: Path, day: date) -> Network:
             if key in _cache:
                 _cache.move_to_end(key)
                 return _cache[key]
+        with _cache_build_lock:
+            with _cache_lock:
+                if key in _cache:
+                    _cache.move_to_end(key)
+                    return _cache[key]
             built = Network(connection, day)
-            _cache[key] = built
-            while len(_cache) > CACHED_DAYS:
-                _cache.popitem(last=False)
+            with _cache_lock:
+                _cache[key] = built
+                _trim_cache()
             return built
 
 
@@ -654,6 +732,7 @@ def plan(  # noqa: PLR0913
     while start < stop and len(kept) < results:
         end = min(start + width, stop)
         if start != after:
+            departure_streams = profile._departure_streams  # noqa: SLF001 - immutable query-local eligibility
             profile = _Profile(
                 net,
                 profile.origins,
@@ -663,7 +742,8 @@ def plan(  # noqa: PLR0913
                 egress=profile.egress,
                 query=profile.query,
             )
-        events = profile.departures(start, end)
+            profile._departure_streams = departure_streams  # noqa: SLF001
+        events = profile.capped_departures(start, end, WINDOW_EVENTS + 1)
         if len(events) > WINDOW_EVENTS:
             end, events = events[-WINDOW_EVENTS - 1][0], events[-WINDOW_EVENTS:]
         for n, (departure, boarding) in enumerate(events):
