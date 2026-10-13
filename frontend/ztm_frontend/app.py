@@ -23,7 +23,7 @@ from flask import (
     url_for,
 )
 
-from ztm_frontend import db, live_status, planner, planner_text, queries, sqlite_geocoding
+from ztm_frontend import db, live_status, planner, planner_text, planner_warmup, queries, sqlite_geocoding
 from ztm_frontend.sqlite_geocoding import GeocodingError
 
 EARLY_DELAY_SECONDS = -60
@@ -528,6 +528,13 @@ def _percent_class(value: float | None) -> str:
     if value < LOW_ON_TIME_RATE:
         return "late-text"
     return "dim-text"
+
+
+def create_serving_app() -> Flask:
+    """Start cache warmup only in the serving process, not on import or in tests."""
+    serving_app = create_app()
+    planner_warmup.start(serving_app)
+    return serving_app
 
 
 app = create_app()

@@ -460,7 +460,9 @@ def test_later_page_starts_where_an_unshown_journey_would_be_skipped(monkeypatch
         monkeypatch.setattr(planner.journey, "plan", lambda *_args, **_kwargs: results)
 
     monkeypatch.setattr(planner.journey, "network", lambda *_args: None)
-    monkeypatch.setattr(planner, "_connection", lambda _path, result, _day, _current: {"depart": result.depart})
+    monkeypatch.setattr(
+        planner, "_connection", lambda _path, result, _day, _current, **_kwargs: {"depart": result.depart}
+    )
     shown = [600 + 60 * i for i in range(planner.RESULTS)]  # the last card leaves at 00:15:00
     found(*shown, shown[-1] + 30)  # an unshown journey at 00:15:30
     assert planner.search(Path(), "1", "2", DAY, 0)[1] == shown[-1]

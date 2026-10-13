@@ -5,8 +5,10 @@ import math
 import os
 import random
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
+from threading import Event
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -484,9 +486,51 @@ def test_artifact_cache_reuses_network_and_invalidates_on_publication(
     next_day = journey.network(path, DAY + timedelta(days=1))
     assert journey.network(path, DAY) is new  # refresh the build/day LRU entry
     journey.network(path, DAY + timedelta(days=2))
-    assert list(cache) == [(str(path), "new", DAY), (str(path), "new", DAY + timedelta(days=2))]
+    assert list(cache) == [
+        (str(path), "old", DAY),
+        (str(path), "new", DAY + timedelta(days=1)),
+        (str(path), "new", DAY),
+        (str(path), "new", DAY + timedelta(days=2)),
+    ]
+    journey.network(path, DAY + timedelta(days=3))
+    assert list(cache) == [(str(path), "new", DAY + timedelta(days=i)) for i in (1, 0, 2, 3)]
+    journey.network(path, DAY + timedelta(days=4))
+    assert list(cache) == [(str(path), "new", DAY + timedelta(days=i)) for i in (0, 2, 3, 4)]
     assert journey.network(path, DAY + timedelta(days=1)) is not next_day
     assert len(cache) == journey.CACHED_DAYS
+
+
+def test_warming_another_day_does_not_block_cache_hits_and_coalesces_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(journey, "_cache", OrderedDict())
+    path = tmp_path / "planner.duckdb"
+    with duckdb.connect(str(path)) as connection:
+        _write(connection, (Trip(1, (Stop("O:1", 100), Stop("D:1", 200))),))
+    cached = journey.network(path, DAY)
+    building, release = Event(), Event()
+    built: list[Network] = []
+    original = journey.Network
+
+    def build(connection: duckdb.DuckDBPyConnection, day: date) -> Network:
+        building.set()
+        assert release.wait(5), "test did not release the cold build"
+        net = original(connection, day)
+        built.append(net)
+        return net
+
+    monkeypatch.setattr(journey, "Network", build)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first = executor.submit(journey.network, path, DAY + timedelta(days=1))
+        try:
+            assert building.wait(5)
+            duplicate = executor.submit(journey.network, path, DAY + timedelta(days=1))
+            hit = executor.submit(journey.network, path, DAY)
+            assert hit.result(timeout=2) is cached
+        finally:
+            release.set()
+        assert first.result(timeout=5) is duplicate.result(timeout=5)
+    assert built == [first.result()]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows cannot replace an open DuckDB file")
