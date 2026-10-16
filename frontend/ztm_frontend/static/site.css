@@ -2993,11 +2993,17 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   border-color: var(--dim);
 }
 
+/* One grid for the whole header: the label sits above, the departure time, chips and duration share one baseline,
+   and the stop line shares the next row with the arrival. The three wrappers dissolve into it (display: contents). */
 .pl-summary {
   display: grid;
+  grid-template-areas:
+    "label . ."
+    "time chips duration"
+    ". sub arrival";
   grid-template-columns: 6.2rem minmax(0, 1fr) auto;
-  gap: 1rem;
-  align-items: center;
+  gap: 0.35rem 1rem;
+  align-items: baseline;
   padding: 0.85rem 1rem;
   cursor: pointer;
   list-style: none;
@@ -3011,30 +3017,27 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   background: var(--hover);
 }
 
-.pl-depart {
-  display: flex;
-  flex-direction: column;
+.pl-depart,
+.pl-route,
+.pl-trip-time {
+  display: contents;
 }
 
 .pl-label {
+  grid-area: label;
+  margin-bottom: -0.35rem;
   color: var(--muted);
   font-size: 0.72rem;
   white-space: nowrap;
 }
 
 .pl-time {
+  grid-area: time;
   color: #f4f4f4;
   font-size: 1.9rem;
   font-weight: 800;
   letter-spacing: -0.02em;
   line-height: 1.1;
-}
-
-.pl-route {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  min-width: 0;
 }
 
 .pl-line {
@@ -3053,21 +3056,19 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   white-space: nowrap;
 }
 
-.pl-trip-time {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.15rem;
-  white-space: nowrap;
-}
-
 .pl-duration {
+  grid-area: duration;
+  justify-self: end;
+  white-space: nowrap;
   color: #f4f4f4;
   font-size: 1.25rem;
   font-weight: 800;
 }
 
 .pl-arrival {
+  grid-area: arrival;
+  justify-self: end;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 0.75rem;
 }
@@ -3181,9 +3182,18 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
 .pl-chips {
   display: flex;
+  grid-area: chips;
   flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.pl-chip {
+  display: inline-flex;
   align-items: center;
   gap: 0.3rem;
+  white-space: nowrap;
 }
 
 .pl-sep {
@@ -3206,6 +3216,8 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 .pl-sub {
+  grid-area: sub;
+  min-width: 0;
   overflow: hidden;
   color: var(--muted);
   font-size: 0.78rem;
@@ -3451,10 +3463,20 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
     display: none;
   }
 
+  /* Too narrow for chips beside two times: the times take the top rows and the route gets the full width. */
   .pl-summary {
-    grid-template-columns: 5.6rem minmax(0, 1fr) auto;
-    gap: 0.7rem;
+    grid-template-areas:
+      "label label"
+      "time duration"
+      "chips arrival"
+      "sub sub";
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.35rem 0.7rem;
     padding: 0.75rem;
+  }
+
+  .pl-chips {
+    margin-top: 0.15rem;
   }
 
   .pl-label {
