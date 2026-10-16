@@ -42,13 +42,16 @@
           </span>
           <span class="pl-route">
             <span class="pl-chips">
+              {# Each chip keeps its trailing separator, so a wrapped row ends with "›" instead of starting with it. #}
               {% for c in r.chips %}
-                {% if not loop.first %}<span class="pl-sep" aria-hidden="true">›</span>{% endif %}
-                {% if c.kind == 'walk' %}
-                  <span class="pl-walk-chip mono" title="{{ t.walk }} {{ c.minutes }} min">{{ walker() }}{{ c.minutes }}</span>
-                {% else %}
-                  {{ pill(c.mode, c.line) }}{% if c.live %}<span class="pl-live-dot" title="{{ t.live }}" aria-label="{{ t.live }}"></span>{% endif %}
-                {% endif %}
+                <span class="pl-chip">
+                  {%- if c.kind == 'walk' %}
+                    <span class="pl-walk-chip mono" title="{{ t.walk }} {{ c.minutes }} min">{{ walker() }}{{ c.minutes }}</span>
+                  {%- else %}
+                    {{ pill(c.mode, c.line) }}{% if c.live %}<span class="pl-live-dot" title="{{ t.live }}" aria-label="{{ t.live }}"></span>{% endif %}
+                  {%- endif %}
+                  {%- if not loop.last %}<span class="pl-sep" aria-hidden="true">›</span>{% endif -%}
+                </span>
               {% endfor %}
             </span>
             <span class="pl-sub">
