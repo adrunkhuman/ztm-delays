@@ -2993,18 +2993,17 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   border-color: var(--dim);
 }
 
-/* One grid for the whole header: the label sits above, the departure time, chips and duration share one baseline,
-   and the stop line shares the next row with the arrival. The three wrappers dissolve into it (display: contents). */
+/* Two rows in one grid: the big row (leave time, route, duration) and a small row under it (what each number
+   means, where to board). The three wrappers dissolve into the grid (display: contents) so both rows line up. */
 .pl-summary {
   display: grid;
   grid-template-areas:
-    "label . ."
     "time chips duration"
-    ". sub arrival";
-  grid-template-columns: 6.2rem minmax(0, 1fr) auto;
-  gap: 0.35rem 1rem;
-  align-items: baseline;
-  padding: 0.85rem 1rem;
+    "label sub arrival";
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.15rem 1.1rem;
+  align-items: center;
+  padding: 0.8rem 1rem;
   cursor: pointer;
   list-style: none;
 }
@@ -3025,19 +3024,18 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
 .pl-label {
   grid-area: label;
-  margin-bottom: -0.35rem;
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.8rem;
   white-space: nowrap;
 }
 
 .pl-time {
   grid-area: time;
   color: #f4f4f4;
-  font-size: 1.9rem;
+  font-size: 1.75rem;
   font-weight: 800;
   letter-spacing: -0.02em;
-  line-height: 1.1;
+  line-height: 1.05;
 }
 
 .pl-line {
@@ -3061,7 +3059,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   justify-self: end;
   white-space: nowrap;
   color: #f4f4f4;
-  font-size: 1.25rem;
+  font-size: 1.3rem;
   font-weight: 800;
 }
 
@@ -3070,7 +3068,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   justify-self: end;
   white-space: nowrap;
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.85rem;
 }
 
 .pl-arrival b {
@@ -3184,21 +3182,28 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   display: flex;
   grid-area: chips;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.3rem;
+  align-items: center;
+  gap: 0.3rem 0.35rem;
   min-width: 0;
 }
 
 .pl-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.35rem;
   white-space: nowrap;
 }
 
+/* The route is the card's main line, so its pills are larger than the timeline's. */
+.pl-chips .pl-pill {
+  height: 1.45rem;
+  min-width: 2.3rem;
+  font-size: 0.85rem;
+}
+
 .pl-sep {
-  color: var(--dim);
-  font-size: 0.8rem;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .pl-walker {
@@ -3209,9 +3214,14 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   vertical-align: -0.1rem;
 }
 
+.pl-walk-chip .pl-walker {
+  width: 0.7rem;
+  height: 0.95rem;
+}
+
 .pl-walk-chip {
-  color: var(--muted);
-  font-size: 0.72rem;
+  color: var(--fg2);
+  font-size: 0.85rem;
   white-space: nowrap;
 }
 
@@ -3220,7 +3230,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: 0.85rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3463,29 +3473,29 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
     display: none;
   }
 
-  /* Too narrow for chips beside two times: the times take the top rows and the route gets the full width. */
+  /* The same big and small rows, but the route needs the width the duration took, so the duration joins the small
+     row beside the arrival and the boarding stop gets a full-width third row. */
   .pl-summary {
     grid-template-areas:
-      "label label"
-      "time duration"
-      "chips arrival"
-      "sub sub";
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.35rem 0.7rem;
-    padding: 0.75rem;
+      "time chips chips"
+      "label duration arrival"
+      "sub sub sub";
+    gap: 0.1rem 0.7rem;
+    padding: 0.7rem 0.75rem;
   }
 
-  .pl-chips {
-    margin-top: 0.15rem;
-  }
-
-  .pl-label {
-    font-size: 0.64rem;
-    white-space: nowrap;
+  .pl-sub {
+    margin-top: 0.25rem;
   }
 
   .pl-time {
-    font-size: 1.5rem;
+    font-size: 1.45rem;
+  }
+
+  .pl-duration {
+    color: var(--fg);
+    font-size: 0.85rem;
+    font-weight: 700;
   }
 }
 
@@ -3497,10 +3507,6 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 @media (max-width: 600px) {
-  .pl-sub {
-    white-space: normal;
-  }
-
   .pl-timeline {
     padding: 0.5rem 0.75rem 0.8rem;
   }
