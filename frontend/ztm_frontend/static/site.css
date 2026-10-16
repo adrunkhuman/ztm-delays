@@ -3039,7 +3039,8 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
 .pl-line {
   display: flex;
-  gap: 0.55rem;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.55rem;
   align-items: center;
   min-width: 0;
 }
@@ -3121,23 +3122,37 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   white-space: nowrap;
 }
 
+/* The vehicle is the page's live dot; at journey scale a pill would sit on top of the boarding stop. */
 .pl-map-vehicle {
-  background: var(--bg);
+  width: 0.8rem;
+  height: 0.8rem;
+  margin: 0;
+  border: 2px solid var(--bg);
+}
+
+/* The timeline's own stop dots: filled at the two ends, hollow where you board, alight or change. */
+.pl-map-node {
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 2px solid var(--fg);
+  border-radius: 50%;
+  background: var(--panel);
   box-shadow: 0 0 0 2px rgb(0 0 0 / 60%);
 }
 
-.pl-map-stop {
-  width: 0.75rem;
-  height: 0.75rem;
-  border: 2px solid var(--bg);
-  border-radius: 50%;
+.pl-map-node.end {
   background: var(--fg);
-  box-shadow: 0 0 0 2px var(--fg);
 }
 
-.pl-minimap {
-  height: 11rem;
-  margin: 0.5rem 0;
+/* Leg labels tie each line on the map to its ride in the timeline. */
+.pl-map-leg {
+  font-size: 0.7rem;
+  background: var(--panel);
+}
+
+.pl-journey-map {
+  height: 13rem;
+  margin: 0.75rem 1rem 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -3314,10 +3329,18 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   background: var(--rail);
 }
 
-.pl-seg.ride.mode-bus { --rail: #6c55a8; }
-.pl-seg.ride.mode-tram { --rail: #8a7330; }
-.pl-seg.ride.mode-metro { --rail: #3a5fb8; }
-.pl-seg.ride.mode-rail { --rail: #2f7a50; }
+/* Mode colours shared by the timeline rail and the journey map (planner.js reads --rail-<mode>). */
+.pl-results {
+  --rail-bus: #6c55a8;
+  --rail-tram: #8a7330;
+  --rail-metro: #3a5fb8;
+  --rail-rail: #2f7a50;
+}
+
+.pl-seg.ride.mode-bus { --rail: var(--rail-bus); }
+.pl-seg.ride.mode-tram { --rail: var(--rail-tram); }
+.pl-seg.ride.mode-metro { --rail: var(--rail-metro); }
+.pl-seg.ride.mode-rail { --rail: var(--rail-rail); }
 
 .pl-seg.walk .pl-seg-line {
   width: 0;

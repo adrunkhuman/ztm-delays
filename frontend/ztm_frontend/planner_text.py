@@ -65,7 +65,8 @@ TEXT: dict[str, dict[str, object]] = {
         "live_waiting_late": "at terminus, +{n} min",
         "live_previous": "on previous trip",
         "live_previous_late": "previous trip, +{n} min",
-        "map_label": "Where the vehicle is now and your stop",
+        "map_label": "Map of this connection, with where the next vehicle is now",
+        "stops_away": "{n} {stops} away",
         "live_note": "Live times follow where the vehicles are now.",
     },
     "pl": {
@@ -121,7 +122,8 @@ TEXT: dict[str, dict[str, object]] = {
         "live_waiting_late": "na pętli, +{n} min",
         "live_previous": "poprzedni kurs",
         "live_previous_late": "poprzedni kurs, +{n} min",
-        "map_label": "Gdzie jest teraz pojazd i twój przystanek",
+        "map_label": "Mapa połączenia i miejsce, w którym jest teraz najbliższy pojazd",
+        "stops_away": "{n} {stops} stąd",
         "live_note": "Czasy na żywo według tego, gdzie są teraz pojazdy.",
     },
 }

@@ -1,4 +1,4 @@
-// Stop selection edits the form; only submitting it searches. Live cards refresh with htmx and draw minimaps.
+// Stop selection edits the form; only submitting it searches. Live cards refresh with htmx; open cards draw a journey map.
 (() => {
   // The script also arrives inside boosted page responses. Install delegated handlers just once.
   if (window.plannerInitialized) return;
@@ -292,7 +292,7 @@
     const root = event.target;
     if (picker && (root === picker.panel || root.contains(picker.panel))) closePicker();
     if (root.matches(".pl-input")) cancelSuggestions(root);
-    for (const box of root.querySelectorAll(".pl-minimap")) {
+    for (const box of root.querySelectorAll(".pl-journey-map")) {
       minimaps.get(box)?.remove();
       minimaps.delete(box);
     }
@@ -329,8 +329,30 @@
     });
   }
 
+  // A vehicle further than this from the boarding stop (often on its previous trip across the city) would zoom the
+  // map out past the journey, so it is left to the status line's "N stops away".
+  const APPROACH_SHOWN_M = 2500;
+
+  function metres([lon1, lat1], [lon2, lat2]) {
+    const x = (lon2 - lon1) * Math.cos(((lat1 + lat2) / 2) * Math.PI / 180);
+    return Math.hypot(x, lat2 - lat1) * 111_320;
+  }
+
+  function marker(map, element, at) {
+    return new maplibregl.Marker({ element }).setLngLat(at).addTo(map);
+  }
+
+  function legLabel(mode, line) {
+    const pill = document.createElement("span");
+    pill.className = `landing-line-pill mono pl-pill mode-${mode} pl-map-leg`;
+    pill.textContent = line;
+    return pill;
+  }
+
+  // Map data: legs in order ({kind: "walk"|"ride", path, mode?, line?}) and, while the next ride is live and not yet
+  // at the stop, approach {vehicle, path, mode, line} ending at that ride's boarding stop.
   async function draw(card) {
-    const boxes = card.querySelectorAll(".pl-minimap:not([data-drawn])");
+    const boxes = card.querySelectorAll(".pl-journey-map:not([data-drawn])");
     if (!boxes.length) return;
     try {
       await loadMapLibre();
@@ -342,40 +364,60 @@
       // A second toggle or an htmx replacement may happen while MapLibre is loading.
       if (!box.isConnected || !card.open || minimaps.has(box)) continue;
       box.dataset.drawn = "1";
-      const { vehicle, stop, path } = JSON.parse(box.dataset.map);
-      const points = [vehicle, stop, ...path];
-      const bounds = points.reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(vehicle, vehicle));
+      const { legs, approach } = JSON.parse(box.dataset.map);
+      const shown = approach && metres(approach.vehicle, approach.path.at(-1)) <= APPROACH_SHOWN_M ? approach : null;
+      const first = legs[0].path[0];
+      const bounds = legs.flatMap(leg => leg.path).concat(shown ? shown.path : [])
+        .reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(first, first));
       const map = new maplibregl.Map({
         container: box,
         style: new URL(box.dataset.style, window.location.href).href,
         bounds,
-        fitBoundsOptions: { padding: 36, maxZoom: 16 },
+        fitBoundsOptions: { padding: 28, maxZoom: 16 },
         interactive: false,
         attributionControl: { compact: true },
       });
       minimaps.set(box, map);
-      // The page's own symbols: the timeline's stop dot, the line pill for the vehicle, the ride's mode colour.
-      const stopDot = document.createElement("span");
-      stopDot.className = "pl-map-stop";
-      const pill = document.createElement("span");
-      pill.className = `landing-line-pill mono pl-pill mode-${box.dataset.mode} pl-map-vehicle`;
-      pill.textContent = box.dataset.line;
-      new maplibregl.Marker({ element: stopDot }).setLngLat(stop).addTo(map);
-      new maplibregl.Marker({ element: pill }).setLngLat(vehicle).addTo(map);
-      const colour = getComputedStyle(box).getPropertyValue("--rail").trim() || "#888888";
+      const styles = getComputedStyle(box);
+      const colour = (mode) => styles.getPropertyValue(`--rail-${mode}`).trim() || "#888888";
+      // Leg ends become the timeline's dots; a change at the same post is one dot, not two.
+      const nodes = [first, ...legs.map(leg => leg.path.at(-1))];
+      nodes.forEach((at, i) => {
+        if (i > 0 && i < nodes.length - 1 && metres(at, nodes[i - 1]) < 15) return;
+        const dot = document.createElement("span");
+        dot.className = `pl-map-node${i === 0 || i === nodes.length - 1 ? " end" : ""}`;
+        marker(map, dot, at);
+      });
+      for (const leg of legs) {
+        if (leg.kind === "ride") marker(map, legLabel(leg.mode, leg.line), leg.path[Math.floor(leg.path.length / 2)]);
+      }
+      if (shown) {
+        const vehicle = document.createElement("span");
+        vehicle.className = "pl-live-dot pl-map-vehicle";
+        marker(map, vehicle, shown.vehicle);
+      }
       map.on("load", () => {
         if (!box.isConnected || minimaps.get(box) !== map) return;
         // Compact attribution opens expanded on wide screens; on a minimap it would cover the route.
         box.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show");
-        const line = { type: "Feature", geometry: { type: "LineString", coordinates: path }, properties: {} };
-        map.addSource("path", { type: "geojson", data: line });
-        map.addLayer({
-          id: "path",
-          type: "line",
-          source: "path",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": colour, "line-width": 4 },
-        });
+        // The large city name lands mid-route on any cross-city journey.
+        if (map.getLayer("warsaw-name")) map.setLayoutProperty("warsaw-name", "visibility", "none");
+        const feature = (path, properties) => ({ type: "Feature", geometry: { type: "LineString", coordinates: path }, properties });
+        const collection = (features) => ({ type: "geojson", data: { type: "FeatureCollection", features } });
+        const rides = legs.filter(leg => leg.kind === "ride").map(leg => feature(leg.path, { colour: colour(leg.mode) }));
+        map.addSource("approach", collection(shown ? [feature(shown.path, { colour: colour(shown.mode) })] : []));
+        map.addSource("walks", collection(legs.filter(leg => leg.kind === "walk").map(leg => feature(leg.path, {}))));
+        map.addSource("rides", collection(rides));
+        const round = { "line-cap": "round", "line-join": "round" };
+        // The approach is context, not the trip: thin, dashed and faded under everything else.
+        map.addLayer({ id: "approach", type: "line", source: "approach", layout: { "line-join": "round" },
+          paint: { "line-color": ["get", "colour"], "line-width": 2.5, "line-opacity": 0.7, "line-dasharray": [2, 2] } });
+        map.addLayer({ id: "walks", type: "line", source: "walks", layout: round,
+          paint: { "line-color": "#b4b4b4", "line-width": 3, "line-dasharray": [0, 2] } });
+        map.addLayer({ id: "ride-casing", type: "line", source: "rides", layout: round,
+          paint: { "line-color": "#111111", "line-width": 8 } });
+        map.addLayer({ id: "rides", type: "line", source: "rides", layout: round,
+          paint: { "line-color": ["get", "colour"], "line-width": 5 } });
       });
     }
   }
