@@ -1,6 +1,7 @@
 {% macro serving_window_service_date_filter(column, start_date, end_date) %}
     {#- Joining dim_serving_window_date does not prune partitions; literal dates read at execution time do. -#}
-    {% if not execute %}
+    {#- Offline compiles (--no-introspect) cannot query; no filter keeps the result, unpruned. -#}
+    {% if not execute or not flags.INTROSPECT %}
         {{ return('true') }}
     {% endif %}
     {% set dates_query %}
