@@ -22,6 +22,7 @@ arrivals as (
     from {{ ref('int_serving_stop_arrival') }}
     where service_date between date_sub(date('{{ scope.start }}'), interval {{ lookback_days }} day)
         and date('{{ scope.end }}')
+      and {{ serving_window_service_date_filter('service_date', scope.start, scope.end) }}
 ),
 
 calls as (

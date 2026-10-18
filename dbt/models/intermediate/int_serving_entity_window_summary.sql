@@ -47,6 +47,7 @@ with base as (
             and date('{{ var("max_gps_date", processing_date) }}')
     where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
         and date('{{ processing_date }}')
+      and {{ serving_window_service_date_filter('arrivals.service_date', processing_date, processing_date) }}
       and arrivals.trip_quality = 'complete'
       and arrivals.mode in ('bus', 'tram')
 ),
