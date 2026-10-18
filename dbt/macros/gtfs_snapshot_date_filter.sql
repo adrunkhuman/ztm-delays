@@ -9,7 +9,7 @@
     {%- set dates = [] -%}
     {%- set fixture_ids = [] -%}
     {%- for snapshot_id in ids -%}
-        {%- if not modules.re.fullmatch('\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z_[0-9a-f]{12}', snapshot_id) -%}
+        {%- if not modules.re.fullmatch('[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z_[0-9a-f]{12}', snapshot_id) -%}
             {%- do fixture_ids.append(snapshot_id) -%}
         {%- elif snapshot_id[:10] not in dates -%}
             {%- do dates.append(snapshot_id[:10]) -%}

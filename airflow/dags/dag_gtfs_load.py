@@ -58,6 +58,15 @@ GTFS_RAW_SOURCES = (
 GTFS_STAGING_PROCESSING_DATE = "{{ ti.xcom_pull(task_ids='selected_gtfs_snapshot')['processing_date'] }}"
 GTFS_SNAPSHOT_ID = "{{ ti.xcom_pull(task_ids='selected_gtfs_snapshot')['snapshot_id'] }}"
 GTFS_DBT_VARS = dbt_vars(processing_date=GTFS_STAGING_PROCESSING_DATE, gtfs_snapshot_id=GTFS_SNAPSHOT_ID)
+# Contract tests check every snapshot loaded by the run, not only the latest one the models pin.
+GTFS_BATCH_SNAPSHOT_IDS = (
+    "{{ ti.xcom_pull(task_ids='selected_gtfs_snapshot')['snapshots'] | map(attribute='snapshot_id') | join(',') }}"
+)
+GTFS_TEST_DBT_VARS = dbt_vars(
+    processing_date=GTFS_STAGING_PROCESSING_DATE,
+    gtfs_snapshot_id=GTFS_SNAPSHOT_ID,
+    gtfs_snapshot_ids=GTFS_BATCH_SNAPSHOT_IDS,
+)
 
 
 @dataclass(frozen=True)
@@ -363,7 +372,7 @@ with DAG(
         bash_command=dbt_command(
             "test",
             f"{GTFS_RAW_SOURCES} {GTFS_STAGING_MODELS}",
-            GTFS_DBT_VARS,
+            GTFS_TEST_DBT_VARS,
             "--indirect-selection cautious --exclude tag:audit",
         ),
     )

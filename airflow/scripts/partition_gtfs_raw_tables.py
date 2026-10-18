@@ -8,13 +8,15 @@ writes and filters the new column, using credentials that can write ztm_raw:
     python airflow/scripts/partition_gtfs_raw_tables.py --execute  # copy, verify, swap
 
 Each original is kept as <table>__unpartitioned_backup for recovery; drop it once the new layout
-has run cleanly. The script is idempotent per table: already-partitioned tables are skipped.
+has run cleanly. The script is not baked into the Airflow image; `docker cp` it into the container.
+Reruns are safe: partitioned tables are skipped and an interrupted swap is completed.
 """
 
 from __future__ import annotations
 
 import argparse
 
+from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 
 PROJECT = "ztm-data"
@@ -29,7 +31,14 @@ SNAPSHOT_DATE_SQL = "cast(substr(gtfs_snapshot_id, 1, 10) as date)"
 def _migrate(client: bigquery.Client, dataset: str, table: str, *, execute: bool) -> None:
     source_id = f"{PROJECT}.{dataset}.{table}"
     staged_id = f"{source_id}__partitioned"
-    source = client.get_table(source_id)
+    try:
+        source = client.get_table(source_id)
+    except NotFound:
+        # The first rename of an interrupted swap succeeded; finish the second.
+        client.get_table(staged_id)
+        client.query(f"alter table `{staged_id}` rename to `{table}`", location=LOCATION).result()
+        print(f"{table}: completed an interrupted swap")
+        return
     if source.time_partitioning is not None and source.time_partitioning.field == DATE_FIELD:
         print(f"{table}: already partitioned by {DATE_FIELD}, skipping")
         return

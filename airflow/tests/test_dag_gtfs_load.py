@@ -11,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import jinja2
 import pytest
 
 SNAPSHOT_ID = "2026-10-16T00:00:00Z_b387cd78310f"
@@ -439,6 +440,17 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert dag.watcher in dag.dbt_test_gtfs_dimensions.downstream
     assert dag.fail_on_any_task_failure.kwargs["retries"] == 0
 
+
+def test_staging_contract_tests_receive_every_snapshot_in_the_batch() -> None:
+    dag = _load_dag_module()
+    batch = dag._snapshot_batch([{"snapshot_id": "first"}, {"snapshot_id": SNAPSHOT_ID}])
+    ti = types.SimpleNamespace(xcom_pull=lambda task_ids: batch)
+
+    rendered = jinja2.Template(dag.GTFS_BATCH_SNAPSHOT_IDS).render(ti=ti)
+
+    assert rendered == f"first,{SNAPSHOT_ID}"
+    assert "gtfs_snapshot_ids" in dag.dbt_test_gtfs_staging.bash_command
+    assert "gtfs_snapshot_ids" not in dag.dbt_run_gtfs_staging.bash_command
 
 def _assert_dbt_command(command: str, dbt_subcommand: str, selector: str) -> None:
     assert f"dbt {dbt_subcommand}" in command
