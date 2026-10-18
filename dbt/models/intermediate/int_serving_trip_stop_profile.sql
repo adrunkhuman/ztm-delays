@@ -57,6 +57,7 @@ inner join {{ ref('stg_gtfs__stop_times') }} as stop_times
     on scheduled_trips.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
     and scheduled_trips.trip_id = stop_times.trip_id
     and stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+    and {{ gtfs_snapshot_date_filter(gtfs_snapshot_id, 'stop_times.gtfs_snapshot_date') }}
 left join {{ ref('stg_gtfs__stops') }} as stops
     on scheduled_trips.gtfs_snapshot_id = stops.gtfs_snapshot_id
     and stop_times.stop_id = stops.stop_id

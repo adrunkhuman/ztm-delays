@@ -64,6 +64,7 @@ def _macros(**context: object) -> SimpleNamespace:
             "schedule_ledger.sql",
             "schedule_fingerprints.sql",
             "gtfs_trip_schedule_history.sql",
+            "gtfs_snapshot_date_filter.sql",
         )
     )
     module = env.from_string(source).make_module(defaults)
@@ -260,6 +261,15 @@ def test_rendered_ledger_expands_history_and_marks_removed_dates() -> None:
         (datetime.date(2026, 1, 3), None, None, None, None, None, None, True),
     ]
 
+
+def test_gtfs_snapshot_date_filter_prunes_real_snapshots_and_skips_fixtures() -> None:
+    date_filter = _macros().gtfs_snapshot_date_filter
+    same_day = ["2026-10-15T00:00:00Z_09e95acee3e3", "2026-10-15T08:00:00Z_7bdd11c5da81"]
+
+    assert date_filter(same_day, "t.gtfs_snapshot_date").strip() == "t.gtfs_snapshot_date in (date '2026-10-15')"
+    assert date_filter("2026-10-16T00:00:00Z_b387cd78310f").strip() == "gtfs_snapshot_date in (date '2026-10-16')"
+    assert date_filter(["pin", *same_day]).strip() == "true"
+    assert date_filter([]).strip() == "false"
 
 def test_noop_ledger_has_no_raw_expansion_and_markers_are_excluded_from_versions() -> None:
     env = Environment(extensions=["jinja2.ext.do"], autoescape=False)  # noqa: S701 - SQL, not HTML.

@@ -954,6 +954,8 @@ unit_tests:
       vars:
         processing_date: '2026-01-15'
         max_gps_date: '2026-01-15'
+      macros:
+        serving_window_service_date_filter: 'true'
     given:
       - input: ref('int_serving_stop_arrival')
         format: sql

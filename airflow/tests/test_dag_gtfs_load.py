@@ -11,7 +11,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import jinja2
 import pytest
+
+SNAPSHOT_ID = "2026-10-16T00:00:00Z_b387cd78310f"
 
 
 def test_parse_gcs_uri_splits_bucket_and_blob() -> None:
@@ -27,7 +30,7 @@ def test_parse_gcs_uri_rejects_non_gcs_uri() -> None:
         dag._parse_gcs_uri("https://example.com/test.zip")
 
 
-def test_extract_gtfs_table_adds_snapshot_id_and_ignores_extra_columns(tmp_path: Path) -> None:
+def test_extract_gtfs_table_adds_snapshot_columns_and_ignores_extra_columns(tmp_path: Path) -> None:
     dag = _load_dag_module()
     zip_path = tmp_path / "gtfs.zip"
     with zipfile.ZipFile(zip_path, "w") as zip_file:
@@ -38,7 +41,7 @@ def test_extract_gtfs_table_adds_snapshot_id_and_ignores_extra_columns(tmp_path:
         )
 
     with zipfile.ZipFile(zip_path) as zip_file:
-        output_path = dag._extract_gtfs_table(zip_file, dag.GTFS_TABLES[0], "snapshot-1", tmp_path)
+        output_path = dag._extract_gtfs_table(zip_file, dag.GTFS_TABLES[0], SNAPSHOT_ID, tmp_path)
 
     with output_path.open(newline="", encoding="utf-8") as output_file:
         rows = list(csv.DictReader(output_file))
@@ -53,7 +56,8 @@ def test_extract_gtfs_table_adds_snapshot_id_and_ignores_extra_columns(tmp_path:
             "block_id": "block",
             "block_short_name": "12",
             "shape_id": "shape",
-            "gtfs_snapshot_id": "snapshot-1",
+            "gtfs_snapshot_id": SNAPSHOT_ID,
+            "gtfs_snapshot_date": "2026-10-16",
         }
     ]
 
@@ -79,6 +83,14 @@ def test_extract_gtfs_table_normalizes_gtfs_dates_for_bigquery(tmp_path: Path) -
             "gtfs_snapshot_id": "snapshot-1",
         }
     ]
+
+
+def test_gtfs_snapshot_date_requires_canonical_snapshot_id() -> None:
+    dag = _load_dag_module()
+
+    assert dag._gtfs_snapshot_date(SNAPSHOT_ID).isoformat() == "2026-10-16"
+    with pytest.raises(ValueError, match="Unexpected GTFS snapshot ID"):
+        dag._gtfs_snapshot_date("snapshot-1")
 
 
 def test_extract_gtfs_table_rejects_missing_required_file(tmp_path: Path) -> None:
@@ -108,6 +120,8 @@ def test_load_csv_to_bigquery_uses_expected_load_contract(tmp_path: Path) -> Non
     assert client.load_call.job_config.create_disposition == dag.bigquery.CreateDisposition.CREATE_IF_NEEDED
     assert client.load_call.job_config.write_disposition == dag.bigquery.WriteDisposition.WRITE_APPEND
     assert client.load_call.job_config.clustering_fields == ["gtfs_snapshot_id"]
+    assert client.load_call.job_config.time_partitioning.field == "gtfs_snapshot_date"
+    assert client.load_call.job_config.time_partitioning.type_ == "DAY"
     assert [field.name for field in client.load_call.job_config.schema] == [
         field.name for field in dag.GTFS_TABLES[0].schema
     ]
@@ -349,17 +363,19 @@ def test_load_gtfs_snapshot_extracts_all_required_files_and_loads_all_raw_tables
     monkeypatch.setattr(dag.bigquery, "Client", lambda project: client)
     monkeypatch.setattr(dag.storage, "Client", lambda project: storage_client)
 
-    dag._load_gtfs_snapshot({"snapshot_id": "snapshot-1", "gcs_path": "gs://ztm-analytics-bucket/raw/gtfs/test.zip"})
+    dag._load_gtfs_snapshot({"snapshot_id": SNAPSHOT_ID, "gcs_path": "gs://ztm-analytics-bucket/raw/gtfs/test.zip"})
 
     assert storage_client.bucket_name == "ztm-analytics-bucket"
     assert storage_client.blob_name == "raw/gtfs/test.zip"
     assert [load.destination for load in client.load_calls] == [spec.table for spec in dag.GTFS_TABLES]
     assert len(client.load_calls) == len(dag.GTFS_TABLES)
     assert all(load.job.result_called for load in client.load_calls)
-    assert any("snapshot-1" in load.loaded_text for load in client.load_calls)
+    assert all(SNAPSHOT_ID in load.loaded_text for load in client.load_calls)
     stop_times_load = next(load for load in client.load_calls if load.destination.endswith(".raw_gtfs_stop_times"))
     assert "pickup_type,drop_off_type" in stop_times_load.loaded_text
-    assert "trip-1,stop-1,1,12:00:00,12:00:30,3,3,snapshot-1" in stop_times_load.loaded_text
+    assert f"trip-1,stop-1,1,12:00:00,12:00:30,3,3,{SNAPSHOT_ID},2026-10-16" in stop_times_load.loaded_text
+    stops_load = next(load for load in client.load_calls if load.destination.endswith(".raw_gtfs_stops"))
+    assert stops_load.job_config.time_partitioning is None
 
 
 def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
@@ -424,6 +440,17 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert dag.watcher in dag.dbt_test_gtfs_dimensions.downstream
     assert dag.fail_on_any_task_failure.kwargs["retries"] == 0
 
+
+def test_staging_contract_tests_receive_every_snapshot_in_the_batch() -> None:
+    dag = _load_dag_module()
+    batch = dag._snapshot_batch([{"snapshot_id": "first"}, {"snapshot_id": SNAPSHOT_ID}])
+    ti = types.SimpleNamespace(xcom_pull=lambda task_ids: batch)
+
+    rendered = jinja2.Template(dag.GTFS_BATCH_SNAPSHOT_IDS).render(ti=ti)
+
+    assert rendered == f"first,{SNAPSHOT_ID}"
+    assert "gtfs_snapshot_ids" in dag.dbt_test_gtfs_staging.bash_command
+    assert "gtfs_snapshot_ids" not in dag.dbt_run_gtfs_staging.bash_command
 
 def _assert_dbt_command(command: str, dbt_subcommand: str, selector: str) -> None:
     assert f"dbt {dbt_subcommand}" in command
@@ -503,6 +530,8 @@ def _install_google_stubs() -> None:
     bigquery_module.CreateDisposition = types.SimpleNamespace(CREATE_IF_NEEDED="CREATE_IF_NEEDED")
     bigquery_module.WriteDisposition = types.SimpleNamespace(WRITE_APPEND="WRITE_APPEND")
     bigquery_module.LoadJobConfig = FakeLoadJobConfig
+    bigquery_module.TimePartitioning = FakeTimePartitioning
+    bigquery_module.TimePartitioningType = types.SimpleNamespace(DAY="DAY")
     storage_module.Client = lambda project: FakeStorageClient()
     google_cloud_module.bigquery = bigquery_module
     google_cloud_module.storage = storage_module
@@ -596,6 +625,13 @@ class FakeLoadJobConfig:
         self.create_disposition = kwargs["create_disposition"]
         self.write_disposition = kwargs["write_disposition"]
         self.clustering_fields = kwargs.get("clustering_fields")
+        self.time_partitioning = kwargs.get("time_partitioning")
+
+
+@dataclass(frozen=True)
+class FakeTimePartitioning:
+    type_: str
+    field: str
 
 
 class FakeJob:

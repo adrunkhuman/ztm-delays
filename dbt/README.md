@@ -64,6 +64,8 @@ uv run --no-project --with google-cloud-bigquery \
   --manifest dbt/target/manifest.json --output dbt/target/schedule_estimate
 ```
 
+`raw_gtfs_trips` and `raw_gtfs_stop_times` are partitioned by `gtfs_snapshot_date` (the UTC date prefix of `gtfs_snapshot_id`) and reject queries without a filter on it. Pair every literal snapshot filter on them, including through their staging views, with `gtfs_snapshot_date_filter`; clustering alone does not bound MERGE estimates, and the byte cap is checked against those estimates.
+
 The estimator uses metadata APIs and BigQuery dry runs, never execution. Its reports are not an upper bound: missing relations, temporary reads, retries, and non-ledger work can leave costs unaccounted for. Save each batch's report before compiling the next. `DBT_BIGQUERY_MAXIMUM_BYTES_BILLED` is a per-query cap, not a total budget.
 
 CI compiles warehouse models and runs dbt unit tests with GCP credentials. Normal Airflow tests exclude `tag:audit`; the weekly audit builds tagged evidence models before testing them. Recovery that depends on those contracts must run the same audit sequence, not assume nightly checks cover history.

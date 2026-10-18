@@ -27,6 +27,7 @@ with base as (
         and windows.source_end_date = date('{{ processing_date }}')
     where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
         and date('{{ processing_date }}')
+      and {{ serving_window_service_date_filter('arrivals.service_date', processing_date, processing_date) }}
       and trip_quality = 'complete'
       and mode in ('bus', 'tram')
 ),

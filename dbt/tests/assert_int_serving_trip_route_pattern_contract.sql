@@ -1,11 +1,17 @@
 {% set processing_date = var('processing_date', '1970-01-01') %}
-{% set start = var('serving_rebuild_start_date', processing_date) %}
+{% set start = var('serving_rebuild_start_date', none) %}
 {% set end = var('serving_rebuild_end_date', processing_date) %}
 {% set lookback_days = var('serving_window_lookback_days', 420) %}
+{#- Daily runs replace only processing_date; a bulk rebuild rewrites its whole lookback range. -#}
+{% if start is none %}
+    {% set range_start = "date('" ~ processing_date ~ "')" %}
+{% else %}
+    {% set range_start = "date_sub(date('" ~ start ~ "'), interval " ~ lookback_days ~ " day)" %}
+{% endif %}
 
 with patterns as (
     select * from {{ ref('int_serving_trip_route_pattern') }}
-    where service_date between date_sub(date('{{ start }}'), interval {{ lookback_days }} day) and date('{{ end }}')
+    where service_date between {{ range_start }} and date('{{ end }}')
 ),
 
 violations as (
@@ -37,7 +43,7 @@ violations as (
         and execution.service_date = patterns.service_date
         and execution.trip_id = patterns.trip_id
         and execution.vehicle_number = patterns.vehicle_number
-    where execution.service_date between date_sub(date('{{ start }}'), interval {{ lookback_days }} day) and date('{{ end }}')
+    where execution.service_date between {{ range_start }} and date('{{ end }}')
         and execution.trip_quality = 'complete' and execution.mode in ('bus', 'tram')
         and patterns.trip_id is null
 )

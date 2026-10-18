@@ -1,3 +1,5 @@
+-- Validates the snapshots loaded by this run; earlier ones were checked when they were loaded.
+{% set snapshot_ids = var('gtfs_snapshot_ids', var('gtfs_snapshot_id')).split(',') %}
 with grouped_stop_times as (
     select
         gtfs_snapshot_id,
@@ -19,7 +21,8 @@ with grouped_stop_times as (
         countif(drop_off_type not in (0, 1, 2, 3)) as drop_off_type_violations,
         countif(stop_service_class not in ('regular', 'request', 'not_in_passenger_service')) as stop_service_class_violations
     from {{ ref('stg_gtfs__stop_times') }}
-    where gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+    where gtfs_snapshot_id in ({{ schedule_snapshot_literals(snapshot_ids) }})
+      and {{ gtfs_snapshot_date_filter(snapshot_ids) }}
     group by gtfs_snapshot_id, trip_id, stop_sequence
 ),
 
@@ -49,6 +52,8 @@ grouped_trips as (
         ) as required_field_violations,
         countif(direction_id not in (0, 1)) as direction_id_violations
     from {{ ref('stg_gtfs__trips') }}
+    where gtfs_snapshot_id in ({{ schedule_snapshot_literals(snapshot_ids) }})
+      and {{ gtfs_snapshot_date_filter(snapshot_ids) }}
     group by gtfs_snapshot_id, trip_id
 ),
 
@@ -73,6 +78,7 @@ grouped_stops as (
             or gtfs_snapshot_id is null
         ) as required_field_violations
     from {{ ref('stg_gtfs__stops') }}
+    where gtfs_snapshot_id in ({{ schedule_snapshot_literals(snapshot_ids) }})
     group by gtfs_snapshot_id, stop_id
 ),
 
@@ -98,6 +104,7 @@ grouped_routes as (
         countif(route_type not in (0, 1, 2, 3)) as route_type_violations,
         countif(mode not in ('tram', 'metro', 'rail', 'bus')) as mode_violations
     from {{ ref('stg_gtfs__routes') }}
+    where gtfs_snapshot_id in ({{ schedule_snapshot_literals(snapshot_ids) }})
     group by gtfs_snapshot_id, route_id
 ),
 
@@ -126,6 +133,7 @@ grouped_calendar_dates as (
         countif(exception_type != 1) as exception_type_violations,
         countif(day_type not in ('weekday', 'weekend')) as day_type_violations
     from {{ ref('stg_gtfs__calendar_dates') }}
+    where gtfs_snapshot_id in ({{ schedule_snapshot_literals(snapshot_ids) }})
     group by gtfs_snapshot_id, service_id, service_date
 ),
 

@@ -202,10 +202,11 @@ unit_tests:
             timestamp('2026-01-15 23:50:00+01'), timestamp('2026-01-16 00:20:00+01'), timestamp('2026-01-15 23:51:00+01'),
             timestamp('2026-01-16 00:21:00+01'), 60, 60, 2, 2, 1.0, 0, 0, 0, 1, 1, 60, 10.0, true, true, false, false, false,
             'complete', array<string>[], 'regular', array<string>[], false
-      - input: ref('int_gtfs_trip_schedule_history')
-        rows:
-          - {gtfs_snapshot_id: snapshot-older, processing_date: '2026-01-15', service_date: '2026-01-15', trip_id: trip-1, line: '187', direction_id: 1, service_id: svc-1, trip_headsign: Central, shape_id: shape-1, schedule_day_type: friday, schedule_service_ids: svc-1}
-          - {gtfs_snapshot_id: snapshot-1, processing_date: '2026-01-16', service_date: '2026-01-15', trip_id: trip-1, line: '187', direction_id: 1, service_id: svc-1, trip_headsign: Central, shape_id: shape-1, schedule_day_type: friday, schedule_service_ids: svc-1}
+      - input: ref('int_gtfs_trip_schedule_processing')
+        format: sql
+        rows: |
+          select 'snapshot-older' as gtfs_snapshot_id, date '2026-01-15' as processing_date, date '2026-01-15' as service_date, 'trip-1' as trip_id, '187' as line, 1 as direction_id, 'svc-1' as service_id, 'Central' as trip_headsign, 'shape-1' as shape_id, 'friday' as schedule_day_type, 'svc-1' as schedule_service_ids
+          union all select 'snapshot-1', date '2026-01-16', date '2026-01-15', 'trip-1', '187', 1, 'svc-1', 'Central', 'shape-1', 'friday', 'svc-1'
       - input: ref('stg_gtfs__routes')
         rows:
           - {gtfs_snapshot_id: snapshot-older, route_id: '187', route_short_name: '187', mode: bus}
@@ -322,10 +323,11 @@ unit_tests:
             timestamp('2026-01-15 12:20:00+01'), timestamp('2026-01-15 12:01:00+01'),
             timestamp('2026-01-15 12:21:00+01'), 60, 60, 1, 1, 1.0, 0, 0, 0, 0, 0, 60, 10.0,
             true, true, false, false, false, 'complete', array<string>[], 'regular', array<string>[], false
-      - input: ref('int_gtfs_trip_schedule_history')
-        rows:
-          - {gtfs_snapshot_id: snapshot-current, processing_date: '2026-01-15', service_date: '2026-01-15', trip_id: trip-overlay, line: '187', direction_id: 0, service_id: svc, trip_headsign: Overlay, shape_id: shape-overlay, schedule_day_type: thursday, schedule_service_ids: svc}
-          - {gtfs_snapshot_id: snapshot-current, processing_date: '2026-01-15', service_date: '2026-01-15', trip_id: trip-current, line: '187', direction_id: 0, service_id: svc, trip_headsign: Current, shape_id: shape-current, schedule_day_type: thursday, schedule_service_ids: svc}
+      - input: ref('int_gtfs_trip_schedule_processing')
+        format: sql
+        rows: |
+          select 'snapshot-current' as gtfs_snapshot_id, date '2026-01-15' as processing_date, date '2026-01-15' as service_date, 'trip-overlay' as trip_id, '187' as line, 0 as direction_id, 'svc' as service_id, 'Overlay' as trip_headsign, 'shape-overlay' as shape_id, 'thursday' as schedule_day_type, 'svc' as schedule_service_ids
+          union all select 'snapshot-current', date '2026-01-15', date '2026-01-15', 'trip-current', '187', 0, 'svc', 'Current', 'shape-current', 'thursday', 'svc'
       - input: ref('stg_gtfs__routes')
         rows:
           - {gtfs_snapshot_id: snapshot-current, route_id: '187', route_short_name: '187', mode: bus}

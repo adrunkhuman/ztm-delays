@@ -15,6 +15,7 @@ with contract_counts as (
     left join {{ source('raw', 'raw_gtfs_snapshots') }} as snapshots
         on stop_times.gtfs_snapshot_id = snapshots.snapshot_id
     where stop_times.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id", "__missing_snapshot__") }}'
+      and {{ gtfs_snapshot_date_filter(var("gtfs_snapshot_id", "__missing_snapshot__"), 'stop_times.gtfs_snapshot_date') }}
 )
 
 select issue_type, violation_count

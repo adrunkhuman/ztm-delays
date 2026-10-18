@@ -122,7 +122,7 @@ enriched as (
         matcher.service_observation_class,
         matcher.service_observation_flags
     from matcher_trips as matcher
-    inner join {{ ref('int_gtfs_trip_schedule_history') }} as schedule
+    inner join {{ ref('int_gtfs_trip_schedule_processing') }} as schedule
         on matcher.gtfs_snapshot_id = schedule.gtfs_snapshot_id
         and matcher.gps_date = schedule.processing_date
         and matcher.service_date = schedule.service_date

@@ -23,7 +23,9 @@ stop_service as (
         on stop_times.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
     -- Literal filters enable block pruning on the snapshot-clustered GTFS sources.
     where stop_times.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+      and {{ gtfs_snapshot_date_filter(var("gtfs_snapshot_id"), 'stop_times.gtfs_snapshot_date') }}
       and trips.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+      and {{ gtfs_snapshot_date_filter(var("gtfs_snapshot_id"), 'trips.gtfs_snapshot_date') }}
       and routes.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
 ),
 

@@ -29,6 +29,7 @@
         from {{ ref('int_serving_trip_route_pattern') }}
         where service_date between date_sub(date('{{ scope.start }}'), interval {{ lookback_days }} day)
             and date('{{ scope.end }}')
+          and {{ serving_window_service_date_filter('service_date', scope.start, scope.end) }}
     ),
     eligible as (
         select windows.window_type, windows.window_key, windows.source_end_date, patterns.*

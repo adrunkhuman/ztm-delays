@@ -12,6 +12,8 @@ with contract_counts as (
     from {{ source('raw', 'raw_gtfs_trips') }} as raw_trips
     left join {{ source('raw', 'raw_gtfs_snapshots') }} as snapshots
         on raw_trips.gtfs_snapshot_id = snapshots.snapshot_id
+    -- Weekly audit of every retained snapshot; the partitioned source requires an explicit filter.
+    where raw_trips.gtfs_snapshot_date >= date '1970-01-01'
 )
 
 select issue_type, violation_count

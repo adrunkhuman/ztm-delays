@@ -73,6 +73,8 @@ sources:
           - name: route_id
           - name: service_id
           - name: gtfs_snapshot_id
+          - name: gtfs_snapshot_date
+            description: Day partition (UTC date prefix of gtfs_snapshot_id). The table requires a filter on it.
       - name: raw_gtfs_stop_times
         description: Raw stop_times.txt rows loaded from GTFS snapshots.
         columns:
@@ -86,6 +88,8 @@ sources:
           - name: drop_off_type
             description: GTFS drop_off_type. Warsaw feed currently uses 0 for regular, 1 for no drop-off, and 3 for driver-arranged/request drop-off.
           - name: gtfs_snapshot_id
+          - name: gtfs_snapshot_date
+            description: Day partition (UTC date prefix of gtfs_snapshot_id). The table requires a filter on it.
       - name: raw_gtfs_stops
         description: Raw stops.txt rows loaded from GTFS snapshots.
         columns:

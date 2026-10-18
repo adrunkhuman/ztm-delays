@@ -22,6 +22,7 @@ unit_tests:
         serving_rebuild_end_date: '2026-01-15'
       macros:
         is_incremental: false
+        serving_window_service_date_filter: 'true'
     given:
       - input: ref('int_serving_trip_route_pattern')
         format: sql
