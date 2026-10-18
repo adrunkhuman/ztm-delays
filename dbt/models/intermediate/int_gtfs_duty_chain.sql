@@ -36,6 +36,7 @@ with scheduled_trips as (
         on schedule.gtfs_snapshot_id = trips.gtfs_snapshot_id
         and schedule.trip_id = trips.trip_id
         and trips.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+        and {{ gtfs_snapshot_date_filter(gtfs_snapshot_id, 'trips.gtfs_snapshot_date') }}
     left join {{ ref('stg_gtfs__routes') }} as routes
         on schedule.gtfs_snapshot_id = routes.gtfs_snapshot_id
         and schedule.line = routes.route_id
@@ -82,6 +83,7 @@ trip_terminal_stops as (
         on service_day_trips.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and service_day_trips.trip_id = stop_times.trip_id
         and stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+        and {{ gtfs_snapshot_date_filter(gtfs_snapshot_id, 'stop_times.gtfs_snapshot_date') }}
     group by service_day_trips.gtfs_snapshot_id, service_day_trips.trip_id
 ),
 

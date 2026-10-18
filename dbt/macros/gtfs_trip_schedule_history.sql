@@ -5,6 +5,10 @@ bounded_{{ name }} as (
     select * from {{ ref('stg_gtfs__' ~ name) }}
     {% if snapshot_ids is not none %}
     where gtfs_snapshot_id in ({{ schedule_snapshot_literals(snapshot_ids) }})
+    {% if name != 'calendar_dates' %}and {{ gtfs_snapshot_date_filter(snapshot_ids) }}{% endif %}
+    {% elif name != 'calendar_dates' %}
+    -- Deliberate full-history read; the partitioned source requires an explicit filter.
+    where gtfs_snapshot_date >= date '1970-01-01'
     {% endif %}
 ),
 {% endfor %}

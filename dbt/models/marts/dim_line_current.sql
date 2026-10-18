@@ -15,6 +15,7 @@ routes as (
     from {{ ref('stg_gtfs__routes') }} as routes
     inner join selected_snapshot
         on routes.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
+    where routes.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
 ),
 
 headsigns_by_direction as (
@@ -26,7 +27,10 @@ headsigns_by_direction as (
     from {{ ref('stg_gtfs__trips') }} as trips
     inner join selected_snapshot
         on trips.gtfs_snapshot_id = selected_snapshot.gtfs_snapshot_id
-    where trips.trip_headsign is not null
+    -- Literal filters prune the snapshot-partitioned source; the join alone does not.
+    where trips.gtfs_snapshot_id = '{{ var("gtfs_snapshot_id") }}'
+      and {{ gtfs_snapshot_date_filter(var("gtfs_snapshot_id"), 'trips.gtfs_snapshot_date') }}
+      and trips.trip_headsign is not null
     group by trips.line, trips.gtfs_snapshot_id, trips.direction_id
 ),
 

@@ -62,6 +62,8 @@ models:
       - name: brigade
       - name: shape_id
       - name: gtfs_snapshot_id
+      - name: gtfs_snapshot_date
+        description: Source partition, the UTC date prefix of gtfs_snapshot_id. Filter on it next to gtfs_snapshot_id; see the gtfs_snapshot_date_filter macro.
 
   - name: stg_gtfs__stop_times
     description: GTFS stop times spanning all loaded snapshots, with schedule times converted to seconds since GTFS service-day midnight. Values can exceed 86400 for overnight service.
@@ -78,6 +80,8 @@ models:
       - name: stop_service_class
         description: "Passenger-service class derived from GTFS pickup/drop-off rules: regular, request, or not_in_passenger_service."
       - name: gtfs_snapshot_id
+      - name: gtfs_snapshot_date
+        description: Source partition, the UTC date prefix of gtfs_snapshot_id. Filter on it next to gtfs_snapshot_id; see the gtfs_snapshot_date_filter macro.
 
   - name: stg_gtfs__stops
     description: GTFS stops spanning all loaded snapshots, after dropping structurally impossible coordinates.
@@ -220,10 +224,10 @@ unit_tests:
       - input: source('raw', 'raw_gtfs_trips')
         format: sql
         rows: |
-          select 'trip-old' as trip_id, '187' as route_id, 'svc-old' as service_id, 'Old' as trip_headsign, 0 as direction_id, 'block-old' as block_id, '10' as block_short_name, 'shape-old' as shape_id, 'snapshot-old' as gtfs_snapshot_id
-          union all select 'trip-valid', '187', 'svc-valid', 'Valid', 1, 'block-valid', '0012', 'shape-valid', 'snapshot-valid'
-          union all select 'trip-future', '187', 'svc-future', 'Future', 0, 'block-future', '14', 'shape-future', 'snapshot-future'
-          union all select 'trip-empty-block', '187', 'svc-empty', 'Empty Block', 0, '', '', 'shape-empty', 'snapshot-valid'
+          select 'trip-old' as trip_id, '187' as route_id, 'svc-old' as service_id, 'Old' as trip_headsign, 0 as direction_id, 'block-old' as block_id, '10' as block_short_name, 'shape-old' as shape_id, 'snapshot-old' as gtfs_snapshot_id, date '2026-01-14' as gtfs_snapshot_date
+          union all select 'trip-valid', '187', 'svc-valid', 'Valid', 1, 'block-valid', '0012', 'shape-valid', 'snapshot-valid', date '2026-01-15'
+          union all select 'trip-future', '187', 'svc-future', 'Future', 0, 'block-future', '14', 'shape-future', 'snapshot-future', date '2026-01-16'
+          union all select 'trip-empty-block', '187', 'svc-empty', 'Empty Block', 0, '', '', 'shape-empty', 'snapshot-valid', date '2026-01-15'
     expect:
       rows:
         - {trip_id: 'trip-old', line: '187', service_id: 'svc-old', trip_headsign: 'Old', direction_id: 0, block_id: 'block-old', block_short_name: '10', brigade: '10', shape_id: 'shape-old', gtfs_snapshot_id: 'snapshot-old'}
@@ -237,13 +241,13 @@ unit_tests:
       - input: source('raw', 'raw_gtfs_stop_times')
         format: sql
         rows: |
-          select 'trip-1' as trip_id, '401002' as stop_id, 7 as stop_sequence, '25:03:04' as arrival_time, '25:04:05' as departure_time, 3 as pickup_type, 3 as drop_off_type, 'snapshot-valid' as gtfs_snapshot_id
-          union all select 'trip-1', '401003', 8, '25:05:04', '25:06:05', 1, 1, 'snapshot-valid'
-          union all select 'trip-1', '401004', 9, '25:07:04', '25:08:05', null, null, 'snapshot-valid'
-          union all select 'trip-1', '401005', 10, '25:09:04', '25:10:05', 1, 0, 'snapshot-valid'
-          union all select 'trip-1', '401006', 11, '25:11:04', '25:12:05', 0, 1, 'snapshot-valid'
-          union all select 'trip-1', '401007', 12, '25:13:04', '25:14:05', 3, 0, 'snapshot-valid'
-          union all select 'trip-1', '401008', 13, '25:15:04', '25:16:05', 0, 3, 'snapshot-valid'
+          select 'trip-1' as trip_id, '401002' as stop_id, 7 as stop_sequence, '25:03:04' as arrival_time, '25:04:05' as departure_time, 3 as pickup_type, 3 as drop_off_type, 'snapshot-valid' as gtfs_snapshot_id, date '2026-01-15' as gtfs_snapshot_date
+          union all select 'trip-1', '401003', 8, '25:05:04', '25:06:05', 1, 1, 'snapshot-valid', date '2026-01-15'
+          union all select 'trip-1', '401004', 9, '25:07:04', '25:08:05', null, null, 'snapshot-valid', date '2026-01-15'
+          union all select 'trip-1', '401005', 10, '25:09:04', '25:10:05', 1, 0, 'snapshot-valid', date '2026-01-15'
+          union all select 'trip-1', '401006', 11, '25:11:04', '25:12:05', 0, 1, 'snapshot-valid', date '2026-01-15'
+          union all select 'trip-1', '401007', 12, '25:13:04', '25:14:05', 3, 0, 'snapshot-valid', date '2026-01-15'
+          union all select 'trip-1', '401008', 13, '25:15:04', '25:16:05', 0, 3, 'snapshot-valid', date '2026-01-15'
     expect:
       rows:
         - trip_id: 'trip-1'

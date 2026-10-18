@@ -8,5 +8,7 @@ select
     nullif(cast(block_short_name as string), '') as block_short_name,
     coalesce(nullif(regexp_replace(cast(block_short_name as string), r'^0+', ''), ''), '0') as brigade,
     cast(shape_id as string) as shape_id,
-    cast(gtfs_snapshot_id as string) as gtfs_snapshot_id
+    cast(gtfs_snapshot_id as string) as gtfs_snapshot_id,
+    -- Uncast so filters through this view still prune the source partitions.
+    gtfs_snapshot_date
 from {{ source('raw', 'raw_gtfs_trips') }}

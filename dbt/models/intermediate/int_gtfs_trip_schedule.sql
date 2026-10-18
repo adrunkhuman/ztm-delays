@@ -96,6 +96,7 @@ active_trip_services as (
         on trips.service_id = calendar_schedule_classes.service_id
         and trips.gtfs_snapshot_id = calendar_schedule_classes.gtfs_snapshot_id
     where trips.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+      and {{ gtfs_snapshot_date_filter(gtfs_snapshot_id, 'trips.gtfs_snapshot_date') }}
 ),
 
 line_direction_schedule_classes as (
@@ -147,6 +148,7 @@ active_trips as (
         and trips.line = line_direction_schedule_classes.line
         and trips.direction_id = line_direction_schedule_classes.direction_id
     where trips.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+      and {{ gtfs_snapshot_date_filter(gtfs_snapshot_id, 'trips.gtfs_snapshot_date') }}
 ),
 
 trip_stop_times as (
@@ -172,6 +174,7 @@ trip_stop_times as (
         on active_trips.trip_id = stop_times.trip_id
         and active_trips.gtfs_snapshot_id = stop_times.gtfs_snapshot_id
         and stop_times.gtfs_snapshot_id = '{{ gtfs_snapshot_id }}'
+        and {{ gtfs_snapshot_date_filter(gtfs_snapshot_id, 'stop_times.gtfs_snapshot_date') }}
 ),
 
 trip_schedules as (

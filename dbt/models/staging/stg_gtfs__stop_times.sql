@@ -19,5 +19,7 @@ select
             then 'request'
         else 'regular'
     end as stop_service_class,
-    cast(gtfs_snapshot_id as string) as gtfs_snapshot_id
+    cast(gtfs_snapshot_id as string) as gtfs_snapshot_id,
+    -- Uncast so filters through this view still prune the source partitions.
+    gtfs_snapshot_date
 from {{ source('raw', 'raw_gtfs_stop_times') }}
