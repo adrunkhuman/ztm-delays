@@ -27,6 +27,8 @@ from ztm_airflow_common import (
 
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
 GTFS_DATE_LENGTH = 8
+# Partition column of the large per-snapshot tables: the UTC date prefix of the snapshot ID.
+GTFS_SNAPSHOT_DATE_FIELD = "gtfs_snapshot_date"
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
 GTFS_SNAPSHOT_ID_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z_[0-9a-f]{12}$")
 PROCESSING_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -66,6 +68,7 @@ class GtfsTableSpec:
     table: str
     schema: list[bigquery.SchemaField]
     clustering_fields: list[str] | None = None
+    partitioned: bool = False
 
 
 GTFS_TABLES = (
@@ -82,8 +85,10 @@ GTFS_TABLES = (
             bigquery.SchemaField("block_short_name", "STRING"),
             bigquery.SchemaField("shape_id", "STRING"),
             bigquery.SchemaField("gtfs_snapshot_id", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField(GTFS_SNAPSHOT_DATE_FIELD, "DATE", mode="REQUIRED"),
         ],
         clustering_fields=["gtfs_snapshot_id"],
+        partitioned=True,
     ),
     GtfsTableSpec(
         filename="stop_times.txt",
@@ -97,8 +102,10 @@ GTFS_TABLES = (
             bigquery.SchemaField("pickup_type", "INTEGER"),
             bigquery.SchemaField("drop_off_type", "INTEGER"),
             bigquery.SchemaField("gtfs_snapshot_id", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField(GTFS_SNAPSHOT_DATE_FIELD, "DATE", mode="REQUIRED"),
         ],
         clustering_fields=["gtfs_snapshot_id"],
+        partitioned=True,
     ),
     GtfsTableSpec(
         filename="stops.txt",
@@ -234,6 +241,10 @@ def _extract_gtfs_table(zip_file: zipfile.ZipFile, spec: GtfsTableSpec, snapshot
 
     output_path = output_dir / spec.filename.replace(".txt", ".csv")
     fieldnames = [field.name for field in spec.schema]
+    snapshot_columns = {"gtfs_snapshot_id": snapshot_id}
+    if spec.partitioned:
+        snapshot_columns[GTFS_SNAPSHOT_DATE_FIELD] = _gtfs_snapshot_date(snapshot_id).isoformat()
+    source_fields = [field for field in spec.schema if field.name not in snapshot_columns]
 
     with (
         zip_file.open(spec.filename) as source_file,
@@ -244,11 +255,16 @@ def _extract_gtfs_table(zip_file: zipfile.ZipFile, spec: GtfsTableSpec, snapshot
         writer.writeheader()
         for row in reader:
             writer.writerow(
-                {field.name: _csv_value(row.get(field.name, ""), field) for field in spec.schema[:-1]}
-                | {"gtfs_snapshot_id": snapshot_id}
+                {field.name: _csv_value(row.get(field.name, ""), field) for field in source_fields} | snapshot_columns
             )
 
     return output_path
+
+
+def _gtfs_snapshot_date(snapshot_id: str) -> date:
+    if not GTFS_SNAPSHOT_ID_PATTERN.fullmatch(snapshot_id):
+        raise ValueError(f"Unexpected GTFS snapshot ID: {snapshot_id}")
+    return date.fromisoformat(snapshot_id[:10])
 
 
 def _csv_value(value: str, field: bigquery.SchemaField) -> str:
@@ -265,6 +281,11 @@ def _load_csv_to_bigquery(client: bigquery.Client, csv_path: Path, spec: GtfsTab
         create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
         clustering_fields=spec.clustering_fields,
+        time_partitioning=(
+            bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY, field=GTFS_SNAPSHOT_DATE_FIELD)
+            if spec.partitioned
+            else None
+        ),
     )
     job_id = f"load_{spec.table.rsplit('.', 1)[-1]}_{_bigquery_job_id_suffix(snapshot_id)}"
     with csv_path.open("rb") as csv_file:
