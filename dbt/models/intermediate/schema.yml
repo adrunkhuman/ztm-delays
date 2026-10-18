@@ -79,6 +79,9 @@ models:
         description: Raw GTFS snapshot publish timestamp used to rank eligible snapshots.
         tests: [not_null]
 
+  - name: int_gtfs_trip_schedule_processing
+    description: Ephemeral int_gtfs_trip_schedule_history rows for one processing_date under its governing gtfs_snapshot_id. Nightly facts use it so the snapshot-partitioned GTFS sources are pruned; columns match the history spine.
+
   - name: int_gtfs_trip_schedule_history
     description: Var-free scheduled GTFS trip spine for historical schedule-version lineage. Uses int_gtfs_processing_snapshot to choose the governing snapshot for each processing date and emits processing-date plus prior-service-date trips.
     columns:
