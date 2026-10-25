@@ -28,7 +28,7 @@ The persisted `int_gtfs_processing_snapshot` mapping selects the timetable for e
 
 A normal run for date `D` reads GPS from `D-1` and `D` into one matcher artifact, then publishes both service dates. Trips extending beyond `D` are completed by the next run. Rebuilding an older processing date preserves newer overnight observations already published into its service-date partition. Known archive boundaries use an explicit current-date-only policy.
 
-Scheduled times use Warsaw wall-clock time, including GTFS times beyond 24:00. The matcher and dbt share the same daylight-saving policy: normalize spring-forward gaps and use the first fall-back occurrence.
+Scheduled times follow the GTFS rule: seconds elapsed from Warsaw noon minus 12 h of the service date, including times beyond 24:00. That origin is local midnight except on DST change days, and ZTM vehicles follow it (verified against GPS on 2026-10-25). The matcher (`ztm_matcher.time`) and dbt (`warsaw_scheduled_timestamp`) implement the same conversion.
 
 ## Warehouse
 

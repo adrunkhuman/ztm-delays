@@ -43,8 +43,17 @@ def _feed(path: Path, day: date, schedules: list[tuple[str, str, str, str]]) -> 
             archive.writestr(name, stream.getvalue())
 
 
-@pytest.mark.parametrize("day", [date(2026, 1, 15), date(2026, 3, 29), date(2026, 10, 25)])
-def test_dated_load_matches_full_selection_and_semantics(tmp_path: Path, day: date) -> None:
+@pytest.mark.parametrize(
+    ("day", "loaded"),
+    [
+        (date(2026, 1, 15), {"touch-start", "current-start", "both"}),
+        # GTFS origin is noon minus 12 h: 00:00:00 on the 23-hour day is 23:00 the evening before.
+        (date(2026, 3, 29), {"touch-start", "both"}),
+        # 48:00:00 of the prior service day lands at 23:00 on the 25-hour day.
+        (date(2026, 10, 25), {"touch-start", "current-start", "both", "long"}),
+    ],
+)
+def test_dated_load_matches_full_selection_and_semantics(tmp_path: Path, day: date, loaded: set[str]) -> None:
     path = tmp_path / "feed.zip"
     _feed(
         path,
@@ -62,7 +71,7 @@ def test_dated_load_matches_full_selection_and_semantics(tmp_path: Path, day: da
     bounded = gtfs.load(path, "synthetic", day)
     expected = gtfs.select(full, day)
     assert gtfs.select(bounded, day) == expected
-    assert set(bounded.stop_times) == {"touch-start", "current-start", "both"}
+    assert set(bounded.stop_times) == loaded
     assert sum(row["trip_id"] == "both" for row in expected) == 2
     assert bounded.stop_times == {key: full.stop_times[key] for key in bounded.stop_times}
     assert stop_semantics(duties(expected, bounded), bounded) == stop_semantics(duties(expected, full), full)
