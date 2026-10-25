@@ -1261,17 +1261,17 @@ def test_prior_service_gtfs_after_midnight_gps_produces_complete_lineage(tmp_pat
     [
         (
             date(2026, 3, 29),
-            datetime(2026, 3, 29, 1, 30, tzinfo=UTC),
+            datetime(2026, 3, 29, 0, 30, tzinfo=UTC),
             datetime(2026, 3, 29, 23, 0, tzinfo=UTC),
         ),
         (
             date(2026, 10, 25),
-            datetime(2026, 10, 25, 0, 30, tzinfo=UTC),
+            datetime(2026, 10, 25, 1, 30, tzinfo=UTC),
             datetime(2026, 10, 26, 0, 0, tzinfo=UTC),
         ),
     ],
 )
-def test_fact_scheduled_times_use_warsaw_wall_clock_across_dst_and_overnight(
+def test_fact_scheduled_times_use_gtfs_origin_across_dst_and_overnight(
     tmp_path: Path, service_date: date, scheduled_start: datetime, scheduled_end: datetime
 ) -> None:
     zip_path, output = tmp_path / "snapshot.zip", tmp_path / "output"

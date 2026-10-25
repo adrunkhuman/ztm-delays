@@ -128,7 +128,7 @@ def test_same_trip_ids_remain_distinct_across_service_dates(tmp_path: Path) -> N
     assert {row["service_date"] for row in rows} == {date(2026, 1, 14), date(2026, 1, 15)}
 
 
-def test_select_uses_shared_warsaw_wall_clock_policy_across_dst() -> None:
+def test_select_uses_gtfs_noon_minus_12h_origin_across_dst() -> None:
     trip = Trip("dst", "r", "svc", "DST", 0, "block", "1", "1", "s")
     stop_times = {
         "dst": [
@@ -139,12 +139,12 @@ def test_select_uses_shared_warsaw_wall_clock_policy_across_dst() -> None:
     for processing_date, expected_start, expected_end in (
         (
             date(2026, 3, 29),
-            datetime(2026, 3, 29, 1, 30, tzinfo=UTC),
+            datetime(2026, 3, 29, 0, 30, tzinfo=UTC),
             datetime(2026, 3, 29, 23, 0, tzinfo=UTC),
         ),
         (
             date(2026, 10, 25),
-            datetime(2026, 10, 25, 0, 30, tzinfo=UTC),
+            datetime(2026, 10, 25, 1, 30, tzinfo=UTC),
             datetime(2026, 10, 26, 0, 0, tzinfo=UTC),
         ),
     ):

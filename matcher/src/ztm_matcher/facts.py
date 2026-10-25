@@ -168,35 +168,13 @@ def _assert_unique(connection: duckdb.DuckDBPyConnection, query: str, label: str
 
 
 def _install_warsaw_scheduled_time_macro(connection: duckdb.DuckDBPyConnection) -> None:
-    """Install Python-authoritative Warsaw wall-clock conversion, not legacy dbt elapsed UTC."""
+    """Install the SQL twin of ``time.warsaw_scheduled_time`` (GTFS noon-minus-12h origin)."""
+    # Interval micros are absolute on TIMESTAMPTZ, so the subtraction happens in UTC.
     connection.execute(
         """
         create or replace temp macro warsaw_scheduled_time(service_date, seconds) as (
-            with wall_time as (
-                select service_date::timestamp + seconds * interval '1 second' as local_time
-            ), resolved as (
-                select local_time, timezone('Europe/Warsaw', local_time) as resolved_time,
-                    local_time - interval '1 hour' as previous_local_time
-                from wall_time
-            ), offsets as (
-                select *, local_time - timezone('UTC', resolved_time) as resolved_offset,
-                    previous_local_time
-                        - timezone('UTC', timezone('Europe/Warsaw', previous_local_time)) as previous_offset,
-                    timezone('Europe/Warsaw', resolved_time) as resolved_local_time,
-                    timezone('Europe/Warsaw', timezone('Europe/Warsaw', previous_local_time))
-                        as previous_resolved_local_time
-                from resolved
-            )
-            select case
-                -- DuckDB selects the second fall-back occurrence by default. Choose the
-                -- first one, as stop_alignment does with Python's fold=0.
-                when resolved_local_time = local_time
-                    and previous_resolved_local_time = previous_local_time
-                    and previous_offset > resolved_offset
-                    then resolved_time - (previous_offset - resolved_offset)
-                else resolved_time
-            end
-            from offsets
+            timezone('Europe/Warsaw', service_date::timestamp + interval '12 hours')
+                - interval '12 hours' + seconds * interval '1 second'
         )
         """
     )

@@ -238,12 +238,14 @@ def test_ports_segment_interpolation_uneven_interpolation_and_snapshot_identity(
 @pytest.mark.parametrize(
     ("service_date", "seconds", "expected"),
     [
-        (date(2026, 3, 29), 2 * 3600 + 30 * 60, datetime(2026, 3, 29, 1, 30, tzinfo=UTC)),
-        (date(2026, 10, 25), 2 * 3600 + 30 * 60, datetime(2026, 10, 25, 0, 30, tzinfo=UTC)),
+        (date(2026, 3, 29), 2 * 3600 + 30 * 60, datetime(2026, 3, 29, 0, 30, tzinfo=UTC)),
+        (date(2026, 10, 25), 2 * 3600 + 30 * 60, datetime(2026, 10, 25, 1, 30, tzinfo=UTC)),
+        # Observed 2026-10-25: night trips at 27:30 ran at 02:30 CET, not 03:30.
+        (date(2026, 10, 24), 27 * 3600 + 30 * 60, datetime(2026, 10, 25, 1, 30, tzinfo=UTC)),
         (date(2026, 1, 15), 25 * 3600, datetime(2026, 1, 16, tzinfo=UTC)),
     ],
 )
-def test_scheduled_time_uses_warsaw_wall_clock(service_date: date, seconds: int, expected: datetime) -> None:
+def test_scheduled_time_uses_gtfs_noon_minus_12h_origin(service_date: date, seconds: int, expected: datetime) -> None:
     assert _scheduled_time(service_date, seconds) == expected
 
 
