@@ -59,7 +59,7 @@ def test_parse_record_converts_warsaw_time_to_utc() -> None:
         "VehicleNumber": "1234",
     }
 
-    row = poller._parse_record(record, vehicle_type_id=1)
+    row = poller._parse_record(record, vehicle_type_id=1, received_at=datetime(2026, 1, 15, 11, 0, 5, tzinfo=UTC))
 
     assert row == {
         "Lines": "187",
@@ -72,8 +72,17 @@ def test_parse_record_converts_warsaw_time_to_utc() -> None:
     }
 
 
-def test_parse_warsaw_time_uses_first_occurrence_during_fall_transition() -> None:
-    assert poller._parse_warsaw_time("2026-10-25 02:30:00") == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+@pytest.mark.parametrize(
+    ("received_at", "expected"),
+    [
+        (datetime(2026, 10, 25, 0, 30, 5, tzinfo=UTC), datetime(2026, 10, 25, 0, 30, tzinfo=UTC)),
+        (datetime(2026, 10, 25, 1, 30, 5, tzinfo=UTC), datetime(2026, 10, 25, 1, 30, tzinfo=UTC)),
+    ],
+)
+def test_parse_warsaw_time_resolves_repeated_fall_hour_nearest_the_poll(
+    received_at: datetime, expected: datetime
+) -> None:
+    assert poller._parse_warsaw_time("2026-10-25 02:30:00", received_at) == expected
 
 
 def test_parse_record_skips_nonexistent_spring_transition_time() -> None:
@@ -86,11 +95,11 @@ def test_parse_record_skips_nonexistent_spring_transition_time() -> None:
         "VehicleNumber": "1234",
     }
 
-    assert poller._parse_record(record, vehicle_type_id=1) is None
+    assert poller._parse_record(record, vehicle_type_id=1, received_at=datetime(2026, 3, 29, 1, 0, tzinfo=UTC)) is None
 
 
 def test_parse_record_skips_invalid_records() -> None:
-    row = poller._parse_record({"Lines": "187"}, vehicle_type_id=1)
+    row = poller._parse_record({"Lines": "187"}, vehicle_type_id=1, received_at=datetime(2026, 1, 15, 11, tzinfo=UTC))
 
     assert row is None
 

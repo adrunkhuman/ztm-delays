@@ -530,9 +530,10 @@ def _poll_api(session: requests.Session, config: Config, vehicle_type: VehicleTy
         LOGGER.warning("API returned no records vehicle_type=%s", vehicle_type.name)
         return []
 
+    received_at = datetime.now(UTC)
     parsed_rows = []
     for record in records:
-        row = _parse_record(record, vehicle_type.id)
+        row = _parse_record(record, vehicle_type.id, received_at)
         if row is not None:
             parsed_rows.append(row)
     return parsed_rows
@@ -712,9 +713,9 @@ def _extract_records(payload: object) -> list[dict[str, object]]:
     return [cast("dict[str, object]", record) for record in records if isinstance(record, dict)]
 
 
-def _parse_record(record: dict[str, object], vehicle_type_id: int) -> GpsRow | None:
+def _parse_record(record: dict[str, object], vehicle_type_id: int, received_at: datetime) -> GpsRow | None:
     try:
-        gps_time = _parse_warsaw_time(str(record["Time"]))
+        gps_time = _parse_warsaw_time(str(record["Time"]), received_at)
         return {
             "Lines": str(record["Lines"]),
             "Brigade": str(record["Brigade"]),
@@ -729,10 +730,13 @@ def _parse_record(record: dict[str, object], vehicle_type_id: int) -> GpsRow | N
         return None
 
 
-def _parse_warsaw_time(value: str) -> datetime:
+def _parse_warsaw_time(value: str, received_at: datetime) -> datetime:
     local_time = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=WARSAW_TZ)
     naive_time = local_time.replace(tzinfo=None)
-    utc_time = local_time.astimezone(UTC)
+    # The API sends naive local time. In the repeated fall-back hour the other reading is an hour off,
+    # so the one nearer the poll is right; always taking the first dropped a whole hour as stale.
+    readings = {local_time.replace(fold=fold).astimezone(UTC) for fold in (0, 1)}
+    utc_time = min(readings, key=lambda reading: abs(reading - received_at))
     if utc_time.astimezone(WARSAW_TZ).replace(tzinfo=None) != naive_time:
         raise ValueError(f"nonexistent Warsaw local time: {value}")
     return utc_time
