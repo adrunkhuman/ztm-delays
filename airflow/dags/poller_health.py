@@ -1,9 +1,10 @@
 """Evaluate private v1 poll summaries without Airflow, GPS scans, or service assumptions.
 
 The signal is the fresh fleet: distinct vehicles with a ping younger than the
-poller's age cutoff, per successful poll. Each minute is compared with the SAME
-Warsaw weekday and wall-clock minute in the preceding 28 local dates (DST folds
-are folded into one daily sample). Weeks that were themselves outages at that
+poller's age cutoff, per successful poll. Each minute is compared with the same
+wall-clock minute on the latest four local dates within 28 days that ran the
+same timetable class (poller_health_schedule; plain weekday without GTFS data).
+DST folds are folded into one daily sample. Weeks that were themselves outages at that
 minute are dropped, so a past incident cannot lower the bar. Minutes where fewer
 than ``minimum_fleet`` vehicles usually run are never flagged: quiet nights are
 not outages. The share of stale rows is not a signal; the API keeps serving the
@@ -30,6 +31,8 @@ from itertools import pairwise
 from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from poller_health_schedule import IRREGULAR, Schedule, profile
 
 MODES = ("bus", "tram")
 WARSAW = ZoneInfo("Europe/Warsaw")
@@ -203,12 +206,18 @@ def validate_minute(item: dict[str, Any]) -> None:
         raise ValueError("distinct counts exceed accepted rows")
 
 
-def comparable_hours(hour: datetime, config: Config) -> list[datetime]:
-    """Return unique UTC candidates for same local weekday/hour, at most five."""
+def comparable_hours(hour: datetime, config: Config, schedule: Schedule | None = None) -> list[datetime]:
+    """Return unique UTC candidates for the same local hour on the latest four regular days of its class."""
     # Pendulum arithmetic with ZoneInfo can drop the timezone and shift the wall clock.
     local = datetime.fromtimestamp(hour.timestamp(), WARSAW)
+    kind, _ = profile(local.date(), schedule)
     candidates = set()
-    for days in range(7, config.lookback_days + 1, 7):
+    used = 0
+    for days in range(1, config.lookback_days + 1):
+        other, scale = profile(local.date() - timedelta(days=days), schedule)
+        if used == MAXIMUM_SAMPLES or other != kind or abs(scale - 1) > IRREGULAR:
+            continue
+        used += 1
         wall = (local - timedelta(days=days)).replace(tzinfo=None)
         for fold in (0, 1):
             candidate = wall.replace(tzinfo=WARSAW, fold=fold).astimezone(UTC)
@@ -325,8 +334,12 @@ def baseline(
     config: Config,
     *,
     reset_at: str | None = None,
+    scale: float = 1.0,
 ) -> dict[str, Any]:
-    """Per-minute usual fleet from one sample per local date, dropping outage weeks."""
+    """Per-minute usual fleet from one sample per local date, dropping outage weeks.
+
+    ``scale`` shrinks the expectation for a day whose timetable plans fewer vehicles than usual.
+    """
     epoch = timestamp(reset_at) if reset_at else None
     daily: dict[str, dict[int, list[float]]] = {}
     for source in samples:
@@ -348,11 +361,16 @@ def baseline(
             continue
         typical = median(values)
         kept = [value for value in values if value >= config.threshold * typical] or values
-        usual.append(round(median(kept), 1))
-        low.append(round(min(kept), 1))
-        high.append(round(max(kept), 1))
+        usual.append(round(median(kept) * scale, 1))
+        low.append(round(min(kept) * scale, 1))
+        high.append(round(max(kept) * scale, 1))
     samples_used = sum(1 for day in daily.values() if day)
     return {"samples": min(samples_used, MAXIMUM_SAMPLES), "vehicles": usual, "low": low, "high": high}
+
+
+def planned_scale(hour: datetime, schedule: Schedule | None) -> float:
+    """Expect less on a smaller-than-usual plan, never more: extra service is often daytime only."""
+    return min(1.0, profile(hour.astimezone(WARSAW).date(), schedule)[1])
 
 
 def empty_baseline() -> dict[str, Any]:
@@ -703,6 +721,7 @@ def evaluate(  # noqa: PLR0913
     evaluated_at: datetime | None = None,
     source_reason: str = "summary_absent",
     reset_modes: tuple[str, ...] = (),
+    schedule: Schedule | None = None,
 ) -> dict[str, Any]:
     """Evaluate one closed UTC hour; inputs must already pass source validation."""
     if previous_report and timestamp(previous_report["hour_start"]) != hour - timedelta(hours=1):
@@ -728,15 +747,16 @@ def evaluate(  # noqa: PLR0913
         "vehicle_types": {},
         "events": reset_events,
     }
-    candidates = set(comparable_hours(hour, config))
+    candidates = set(comparable_hours(hour, config, schedule))
     samples = [source for source in samples if timestamp(source["hour_start"]) in candidates]
+    scale = planned_scale(hour, schedule)
     for mode in MODES:
         prior_state = previous_report["vehicle_types"][mode]["state"] if previous_report else {}
         row, events = evaluate_mode(
             hour,
             mode,
             summary,
-            baseline(samples, mode, config, reset_at=prior_state.get("baseline_reset_at")),
+            baseline(samples, mode, config, reset_at=prior_state.get("baseline_reset_at"), scale=scale),
             previous_summary,
             previous_report,
             collection,

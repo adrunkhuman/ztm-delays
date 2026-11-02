@@ -4,8 +4,9 @@ Environment controls: POLLER_HEALTH_DURATION_MINUTES (15),
 POLLER_HEALTH_COVERAGE_FRACTION (0.8 minimum), POLLER_HEALTH_THRESHOLD (0.5),
 POLLER_HEALTH_LOOKBACK_DAYS (28, bounded to 21..28), POLLER_HEALTH_MINIMUM_FLEET
 (20), and optional POLLER_HEALTH_WEBHOOK_URL (HTTPS). Baselines require three
-same-weekday samples per minute; raw-GPS seeds (dag_poller_health_seed) stand in
-for summaries from before collection began.
+samples per minute from days of the same GTFS schedule class (dag_gtfs_load
+refreshes poller_health_schedule.SCHEDULE_PATH); raw-GPS seeds
+(dag_poller_health_seed) stand in for summaries from before collection began.
 Source paths: POLLER_HEALTH_GCS_PREFIX (health/poller/hourly) and
 POLLER_HEARTBEAT_GCS_PATH (health/poller/latest.json), both stripped and nonempty.
 
@@ -49,7 +50,7 @@ import os
 import re
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import requests
@@ -68,6 +69,7 @@ from poller_health import (
     evaluate,
     hour_path,
     iso,
+    planned_scale,
     snapshot,
     timestamp,
     upgrade_report,
@@ -79,6 +81,7 @@ from poller_health_gcs import (
     collection_start,
     first_collection_start,
     read_object,
+    read_schedule,
     read_summary,
 )
 from poller_health_public import HISTORY_HOURS, HISTORY_MAX_BYTES, HISTORY_PATH, LOOKAHEAD_HOURS, feed_history
@@ -90,6 +93,9 @@ from ztm_airflow_common import (
     GCS_BUCKET,
     airflow_failure_alert,
 )
+
+if TYPE_CHECKING:
+    from poller_health_schedule import Schedule
 
 LOGGER = logging.getLogger(__name__)
 RAW_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_poller_hourly_health"
@@ -294,17 +300,20 @@ def persist_rows(client: bigquery.Client, report: dict[str, Any]) -> None:
 
 
 def lookahead_baselines(
-    bucket: storage.Bucket, report: dict[str, Any], config: Config
+    bucket: storage.Bucket, report: dict[str, Any], config: Config, schedule: Schedule | None = None
 ) -> dict[str, list[dict[str, Any]]]:
     """Baselines for the hours after the evaluated one, so live readers know "usual now"."""
     hour = timestamp(report["hour_start"])
     result: dict[str, list[dict[str, Any]]] = {mode: [] for mode in MODES}
     for offset in range(1, LOOKAHEAD_HOURS + 1):
-        candidates = comparable_hours(hour + timedelta(hours=offset), config)
+        ahead = hour + timedelta(hours=offset)
+        candidates = comparable_hours(ahead, config, schedule)
         samples = [sample for candidate in candidates if (sample := read_sample(bucket, candidate)[1])]
         for mode in MODES:
             reset_at = report["vehicle_types"][mode]["state"].get("baseline_reset_at")
-            result[mode].append(baseline(samples, mode, config, reset_at=reset_at))
+            result[mode].append(
+                baseline(samples, mode, config, reset_at=reset_at, scale=planned_scale(ahead, schedule))
+            )
     return result
 
 
@@ -328,7 +337,7 @@ def publish_history(bucket: storage.Bucket, report: dict[str, Any], config: Conf
     if newer:
         return
     previous = [optional_report(bucket, hour - timedelta(hours=offset)) for offset in range(HISTORY_HOURS - 1, 0, -1)]
-    history = feed_history(report, previous, lookahead_baselines(bucket, report, config), config)
+    history = feed_history(report, previous, lookahead_baselines(bucket, report, config, read_schedule(bucket)), config)
     # Public readers poll this object; GCS must not serve a cached older copy.
     write_object(bucket, HISTORY_PATH, history, generation, limit=HISTORY_MAX_BYTES, cache_control="no-cache")
 
@@ -351,7 +360,8 @@ def evaluate_report(
     heartbeat_start = collection_start(bucket)
     if heartbeat_start:
         collection_markers.append(heartbeat_start)
-    for candidate in comparable_hours(hour, config):
+    schedule = read_schedule(bucket)
+    for candidate in comparable_hours(hour, config, schedule):
         historical, sample = read_sample(bucket, candidate)
         if historical:
             collection_markers.append(historical["collection_started_at"])
@@ -377,6 +387,7 @@ def evaluate_report(
         config=config,
         source_reason=source_reason,
         reset_modes=reset_modes,
+        schedule=schedule,
     )
     if evaluation_gap:
         for row in report["vehicle_types"].values():

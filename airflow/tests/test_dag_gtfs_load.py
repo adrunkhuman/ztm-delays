@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import json
 import sys
 import types
 import zipfile
 from collections import UserDict
 from dataclasses import dataclass
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -438,7 +440,58 @@ def test_dag_runs_tests_gtfs_staging_and_dimensions_after_raw_load() -> None:
     assert dag.dbt_run_gtfs_dimensions in dag.dbt_test_gtfs_staging.downstream
     assert dag.dbt_test_gtfs_dimensions in dag.dbt_run_gtfs_dimensions.downstream
     assert dag.watcher in dag.dbt_test_gtfs_dimensions.downstream
+    assert dag.schedule_days in dag.loaded_gtfs_snapshot.downstream
+    assert dag.watcher in dag.schedule_days.downstream
     assert dag.fail_on_any_task_failure.kwargs["retries"] == 0
+
+
+@pytest.mark.parametrize(
+    ("stored", "first"), [(None, date(2026, 9, 21)), ({"version": 1, "days": {}}, date(2026, 11, 2))]
+)
+def test_refresh_schedule_days_scans_new_snapshots_or_bootstraps_window(
+    monkeypatch: pytest.MonkeyPatch, stored: dict[str, Any] | None, first: date
+) -> None:
+    dag = _load_dag_module()
+    uploads: list[tuple[str, dict[str, Any]]] = []
+    queries: list[Any] = []
+
+    class Blob:
+        def upload_from_string(self, payload: str, **kwargs: Any) -> None:
+            uploads.append((payload, kwargs))
+
+    def query(sql: str, *, job_config: Any, location: str) -> Any:
+        queries.append((sql, job_config, location))
+        rows = [types.SimpleNamespace(service_date=date(2026, 11, 11), service_id="2026-11-08:NdS", blocks=1267)]
+        return types.SimpleNamespace(result=lambda: rows)
+
+    monkeypatch.setattr(dag, "read_object", lambda *_args: (stored, 7 if stored else 0))
+    monkeypatch.setattr(
+        dag,
+        "storage",
+        types.SimpleNamespace(
+            Client=lambda project: types.SimpleNamespace(bucket=lambda _: types.SimpleNamespace(blob=lambda _: Blob()))
+        ),
+    )
+    monkeypatch.setattr(
+        dag,
+        "bigquery",
+        types.SimpleNamespace(
+            Client=lambda project: types.SimpleNamespace(query=query),
+            QueryJobConfig=lambda query_parameters: query_parameters,
+            ScalarQueryParameter=lambda name, kind, value: (name, kind, value),
+        ),
+    )
+    snapshot = {
+        "snapshot_id": "2026-11-02T01:00:00Z_15824da9f2c0",
+        "gcs_path": "gs://ztm-analytics-bucket/raw/gtfs/2026-11-02T01:00:00Z_15824da9f2c0.zip",
+        "processing_date": "2026-11-02",
+    }
+    dag._refresh_schedule_days({"snapshots": [snapshot]}, date(2026, 11, 2))
+    assert queries[0][1] == [("first_snapshot_date", "DATE", first)]
+    assert "ztm_raw.raw_gtfs_trips" in queries[0][0]
+    payload, kwargs = uploads[0]
+    assert json.loads(payload) == {"version": 1, "days": {"2026-11-11": {"blocks": 1267, "class": "sunday"}}}
+    assert kwargs["if_generation_match"] == (7 if stored else 0)
 
 
 def test_staging_contract_tests_receive_every_snapshot_in_the_batch() -> None:
@@ -451,6 +504,7 @@ def test_staging_contract_tests_receive_every_snapshot_in_the_batch() -> None:
     assert rendered == f"first,{SNAPSHOT_ID}"
     assert "gtfs_snapshot_ids" in dag.dbt_test_gtfs_staging.bash_command
     assert "gtfs_snapshot_ids" not in dag.dbt_run_gtfs_staging.bash_command
+
 
 def _assert_dbt_command(command: str, dbt_subcommand: str, selector: str) -> None:
     assert f"dbt {dbt_subcommand}" in command
@@ -477,6 +531,9 @@ def _load_dag_module() -> types.ModuleType:
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
+    # Poller-health tests import these against their own google stubs.
+    for name in ("poller_health_gcs", "poller_health"):
+        sys.modules.pop(name, None)
     return module
 
 

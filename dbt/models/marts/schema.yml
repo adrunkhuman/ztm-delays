@@ -2431,6 +2431,17 @@ unit_tests:
       rows:
         - {service_date: '2026-01-01', day_type: 'weekday', is_holiday: true, weekday_name: 'Thursday', day_of_week: 5, iso_week: 1, month: 1, year: 2026}
 
+  - name: dim_date_marks_christmas_eve_holiday
+    model: dim_date
+    given:
+      - input: ref('stg_gtfs__calendar_dates')
+        format: sql
+        rows: |
+          select 'svc' as service_id, date '2025-12-24' as service_date, 1 as exception_type, 'weekday' as day_type, 'snapshot-valid' as gtfs_snapshot_id
+    expect:
+      rows:
+        - {service_date: '2025-12-24', day_type: 'weekday', is_holiday: true, weekday_name: 'Wednesday', day_of_week: 4, iso_week: 52, month: 12, year: 2025}
+
   - name: dim_date_marks_easter_monday_holiday
     model: dim_date
     given:
