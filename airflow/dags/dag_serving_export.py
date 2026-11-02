@@ -154,6 +154,25 @@ PARTITIONED_EXPORT_TABLES = {
     "mart_entity_window_daily_summary": "source_end_date",
     "mart_hour_window_summary": "source_end_date",
 }
+# Tables exported as a column subset, kept in sync with what the frontend reads. Views and tables
+# select these columns by name because partitions cached before a subset change keep extra columns.
+EXPORT_COLUMNS_BY_TABLE = {
+    "fct_expected_stop_event": (
+        "gtfs_snapshot_id",
+        "service_date",
+        "trip_id",
+        "vehicle_number",
+        "stop_sequence",
+        "stop_id",
+        "stop_group_id",
+        "stop_post_code",
+        "stop_name",
+        "scheduled_arrival_time",
+        "actual_arrival_time",
+        "delay_seconds",
+        "observation_status",
+    ),
+}
 PARTITION_CACHE_MANIFEST = "_MANIFEST.json"
 LOCAL_PARTITION_DIRECTORY = "parquet"
 LOCAL_GENERATION_INACTIVE_MARKER = ".inactive"
@@ -646,19 +665,49 @@ def _extract_partitioned_store_inputs(
 
 
 def _extract_mart_to_gcs(client: bigquery.Client, config: ExportConfig, table_name: str) -> None:
-    source_table = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}"
     destination_uri = _table_extract_uri(config, table_name)
-    job_config = bigquery.ExtractJobConfig(destination_format=bigquery.DestinationFormat.PARQUET)
     job_id = _bigquery_job_id("serving_export", config.export_id, table_name)
     try:
-        job = client.extract_table(
-            source_table, destination_uri, job_config=job_config, job_id=job_id, location=BIGQUERY_LOCATION
-        )
+        job = _start_parquet_export(client, table_name, destination_uri, job_id)
     except Conflict:
         raise RuntimeError(
             f"Serving export job already exists for export_id={config.export_id} table={table_name}"
         ) from None
     job.result()
+
+
+def _start_parquet_export(
+    client: bigquery.Client,
+    table_name: str,
+    destination_uri: str,
+    job_id: str,
+    partition_date: str | None = None,
+) -> bigquery.ExtractJob | bigquery.QueryJob:
+    """Start a ZSTD Parquet export; extract jobs are free, column subsets need a query."""
+    source_table = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}"
+    columns = EXPORT_COLUMNS_BY_TABLE.get(table_name)
+    if columns is None:
+        if partition_date is not None:
+            source_table = f"{source_table}${partition_date.replace('-', '')}"
+        job_config = bigquery.ExtractJobConfig(
+            destination_format=bigquery.DestinationFormat.PARQUET,
+            compression=bigquery.Compression.ZSTD,
+        )
+        return client.extract_table(
+            source_table, destination_uri, job_config=job_config, job_id=job_id, location=BIGQUERY_LOCATION
+        )
+    partition_filter = ""
+    if partition_date is not None:
+        if not EXPORT_DATE_PATTERN.fullmatch(partition_date):
+            raise ValueError(f"Invalid partition date: {partition_date}")
+        partition_filter = f"where {SHARDED_EXPORT_TABLES[table_name]} = date '{partition_date}'"
+    query = f"""
+        export data options (uri = '{destination_uri}', format = 'PARQUET', compression = 'ZSTD', overwrite = true)
+        as select {", ".join(columns)}
+        from `{source_table}`
+        {partition_filter}
+    """
+    return client.query(query, job_id=job_id, location=BIGQUERY_LOCATION)
 
 
 def _sync_partition_cache(
@@ -717,18 +766,10 @@ def _extract_mart_partition_to_cache(
     partition_date: str,
 ) -> None:
     date_column = SHARDED_EXPORT_TABLES[table_name]
-    source_table = f"{GCP_PROJECT}.{BIGQUERY_MARTS_DATASET}.{table_name}${partition_date.replace('-', '')}"
     destination_uri = _partition_staging_extract_uri(config, table_name, date_column, partition_date)
-    job_config = bigquery.ExtractJobConfig(destination_format=bigquery.DestinationFormat.PARQUET)
     job_id = _bigquery_job_id("serving_export_partition", config.export_id, table_name, partition_date)
     try:
-        job = bigquery_client.extract_table(
-            source_table,
-            destination_uri,
-            job_config=job_config,
-            job_id=job_id,
-            location=BIGQUERY_LOCATION,
-        )
+        job = _start_parquet_export(bigquery_client, table_name, destination_uri, job_id, partition_date)
     except Conflict:
         raise RuntimeError(
             f"Serving export partition job already exists for export_id={config.export_id} table={table_name}"
@@ -1196,7 +1237,7 @@ def _build_duckdb_file(
         _configure_duckdb_build_connection(connection, build_input.temp_directory)
         for table_name in MART_TABLES:
             connection.execute(
-                f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
+                f"create table {_identifier(table_name)} as select {_export_select_list(table_name)} from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
         _create_export_metadata_tables(connection, build_input)
 
@@ -1211,7 +1252,7 @@ def _build_partitioned_catalog_file(
         _configure_duckdb_build_connection(connection, build_input.temp_directory)
         for table_name in GLOBAL_EXPORT_TABLES:
             connection.execute(
-                f"create table {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
+                f"create table {_identifier(table_name)} as select {_export_select_list(table_name)} from read_parquet({_duckdb_path_list(build_input.parquet_paths_by_table[table_name])})"
             )
         for table_name in SHARDED_EXPORT_TABLES:
             catalog_paths = _partitioned_catalog_paths(
@@ -1219,7 +1260,7 @@ def _build_partitioned_catalog_file(
                 build_input.parquet_paths_by_table[table_name],
             )
             connection.execute(
-                f"create view {_identifier(table_name)} as select * from read_parquet({_duckdb_path_list(catalog_paths)}, hive_partitioning = false)"
+                f"create view {_identifier(table_name)} as select {_export_select_list(table_name)} from read_parquet({_duckdb_path_list(catalog_paths)}, hive_partitioning = false)"
             )
         _create_export_metadata_tables(connection, build_input)
 
@@ -1680,6 +1721,11 @@ def _cleanup_stale_gcs_staging_best_effort(
 def _bigquery_job_id(*parts: str) -> str:
     raw_job_id = "_".join(parts)
     return re.sub(r"[^A-Za-z0-9_]", "_", raw_job_id).strip("_")[:1024]
+
+
+def _export_select_list(table_name: str) -> str:
+    columns = EXPORT_COLUMNS_BY_TABLE.get(table_name)
+    return "*" if columns is None else ", ".join(_identifier(column) for column in columns)
 
 
 def _identifier(value: str) -> str:
