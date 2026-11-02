@@ -156,6 +156,7 @@ def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
             ["all-technical", "n46", "svc", "Technical", "0", "seven", "7", "s"],
             ["malformed-previous", "n47", "svc", "Previous", "0", "eight", "8", "s"],
             ["malformed", "n47", "svc", "Malformed", "0", "eight", "8", "s"],
+            ["cemetery", "C13", "svc", "Cemetery", "0", "nine", "9", "s"],
         ],
         "stop_times.txt": [
             ["trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time", "pickup_type", "drop_off_type"],
@@ -178,6 +179,8 @@ def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
             ["malformed-previous", "100004", "2", "02:00:00", "02:00:00", "0", "0"],
             ["malformed", "100001", "1", "01:30:00", "01:30:00", "0", "0"],
             ["malformed", "100004", "2", "02:30:00", "02:30:00", "0", "0"],
+            ["cemetery", "100001", "1", "01:00:00", "01:00:00", "0", "0"],
+            ["cemetery", "100003", "2", "02:00:00", "02:00:00", "0", "0"],
         ],
         "stops.txt": [
             ["stop_id", "stop_name", "stop_code", "stop_lat", "stop_lon", "zone_id", "stop_name_stem", "town_name"],
@@ -203,6 +206,7 @@ def _ranking_gtfs(path: Path, *, include_zone_id: bool = True) -> None:
             ["n45", "N45", "3"],
             ["n46", "N46", "3"],
             ["n47", "N47", "3"],
+            ["C13", "C13", "3"],
         ],
         "calendar_dates.txt": [
             ["service_id", "date", "exception_type"],
@@ -273,6 +277,28 @@ def test_normalize_applies_diagnostic_line_and_vehicle_filters(tmp_path: Path) -
     assert rows == 1
     assert pq.read_table(output).to_pylist()[0]["line"] == "Z26"
     assert pq.read_table(output).to_pylist()[0]["vehicle_number"] == "3"
+
+
+def test_normalize_keeps_lettered_brigades_and_drops_malformed_ones(tmp_path: Path) -> None:
+    gps = tmp_path / "gps"
+    _gps(
+        gps,
+        [
+            _row(Lines="C15", Brigade="M31", VehicleNumber="2"),
+            _row(Lines="187", Brigade="007", VehicleNumber="3"),
+            _row(Lines="C13", Brigade=" ", VehicleNumber="4"),
+            _row(Lines="187", Brigade="EX-1", VehicleNumber="5"),
+        ],
+    )
+    output = tmp_path / "normalized.parquet"
+
+    with duckdb.connect() as connection:
+        normalize(connection, [next(gps.rglob("*.parquet"))], (date(2026, 1, 15),), output)
+
+    assert [(row["line"], row["brigade"]) for row in pq.read_table(output).to_pylist()] == [
+        ("C15", "M31"),
+        ("187", "7"),
+    ]
 
 
 def test_normalize_keeps_same_vehicle_number_separate_across_types(tmp_path: Path) -> None:
@@ -582,6 +608,44 @@ def test_cross_midnight_run_uses_both_input_dates_and_preserves_source_dates(tmp
     assert {row["gps_date"] for row in trips + arrivals + expected} == {date(2026, 1, 15)}
     assert [row["source_gps_date"] for row in arrivals] == [date(2026, 1, 14), date(2026, 1, 15)]
     assert [row["source_gps_date"] for row in expected] == [date(2026, 1, 14), date(2026, 1, 15)]
+
+
+def test_prior_day_run_of_the_same_brigade_is_not_evidence_for_today(tmp_path: Path) -> None:
+    root, zip_path, output = tmp_path / "gps", tmp_path / "snapshot.zip", tmp_path / "output"
+    _cross_midnight_gtfs(zip_path)
+    # The "current" course (01:00-01:10 Warsaw on Jan 15) driven exactly one day early, with no GPS on Jan 15.
+    start = datetime(2026, 1, 14, 0, 0, tzinfo=UTC)
+    pings = [
+        _row(
+            Lines="n50",
+            Brigade="0050",
+            VehicleNumber="50",
+            Lat=52.2,
+            Lon=21.0 if minute <= 1 else 21.01 if minute >= 9 else 21.005,
+            Time=start + timedelta(minutes=minute),
+            ingested_at=start + timedelta(minutes=minute),
+        )
+        for minute in range(0, 12)
+    ]
+    _gps_for_date(root, date(2026, 1, 14), pings)
+    config = RunConfig(
+        date(2026, 1, 15),
+        "synthetic",
+        root,
+        zip_path,
+        output,
+        output / "metrics.json",
+        allow_missing_hours=True,
+    )
+
+    with ReconstructionRun(config) as run:
+        run.prepare()
+
+    executions = {row["trip_id"]: row for row in pq.read_table(output / "duty_execution.parquet").to_pylist()}
+    assert (executions["current"]["execution_status"], executions["current"]["execution_reason"]) == (
+        "missed",
+        "no_line_observation",
+    )
 
 
 def test_current_only_input_policy_excludes_prior_gps_partition(tmp_path: Path) -> None:
@@ -970,6 +1034,8 @@ def test_schedule_trip_universe_classifies_zone_depot_technical_and_short_turns(
     assert universe["short"]["is_short_turn_part_trip"]
     assert universe["short"]["terminal_pair_rank"] == 2
     assert not universe["short"]["is_zone1_public_ranking_trip"]
+    assert universe["cemetery"]["is_public_passenger_segment"]
+    assert not universe["cemetery"]["is_zone1_public_ranking_trip"]
 
 
 def test_trip_universe_writes_from_in_memory_schedule_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -12,7 +12,7 @@ Airflow polls the [mkuran GTFS feed](https://mkuran.pl/gtfs/warsaw.zip) hourly a
 
 The Python matcher reads raw GPS and one pinned GTFS ZIP locally. It assigns vehicles to ordered duty courses, then aligns GPS segments to scheduled stop occurrences. A duty is a sequence of trips assigned to a vehicle; GTFS `block_id` provides its identity. Line/brigade fallback is weaker evidence and cannot produce high-confidence execution facts.
 
-Only confidently assigned executions enter the trip facts. Stop alignment preserves repeated stops and rejects time regression or reuse of a GPS segment. Unsettled passenger-service boundaries do not produce confident passenger delays. The matcher records uncertainty rather than filling gaps with inferred arrivals.
+Replacement (Z) and All Saints' Day cemetery (C) lines are dispatched rather than run to each brigade's timetable, so their courses accept wider departure and duration offsets. Only confidently assigned executions enter the trip facts. Stop alignment preserves repeated stops and rejects time regression or reuse of a GPS segment. Unsettled passenger-service boundaries do not produce confident passenger delays. The matcher records uncertainty rather than filling gaps with inferred arrivals.
 
 ## Dates and history
 
@@ -70,7 +70,7 @@ Predictions describe usual conditions. The poller also publishes each vehicle's 
 
 ## Interpreting the results
 
-Delay is actual minus scheduled arrival time: positive is late. Delay summaries use `complete` trips; `partial` trips remain useful for drill-down, while `broken` trips are diagnostic. These classifications describe evidence quality, not whether a service ran successfully.
+Delay is actual minus scheduled arrival time: positive is late. At the first and last passenger stops the actual time is the last GPS ping within 50 m before leaving and the first one on arrival, taken from the terminal dwell; without such a ping the wider 250 m terminal match is kept. Delay summaries use `complete` trips; `partial` trips remain useful for drill-down, while `broken` trips are diagnostic. These classifications describe evidence quality, not whether a service ran successfully.
 
 Ingestion completeness measures raw GPS presence. Service coverage compares scheduled service with observed complete/partial trips. A missing coverage row means no scheduled service for that slice; zero coverage means scheduled service was not observed. Neither ingestion gaps nor unmatched trips establish cancellations.
 

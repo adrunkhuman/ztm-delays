@@ -82,7 +82,8 @@ def normalize(
                 ingested_at, cast(timezone('Europe/Warsaw', "Time") as date) gps_date
               from raw_gps
                   where cast(timezone('Europe/Warsaw', "Time") as date) in ({dates_sql})
-                and regexp_full_match(cast("Brigade" as varchar), '^[0-9]+$')
+                -- GTFS block_short_name also uses one-letter prefixes such as M31 (C15, 409) and D1.
+                and regexp_full_match(cast("Brigade" as varchar), '^[A-Z]?[0-9]+$')
                 and regexp_full_match(cast("VehicleNumber" as varchar), '^[0-9]+$')
                 and cast("Lat" as double) between 51.0 and 53.5 and cast("Lon" as double) between 19.5 and 22.5
                 {diagnostic_sql}

@@ -21,6 +21,8 @@ REPLACEMENT_MAX_EARLY_DEPARTURE_SECONDS = 30 * 60
 REPLACEMENT_MAX_LATE_DEPARTURE_SECONDS = 90 * 60
 MAX_TRAVERSAL_DURATION_OVERRUN_SECONDS = 45 * 60
 REPLACEMENT_MAX_TRAVERSAL_DURATION_OVERRUN_SECONDS = 90 * 60
+# Twice the widest plausible departure delay plus duration overrun, so trimming never removes a candidate.
+EVIDENCE_WINDOW_MARGIN_SECONDS = 6 * 60 * 60
 
 
 def _distance_meters(lat: float, lon: float, stop_lat: float, stop_lon: float) -> float:
@@ -165,9 +167,17 @@ def extract_evidence(course: dict[str, Any], pings: list[dict[str, Any]]) -> lis
     return result
 
 
+def is_dispatched_line(line: object) -> bool:
+    """Return whether a line runs on dispatcher judgement rather than its per-brigade timetable.
+
+    Z lines replace disrupted service; C lines serve cemeteries around All Saints' Day.
+    """
+    return str(line).upper().startswith(("Z", "C"))
+
+
 def _plausible_schedule_offset(course: dict[str, Any], candidate: dict[str, Any]) -> bool:
     delay = (candidate["departure_event_time"] - course["scheduled_start_time"]).total_seconds()
-    replacement = str(course["line"]).upper().startswith("Z")
+    replacement = is_dispatched_line(course["line"])
     max_early = REPLACEMENT_MAX_EARLY_DEPARTURE_SECONDS if replacement else MAX_EARLY_DEPARTURE_SECONDS
     max_late = REPLACEMENT_MAX_LATE_DEPARTURE_SECONDS if replacement else MAX_LATE_DEPARTURE_SECONDS
     scheduled_duration = (course["scheduled_end_time"] - course["scheduled_start_time"]).total_seconds()

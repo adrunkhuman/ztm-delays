@@ -538,3 +538,105 @@ def test_pre_ownership_segment_cannot_match_later_stop() -> None:
     )
 
     assert candidates == [[], []]
+
+
+def _terminal_execution() -> dict[str, Any]:
+    return _execution(
+        service_date=date(2026, 1, 14),
+        source_ping_start_time=BASE,
+        ownership_interval_start_time=BASE + timedelta(seconds=300),
+        ownership_interval_end_time=BASE + timedelta(seconds=480),
+        source_ping_end_time=BASE + timedelta(seconds=480),
+    )
+
+
+def test_terminal_stops_use_last_close_departure_and_first_close_arrival() -> None:
+    stops = _with_schedule([_stop(1, 0.0), _stop(2, 0.006), _stop(3, 0.012)])
+    # Origin dwell, then leaving the 250 m radius at 300 s; destination radius reached at 480 s, stop at 540 s.
+    pings = [
+        _ping(seconds, longitude)
+        for seconds, longitude in (
+            (0, 0.0),
+            (60, 0.0001),
+            (120, 0.0),
+            (180, 0.0),
+            (240, 0.002),
+            (300, 0.004),
+            (360, 0.006),
+            (420, 0.009),
+            (480, 0.0105),
+            (540, 0.012),
+            (600, 0.012),
+        )
+    ]
+
+    result = align_stop_crossings(_terminal_execution(), stops, pings)
+
+    assert [row["actual_arrival_time"] for row in result.operational_crossings] == [
+        BASE + timedelta(seconds=180),
+        BASE + timedelta(seconds=360),
+        BASE + timedelta(seconds=540),
+    ]
+    assert all(row["segment_distance_m"] < 1 for row in result.operational_crossings)
+    assert all(row["alignment_confidence"] == "high" for row in result.operational_crossings)
+    assert ["terminal_dwell_crossing" in row["alignment_evidence"] for row in result.operational_crossings] == [
+        True,
+        False,
+        True,
+    ]
+
+
+def test_technical_stop_past_destination_keeps_path_confident_and_terminal_retimed() -> None:
+    stops = _with_schedule([_stop(1, 0.0), _stop(2, 0.006), _stop(3, 0.012), _stop(4, 0.0105, kind="technical_suffix")])
+    for stop in stops:
+        stop["first_passenger_stop_sequence"], stop["last_passenger_stop_sequence"] = 1, 3
+        stop["is_passenger_stop"] = stop["stop_execution_class"] == "passenger"
+    # The technical stop is passed on approach, before the vehicle reaches the passenger terminus.
+    pings = [
+        _ping(seconds, longitude)
+        for seconds, longitude in (
+            (0, 0.0),
+            (180, 0.0),
+            (240, 0.002),
+            (300, 0.004),
+            (360, 0.006),
+            (420, 0.009),
+            (480, 0.0105),
+            (540, 0.012),
+            (600, 0.012),
+        )
+    ]
+
+    result = align_stop_crossings(_terminal_execution(), stops, pings)
+
+    assert not result.ambiguous
+    assert [row["stop_sequence"] for row in result.passenger_arrivals] == [1, 2, 3]
+    assert result.passenger_arrivals[-1]["actual_arrival_time"] == BASE + timedelta(seconds=540)
+
+
+def test_terminal_stops_without_close_dwell_ping_keep_ownership_bounded_crossings() -> None:
+    stops = _with_schedule([_stop(1, 0.0), _stop(2, 0.006), _stop(3, 0.012)])
+    # The vehicle waits about 140-170 m from both terminal poles.
+    pings = [
+        _ping(seconds, longitude)
+        for seconds, longitude in (
+            (0, 0.002),
+            (120, 0.002),
+            (240, 0.0025),
+            (300, 0.004),
+            (360, 0.006),
+            (420, 0.009),
+            (480, 0.0105),
+            (540, 0.0099),
+        )
+    ]
+
+    candidates = crossing_candidates(_terminal_execution(), stops, pings)
+
+    assert {candidate.segment_start["gps_time"] for candidate in candidates[0]} == {BASE + timedelta(seconds=240)}
+    assert all(candidate.segment_end["gps_time"] <= BASE + timedelta(seconds=480) for candidate in candidates[2])
+    assert all(
+        BASE + timedelta(seconds=300) <= candidate.segment_start["gps_time"]
+        and candidate.segment_end["gps_time"] <= BASE + timedelta(seconds=480)
+        for candidate in candidates[1]
+    )

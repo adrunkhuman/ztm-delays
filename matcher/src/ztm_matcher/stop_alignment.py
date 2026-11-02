@@ -19,6 +19,8 @@ MAX_ALIGNMENT_STATES = 64
 MAX_CANDIDATES_PER_STOP = 64
 SEGMENT_CANDIDATE_CHUNK_SIZE = 4096
 PRE_OWNERSHIP_SEGMENT_SECONDS = 120
+TERMINAL_DWELL_SECONDS = 10 * 60
+TERMINAL_CLOSE_METERS = 50.0
 AMBIGUITY_COST = 0.25
 MAX_CONSECUTIVE_DELAY_CHANGE_SECONDS = 15 * 60
 
@@ -130,6 +132,99 @@ def _segments(pings: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any], di
         if 1 <= (end["gps_time"] - start["gps_time"]).total_seconds() <= MAX_SEGMENT_GAP_SECONDS
         and _segment_speed_mps(start, end) <= IMPOSSIBLE_SPEED_MPS
     ]
+
+
+def _close_dwell_crossings(
+    stop_index: int, stop: dict[str, Any], scheduled: datetime, pings: list[dict[str, Any]]
+) -> list[CrossingCandidate]:
+    segments = _segments(pings)
+    if not segments:
+        return []
+    distances, start_distances, end_distances, arrival_seconds = _candidate_matrices([stop], segments)
+    return [
+        CrossingCandidate(
+            stop_index,
+            segment_index,
+            start["gps_time"] + timedelta(seconds=int(arrival_seconds[0, column])),
+            scheduled,
+            float(distances[0, column]),
+            float(start_distances[0, column]),
+            float(end_distances[0, column]),
+            TERMINAL_CLOSE_METERS,
+            start,
+            end,
+        )
+        for column, (segment_index, start, end) in enumerate(segments)
+        if distances[0, column] <= TERMINAL_CLOSE_METERS
+    ]
+
+
+def terminal_dwell_crossings(
+    execution: dict[str, Any], stops: list[dict[str, Any]], pings: list[dict[str, Any]]
+) -> dict[int, CrossingCandidate]:
+    """Time the terminal passenger stops from close pings in the dwell just outside ownership.
+
+    Ownership starts at the first ping outside the 250 m origin radius and ends at the first ping inside the
+    destination radius, so ownership-bounded crossings sit up to 250 m from the terminals. The departure is the last
+    close crossing before leaving the origin; the arrival is the first one on reaching the destination.
+    """
+    passenger_indexes = [index for index, stop in enumerate(stops) if stop.get("is_passenger_stop")]
+    if not passenger_indexes:
+        return {}
+    source_start = execution["source_ping_start_time"] or execution["ownership_interval_start_time"]
+    lower = max(execution["ownership_interval_start_time"], source_start)
+    upper = min(
+        execution["ownership_interval_end_time"],
+        execution["source_ping_end_time"] or execution["ownership_interval_end_time"],
+    )
+    after_lower = next((ping for ping in pings if ping["gps_time"] >= lower), None)
+    before_upper = next((ping for ping in reversed(pings) if ping["gps_time"] <= upper), None)
+    origin_pings = [
+        ping
+        for ping in pings
+        if source_start <= ping["gps_time"] < lower
+        and (lower - ping["gps_time"]).total_seconds() <= TERMINAL_DWELL_SECONDS
+    ] + ([after_lower] if after_lower else [])
+    last = passenger_indexes[-1]
+    destination_pings = ([before_upper] if before_upper else []) + _destination_dwell(pings, stops[last], upper)
+    windows = ((passenger_indexes[0], origin_pings, max), (last, destination_pings, min))
+    result: dict[int, CrossingCandidate] = {}
+    for index, window, choose in windows:
+        stop = stops[index]
+        scheduled = _scheduled_time(execution["service_date"], stop.get("arrival_time_seconds"))
+        if stop.get("stop_lat") is None or stop.get("stop_lon") is None or scheduled is None:
+            continue
+        close = [
+            candidate
+            for candidate in _close_dwell_crossings(index, stop, scheduled, window)
+            if (
+                candidate.segment_start["gps_time"] < lower
+                if choose is max
+                else candidate.segment_end["gps_time"] > upper
+            )
+        ]
+        if close:
+            result[index] = choose(close, key=lambda item: (item.actual_time, item.segment_index))
+    return result
+
+
+def _destination_dwell(pings: list[dict[str, Any]], stop: dict[str, Any], upper: datetime) -> list[dict[str, Any]]:
+    """Return the contiguous pings after ``upper`` that stay inside the destination terminal radius."""
+    dwell: list[dict[str, Any]] = []
+    previous_time = upper
+    for ping in pings:
+        time = ping["gps_time"]
+        if time <= upper:
+            continue
+        if (
+            (time - upper).total_seconds() > TERMINAL_DWELL_SECONDS
+            or (time - previous_time).total_seconds() > MAX_SEGMENT_GAP_SECONDS
+            or _segment_distance_m(ping, ping, stop) > EXPANDED_RADIUS_METERS
+        ):
+            break
+        dwell.append(ping)
+        previous_time = time
+    return dwell
 
 
 def _candidate_matrices(
@@ -472,12 +567,29 @@ def align_stop_crossings(
     stops = sorted(semantics, key=lambda item: int(item["stop_sequence"]))
     candidates = crossing_candidates(execution, stops, pings)
     selected, ambiguous = _align(stops, candidates)
+    # Re-time terminals after the global path so dwell evidence cannot change other stops or path ambiguity.
+    # Only passenger order is enforced: technical stops past a terminal are often passed before reaching it.
+    dwell = {
+        index: candidate
+        for index, candidate in terminal_dwell_crossings(execution, stops, pings).items()
+        if selected[index] is not None
+        and all(
+            other.actual_time <= candidate.actual_time
+            if position < index
+            else candidate.actual_time <= other.actual_time
+            for position, other in enumerate(selected)
+            if other is not None and position != index and stops[position].get("is_passenger_stop")
+        )
+    }
+    selected = tuple(dwell.get(index, candidate) for index, candidate in enumerate(selected))
     operational: list[dict[str, Any]] = []
     passenger: list[dict[str, Any]] = []
-    for stop, candidate in zip(stops, selected, strict=True):
+    for index, (stop, candidate) in enumerate(zip(stops, selected, strict=True)):
         if candidate is None:
             continue
         evidence = ["direct_segment_crossing", "global_monotone_path"]
+        if index in dwell:
+            evidence.append("terminal_dwell_crossing")
         if ambiguous:
             evidence.append("alignment_ambiguous")
         confidence = "medium" if ambiguous else "high"
