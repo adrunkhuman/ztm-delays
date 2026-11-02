@@ -340,7 +340,39 @@ def test_extract_mart_to_gcs_uses_parquet_extract_contract() -> None:
     assert client.extract_call.job_id == "serving_export_export_1_mart_trip_daily"
     assert client.extract_call.location == dag.BIGQUERY_LOCATION
     assert client.extract_call.job_config.destination_format == dag.bigquery.DestinationFormat.PARQUET
+    assert client.extract_call.job_config.compression == dag.bigquery.Compression.ZSTD
     assert client.extract_call.job.result_called is True
+
+
+def test_column_subset_partition_export_uses_zstd_export_query() -> None:
+    dag = _load_dag_module()
+    client = FakeBigQueryClient()
+
+    dag._start_parquet_export(
+        client,
+        "fct_expected_stop_event",
+        "gs://bucket/staging/part-*.parquet",
+        "job-1",
+        "2026-07-02",
+    )
+
+    assert client.extract_calls == []
+    assert client.query_call is not None
+    query = " ".join(client.query_call.query.split())
+    assert "uri = 'gs://bucket/staging/part-*.parquet'" in query
+    assert "format = 'PARQUET', compression = 'ZSTD', overwrite = true" in query
+    assert f"select {', '.join(dag.EXPORT_COLUMNS_BY_TABLE['fct_expected_stop_event'])} from" in query
+    assert query.endswith("from `ztm-data.ztm_marts.fct_expected_stop_event` where service_date = date '2026-07-02'")
+    assert (client.query_call.job_id, client.query_call.location) == ("job-1", dag.BIGQUERY_LOCATION)
+
+
+def test_column_subset_export_rejects_malformed_partition_date() -> None:
+    dag = _load_dag_module()
+
+    with pytest.raises(ValueError, match="Invalid partition date"):
+        dag._start_parquet_export(
+            FakeBigQueryClient(), "fct_expected_stop_event", "gs://b/p-*.parquet", "job", "x' or 1=1"
+        )
 
 
 def test_extract_partitioned_store_inputs_refreshes_only_changed_local_partitions(
@@ -417,11 +449,11 @@ def test_sync_partition_cache_updates_changed_partitions() -> None:
     storage_client = FakeStorageClient(
         [
             FakeBlob(
-                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-01/part-000.parquet"
+                "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-01/part-000.parquet"
             ),
-            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet"),
+            FakeBlob("prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-02/old.parquet"),
             FakeBlob(
-                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet"
+                "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-02/part-000.parquet"
             ),
         ]
     )
@@ -437,32 +469,32 @@ def test_sync_partition_cache_updates_changed_partitions() -> None:
         changed_partition_dates=("2026-07-01", "2026-07-02"),
     )
 
-    dag._sync_partition_cache(client, storage_client, config, "fct_expected_stop_event")
+    dag._sync_partition_cache(client, storage_client, config, "mart_entity_timeline_daily")
 
     assert client.query_call is None
     assert [call.source_table for call in client.extract_calls] == [
-        "ztm-data.ztm_marts.fct_expected_stop_event$20260701",
-        "ztm-data.ztm_marts.fct_expected_stop_event$20260702",
+        "ztm-data.ztm_marts.mart_entity_timeline_daily$20260701",
+        "ztm-data.ztm_marts.mart_entity_timeline_daily$20260702",
     ]
     assert client.extract_calls[-1].destination_uri == (
-        "gs://bucket/prefix/partition_staging/export_id=export-1/fct_expected_stop_event/"
+        "gs://bucket/prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/"
         "service_date=2026-07-02/part-*.parquet"
     )
     assert client.extract_calls[-1].job_config.destination_format == dag.bigquery.DestinationFormat.PARQUET
-    assert client.extract_calls[-1].job_id == "serving_export_partition_export_1_fct_expected_stop_event_2026_07_02"
+    assert client.extract_calls[-1].job_id == "serving_export_partition_export_1_mart_entity_timeline_daily_2026_07_02"
     assert client.extract_calls[-1].location == dag.BIGQUERY_LOCATION
     assert all(call.job.result_called for call in client.extract_calls)
     assert storage_client.deleted_blob_names == [
-        "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet",
+        "prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-02/old.parquet",
     ]
     assert storage_client.copied_blob_names == [
         (
-            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-01/part-000.parquet",
-            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-01/generation=export-1/part-000.parquet",
+            "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-01/part-000.parquet",
+            "prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-01/generation=export-1/part-000.parquet",
         ),
         (
-            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
-            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/generation=export-1/part-000.parquet",
+            "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-02/part-000.parquet",
+            "prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-02/generation=export-1/part-000.parquet",
         ),
     ]
 
@@ -472,12 +504,12 @@ def test_sync_partition_cache_extracts_missing_partitions() -> None:
     client = FakeBigQueryClient(partition_ids=["20260701", "20260702", "20260703"])
     storage_client = FakeStorageClient(
         [
-            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-01/part-000.parquet"),
+            FakeBlob("prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-01/part-000.parquet"),
             FakeBlob(
-                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet"
+                "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-02/part-000.parquet"
             ),
             FakeBlob(
-                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-03/part-000.parquet"
+                "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-03/part-000.parquet"
             ),
         ]
     )
@@ -493,21 +525,21 @@ def test_sync_partition_cache_extracts_missing_partitions() -> None:
         changed_partition_dates=("2026-07-03",),
     )
 
-    dag._sync_partition_cache(client, storage_client, config, "fct_expected_stop_event")
+    dag._sync_partition_cache(client, storage_client, config, "mart_entity_timeline_daily")
 
-    assert client.partition_table_refs == ["ztm-data.ztm_marts.fct_expected_stop_event"]
+    assert client.partition_table_refs == ["ztm-data.ztm_marts.mart_entity_timeline_daily"]
     assert [call.source_table for call in client.extract_calls] == [
-        "ztm-data.ztm_marts.fct_expected_stop_event$20260703",
-        "ztm-data.ztm_marts.fct_expected_stop_event$20260702",
+        "ztm-data.ztm_marts.mart_entity_timeline_daily$20260703",
+        "ztm-data.ztm_marts.mart_entity_timeline_daily$20260702",
     ]
     assert storage_client.copied_blob_names == [
         (
-            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-03/part-000.parquet",
-            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-03/generation=export-1/part-000.parquet",
+            "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-03/part-000.parquet",
+            "prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-03/generation=export-1/part-000.parquet",
         ),
         (
-            "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part-000.parquet",
-            "prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/generation=export-1/part-000.parquet",
+            "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-02/part-000.parquet",
+            "prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-02/generation=export-1/part-000.parquet",
         ),
     ]
 
@@ -517,13 +549,13 @@ def test_partitioned_sync_without_changed_dates_refreshes_all_partitions() -> No
     client = FakeBigQueryClient(partition_ids=["20260701", "20260702"])
     storage_client = FakeStorageClient(
         [
-            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-01/old.parquet"),
-            FakeBlob("prefix/partition_cache/fct_expected_stop_event/service_date=2026-07-02/old.parquet"),
+            FakeBlob("prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-01/old.parquet"),
+            FakeBlob("prefix/partition_cache/mart_entity_timeline_daily/service_date=2026-07-02/old.parquet"),
             FakeBlob(
-                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-01/part.parquet"
+                "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-01/part.parquet"
             ),
             FakeBlob(
-                "prefix/partition_staging/export_id=export-1/fct_expected_stop_event/service_date=2026-07-02/part.parquet"
+                "prefix/partition_staging/export_id=export-1/mart_entity_timeline_daily/service_date=2026-07-02/part.parquet"
             ),
         ]
     )
@@ -533,11 +565,11 @@ def test_partitioned_sync_without_changed_dates_refreshes_all_partitions() -> No
         changed_partition_dates=(),
     )
 
-    dag._sync_partition_cache(client, storage_client, config, "fct_expected_stop_event")
+    dag._sync_partition_cache(client, storage_client, config, "mart_entity_timeline_daily")
 
     assert [call.source_table for call in client.extract_calls] == [
-        "ztm-data.ztm_marts.fct_expected_stop_event$20260701",
-        "ztm-data.ztm_marts.fct_expected_stop_event$20260702",
+        "ztm-data.ztm_marts.mart_entity_timeline_daily$20260701",
+        "ztm-data.ztm_marts.mart_entity_timeline_daily$20260702",
     ]
 
 
@@ -981,6 +1013,42 @@ def test_build_partitioned_catalog_materializes_globals_and_exposes_shard_views(
         }
         assert connection.execute("select count(*) from mart_trip_daily").fetchone()[0] == 1
         assert connection.execute("select export_id from export_metadata").fetchone()[0] == "partitioned-1"
+
+
+def test_partitioned_catalog_reads_column_subset_over_wider_cached_shards(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    parquet_paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
+    slim_path = parquet_paths_by_table["fct_expected_stop_event"][0]
+    wide_path = tmp_path / "wide_expected_stop_event.parquet"
+    with duckdb.connect() as connection:
+        connection.read_parquet(str(slim_path)).select("*, 12.5 as stop_distance_m").write_parquet(str(wide_path))
+    # A shard cached before the column subset existed, listed first so it would set the schema.
+    parquet_paths_by_table["fct_expected_stop_event"] = [wide_path, slim_path]
+    source_stats = [dag.TableStats(table_name=table_name, row_count=1, size_bytes=10) for table_name in dag.MART_TABLES]
+    temp_directory = tmp_path / "catalog-temp"
+    temp_directory.mkdir()
+    catalog_path = tmp_path / "catalog.duckdb"
+
+    dag._build_partitioned_catalog_file(
+        duckdb,
+        catalog_path,
+        dag.DuckdbBuildInput(
+            parquet_paths_by_table=parquet_paths_by_table,
+            source_stats=source_stats,
+            config=replace(_test_export_config(dag, tmp_path), output_filename="catalog.duckdb"),
+            exported_at=datetime(2026, 7, 2, tzinfo=UTC),
+            temp_directory=temp_directory,
+        ),
+    )
+
+    with duckdb.connect(catalog_path, read_only=True) as connection:
+        assert connection.execute("select count(*) from fct_expected_stop_event").fetchone()[0] == 2
+        columns = connection.execute(
+            "select column_name from information_schema.columns where table_name = 'fct_expected_stop_event' "
+            "order by ordinal_position"
+        ).fetchall()
+    assert [row[0] for row in columns] == list(dag.EXPORT_COLUMNS_BY_TABLE["fct_expected_stop_event"])
 
 
 def test_partitioned_catalog_paths_use_canonical_shared_root(tmp_path: Path) -> None:
@@ -1950,6 +2018,7 @@ def _install_google_stubs() -> None:
     bigquery_module.Client = lambda project: FakeBigQueryClient()
     bigquery_module.ExtractJobConfig = FakeExtractJobConfig
     bigquery_module.DestinationFormat = types.SimpleNamespace(PARQUET="PARQUET")
+    bigquery_module.Compression = types.SimpleNamespace(ZSTD="ZSTD")
     storage_module.Client = lambda project: FakeStorageClient([])
     google_cloud_module.bigquery = bigquery_module
     google_cloud_module.storage = storage_module
@@ -2026,6 +2095,7 @@ class FakeBigQueryClient:
         self.extract_call: ExtractCall | None = None
         self.extract_calls: list[ExtractCall] = []
         self.query_call: QueryCall | None = None
+        self.query_calls: list[QueryCall] = []
         self.existing_job = FakeJob()
         self.get_job_call: tuple[str, str, str] | None = None
         self.partition_ids = partition_ids or []
@@ -2060,6 +2130,7 @@ class FakeBigQueryClient:
             raise Conflict("job exists")
         job = FakeJob()
         self.query_call = QueryCall(query, job_id, location, job)
+        self.query_calls.append(self.query_call)
         return job
 
 
@@ -2110,8 +2181,9 @@ class FakeTableMetadata:
 
 
 class FakeExtractJobConfig:
-    def __init__(self, *, destination_format: str) -> None:
+    def __init__(self, *, destination_format: str, compression: str | None = None) -> None:
         self.destination_format = destination_format
+        self.compression = compression
 
 
 class FakeJob:

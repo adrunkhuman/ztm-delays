@@ -114,6 +114,8 @@ Omitting the date list requests a full refresh and can be expensive. Structural 
 
 The partitioned store is enabled with `SERVING_EXPORT_PARTITIONED_STORE=true`; the source default is `false`. It retains date partitions under `parquet/` and publishes a small DuckDB catalog over them. The first run downloads all retained partitions.
 
+Parquet is exported with ZSTD compression. Tables in `EXPORT_COLUMNS_BY_TABLE` (`fct_expected_stop_event`) are exported as the columns the frontend reads, through an `EXPORT DATA` query that scans one partition's selected columns; add a column there before the frontend reads it. Partitions cached before a format change keep their old encoding until they are re-exported.
+
 Mount the same host directory at `/opt/airflow/serving` and `/serving` in Airflow, and at `/serving` read-only in frontend. Set:
 
 ```text
