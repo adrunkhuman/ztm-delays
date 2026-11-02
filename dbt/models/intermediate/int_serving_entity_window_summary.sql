@@ -38,6 +38,7 @@ with base as (
     inner join {{ ref('dim_serving_window_date') }} as windows
         on arrivals.service_date = windows.service_date
         and windows.source_end_date = date('{{ processing_date }}')
+        and {{ serving_window_type_filter('windows.window_type') }}
     left join {{ ref('int_serving_trip_universe') }} as universe
         on arrivals.gtfs_snapshot_id = universe.gtfs_snapshot_id
         and arrivals.gps_date = universe.processing_date
@@ -130,3 +131,4 @@ select
     quantiles.p90_delay_seconds - quantiles.median_delay_seconds as delay_spread_seconds
 from counts
 inner join quantiles using (grain_key)
+{{ serving_window_retained_rows(processing_date) }}

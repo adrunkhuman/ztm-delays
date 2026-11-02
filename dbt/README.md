@@ -14,6 +14,7 @@ The stack uses Python 3.13, `dbt-core==1.11.11`, and `dbt-bigquery==1.11.3`. [pr
 | `gtfs_snapshot_id` | Governing snapshot from the persisted date mapping. |
 | `publish_service_date` | Fact partition to replace; defaults to `processing_date`. |
 | `aggregation_start_date` | Start of the inclusive coverage/status rebuild window. |
+| `serving_window_types` | Comma-separated window types to rebuild in the serving window partition (`day,month` for the nightly prior-date pass); other types keep their stored rows. Unset rebuilds all. Rejected with `--full-refresh`. |
 
 Airflow supplies these per phase. Prefer a targeted DAG run to manually selecting facts: matcher publication, current/prior dates, schedule views, and serving marts must remain consistent. Do not rebuild a multi-date coverage window under one snapshot.
 

@@ -107,3 +107,4 @@ select
 from scheduled
 left join counts using (grain_key)
 left join quantiles using (grain_key)
+{{ serving_window_retained_rows(processing_date) }}

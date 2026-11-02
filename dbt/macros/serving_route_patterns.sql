@@ -23,6 +23,7 @@
         select *
         from {{ ref('dim_serving_window_date') }}
         where source_end_date between date('{{ scope.start }}') and date('{{ scope.end }}')
+          and {{ serving_window_type_filter('window_type') }}
     ),
     patterns as (
         select *
