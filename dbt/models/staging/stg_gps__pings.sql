@@ -23,7 +23,7 @@ with source as (
     from {{ source('raw', 'raw_gps_pings') }}
     where cast(Time as timestamp) >= timestamp(date('{{ var("processing_date") }}'), 'Europe/Warsaw')
       and cast(Time as timestamp) < timestamp(date_add(date('{{ var("processing_date") }}'), interval 1 day), 'Europe/Warsaw')
-      and regexp_contains(cast(Brigade as string), r'^\d+$')
+      and regexp_contains(cast(Brigade as string), r'^[A-Z]?\d+$')
       and regexp_contains(cast(VehicleNumber as string), r'^\d+$')
       and safe_cast(Lat as float64) between 51.0 and 53.5
       and safe_cast(Lon as float64) between 19.5 and 22.5

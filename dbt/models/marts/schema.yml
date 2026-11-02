@@ -923,7 +923,7 @@ unit_tests:
         - {service_date: '2026-01-14', schedule_day_type: wednesday}
         - {service_date: '2026-01-15', schedule_day_type: thursday}
 
-  - name: int_serving_trip_universe_classifies_short_turns_from_stop_profiles
+  - name: int_serving_trip_universe_classifies_short_turns_and_cemetery_lines
     model: int_serving_trip_universe
     overrides:
       vars:
@@ -942,11 +942,14 @@ unit_tests:
               '187', 'bus', '0', 'full-2', 'CENTRUM', true, 'A', 'C', 3, 'A|B|C', 0, ['1']
           union all select date '2026-01-15', date '2026-01-15', 'weekday', 'snapshot', '187',
               '187', 'bus', '0', 'short', 'CENTRUM', true, 'A', 'B', 2, 'A|B', 0, ['1']
+          union all select date '2026-01-15', date '2026-01-15', 'weekday', 'snapshot', 'C13',
+              'C13', 'bus', '0', 'cemetery', 'CMENTARZ', true, 'A', 'C', 3, 'A|B|C', 0, ['1']
     expect:
       rows:
         - {trip_id: full-1, terminal_pair_rank: 1, is_short_turn_part_trip: false, is_zone1_public_ranking_trip: true}
         - {trip_id: full-2, terminal_pair_rank: 1, is_short_turn_part_trip: false, is_zone1_public_ranking_trip: true}
         - {trip_id: short, terminal_pair_rank: 2, is_short_turn_part_trip: true, is_zone1_public_ranking_trip: false}
+        - {trip_id: cemetery, terminal_pair_rank: 1, is_short_turn_part_trip: false, is_zone1_public_ranking_trip: false}
 
   - name: int_serving_entity_window_summary_expands_shared_entity_grains
     model: int_serving_entity_window_summary

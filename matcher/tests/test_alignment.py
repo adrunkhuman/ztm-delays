@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from ztm_matcher.alignment import extract_evidence, resolve_competing_ownership, settle_duty
 
 BASE = datetime(2026, 1, 15, 9, tzinfo=UTC)
@@ -308,9 +310,10 @@ def test_implausible_schedule_offsets_cannot_own_an_ordinary_course() -> None:
     assert outcome["execution_reason"] == "implausible_schedule_alignment"
 
 
-def test_replacement_course_has_a_wider_but_bounded_schedule_window() -> None:
-    course = _course("replacement", line="Z26")
-    evidence = _evidence(course, [_ping(80, 0.0, line="Z26"), _ping(81, 0.01, line="Z26"), _ping(82, 0.02, line="Z26")])
+@pytest.mark.parametrize("line", ["Z26", "C13"])
+def test_dispatched_course_has_a_wider_but_bounded_schedule_window(line: str) -> None:
+    course = _course("replacement", line=line)
+    evidence = _evidence(course, [_ping(80, 0.0, line=line), _ping(81, 0.01, line=line), _ping(82, 0.02, line=line)])
 
     outcome = settle_duty([course], evidence)[0]
 

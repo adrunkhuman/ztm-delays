@@ -44,7 +44,7 @@ Delay summaries use complete trips. Detail pages retain lower-quality evidence a
 
 Weekday/weekend classification follows timetable service, not a calendar-only filter. Line comparisons in those windows use timetable versions active at the selected anchor; month views retain the whole observed month. Daily chart medians are not recombined into aggregate medians.
 
-Entity rankings use qualifying zone-1 public-service trips and minimum observation counts. They are not rankings of every scheduled line or stop. [Architecture](../docs/architecture.md#interpreting-the-results) explains the wider coverage limitations.
+Entity rankings use qualifying zone-1 public-service trips and minimum observation counts; All Saints' Day cemetery lines (C) are excluded because their trips are dispatched rather than timetabled. They are not rankings of every scheduled line or stop. [Architecture](../docs/architecture.md#interpreting-the-results) explains the wider coverage limitations.
 
 The route map shows **net delay change** between consecutive scheduled stops: the downstream stop's signed arrival delay minus the upstream stop's. Red means delay grows over that segment; blue means time is recovered. It uses complete trips with both scheduled arrivals between 06:00 and 22:00, and corridors with at least 100 traversals in the period. Weekdays and weekends are calendar days. A segment's change includes dwell time at the upstream stop. It does not show where inside the segment the delay arose. `scripts/build_map_style.py` regenerates the shared dark basemap used by the delay map, planner picker and live-vehicle minimaps. Road contrast and street labels are shared; red/blue delay overlays and transport-mode overlays retain their distinct meanings.
 

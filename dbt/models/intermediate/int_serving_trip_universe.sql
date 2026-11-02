@@ -70,7 +70,9 @@ classified as (
 select
     *,
     non_zone1_stop_count = 0 as is_zone1_only,
+    -- Cemetery (C) lines' per-trip delays depend on an arbitrary course assignment; matches the matcher universe.
     is_public_service_segment
         and not is_short_turn_part_trip
-        and non_zone1_stop_count = 0 as is_zone1_public_ranking_trip
+        and non_zone1_stop_count = 0
+        and not starts_with(upper(line), 'C') as is_zone1_public_ranking_trip
 from classified

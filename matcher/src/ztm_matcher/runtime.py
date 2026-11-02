@@ -6,11 +6,12 @@ import os
 import shutil
 import time
 import uuid
+from bisect import bisect_left, bisect_right
 from collections.abc import Generator, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from itertools import groupby
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,12 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ztm_matcher.alignment import extract_evidence, resolve_competing_ownership, settle_duty
+from ztm_matcher.alignment import (
+    EVIDENCE_WINDOW_MARGIN_SECONDS,
+    extract_evidence,
+    resolve_competing_ownership,
+    settle_duty,
+)
 from ztm_matcher.config import RunConfig
 from ztm_matcher.errors import fail
 from ztm_matcher.facts import build_facts
@@ -49,7 +55,7 @@ from ztm_matcher.schemas import (
     TRIP_UNIVERSE_SCHEMA_VERSION,
 )
 from ztm_matcher.semantics import duties, iter_stop_semantics
-from ztm_matcher.stop_alignment import PRE_OWNERSHIP_SEGMENT_SECONDS, align_stop_crossings
+from ztm_matcher.stop_alignment import TERMINAL_DWELL_SECONDS, align_stop_crossings
 
 SEMANTICS_BATCH_ROWS = 10_000
 STOP_ALIGNMENT_ROW_GROUP_ROWS = 25_000
@@ -154,8 +160,12 @@ def _write_trip_universe_group(
         is_short_turn_part_trip = id(row) in short_turn_parts
         row["is_short_turn_part_trip"] = is_short_turn_part_trip
         row["is_zone1_only"] = row["non_zone1_stop_count"] == 0
+        # Cemetery lines' per-trip delays depend on an arbitrary course assignment, so they are not ranked.
         row["is_zone1_public_ranking_trip"] = (
-            row["is_public_passenger_segment"] and not is_short_turn_part_trip and row["is_zone1_only"]
+            row["is_public_passenger_segment"]
+            and not is_short_turn_part_trip
+            and row["is_zone1_only"]
+            and not str(row["line"]).upper().startswith("C")
         )
         output_rows.append({name: row[name] for name in TRIP_UNIVERSE_SCHEMA.names})
         if len(output_rows) >= TRIP_UNIVERSE_BATCH_ROWS:
@@ -274,23 +284,15 @@ def _write_stop_alignment(
         execution["ownership_interval_end_time"],
         execution["source_ping_end_time"] or execution["ownership_interval_end_time"],
     )
+    dwell_upper = upper + timedelta(seconds=TERMINAL_DWELL_SECONDS)
     matching = [
         ping
         for ping in pings
         if ping["line"] == execution["line"]
         and ping["brigade"] == execution["brigade"]
-        and source_start <= ping["gps_time"] <= upper
+        and max(source_start, lower - timedelta(seconds=TERMINAL_DWELL_SECONDS)) <= ping["gps_time"] <= dwell_upper
     ]
-    bounded = [ping for ping in matching if lower <= ping["gps_time"]]
-    predecessor = next(
-        (
-            ping
-            for ping in reversed(matching)
-            if ping["gps_time"] < lower and (lower - ping["gps_time"]).total_seconds() <= PRE_OWNERSHIP_SEGMENT_SECONDS
-        ),
-        None,
-    )
-    result = align_stop_crossings(execution, semantics, ([predecessor] if predecessor else []) + bounded)
+    result = align_stop_crossings(execution, semantics, matching)
     operational_rows.extend(result.operational_crossings)
     passenger_rows.extend(result.passenger_arrivals)
     counts["operational_stop_crossings"] += len(result.operational_crossings)
@@ -905,6 +907,7 @@ class ReconstructionRun:
                 patterns: dict[tuple[object, ...], list[dict[str, Any]]] = {}
                 for course in courses:
                     pattern = (
+                        course["service_date"],
                         course["line"],
                         course["brigade"],
                         course["mode"],
@@ -915,7 +918,19 @@ class ReconstructionRun:
                     )
                     patterns.setdefault(pattern, []).append(course)
                 for pattern_courses in patterns.values():
-                    pattern_evidence = extract_evidence(pattern_courses[0], pings)
+                    # GPS from the other input date cannot be a plausible traversal of this service date's courses.
+                    margin = timedelta(seconds=EVIDENCE_WINDOW_MARGIN_SECONDS)
+                    first = bisect_left(
+                        pings,
+                        min(course["scheduled_start_time"] for course in pattern_courses) - margin,
+                        key=lambda ping: ping["gps_time"],
+                    )
+                    last = bisect_right(
+                        pings,
+                        max(course["scheduled_end_time"] for course in pattern_courses) + margin,
+                        key=lambda ping: ping["gps_time"],
+                    )
+                    pattern_evidence = extract_evidence(pattern_courses[0], pings[first:last])
                     for course in pattern_courses:
                         lineage = {
                             name: course[name]
