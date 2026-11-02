@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from google.api_core.exceptions import NotFound
 from poller_health import SUMMARY_MAX_BYTES, decode_json, iso, timestamp, validate_summary
+from poller_health_schedule import SCHEDULE_MAX_BYTES, SCHEDULE_PATH, Schedule, load_schedule
 
 if TYPE_CHECKING:
     from google.cloud import storage
@@ -89,3 +90,13 @@ def first_collection_start(bucket: storage.Bucket) -> str | None:
         return None
     source, _ = read_summary(bucket, hour)
     return source["collection_started_at"] if source else None
+
+
+def read_schedule(bucket: storage.Bucket) -> Schedule | None:
+    """Missing or corrupt GTFS day classes fall back to plain weekdays rather than blocking evaluation."""
+    try:
+        data, _ = read_object(bucket, SCHEDULE_PATH, SCHEDULE_MAX_BYTES)
+        return load_schedule(data) if data is not None else None
+    except ValueError:
+        LOGGER.warning("Invalid schedule days object; comparing same weekdays only")
+        return None

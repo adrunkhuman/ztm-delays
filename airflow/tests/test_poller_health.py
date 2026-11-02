@@ -10,9 +10,10 @@ from typing import Any
 
 import pytest
 
-_SPEC = importlib.util.spec_from_file_location(
-    "poller_health_under_test", Path(__file__).parents[1] / "dags/poller_health.py"
-)
+DAGS = Path(__file__).parents[1] / "dags"
+if str(DAGS) not in sys.path:
+    sys.path.insert(0, str(DAGS))
+_SPEC = importlib.util.spec_from_file_location("poller_health_under_test", DAGS / "poller_health.py")
 assert _SPEC
 assert _SPEC.loader
 health = importlib.util.module_from_spec(_SPEC)

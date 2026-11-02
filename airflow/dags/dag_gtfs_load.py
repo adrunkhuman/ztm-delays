@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 import tempfile
 import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import DAG, TriggerRule, get_current_context, task
 from google.api_core.exceptions import Conflict
 from google.cloud import bigquery, storage
+from poller_health_gcs import read_object
+from poller_health_schedule import QUERY, RETENTION_DAYS, SCHEDULE_MAX_BYTES, SCHEDULE_PATH, load_schedule, merge_days
 from ztm_airflow_common import (
     AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS,
     BIGQUERY_LOCATION,
     BIGQUERY_RAW_DATASET,
     GCP_PROJECT,
+    GCS_BUCKET,
     GTFS_SNAPSHOT_ASSET,
     airflow_failure_alert,
     dbt_command,
@@ -337,6 +341,35 @@ def _load_gtfs_snapshot_batch(snapshot_batch: dict[str, object]) -> None:
         _load_gtfs_snapshot(_validate_snapshot_context(snapshot))
 
 
+def _refresh_schedule_days(snapshot_batch: dict[str, object], today: date) -> None:
+    """Scan only the new snapshots; a missing or corrupt object is rebuilt from the retention window."""
+    snapshots = snapshot_batch["snapshots"]
+    if not isinstance(snapshots, list) or not snapshots:
+        raise TypeError("GTFS snapshot batch must contain at least one snapshot")
+    first = min(_gtfs_snapshot_date(_validate_snapshot_context(item)["snapshot_id"]) for item in snapshots)
+    bucket = storage.Client(project=GCP_PROJECT).bucket(GCS_BUCKET)
+    existing, generation = read_object(bucket, SCHEDULE_PATH, SCHEDULE_MAX_BYTES)
+    try:
+        if existing is not None:
+            load_schedule(existing)
+    except ValueError:
+        existing = None
+    if existing is None:
+        first -= timedelta(days=RETENTION_DAYS)
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("first_snapshot_date", "DATE", first)]
+    )
+    query = QUERY.format(dataset=f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}")
+    rows = bigquery.Client(project=GCP_PROJECT).query(query, job_config=job_config, location=BIGQUERY_LOCATION)
+    data = merge_days(existing, [(row.service_date, row.service_id, row.blocks) for row in rows.result()], today)
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    if len(payload.encode()) > SCHEDULE_MAX_BYTES:
+        raise ValueError("schedule days exceed bound")
+    bucket.blob(SCHEDULE_PATH).upload_from_string(
+        payload, content_type="application/json", if_generation_match=generation
+    )
+
+
 with DAG(
     dag_id="dag_gtfs_load",
     dag_display_name="GTFS snapshot load",
@@ -360,7 +393,16 @@ with DAG(
         """Load every snapshot that triggered this run; downstream dbt vars pin the latest."""
         _load_gtfs_snapshot_batch(snapshot_batch)
 
-    loaded_gtfs_snapshot = load_gtfs_snapshot(selected_gtfs_snapshot())
+    selected_snapshot = selected_gtfs_snapshot()
+    loaded_gtfs_snapshot = load_gtfs_snapshot(selected_snapshot)
+
+    @task
+    def refresh_schedule_days(snapshot_batch: dict[str, object]) -> None:
+        """Feed health compares days by the timetable class GTFS assigns them."""
+        _refresh_schedule_days(snapshot_batch, datetime.now(UTC).date())
+
+    schedule_days = refresh_schedule_days(selected_snapshot)
+    loaded_gtfs_snapshot >> schedule_days
 
     dbt_run_gtfs_staging = BashOperator(
         task_id="dbt_run_gtfs_staging",
@@ -402,6 +444,7 @@ with DAG(
     dbt_run_gtfs_dimensions >> dbt_test_gtfs_dimensions
     watcher = fail_on_any_task_failure()
     dbt_test_gtfs_dimensions >> watcher
+    schedule_days >> watcher
 
 
 if __name__ == "__main__":

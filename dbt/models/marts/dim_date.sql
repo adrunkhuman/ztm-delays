@@ -72,6 +72,8 @@ holidays as (
     union all select date(year, 8, 15) from years
     union all select date(year, 11, 1) from years
     union all select date(year, 11, 11) from years
+    -- Christmas Eve became a public holiday in 2025.
+    union all select date(year, 12, 24) from years where year >= 2025
     union all select date(year, 12, 25) from years
     union all select date(year, 12, 26) from years
     union all select easter_sunday from easter_dates
