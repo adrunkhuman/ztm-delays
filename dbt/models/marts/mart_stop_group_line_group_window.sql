@@ -29,6 +29,7 @@ with base as (
     inner join {{ ref('dim_serving_window_date') }} as windows
         on arrivals.service_date = windows.service_date
         and windows.source_end_date = date('{{ processing_date }}')
+        and {{ serving_window_type_filter('windows.window_type') }}
     where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
         and date('{{ processing_date }}')
       and {{ serving_window_service_date_filter('arrivals.service_date', processing_date, processing_date) }}
@@ -108,3 +109,4 @@ select
     row_number() over (partition by stop_group_id, mode, line, window_type, window_key order by arrival_count desc, trip_headsign) as destination_display_rank,
     posts
 from grouped
+{{ serving_window_retained_rows(processing_date) }}

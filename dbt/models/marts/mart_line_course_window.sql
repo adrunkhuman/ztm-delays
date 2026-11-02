@@ -44,3 +44,4 @@ select
         order by trip_count desc, direction_id, trip_headsign, route_pattern_id
     ) as course_rank
 from grouped
+{{ serving_window_retained_rows(processing_date) }}

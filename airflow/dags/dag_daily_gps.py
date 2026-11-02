@@ -136,10 +136,13 @@ MART_DBT_VARS = dbt_vars(
     processing_date=PROCESSING_DATE,
     gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
 )
+# The prior date's late overnight trips change its day and month views; its rolling windows are superseded by
+# today's, which include that date in full, so rebuilding them again would double the nightly window scans.
 PRIOR_MART_DBT_VARS = dbt_vars(
     processing_date=PRIOR_SERVICE_DATE,
     gtfs_snapshot_id=SELECTED_GTFS_SNAPSHOT_ID,
     max_gps_date=PROCESSING_DATE,
+    serving_window_types="day,month",
 )
 PRIOR_SCHEDULE_DBT_VARS = dbt_vars(
     processing_date=PRIOR_SERVICE_DATE,

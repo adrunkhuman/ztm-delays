@@ -1004,6 +1004,56 @@ unit_tests:
         - {entity_type: stop_post, entity_id: stop-1, universe_type: zone1_public, window_type: day, arrival_count: 1, late_count: 1}
         - {entity_type: stop_post, entity_id: stop-1, universe_type: zone1_public, window_type: month, arrival_count: 1, late_count: 1}
 
+  - name: int_serving_entity_window_summary_partial_rebuild_keeps_other_window_types
+    model: int_serving_entity_window_summary
+    overrides:
+      vars:
+        processing_date: '2026-01-15'
+        max_gps_date: '2026-01-15'
+        serving_window_types: day
+      macros:
+        is_incremental: true
+        serving_window_service_date_filter: 'true'
+    given:
+      - input: ref('int_serving_stop_arrival')
+        format: sql
+        rows: |
+          select 'snapshot' as gtfs_snapshot_id, date '2026-01-15' as gps_date,
+              date '2026-01-15' as service_date, 'trip-1' as trip_id, '1001' as vehicle_number,
+              'version-1' as schedule_version_id, 'complete' as trip_quality, 'bus' as mode,
+              '187' as line, '187' as route_short_name, 'CENTRUM' as trip_headsign,
+              'group-1' as stop_group_id, 'Group 1' as stop_group_name,
+              'stop-1' as stop_id, 'Stop 1' as stop_name, 180 as delay_seconds
+      - input: ref('dim_serving_window_date')
+        format: sql
+        rows: |
+          select 'day' as window_type, '2026-01-15' as window_key,
+              date '2026-01-15' as source_end_date, date '2026-01-15' as service_date
+          union all
+          select 'weekdays', '2026-01-15', date '2026-01-15', date '2026-01-15'
+      - input: ref('int_serving_trip_universe')
+        format: sql
+        rows: |
+          select 'snapshot' as gtfs_snapshot_id, date '2026-01-15' as processing_date,
+              date '2026-01-15' as service_date, 'trip-1' as trip_id,
+              false as is_zone1_public_ranking_trip
+      - input: ref('dim_schedule_version')
+        format: sql
+        rows: |
+          select 'version-1' as schedule_version_id, date '2026-01-01' as valid_from_date,
+              date '2026-01-31' as valid_to_date
+      - input: this
+        rows:
+          - {entity_type: mode, entity_id: bus, universe_type: all_observed, window_type: day, source_end_date: '2026-01-15', arrival_count: 50, late_count: 5}
+          - {entity_type: mode, entity_id: bus, universe_type: all_observed, window_type: weekdays, source_end_date: '2026-01-15', arrival_count: 99, late_count: 9}
+    expect:
+      rows:
+        - {entity_type: mode, entity_id: bus, universe_type: all_observed, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: line, entity_id: '187', universe_type: all_observed, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_group, entity_id: group-1, universe_type: all_observed, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: stop_post, entity_id: stop-1, universe_type: all_observed, window_type: day, arrival_count: 1, late_count: 1}
+        - {entity_type: mode, entity_id: bus, universe_type: all_observed, window_type: weekdays, arrival_count: 99, late_count: 9}
+
   - name: mart_mode_window_summary_uses_ztm_delay_boundaries
     model: mart_mode_window_summary
     overrides:

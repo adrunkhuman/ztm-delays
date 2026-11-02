@@ -485,6 +485,8 @@ def test_dag_uses_bounded_mart_windows() -> None:
     assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
     assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_test_serving_marts_prior.kwargs["bash_command"]
     assert '"max_gps_date": "' + dag.PROCESSING_DATE in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
+    assert '"serving_window_types": "day,month"' in dag.dbt_run_serving_marts_prior.kwargs["bash_command"]
+    assert "serving_window_types" not in dag.dbt_run_serving_marts.kwargs["bash_command"]
     assert '"processing_date": "' + dag.PRIOR_SERVICE_DATE in dag.dbt_run_serving_universe_prior.kwargs["bash_command"]
     assert dag.SELECTED_PRIOR_GTFS_SNAPSHOT_ID in dag.dbt_run_serving_universe_prior.kwargs["bash_command"]
     assert dag.SERVING_UNIVERSE_MODELS in dag.dbt_run_serving_universe.kwargs["bash_command"]
