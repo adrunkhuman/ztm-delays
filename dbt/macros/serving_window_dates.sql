@@ -57,3 +57,14 @@ where source_end_date = date('{{ processing_date }}')
   and not {{ serving_window_type_filter('window_type') }}
     {% endif %}
 {% endmacro %}
+
+{% macro serving_window_anchor_version(version_key, anchor_date) %}
+    {#- Whether the arrival's schedule version is in force on the window's end date. -#}
+    exists (
+        select 1
+        from {{ ref('dim_schedule_version') }} as anchor_version
+        where farm_fingerprint(anchor_version.schedule_version_id) = {{ version_key }}
+          and date('{{ anchor_date }}') between anchor_version.valid_from_date
+              and coalesce(anchor_version.valid_to_date, date '9999-12-31')
+    )
+{% endmacro %}

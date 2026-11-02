@@ -77,6 +77,7 @@ SERVING_UNIVERSE_MODELS = "int_serving_trip_stop_profile int_serving_trip_univer
 SERVING_TRIP_EXECUTION_MODEL = "int_serving_trip_execution"
 SERVING_MODELS = (
     "int_serving_trip_execution int_serving_trip_route_pattern int_serving_stop_arrival "
+    "int_serving_window_arrival "
     "int_serving_observed_date dim_serving_window_date int_serving_entity_window_summary "
     "dim_serving_date "
     "mart_mode_window_summary mart_entity_daily_summary mart_entity_window_daily_summary mart_line_window_summary "
@@ -89,6 +90,7 @@ SERVING_MODELS = (
 )
 PRIOR_SERVING_MODELS = (
     "int_serving_trip_execution int_serving_trip_route_pattern int_serving_stop_arrival "
+    "int_serving_window_arrival "
     "int_serving_observed_date dim_serving_window_date int_serving_entity_window_summary "
     "mart_mode_window_summary mart_entity_daily_summary mart_entity_window_daily_summary mart_line_window_summary "
     "mart_stop_group_window_summary mart_stop_post_window_summary mart_hour_window_summary "

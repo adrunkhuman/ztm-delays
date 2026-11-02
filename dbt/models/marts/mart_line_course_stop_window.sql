@@ -18,8 +18,8 @@
 with {{ serving_route_pattern_window_ctes() }},
 
 arrivals as (
-    select *
-    from {{ ref('int_serving_stop_arrival') }}
+    select service_date, gps_date, trip_key, stop_sequence, stop_id, delay_seconds
+    from {{ ref('int_serving_window_arrival') }}
     where service_date between date_sub(date('{{ scope.start }}'), interval {{ lookback_days }} day)
         and date('{{ scope.end }}')
       and {{ serving_window_service_date_filter('service_date', scope.start, scope.end) }}
@@ -38,11 +38,11 @@ calls as (
     from eligible
     cross join unnest(eligible.stops) as stop
     left join arrivals
-        on eligible.gtfs_snapshot_id = arrivals.gtfs_snapshot_id
+        on farm_fingerprint(concat(
+            eligible.gtfs_snapshot_id, '|', eligible.trip_id, '|', coalesce(eligible.vehicle_number, '')
+        )) = arrivals.trip_key
         and eligible.gps_date = arrivals.gps_date
         and eligible.service_date = arrivals.service_date
-        and eligible.trip_id = arrivals.trip_id
-        and eligible.vehicle_number = arrivals.vehicle_number
         and stop.stop_sequence = arrivals.stop_sequence
         and stop.stop_id = arrivals.stop_id
 ),

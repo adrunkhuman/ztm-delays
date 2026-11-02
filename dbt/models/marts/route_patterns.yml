@@ -97,7 +97,7 @@ unit_tests:
       - input: ref('dim_schedule_version')
         format: sql
         rows: *version_rows
-      - input: ref('int_serving_stop_arrival')
+      - input: ref('int_serving_window_arrival')
         format: sql
         rows: |
           with observed as (
@@ -112,11 +112,11 @@ unit_tests:
             select date '2026-01-15','alternate',pos,
               case pos when 1 then 'A' when 2 then 'X' else 'C' end,90 from unnest([1,2,3]) pos
           )
-          select 'snapshot' as gtfs_snapshot_id, service_date as gps_date, service_date,
-            trip_id,'1001' as vehicle_number,pos*10 as stop_sequence,
+          select service_date as gps_date, service_date,
+            farm_fingerprint(concat('snapshot|', trip_id, '|1001')) as trip_key,pos*10 as stop_sequence,
             concat(grp,format('%02d',pos)) as stop_id,delay_seconds from observed
           union all
-          select 'snapshot',date '2026-01-16',date '2026-01-15','same-trip','1001',20,'B02',9999
+          select date '2026-01-16',date '2026-01-15',farm_fingerprint('snapshot|same-trip|1001'),20,'B02',9999
     expect:
       rows:
         - {source_end_date: '2026-01-14', window_type: day, route_pattern_id: full, call_position: 1, arrival_count: 1, mean_delay_seconds: -60.0, on_time_rate: 0.0}

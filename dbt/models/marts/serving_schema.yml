@@ -410,6 +410,22 @@ models:
           - not_null:
               config: *service_date_filter
 
+  - name: int_serving_window_arrival
+    description: Complete bus and tram serving arrivals narrowed for the window marts, with fingerprinted trip, universe, and schedule-version keys.
+    columns:
+      - name: service_date
+        tests:
+          - not_null:
+              config: *service_date_filter
+      - name: trip_key
+        tests:
+          - not_null:
+              config: *service_date_filter
+      - name: universe_trip_key
+        tests:
+          - not_null:
+              config: *service_date_filter
+
   - name: mart_trip_daily
     description: Trip display mart with warehouse-computed delay profiles, erratic scores, and ranks.
     columns:
