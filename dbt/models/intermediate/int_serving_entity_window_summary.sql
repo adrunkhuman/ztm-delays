@@ -19,38 +19,22 @@ with base as (
         windows.window_key,
         windows.source_end_date,
         arrivals.*,
-        concat(
-            arrivals.gtfs_snapshot_id,
-            '|',
-            arrivals.trip_id,
-            '|',
-            coalesce(arrivals.vehicle_number, '')
-        ) as trip_key,
         coalesce(universe.is_zone1_public_ranking_trip, false) as is_zone1_public_ranking_trip,
-        exists (
-            select 1
-            from {{ ref('dim_schedule_version') }} as anchor_version
-            where anchor_version.schedule_version_id = arrivals.schedule_version_id
-              and date('{{ processing_date }}') between anchor_version.valid_from_date
-                  and coalesce(anchor_version.valid_to_date, date '9999-12-31')
-        ) as is_anchor_schedule_version
-    from {{ ref('int_serving_stop_arrival') }} as arrivals
+        {{ serving_window_anchor_version('arrivals.schedule_version_key', processing_date) }} as is_anchor_schedule_version
+    from {{ ref('int_serving_window_arrival') }} as arrivals
     inner join {{ ref('dim_serving_window_date') }} as windows
         on arrivals.service_date = windows.service_date
         and windows.source_end_date = date('{{ processing_date }}')
         and {{ serving_window_type_filter('windows.window_type') }}
     left join {{ ref('int_serving_trip_universe') }} as universe
-        on arrivals.gtfs_snapshot_id = universe.gtfs_snapshot_id
+        on arrivals.universe_trip_key = farm_fingerprint(concat(universe.gtfs_snapshot_id, '|', universe.trip_id))
         and arrivals.gps_date = universe.processing_date
         and arrivals.service_date = universe.service_date
-        and arrivals.trip_id = universe.trip_id
         and universe.processing_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
             and date('{{ var("max_gps_date", processing_date) }}')
     where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
         and date('{{ processing_date }}')
       and {{ serving_window_service_date_filter('arrivals.service_date', processing_date, processing_date) }}
-      and arrivals.trip_quality = 'complete'
-      and arrivals.mode in ('bus', 'tram')
 ),
 
 expanded as (

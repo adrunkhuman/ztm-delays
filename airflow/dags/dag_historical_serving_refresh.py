@@ -19,6 +19,7 @@ PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_gtfs_proc
 SERVING_UNIVERSE_MODELS = "int_serving_trip_stop_profile int_serving_trip_universe"
 SERVING_PARTITION_MODELS = (
     "int_serving_trip_execution int_serving_trip_route_pattern int_serving_stop_arrival "
+    "int_serving_window_arrival "
     "int_serving_observed_date dim_serving_window_date "
     "int_serving_entity_window_summary mart_mode_window_summary mart_entity_daily_summary "
     "mart_entity_window_daily_summary mart_line_window_summary mart_stop_group_window_summary "

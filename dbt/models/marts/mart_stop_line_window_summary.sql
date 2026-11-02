@@ -15,7 +15,7 @@
 
 with base as (
     select windows.window_type, windows.window_key, windows.source_end_date, arrivals.*
-    from {{ ref('int_serving_stop_arrival') }} as arrivals
+    from {{ ref('int_serving_window_arrival') }} as arrivals
     inner join {{ ref('dim_serving_window_date') }} as windows
         on arrivals.service_date = windows.service_date
         and windows.source_end_date = date('{{ processing_date }}')
@@ -23,8 +23,6 @@ with base as (
     where arrivals.service_date between date_sub(date('{{ processing_date }}'), interval {{ lookback_days }} day)
         and date('{{ processing_date }}')
       and {{ serving_window_service_date_filter('arrivals.service_date', processing_date, processing_date) }}
-      and trip_quality = 'complete'
-      and mode in ('bus', 'tram')
 ),
 
 entities as (

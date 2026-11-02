@@ -18,11 +18,11 @@ The stack uses Python 3.13, `dbt-core==1.11.11`, and `dbt-bigquery==1.11.3`. [pr
 
 Airflow supplies these per phase. Prefer a targeted DAG run to manually selecting facts: matcher publication, current/prior dates, schedule views, and serving marts must remain consistent. Do not rebuild a multi-date coverage window under one snapshot.
 
-For a bulk route-pattern rebuild, set both `serving_rebuild_start_date` and `serving_rebuild_end_date` in the runtime vars file to cover all retained serving dates:
+For a bulk route-pattern rebuild, set both `serving_rebuild_start_date` and `serving_rebuild_end_date` in the runtime vars file to cover all retained serving dates. The same range seeds `int_serving_window_arrival`, which every window mart reads:
 
 ```sh
 dbt run --full-refresh \
-  --select int_serving_trip_route_pattern mart_line_course_window mart_line_course_stop_window \
+  --select int_serving_window_arrival int_serving_trip_route_pattern mart_line_course_window mart_line_course_stop_window \
   --vars "$(cat "$VARS_FILE")"
 dbt test --select assert_int_serving_trip_route_pattern_contract assert_line_route_pattern_window_contract \
   --vars "$(cat "$VARS_FILE")"

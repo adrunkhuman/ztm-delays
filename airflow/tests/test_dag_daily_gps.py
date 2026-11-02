@@ -356,6 +356,7 @@ def test_dag_dbt_tasks_keep_bounded_model_and_test_selection() -> None:
         "int_serving_trip_execution",
         "int_serving_trip_route_pattern",
         "int_serving_stop_arrival",
+        "int_serving_window_arrival",
         "int_serving_observed_date",
         "int_serving_entity_window_summary",
         "dim_serving_window_date",

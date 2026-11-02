@@ -960,12 +960,13 @@ unit_tests:
       macros:
         serving_window_service_date_filter: 'true'
     given:
-      - input: ref('int_serving_stop_arrival')
+      - input: ref('int_serving_window_arrival')
         format: sql
         rows: |
-          select 'snapshot' as gtfs_snapshot_id, date '2026-01-15' as gps_date,
-              date '2026-01-15' as service_date, 'trip-1' as trip_id, '1001' as vehicle_number,
-              'version-1' as schedule_version_id, 'complete' as trip_quality, 'bus' as mode,
+          select date '2026-01-15' as gps_date, date '2026-01-15' as service_date,
+              farm_fingerprint('snapshot|trip-1|1001') as trip_key,
+              farm_fingerprint('snapshot|trip-1') as universe_trip_key,
+              farm_fingerprint('version-1') as schedule_version_key, 'bus' as mode,
               '187' as line, '187' as route_short_name, 'CENTRUM' as trip_headsign,
               'group-1' as stop_group_id, 'Group 1' as stop_group_name,
               'stop-1' as stop_id, 'Stop 1' as stop_name, 180 as delay_seconds
@@ -1015,12 +1016,13 @@ unit_tests:
         is_incremental: true
         serving_window_service_date_filter: 'true'
     given:
-      - input: ref('int_serving_stop_arrival')
+      - input: ref('int_serving_window_arrival')
         format: sql
         rows: |
-          select 'snapshot' as gtfs_snapshot_id, date '2026-01-15' as gps_date,
-              date '2026-01-15' as service_date, 'trip-1' as trip_id, '1001' as vehicle_number,
-              'version-1' as schedule_version_id, 'complete' as trip_quality, 'bus' as mode,
+          select date '2026-01-15' as gps_date, date '2026-01-15' as service_date,
+              farm_fingerprint('snapshot|trip-1|1001') as trip_key,
+              farm_fingerprint('snapshot|trip-1') as universe_trip_key,
+              farm_fingerprint('version-1') as schedule_version_key, 'bus' as mode,
               '187' as line, '187' as route_short_name, 'CENTRUM' as trip_headsign,
               'group-1' as stop_group_id, 'Group 1' as stop_group_name,
               'stop-1' as stop_id, 'Stop 1' as stop_name, 180 as delay_seconds
