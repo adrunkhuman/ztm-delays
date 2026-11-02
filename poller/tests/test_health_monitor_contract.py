@@ -57,6 +57,7 @@ def _collect(tmp_path: Path, hour: datetime, *, low: bool = False, restart: bool
 def test_collector_restart_to_monitor_to_public_history_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _load("poller_health_schedule", ROOT / "airflow/dags/poller_health_schedule.py", monkeypatch)
     monitor = _load("poller_health", ROOT / "airflow/dags/poller_health.py", monkeypatch)
     public = _load("poller_health_public", ROOT / "airflow/dags/poller_health_public.py", monkeypatch)
     hour = datetime(2026, 10, 5, 12, tzinfo=UTC)
