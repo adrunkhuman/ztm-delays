@@ -35,6 +35,7 @@
     addControl() {}
     addSource() { this.sources++; }
     addLayer() { this.layers++; }
+    getLayer() { return undefined; }
   }
   const mapLibrary = {
     Map: MapMock,
@@ -274,11 +275,11 @@
     const draftValues = [...draft.elements].map(el => [el.name, el.value, el.disabled]);
     const card = section.querySelector('.pl-card'); card.open = true;
     const trip = card.querySelector('.pl-stops-toggle'); trip.open = true;
-    await until(() => maps.length === 1 && trip.querySelector('.pl-trip').textContent.includes('Łomianki'), 'initial minimap/lazy trip request missing');
+    await until(() => maps.length === 1 && trip.querySelector('.pl-trip').textContent.includes('Łomianki'), 'initial journey map/lazy trip request missing');
     const oldMap = maps[0], oldBox = oldMap.box;
     check(requests.some(r => r.url.pathname === '/planner/trip/1' && r.headers.get('HX-Request') === 'true'), 'trip fragment did not use htmx');
-    check(oldBox.dataset.drawn === '1', 'initial minimap not drawn');
-    oldMap.handlers.load(); check(oldMap.sources === 1 && oldMap.layers === 1, 'initial map load missing path');
+    check(oldBox.dataset.drawn === '1', 'initial journey map not drawn');
+    oldMap.handlers.load(); check(oldMap.sources === 3 && oldMap.layers === 4, 'initial map load missing route layers');
     const openKeys = [card.dataset.key, trip.dataset.key];
     for (let refresh = 0; refresh < 2; refresh++) {
       const previous = section;
@@ -287,14 +288,14 @@
       const request = requests.filter(r => r.url.pathname === '/planner/results').at(-1);
       check(request.headers.get('HX-Request') === 'true' && request.url.searchParams.get('to') === '2002', 'refresh submitted draft instead of displayed journey');
       request.resolve(snapshots['results_' + lang]);
-      await until(() => document.querySelector('#pl-results') !== previous && maps.length === refresh + 2, 'refresh did not replace results/draw fresh minimap');
+      await until(() => document.querySelector('#pl-results') !== previous && maps.length === refresh + 2, 'refresh did not replace results/draw fresh journey map');
       section = document.querySelector('#pl-results');
       check(form() === draft, 'results refresh replaced draft form');
       check(JSON.stringify([...draft.elements].map(el => [el.name, el.value, el.disabled])) === JSON.stringify(draftValues), 'results refresh changed draft values');
       for (const key of openKeys) check(section.querySelector('details[data-key="' + key + '"]').open, 'refresh lost open card/trip: ' + key);
-      const liveMaps = maps.filter(map => !map.removals && map.box.classList.contains('pl-minimap'));
-      check(liveMaps.length === 1 && liveMaps[0].box.isConnected, 'refresh leaked or duplicated minimap');
-      check(maps[refresh].removals === 1, 'old minimap not removed exactly once');
+      const liveMaps = maps.filter(map => !map.removals && map.box.classList.contains('pl-journey-map'));
+      check(liveMaps.length === 1 && liveMaps[0].box.isConnected, 'refresh leaked or duplicated journey map');
+      check(maps[refresh].removals === 1, 'old journey map not removed exactly once');
       const before = oldMap.sources; oldMap.handlers.load();
       check(oldMap.sources === before && !oldBox.isConnected, 'detached map load still added path');
     }
@@ -309,7 +310,7 @@
       }
     };
     const closedCard = section.querySelectorAll('.pl-card')[1];
-    const box = section.querySelector('.pl-minimap').cloneNode(true); box.removeAttribute('data-drawn');
+    const box = section.querySelector('.pl-journey-map').cloneNode(true); box.removeAttribute('data-drawn');
     closedCard.append(box); closedCard.open = true;
     closedCard.dispatchEvent(new Event('toggle'));
     await until(() => assets.length === 1, 'MapLibre script load not suspended');

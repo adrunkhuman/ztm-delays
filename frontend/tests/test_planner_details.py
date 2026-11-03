@@ -33,8 +33,10 @@ def test_search_batches_ride_details_across_cards(
     with app.test_request_context():
         cards, _ = planner.search(path, "1001", destination, DAY, 7 * 3600)
     assert len(cards) == (1 if destination == "4004" else 2)
-    assert len(calls) == 1
+    # One batch each for rides, shapes and posts, however many cards share them.
     assert "with requested" in calls[0]
+    assert len(calls) == len(set(calls)) <= 3
+    assert all(card["map"] for card in cards)
     assert all(card["timeline"][0]["name"] == "Łomianki" for card in cards)
     assert all(
         card["timeline"][-1]["name"] == ("Centrum" if destination == "4004" else "Metro Marymont") for card in cards
@@ -117,18 +119,18 @@ def test_post_lookup_reuses_missing_and_present_rows_only_within_one_render(
     _write_artifact(path)
     details = planner._CardDetails(path, [], DAY)
     calls: list[str] = []
-    original = planner.fetch_one
+    original = planner.fetch_all
 
-    def recorded(path: Path, sql: str, params: Sequence[Any] = ()) -> dict[str, Any] | None:
+    def recorded(path: Path, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         calls.append(sql)
         return original(path, sql, params)
 
-    monkeypatch.setattr(planner, "fetch_one", recorded)
-    assert details.post("100103") == details.post("100103") == {"lon": 20.921, "lat": 52.331}
-    assert details.post("missing") is details.post("missing") is None
+    monkeypatch.setattr(planner, "fetch_all", recorded)
+    assert details.coord("100103") == details.coord("100103") == [20.921, 52.331]
+    assert details.coord("missing") is details.coord("missing") is None
     assert len(calls) == 2
     fresh = planner._CardDetails(path, [], DAY)
-    assert fresh.post("100103") == details.post("100103")
+    assert fresh.coord("100103") == details.coord("100103")
     assert len(calls) == 3
 
 

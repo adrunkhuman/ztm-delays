@@ -10,9 +10,23 @@ import duckdb
 import pytest
 
 from tests.test_journey import Stop, Trip, _network
-from tests.test_live import BACK, DAY, OUT, _at, _duty, _match, _ping, _shapes, _sod, publish_artifact, publish_feed
+from tests.test_live import (
+    BACK,
+    DAY,
+    LAT,
+    METRE_LON,
+    OUT,
+    _at,
+    _duty,
+    _match,
+    _ping,
+    _shapes,
+    _sod,
+    publish_artifact,
+    publish_feed,
+)
 from ztm_frontend import app as app_module
-from ztm_frontend import live, live_times, planner, queries
+from ztm_frontend import journey, live, live_times, planner, queries
 from ztm_frontend.journey import NO_BOARD
 
 if TYPE_CHECKING:
@@ -167,7 +181,8 @@ def _calibrate(path: Path) -> None:
         )
         connection.executemany("insert into planner_live_turnaround values (?, ?, ?, ?)", TURNAROUND)
         connection.execute(
-            "create table planner_stop_post as select distinct stop_id, 52.23 as lat, 21.01 as lon from planner_stop"
+            "create table planner_stop_post as select distinct stop_id, 52.23::double as lat, 21.01::double as lon "
+            "from planner_stop"
         )
 
 
@@ -180,19 +195,29 @@ def test_cards_show_where_the_vehicle_is(published: tuple[Path, Network], tmp_pa
     ride = next(item for item in cards[0]["timeline"] if item["kind"] == "ride")
     assert cards[0]["live"] is True
     assert (ride["live"]["status"], ride["live"]["late"]) == ("running", 6)  # 5 min 30 s behind the timetable
-    shown = ride["live"]["map"]
-    assert shown["stop"] == [21.01, 52.23]
-    assert shown["path"][0] == pytest.approx(shown["vehicle"], abs=1e-4)  # the vehicle, placed on its shape
+    assert ride["live"]["stops_away"] == 1  # 100 m before the boarding stop
+    # The card's map: the ride along its shape from 1 km to 2 km east, and the vehicle's last 100 m to the stop.
+    shown = cards[0]["map"]
+    (leg,) = shown["legs"]
+    assert (leg["kind"], leg["mode"], leg["line"]) == ("ride", "bus", "175")
+    assert leg["path"][0] == pytest.approx([21.01 + 1000 * METRE_LON, LAT], abs=1e-6)
+    assert leg["path"][-1] == pytest.approx([21.01 + 2000 * METRE_LON, LAT], abs=1e-6)
+    approach = shown["approach"]
+    assert approach["path"][0] == pytest.approx(approach["vehicle"], abs=1e-4)  # the vehicle, placed on its shape
+    assert approach["path"][-1] == pytest.approx(leg["path"][0], abs=1e-6)
+    assert (approach["mode"], approach["line"]) == ("bus", "175")
     # The stop list agrees with the card.
     stops = planner.trip_stops(
         path, ride["trip_key"], ride["board_sequence"], ride["alight_sequence"], DAY, _at(8, 9, 40)
     )
     assert planner.clock(stops[-1]["expected"]) == "08:14"
-    # Without now, nothing is live.
-    assert planner.search(path, "101", "102", DAY, _sod(8, 0))[0][0]["live"] is False
+    # Without now, nothing is live, but the card still maps the connection.
+    static = planner.search(path, "101", "102", DAY, _sod(8, 0))[0][0]
+    assert static["live"] is False
+    assert static["map"] == {"legs": shown["legs"], "approach": None}
 
 
-def test_no_minimap_once_the_vehicle_is_at_the_stop(published: tuple[Path, Network], tmp_path: Path) -> None:
+def test_no_approach_once_the_vehicle_is_at_the_stop(published: tuple[Path, Network], tmp_path: Path) -> None:
     path, _ = published
     _calibrate(path)
     publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(980, _at(8, 9, 20)))
@@ -200,7 +225,21 @@ def test_no_minimap_once_the_vehicle_is_at_the_stop(published: tuple[Path, Netwo
     cards, _ = planner.search(path, "101", "102", DAY, _sod(8, 0), _at(8, 9, 40))
     ride = next(item for item in cards[0]["timeline"] if item["kind"] == "ride")
     assert ride["live"]["status"] == "running"
-    assert ride["live"]["map"] is None
+    assert (ride["live"]["approach"], ride["live"]["stops_away"]) == (None, None)
+    assert cards[0]["map"]["approach"] is None
+
+
+def test_walks_join_searched_points_to_posts(published: tuple[Path, Network]) -> None:
+    path, _ = published
+    _calibrate(path)
+    with duckdb.connect(str(path)) as connection:  # a new build: the cached network predates the posts
+        connection.execute("update planner_metadata set build_id = 'b2'")
+    origin = journey.Point(LAT + 0.001, 21.01, "Somewhere")  # 110 m north of every post
+
+    cards, _ = planner.search(path, origin, "102", DAY, _sod(8, 0))
+    walk, ride = cards[0]["map"]["legs"]
+    assert walk == {"kind": "walk", "path": [[origin.lon, origin.lat], [21.01, 52.23]]}  # the fixture's post
+    assert ride["kind"] == "ride"
 
 
 def test_planner_page_marks_live_rides_and_refreshes_only_then(
@@ -237,8 +276,8 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
 
     page = client.get(url).get_data(as_text=True)
     assert 'class="pl-card live"' in page
-    assert ">6 min late</span>" in page
-    assert 'class="pl-minimap"' in page
+    assert ">6 min late · 1 stop away</span>" in page
+    assert 'class="pl-journey-map"' in page
     assert 'hx-trigger="every[plannerShouldRefresh()] 60s"' in page
     assert re.search(r'src="/static/planner\.js\?v=[0-9a-f]{12}"', page)  # a new version busts caches
     section = re.search(r'<section id="pl-results".*?</section>', page, re.DOTALL)
@@ -266,5 +305,5 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
     Clock.moment = _at(8, 30)  # the feed is now stale: no live data, no polling
     for refreshed in (client.get(url), client.get(poll_url)):
         html = refreshed.get_data(as_text=True)
-        assert "pl-minimap" not in html
+        assert "stop away" not in html
         assert 'hx-trigger="every' not in html
