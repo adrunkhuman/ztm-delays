@@ -3205,6 +3205,11 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   vertical-align: -0.1rem;
 }
 
+.pl-sep {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .pl-walk-chip .pl-walker {
   width: 0.7rem;
   height: 0.95rem;

@@ -411,9 +411,8 @@ def _connection(  # noqa: PLR0913
 def _live_ride(current: live_times.LiveView, leg: journey.Ride) -> dict[str, Any] | None:
     """Where the ride's vehicle is now: on this trip, waiting at its first stop, or still on its previous trip.
 
-    status picks the wording, late the minutes beyond the timetable there, stops_away (running only) how many stops
-    the vehicle still calls at up to and including the boarding stop. approach joins the vehicle to the boarding
-    stop along the shapes, and is None once the vehicle is at the stop or past it.
+    status picks the wording, late the minutes beyond the timetable there; approach joins the vehicle to the
+    boarding stop along the shapes, and is None once the vehicle is at the stop or past it.
     """
     matcher = current.matcher
     net = matcher.net
@@ -439,12 +438,8 @@ def _live_ride(current: live_times.LiveView, leg: journey.Ride) -> dict[str, Any
     late = round(fix.delay_s / 60)
     status = "previous" if before is not None else "waiting" if fix.waiting else "running"
     at_stop = before is None and fix.dist_m >= net.shape_dist[board] - live_times.PASSED_M
-    stops_away = None
-    if status == "running" and not at_stop and net.shape_dist[board] >= 0:
-        # A stop within PASSED_M behind or ahead is where the vehicle is now, not one still to come.
-        stops_away = sum(1 for r in range(row, board + 1) if net.shape_dist[r] > fix.dist_m + live_times.PASSED_M)
     approach = None if at_stop or not line else {"vehicle": [round(fix.lon, 6), round(fix.lat, 6)], "path": line}
-    return {"status": status, "late": late, "stops_away": stops_away, "approach": approach}
+    return {"status": status, "late": late, "approach": approach}
 
 
 def trip_stops(  # noqa: PLR0913

@@ -47,7 +47,7 @@ def snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]
         card["live"] = True
         for item in card["timeline"]:
             if item["kind"] == "ride":
-                item["live"] = {"status": "running", "late": 1, "stops_away": 2, "approach": None}
+                item["live"] = {"status": "running", "late": 1, "approach": None}
         card["map"] = {
             "legs": [{"kind": "ride", "mode": "bus", "line": "1", "path": [[20.921, 52.331], [20.95, 52.30]]}],
             "approach": {

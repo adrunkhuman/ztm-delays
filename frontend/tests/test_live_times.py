@@ -195,7 +195,6 @@ def test_cards_show_where_the_vehicle_is(published: tuple[Path, Network], tmp_pa
     ride = next(item for item in cards[0]["timeline"] if item["kind"] == "ride")
     assert cards[0]["live"] is True
     assert (ride["live"]["status"], ride["live"]["late"]) == ("running", 6)  # 5 min 30 s behind the timetable
-    assert ride["live"]["stops_away"] == 1  # 100 m before the boarding stop
     # The card's map: the ride along its shape from 1 km to 2 km east, and the vehicle's last 100 m to the stop.
     shown = cards[0]["map"]
     (leg,) = shown["legs"]
@@ -225,7 +224,7 @@ def test_no_approach_once_the_vehicle_is_at_the_stop(published: tuple[Path, Netw
     cards, _ = planner.search(path, "101", "102", DAY, _sod(8, 0), _at(8, 9, 40))
     ride = next(item for item in cards[0]["timeline"] if item["kind"] == "ride")
     assert ride["live"]["status"] == "running"
-    assert (ride["live"]["approach"], ride["live"]["stops_away"]) == (None, None)
+    assert ride["live"]["approach"] is None
     assert cards[0]["map"]["approach"] is None
 
 
@@ -276,7 +275,7 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
 
     page = client.get(url).get_data(as_text=True)
     assert 'class="pl-card live"' in page
-    assert ">6 min late · 1 stop away</span>" in page
+    assert ">6 min late</span>" in page
     assert 'class="pl-journey-map"' in page
     assert 'hx-trigger="every[plannerShouldRefresh()] 60s"' in page
     assert re.search(r'src="/static/planner\.js\?v=[0-9a-f]{12}"', page)  # a new version busts caches
@@ -305,5 +304,5 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
     Clock.moment = _at(8, 30)  # the feed is now stale: no live data, no polling
     for refreshed in (client.get(url), client.get(poll_url)):
         html = refreshed.get_data(as_text=True)
-        assert "stop away" not in html
+        assert "min late" not in html
         assert 'hx-trigger="every' not in html

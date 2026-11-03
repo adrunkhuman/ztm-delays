@@ -66,7 +66,6 @@ TEXT: dict[str, dict[str, object]] = {
         "live_previous": "on previous trip",
         "live_previous_late": "previous trip, +{n} min",
         "map_label": "Map of this connection, with where the next vehicle is now",
-        "stops_away": "{n} {stops} away",
     },
     "pl": {
         "from": "Skąd",
@@ -122,7 +121,6 @@ TEXT: dict[str, dict[str, object]] = {
         "live_previous": "poprzedni kurs",
         "live_previous_late": "poprzedni kurs, +{n} min",
         "map_label": "Mapa połączenia i miejsce, w którym jest teraz najbliższy pojazd",
-        "stops_away": "{n} {stops} stąd",
     },
 }
 
