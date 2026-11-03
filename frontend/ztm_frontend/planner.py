@@ -44,6 +44,7 @@ DAY_SECONDS = 86_400
 EARLIER_STEP_SECONDS = 30 * 60
 TIMETABLE_FLAG_SECONDS = 120  # expected times at least this far from the timetable get a marker
 SUMMARY_CHANGE_WALK_MINUTES = 5  # a walk between rides needs more than this to show in the card summary
+SHORT_CHANGE_WALK_M = 100  # a shorter walk between rides is told on the boarding stop, not as its own row
 
 
 def search_key(text: str) -> str:
@@ -380,6 +381,12 @@ def _connection(  # noqa: PLR0913
             "arrive_differs": differs_from_timetable(arrive, ride["alight_scheduled"]),
             "alight_scheduled": ride["alight_scheduled"],
         })  # fmt: skip
+    for i, seg in enumerate(segments):
+        # nodes[i] is where the walk starts and nodes[i + 1] where it ends; only changes between rides fold.
+        short = seg["kind"] == "walk" and seg["distance_m"] is not None and seg["distance_m"] < SHORT_CHANGE_WALK_M
+        if short and 0 < i < len(segments) - 1:
+            seg["short"] = True
+            nodes[i + 1]["walk_m"] = seg["distance_m"]
     first_board = next(n for n in nodes if "be_by" in n)
     first_ride = next(seg for seg in segments if seg["kind"] == "ride")
     return {

@@ -48,6 +48,7 @@ TEXT: dict[str, dict[str, object]] = {
         "wait": "wait",
         "be_here_by": "be here by",
         "walk": "walk",
+        "walk_over": "walk {n} m",
         "stops": ("stop", "stops"),
         "loading": "Loading stops…",
         "no_route": "No connection from {origin} to {destination} after {time} this day.",
@@ -103,6 +104,7 @@ TEXT: dict[str, dict[str, object]] = {
         "wait": "czekaj",
         "be_here_by": "bądź tu o",
         "walk": "pieszo",
+        "walk_over": "przejdź {n} m",
         "stops": ("przystanek", "przystanki", "przystanków"),
         "loading": "Wczytywanie przystanków…",
         "no_route": "Brak połączenia {origin} → {destination} po {time} tego dnia.",
@@ -133,6 +135,22 @@ def plural(count: int, forms: Sequence[str]) -> str:
         return forms[1]
     few = count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}
     return forms[1] if few else forms[2]
+
+
+HOME_CITY = ", Warszawa"
+
+
+def point_label(name: str, lang: str) -> str:
+    """A searched point's label in lang: the map lookup's "near" wording follows the page, and Warsaw goes unsaid.
+
+    The label travels in the URL, so a language switch would otherwise keep the old wording.
+    """
+    name = name.removesuffix(HOME_CITY)
+    for text in TEXT.values():
+        prefix = str(text["near"]).removesuffix("{name}")
+        if name.startswith(prefix):
+            return str(TEXT[lang]["near"]).format(name=name.removeprefix(prefix))
+    return name
 
 
 def day_label(day: date, today: date, lang: str) -> str:

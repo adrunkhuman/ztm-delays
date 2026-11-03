@@ -605,3 +605,35 @@ def test_side_map_only_with_results(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert "pl-side" not in page
     page = client.get("/planner?date=2026-09-23&time=07:00&from=1001&to=4004").get_data(as_text=True)
     assert 'id="pl-side-map"' in page
+
+
+def test_short_change_walk_is_told_on_the_boarding_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    (long_walk,) = planner.connections(path, "1001", "4004", DAY, 7 * 3600)
+    assert "short" not in long_walk["timeline"][3]  # 120 m stays its own row
+    monkeypatch.setattr(planner, "SHORT_CHANGE_WALK_M", 200)
+    (result,) = planner.connections(path, "1001", "4004", DAY, 7 * 3600)
+    _, _, alight, walk, change, _, _ = result["timeline"]
+    assert walk["short"] is True
+    assert change["walk_m"] == 120
+    assert "walk_m" not in alight
+
+    client = _client(tmp_path / "page", monkeypatch)
+    page = client.get("/planner?date=2026-09-23&time=07:00&from=1001&to=4004&lang=en").get_data(as_text=True)
+    assert "walk 120 m · wait 8 min" in re.sub(r"<[^>]+>", "", page)
+    assert "walk 2 min · 120 m" not in page
+
+
+@pytest.mark.parametrize(
+    ("name", "lang", "label"),
+    [
+        ("Near Hermanowska 27, Warszawa", "pl", "W pobliżu Hermanowska 27"),
+        ("W pobliżu Hermanowska 27, Warszawa", "en", "Near Hermanowska 27"),
+        ("Hermanowska 27, Warszawa", "en", "Hermanowska 27"),
+        ("Słoneczna 3, Marki", "pl", "Słoneczna 3, Marki"),  # other towns keep their name
+        ("52.2, 21", "pl", "52.2, 21"),
+    ],
+)
+def test_point_labels_follow_the_page_language(name: str, lang: str, label: str) -> None:
+    assert planner_text.point_label(name, lang) == label

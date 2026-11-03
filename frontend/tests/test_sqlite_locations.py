@@ -40,9 +40,9 @@ def test_sqlite_reverse_labels_use_the_site_language(
     monkeypatch.setenv("ZTM_GEOCODING_DB", str(path))
     client = _client(tmp_path, monkeypatch)
     exact = client.get(f"/planner/reverse?lat={LAT}&lon={LON}&lang={lang}")
-    assert exact.json == {"name": "Marszałkowska 10, Warszawa"}
+    assert exact.json == {"name": "Marszałkowska 10"}  # Warsaw goes unsaid
     nearby = client.get(f"/planner/reverse?lat={LAT + 0.0003}&lon={LON}&lang={lang}")
-    assert nearby.json == {"name": str(planner_text.TEXT[lang]["near"]).format(name="Marszałkowska 10, Warszawa")}
+    assert nearby.json == {"name": str(planner_text.TEXT[lang]["near"]).format(name="Marszałkowska 10")}
     assert nearby.headers["Cache-Control"] == "no-store"
     assert client.get("/planner/reverse?lat=nan&lon=inf").json == {"name": None}
 
@@ -89,10 +89,10 @@ def test_sqlite_replacement_is_visible_without_an_app_restart(tmp_path: Path, mo
     monkeypatch.setenv("ZTM_GEOCODING_DB", str(path))
     client = _client(tmp_path, monkeypatch)
     url = f"/planner/reverse?lat={LAT}&lon={LON}"
-    assert client.get(url).json == {"name": "Marszałkowska 10, Warszawa"}
+    assert client.get(url).json == {"name": "Marszałkowska 10"}
     replacement = _build(tmp_path / "addresses-new.sqlite", [_row(house="11")])
     replacement.replace(path)
-    assert client.get(url).json == {"name": "Marszałkowska 11, Warszawa"}
+    assert client.get(url).json == {"name": "Marszałkowska 11"}
 
 
 def test_suggestions_combine_stops_and_sqlite_addresses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,4 +120,4 @@ def test_missing_database_recovers_after_local_publication(tmp_path: Path, monke
     html = client.get(query).get_data(as_text=True)
     assert "Marszałkowska 10, Warszawa" in html
     assert str(planner_text.TEXT["en"]["address_error"]) not in html
-    assert client.get(f"/planner/reverse?lat={LAT}&lon={LON}").json == {"name": "Marszałkowska 10, Warszawa"}
+    assert client.get(f"/planner/reverse?lat={LAT}&lon={LON}").json == {"name": "Marszałkowska 10"}

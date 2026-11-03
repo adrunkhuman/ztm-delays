@@ -69,7 +69,7 @@
                   <span class="{{ live_class(r.first_ride.live) }}">{{ live_status(r.first_ride.live) }}</span>
                 {%- else %}
                   {% if r.initial_walk %}{{ t.be_there_by }} <span class="mono">{{ r.first_ride.be_by|clock }}</span> · {% endif -%}
-                  {{ r.from_name }}{% if r.from_post.isdigit() %} <span class="pl-post mono">{{ r.from_post }}</span>{% endif %}
+                  {{ r.from_name }}{% if r.from_post.isdigit() %}&nbsp;<span class="pl-post mono">{{ r.from_post }}</span>{% endif %}
                 {%- endif -%}
               </span>
               {% if r.arrive_by - r.arrive >= 120 %}
@@ -97,25 +97,30 @@
                 </span>
                 <span class="pl-dot-col" aria-hidden="true"><span class="pl-node-dot"></span></span>
                 <span class="pl-node-body">
-                  <span class="pl-node-name">{{ item.name }}{% if item.post.isdigit() %} <span class="pl-post mono">{{ item.post }}</span>{% endif %}</span>
+                  {#- A non-breaking space keeps a post number with the last word of a long name. #}
+                  <span class="pl-node-name">{{ item.name }}{% if item.post.isdigit() %}&nbsp;<span class="pl-post mono">{{ item.post }}</span>{% endif %}</span>
                   {% if loop.last %}
                     {% if r.arrive_by - r.arrive >= 120 %}<span class="pl-node-note" title="{{ t.running_late_title }}">{{ t.running_late }} <b class="mono">{{ r.arrive_by|clock }}</b></span>{% endif %}
                   {% elif item.be_by is defined %}
-                    {% set wait, early = item.wait_minutes|default(0) > 0, item.be_by < item.depart %}
-                    {% if wait or early %}
+                    {% set notes = [] %}
+                    {% if item.walk_m is defined %}{% set _ = notes.append(t.walk_over.format(n=item.walk_m)) %}{% endif %}
+                    {% if item.wait_minutes|default(0) > 0 %}{% set _ = notes.append(t.wait ~ ' ' ~ item.wait_minutes ~ ' min') %}{% endif %}
+                    {% if notes or item.be_by < item.depart %}
+                      {#- Each part wraps whole, so a time never lands on a line without its words. #}
                       <span class="pl-node-note">
-                        {%- if wait %}{{ t.wait }} {{ item.wait_minutes }} min{% endif %}{% if wait and early %} · {% endif %}
-                        {%- if early %}{{ t.be_here_by }} <b class="mono">{{ item.be_by|clock }}</b>{% endif -%}
+                        {%- for note in notes %}<span>{{ note }}</span>{% if not loop.last or item.be_by < item.depart %} · {% endif %}{% endfor %}
+                        {%- if item.be_by < item.depart %}<span>{{ t.be_here_by }} <b class="mono">{{ item.be_by|clock }}</b></span>{% endif -%}
                       </span>
                     {% endif %}
                   {% endif %}
                 </span>
               </li>
             {% elif item.kind == 'walk' %}
-              <li class="pl-seg walk">
+              {# A short change walk is only a connector; the boarding stop below says "walk 26 m". #}
+              <li class="pl-seg walk{% if item.short %} short{% endif %}">
                 <span></span>
                 <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
-                <span class="pl-seg-body">{{ walker() }} {{ t.walk }} {{ item.minutes }} min{% if item.distance_m %} · {{ item.distance_m }} m{% endif %}</span>
+                <span class="pl-seg-body">{% if not item.short %}{{ walker() }} {{ t.walk }} {{ item.minutes }} min{% if item.distance_m %} · {{ item.distance_m }} m{% endif %}{% endif %}</span>
               </li>
             {% else %}
               <li class="pl-seg ride mode-{{ item.mode }}">

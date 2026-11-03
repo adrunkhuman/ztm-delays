@@ -3407,9 +3407,14 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   font-size: 0.8rem;
 }
 
+.pl-node-note > span {
+  white-space: nowrap;
+}
+
+/* Secondary to the stop and its time: a lighter number, not a second bold one. */
 .pl-node-note b {
-  color: var(--fg);
-  font-weight: 700;
+  color: var(--fg2);
+  font-weight: 400;
 }
 
 .pl-seg-line {
@@ -3561,6 +3566,10 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   align-items: center;
   gap: 0.1rem;
   color: var(--note);
+}
+
+.pl-seg.walk.short .pl-seg-body {
+  padding: 0.2rem 0;
 }
 
 @media (max-width: 600px) {
