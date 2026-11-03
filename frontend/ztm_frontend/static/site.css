@@ -2993,12 +2993,14 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   border-color: var(--dim);
 }
 
-/* Leave time on the left, arrival on the right (captioned by the trip's duration), the route between them. Times
-   are always HH:MM in mono, so both side columns keep their width on every card and the route starts at the same
-   edge; a long route wraps within its column instead of adding a row. */
+/* Leave time on the left, arrival on the right (captioned by the trip's duration), and between them the route over
+   a muted detail line. Times are always HH:MM in mono, so both side columns keep their width on every card and the
+   route starts at the same edge. */
 .pl-summary {
   display: grid;
-  grid-template-areas: "depart chips arrival";
+  grid-template-areas:
+    "depart chips arrival"
+    "depart detail arrival";
   grid-template-columns: 6.4rem minmax(0, 1fr) auto;
   gap: 0.3rem 1rem;
   align-items: center;
@@ -3090,22 +3092,26 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   font-size: 0.78rem;
 }
 
-.pl-pill.mode-bus {
+.pl-pill.mode-bus,
+.pl-ride-line.mode-bus {
   border-color: #6c55a8;
   color: #c2b0ff;
 }
 
-.pl-pill.mode-tram {
+.pl-pill.mode-tram,
+.pl-ride-line.mode-tram {
   border-color: #8a7330;
   color: #e6c55c;
 }
 
-.pl-pill.mode-metro {
+.pl-pill.mode-metro,
+.pl-ride-line.mode-metro {
   border-color: #3a5fb8;
   color: #9db8ff;
 }
 
-.pl-pill.mode-rail {
+.pl-pill.mode-rail,
+.pl-ride-line.mode-rail {
   border-color: #2f7a50;
   color: #7fd3a0;
 }
@@ -3212,6 +3218,39 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   color: var(--fg2);
   font-size: 0.8rem;
   white-space: nowrap;
+}
+
+/* One muted line under the route; its parts stack on phones rather than cutting off the second. */
+.pl-detail {
+  display: flex;
+  grid-area: detail;
+  flex-wrap: wrap;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.pl-detail-part {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl-detail-part + .pl-detail-part::before {
+  content: "\00a0· ";
+}
+
+.pl-detail .mono:not(.pl-ride-line) {
+  color: var(--fg2);
+}
+
+.pl-ride-line {
+  font-weight: 700;
+}
+
+.pl-detail .pl-live {
+  font-size: inherit;
 }
 
 .pl-post {
@@ -3460,6 +3499,14 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
   .pl-time {
     font-size: 1.4rem;
+  }
+
+  .pl-detail {
+    flex-direction: column;
+  }
+
+  .pl-detail-part + .pl-detail-part::before {
+    content: none;
   }
 }
 

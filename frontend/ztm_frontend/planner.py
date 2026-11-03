@@ -381,12 +381,20 @@ def _connection(  # noqa: PLR0913
             "alight_scheduled": ride["alight_scheduled"],
         })  # fmt: skip
     first_board = next(n for n in nodes if "be_by" in n)
+    first_ride = next(seg for seg in segments if seg["kind"] == "ride")
     return {
         "depart": result.depart,  # seconds, for pagination; the card shows leave_by
         "leave_by": _floor_minute(result.depart),
         "initial_walk": isinstance(result.legs[0], journey.Walk),
         "from_name": first_board["name"],
         "from_post": first_board["post"],
+        # The summary's detail line: the vehicle to catch, when, and (while it is live) where it is now.
+        "first_ride": {
+            "mode": first_ride["mode"],
+            "line": first_ride["line"],
+            "depart": first_board["depart"],
+            "live": first_ride["live"],
+        },
         "arrive": _round_minute(expected),
         "arrive_by": _ceil_minute(result.arrive_late),
         "duration_minutes": max(1, math.ceil((expected - result.depart) / 60)),

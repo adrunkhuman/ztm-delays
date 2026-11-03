@@ -254,6 +254,8 @@ def test_connection_uses_late_bus_bound_and_walk_to_choose_metro(tmp_path: Path)
     assert (alight["stop_id"], change["stop_id"]) == ("200201", "200203")
     assert walk == {"kind": "walk", "minutes": 2, "distance_m": 120}
     assert [c["kind"] for c in result["chips"]] == ["ride", "ride"]  # a short change walk stays in the itinerary
+    board = result["timeline"][0]
+    assert result["first_ride"] == {"mode": bus["mode"], "line": bus["line"], "depart": board["depart"], "live": None}
     # Late bus (08:03) + 2 min walk still makes the 08:06 metro.
     assert planner.clock(change["be_by"]) == "08:06"
     assert planner.clock(change["arrive"]) == "07:58"  # expected bus arrival 07:56 + walk

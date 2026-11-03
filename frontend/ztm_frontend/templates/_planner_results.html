@@ -54,6 +54,21 @@
                 </span>
               {% endfor %}
             </span>
+            {# The vehicle to catch (or where it is now, while live), and the arrival if it runs late. #}
+            {% set first = r.first_ride %}
+            <span class="pl-detail">
+              <span class="pl-detail-part">
+                {%- if first.live %}
+                  <span class="pl-live"><span class="pl-live-dot" aria-hidden="true"></span><b class="pl-ride-line mono mode-{{ first.mode }}">{{ first.line }}</b> {{ live_status(first.live) }}</span>
+                {%- else %}
+                  <b class="pl-ride-line mono mode-{{ first.mode }}">{{ first.line }}</b> {{ t.ride_at }} <span class="mono">{{ first.depart|clock }}</span>
+                  {{ t.ride_from }} {{ r.from_name }} <span class="mono">{{ t.posts.get(r.from_post, r.from_post) }}</span>
+                {%- endif -%}
+              </span>
+              {% if r.arrive_by - r.arrive >= 120 %}
+                <span class="pl-detail-part">{{ t.running_late }} <span class="mono">{{ r.arrive_by|clock }}</span></span>
+              {% endif %}
+            </span>
           </span>
           <span class="pl-arrival" title="{{ t.arrives }} {{ r.arrive|clock }}">
             <span class="pl-label mono">{{ r.duration_minutes }} min</span>
