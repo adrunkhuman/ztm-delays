@@ -21,9 +21,10 @@
   {%- endif -%}
 {%- endmacro %}
 
-{# The site's delay classes: late from 3 min behind the timetable, early from 1 min ahead, on time between. #}
+{# The site's delay classes: late from 3 min behind the timetable, early from 1 min ahead, on time between. A vehicle
+   waiting at its terminus or still on its previous trip is ahead of this departure by nature, never early for it. #}
 {% macro live_class(live) -%}
-  pl-live{% if live.late >= 3 %} late{% elif live.late <= -1 %} early{% endif %}
+  pl-live{% if live.late >= 3 %} late{% elif live.late <= -1 and live.status == 'running' %} early{% endif %}
 {%- endmacro %}
 
 {% macro walker() -%}
