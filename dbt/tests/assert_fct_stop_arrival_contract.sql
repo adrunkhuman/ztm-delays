@@ -55,7 +55,7 @@ with grouped_arrivals as (
             or vehicle_type not in (1, 2)
             or direction_id not in (0, 1)
             or trip_quality not in ('complete', 'partial', 'broken')
-            or detection_method not in ('segment_within_75m', 'segment_within_250m')
+            or detection_method not in ('segment_within_50m', 'segment_within_75m', 'segment_within_250m')
             or stop_execution_class != 'passenger'
             or not are_passenger_boundaries_settled
         ) as enum_violations,
