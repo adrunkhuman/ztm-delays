@@ -227,7 +227,7 @@ def test_planner_page_renders_cards_and_trip_stops(tmp_path: Path, monkeypatch: 
     )
     assert '<span class="pl-time mono">07:29</span>' in page  # be at the stop
     assert 'be here by <b class="mono">07:29</b>' in page
-    assert 'running late: <b class="mono">08:03</b>' in page
+    assert 'usually by <b class="mono">08:03</b>' in page
     assert "9 times in 10" not in page  # a whole journey's bound is not a calibrated 90%
     assert 'title="timetable 07:50"' in page  # arrival flagged against the timetable
     assert 'class="landing-line-pill mono pl-pill mode-bus" title="bus">110</span>' in page
@@ -255,7 +255,7 @@ def test_connection_uses_late_bus_bound_and_walk_to_choose_metro(tmp_path: Path)
     assert walk == {"kind": "walk", "minutes": 2, "distance_m": 120}
     assert [c["kind"] for c in result["chips"]] == ["ride", "ride"]  # a short change walk stays in the itinerary
     board = result["timeline"][0]
-    assert result["first_ride"] == {"mode": bus["mode"], "line": bus["line"], "depart": board["depart"], "live": None}
+    assert result["first_ride"] == {"be_by": board["be_by"], "live": None}
     # Late bus (08:03) + 2 min walk still makes the 08:06 metro.
     assert planner.clock(change["be_by"]) == "08:06"
     assert planner.clock(change["arrive"]) == "07:58"  # expected bus arrival 07:56 + walk
@@ -283,7 +283,6 @@ def test_multi_leg_page_renders_changes_walks_and_distinct_lazy_stops(
     assert "walk 2 min · 120 m" in page
     assert "wait 8 min" in page
     assert 'be here by <b class="mono">08:06</b>' not in page  # the timetabled metro: be there when it leaves
-    assert "Changes leave room for a late arrival and the walk." in page
     _assert_lazy_stops(client, page, [(1, "Łomianki", "Metro Marymont"), (11, "Metro Marymont", "Centrum")])
     assert 'hx-target="#pl-trip-1-2"' in page
     assert 'hx-target="#pl-trip-1-6"' in page  # the intervening walk has no lazy trip request
@@ -329,7 +328,7 @@ def test_endpoint_walks_render_start_deadline_and_final_arrival(
     assert page.count("Leave at") == 2
     assert '<span class="pl-time mono">07:54</span>' in page
     assert "walk 10 min · 720 m" in page
-    assert "running late" not in page  # under 2 min past the expected arrival
+    assert "usually by" not in page  # under 2 min past the expected arrival
     _assert_lazy_stops(client, page, [(10, "Metro Marymont", "Centrum"), (11, "Metro Marymont", "Centrum")])
 
 
@@ -435,7 +434,6 @@ def test_planner_speaks_polish_to_polish_browsers_and_remembers_the_switch(
     assert '<main class="main pl-main" lang="pl">' in page
     assert "Na przystanku" in page
     assert "pieszo 2 min · 120 m" in page
-    assert "Przesiadki mają zapas na spóźnienie pojazdu i dojście." in page
     assert "Szukaj" in page
     assert 'href="/planner?date=2026-09-23&amp;time=07:00&amp;from=1001&amp;to=4004&amp;lang=en"' in page
 

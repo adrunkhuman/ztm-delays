@@ -388,13 +388,8 @@ def _connection(  # noqa: PLR0913
         "initial_walk": isinstance(result.legs[0], journey.Walk),
         "from_name": first_board["name"],
         "from_post": first_board["post"],
-        # The summary's detail line: the vehicle to catch, when, and (while it is live) where it is now.
-        "first_ride": {
-            "mode": first_ride["mode"],
-            "line": first_ride["line"],
-            "depart": first_board["depart"],
-            "live": first_ride["live"],
-        },
+        # The summary's detail line: when to be at the first stop, and (while live) where its vehicle is now.
+        "first_ride": {"be_by": first_board["be_by"], "live": first_ride["live"]},
         "arrive": _round_minute(expected),
         "arrive_by": _ceil_minute(result.arrive_late),
         "duration_minutes": max(1, math.ceil((expected - result.depart) / 60)),

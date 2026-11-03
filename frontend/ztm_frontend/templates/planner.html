@@ -48,7 +48,6 @@
 
     {% include "_planner_results.html" %}
 
-    <p class="pl-note">{{ t.note }} <span class="pl-flag">!</span> {{ t.flag_note }}{% if results|selectattr('live')|first %} {{ t.live_note }}{% endif %}</p>
   </main>
   <script src="{{ asset('planner.js') }}"></script>
 {% endblock %}

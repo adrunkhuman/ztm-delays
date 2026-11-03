@@ -3092,26 +3092,22 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   font-size: 0.78rem;
 }
 
-.pl-pill.mode-bus,
-.pl-ride-line.mode-bus {
+.pl-pill.mode-bus {
   border-color: #6c55a8;
   color: #c2b0ff;
 }
 
-.pl-pill.mode-tram,
-.pl-ride-line.mode-tram {
+.pl-pill.mode-tram {
   border-color: #8a7330;
   color: #e6c55c;
 }
 
-.pl-pill.mode-metro,
-.pl-ride-line.mode-metro {
+.pl-pill.mode-metro {
   border-color: #3a5fb8;
   color: #9db8ff;
 }
 
-.pl-pill.mode-rail,
-.pl-ride-line.mode-rail {
+.pl-pill.mode-rail {
   border-color: #2f7a50;
   color: #7fd3a0;
 }
@@ -3241,12 +3237,8 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   content: "\00a0· ";
 }
 
-.pl-detail .mono:not(.pl-ride-line) {
+.pl-detail .mono:not(.pl-post) {
   color: var(--fg2);
-}
-
-.pl-ride-line {
-  font-weight: 700;
 }
 
 .pl-detail .pl-live {
@@ -3454,12 +3446,6 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   padding: 1rem 0;
   color: var(--muted);
   font-size: 0.85rem;
-}
-
-.pl-note {
-  padding: 1.4rem 0 0.4rem;
-  color: var(--muted);
-  font-size: 0.7rem;
 }
 
 @media (max-width: 600px) {
