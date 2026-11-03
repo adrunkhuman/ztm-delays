@@ -7,8 +7,8 @@
 {%- endmacro %}
 
 {% macro pill(mode, line) -%}
-  {# The site's line badge, as on the lines and stops pages; mode colour lives in the rail and the map. #}
-  <span class="landing-line-pill mono pl-pill{% if mode == 'tram' %} tram{% endif %}" title="{{ t.modes.get(mode, mode) }}">{{ line }}</span>
+  {# One badge for a ride everywhere in the planner (summary, itinerary, map), in its mode's colours. #}
+  <span class="landing-line-pill mono pl-pill mode-{{ mode }}" title="{{ t.modes.get(mode, mode) }}">{{ line }}</span>
 {%- endmacro %}
 
 {% macro live_status(live) -%}

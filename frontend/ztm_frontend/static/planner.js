@@ -344,7 +344,7 @@
 
   function legLabel(mode, line) {
     const pill = document.createElement("span");
-    pill.className = `landing-line-pill mono pl-pill${mode === "tram" ? " tram" : ""} pl-map-leg`;
+    pill.className = `landing-line-pill mono pl-pill mode-${mode} pl-map-leg`;
     pill.textContent = line;
     return pill;
   }

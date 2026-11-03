@@ -2967,6 +2967,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 .pl-results {
   display: flex;
   flex-direction: column;
+  gap: 0.55rem;
   padding-top: 1.3rem;
 }
 
@@ -2983,23 +2984,13 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   color: var(--blue);
 }
 
-/* A ruled list like the site's tables; an opened card becomes a panel. */
 .pl-card {
-  border-bottom: 1px solid var(--border);
-}
-
-.pl-more + .pl-card,
-.pl-results > .pl-card:first-child {
-  border-top: 1px solid var(--border);
-}
-
-.pl-card[open] {
+  border: 1px solid var(--border);
   background: var(--panel);
 }
 
-.pl-results > .pl-card:last-of-type + .pl-more,
-.pl-more:first-child {
-  margin: 0.4rem 0;
+.pl-card[open] {
+  border-color: var(--dim);
 }
 
 /* Leave time on the left, arrival on the right (captioned by the trip's duration), the route between them. Times
@@ -3045,28 +3036,25 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   align-items: flex-end;
 }
 
-/* As large as the leave time but lighter: the leave time is what to act on. */
+/* Blue is arrival throughout the planner. */
 .pl-arrival .pl-time {
-  color: var(--fg2);
-  font-weight: 600;
+  color: var(--blue);
 }
 
-/* The site's caption style (.label): small, uppercase, spaced. */
 .pl-label {
   overflow: hidden;
   color: var(--muted);
-  font-size: 0.62rem;
-  letter-spacing: 0.08em;
-  line-height: 1.6;
+  font-size: 0.75rem;
+  line-height: 1.4;
   text-overflow: ellipsis;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
 .pl-time {
-  color: var(--fg);
-  font-size: 1.55rem;
+  color: #f4f4f4;
+  font-size: 1.6rem;
   font-weight: 800;
+  letter-spacing: -0.02em;
   line-height: 1.1;
 }
 
@@ -3094,9 +3082,32 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   cursor: help;
 }
 
-/* Line numbers longer than the site's usual three characters (e.g. WKD) keep a margin inside the badge. */
+/* The same size wherever a ride appears, so a chip, its itinerary line and its map label look alike. */
 .pl-pill {
-  padding: 0 0.25rem;
+  height: 1.3rem;
+  min-width: 2.1rem;
+  padding: 0 0.3rem;
+  font-size: 0.78rem;
+}
+
+.pl-pill.mode-bus {
+  border-color: #6c55a8;
+  color: #c2b0ff;
+}
+
+.pl-pill.mode-tram {
+  border-color: #8a7330;
+  color: #e6c55c;
+}
+
+.pl-pill.mode-metro {
+  border-color: #3a5fb8;
+  color: #9db8ff;
+}
+
+.pl-pill.mode-rail {
+  border-color: #2f7a50;
+  color: #7fd3a0;
 }
 
 /* Live positions: a dot on live rides, a status line and a minimap in the expanded ride. */
@@ -3155,9 +3166,9 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   background: var(--fg);
 }
 
-/* Badges on the map need a fill to stay readable over streets; trams keep the site's own. */
-.pl-map-leg:not(.tram) {
-  background: var(--bg);
+/* Badges on the map need a fill to stay readable over streets. */
+.pl-map-leg {
+  background: var(--panel);
 }
 
 .pl-journey-map {
@@ -3198,8 +3209,8 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 .pl-walk-chip {
-  color: var(--muted);
-  font-size: 0.72rem;
+  color: var(--fg2);
+  font-size: 0.8rem;
   white-space: nowrap;
 }
 
@@ -3442,13 +3453,13 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
   /* The same columns, only narrower. */
   .pl-summary {
-    grid-template-columns: 6rem minmax(0, 1fr) auto;
-    gap: 0 0.75rem;
-    padding: 0.75rem 0.25rem;
+    grid-template-columns: 5.2rem minmax(0, 1fr) auto;
+    gap: 0 0.7rem;
+    padding: 0.7rem 0.75rem;
   }
 
   .pl-time {
-    font-size: 1.35rem;
+    font-size: 1.4rem;
   }
 }
 

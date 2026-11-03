@@ -230,7 +230,7 @@ def test_planner_page_renders_cards_and_trip_stops(tmp_path: Path, monkeypatch: 
     assert 'running late: <b class="mono">08:03</b>' in page
     assert "9 times in 10" not in page  # a whole journey's bound is not a calibrated 90%
     assert 'title="timetable 07:50"' in page  # arrival flagged against the timetable
-    assert 'class="landing-line-pill mono pl-pill" title="bus">110</span>' in page
+    assert 'class="landing-line-pill mono pl-pill mode-bus" title="bus">110</span>' in page
     assert "Later routes" in page
     assert "/planner/trip/-5?date=2026-09-23&amp;board=0&amp;alight=1" in page
     _assert_lazy_stops(client, page, [(1, "Łomianki", "Metro Marymont"), (-5, "Łomianki", "Metro Marymont")])
@@ -276,7 +276,7 @@ def test_multi_leg_page_renders_changes_walks_and_distinct_lazy_stops(
     assert response.status_code == HTTPStatus.OK
     page = response.get_data(as_text=True)
     assert page.count('class="pl-card"') == 1
-    assert 'class="landing-line-pill mono pl-pill" title="metro">M1</span>' in page
+    assert 'class="landing-line-pill mono pl-pill mode-metro" title="metro">M1</span>' in page
     assert "pl-walk-chip" not in page  # the 2 min change walk is only in the itinerary
     assert "walk 2 min · 120 m" in page
     assert "wait 8 min" in page
