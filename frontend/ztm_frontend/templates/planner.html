@@ -11,7 +11,17 @@
 {% endblock %}
 
 {% block body %}
-  <main class="main pl-main" lang="{{ lang }}">
+  {% set shown = origin and destination and results %}
+  <main class="main pl-main{% if shown %} pl-with-map{% endif %}" lang="{{ lang }}">
+    {# Once there are results, the search folds into one line above them; opening it shows the full form. #}
+    <details class="pl-search"{% if not shown %} open{% endif %}>
+    {% if shown %}
+      <summary class="pl-recap">
+        <span class="pl-recap-route">{{ origin.name }} <span class="pl-recap-arrow" aria-hidden="true">→</span> {{ destination.name }}</span>
+        <span class="pl-recap-when mono">{{ day|day_label(today, lang) }}, {{ time }}</span>
+        <span class="pl-recap-edit">{{ t.change_search }}</span>
+      </summary>
+    {% endif %}
     <form class="pl-form" action="{{ url_for('planner_page') }}" method="get" autocomplete="off">
       <input type="hidden" name="from" value="{{ origin.stop_group_id if origin and origin.stop_group_id else '' }}">
       <input type="hidden" name="to" value="{{ destination.stop_group_id if destination and destination.stop_group_id else '' }}">
@@ -45,8 +55,16 @@
         <button class="pl-go" type="submit">{{ t.go }} <span aria-hidden="true">→</span></button>
       </div>
     </form>
+    </details>
 
     {% include "_planner_results.html" %}
+
+    {# Wide screens: one large map beside the list, of the opened card (or the first); planner.js fills it. #}
+    {% if shown %}
+      <aside class="pl-side" aria-label="{{ t.map_label }}">
+        <div id="pl-side-map" class="pl-side-map" data-style="{{ asset('map-style.json') }}"></div>
+      </aside>
+    {% endif %}
 
   </main>
   <script src="{{ asset('planner.js') }}"></script>

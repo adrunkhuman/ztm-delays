@@ -431,7 +431,11 @@ def test_planner_speaks_polish_to_polish_browsers_and_remembers_the_switch(
     client = _client(tmp_path, monkeypatch)
     url = "/planner?date=2026-09-23&time=07:00&from=1001&to=4004"
     page = client.get(url, headers={"Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"}).get_data(as_text=True)
-    assert '<main class="main pl-main" lang="pl">' in page
+    assert '<main class="main pl-main pl-with-map" lang="pl">' in page
+    # With results, the search folds into one line naming the trip.
+    assert '<details class="pl-search">' in page
+    assert re.search(r'<span class="pl-recap-route">Łomianki <span[^>]*>→</span> Centrum</span>', page)
+    assert ">zmień</span>" in page
     assert "Na przystanku" in page
     assert "pieszo 2 min · 120 m" in page
     assert "Szukaj" in page
@@ -595,3 +599,12 @@ def test_nonzero_point_walk_distances_and_timings_reach_card_nodes(tmp_path: Pat
     assert card["timeline"][0]["depart"] == card["leave_by"] == 26820
     assert card["timeline"][-1]["arrive"] == card["arrive"] == 28620
     assert card["arrive_by"] == 29100
+
+
+def test_search_stays_open_until_there_are_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    for url in ("/planner?date=2026-09-23", "/planner?date=2026-09-23&time=23:50&from=1001&to=4004"):
+        page = client.get(url).get_data(as_text=True)
+        assert '<details class="pl-search" open>' in page
+        assert "pl-recap" not in page
+        assert "pl-side" not in page

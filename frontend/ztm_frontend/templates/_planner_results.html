@@ -21,6 +21,11 @@
   {%- endif -%}
 {%- endmacro %}
 
+{# The site's delay classes: late from 3 min behind the timetable, early from 1 min ahead, on time between. #}
+{% macro live_class(live) -%}
+  pl-live{% if live.late >= 3 %} late{% elif live.late <= -1 %} early{% endif %}
+{%- endmacro %}
+
 {% macro walker() -%}
   <svg class="pl-walker" viewBox="0 0 12 16" aria-hidden="true"><circle cx="6.5" cy="2" r="1.6"/><path d="M5 5.5 3.5 9M5 5.5l2.6.6L9 9M5.6 6l-.6 4 2.4 2.2L8 15.5M5 10l-1.6 5.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
 {%- endmacro %}
@@ -60,7 +65,7 @@
             <span class="pl-detail">
               <span class="pl-detail-part">
                 {%- if r.first_ride.live %}
-                  <span class="pl-live">{{ live_status(r.first_ride.live) }}</span>
+                  <span class="{{ live_class(r.first_ride.live) }}">{{ live_status(r.first_ride.live) }}</span>
                 {%- else %}
                   {% if r.initial_walk %}{{ t.be_there_by }} <span class="mono">{{ r.first_ride.be_by|clock }}</span> · {% endif -%}
                   {{ r.from_name }}{% if r.from_post.isdigit() %} <span class="pl-post mono">{{ r.from_post }}</span>{% endif %}
@@ -117,7 +122,7 @@
                 <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
                 <span class="pl-seg-body">
                   <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span>
-                    {%- if item.live %}<span class="pl-live" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
+                    {%- if item.live %}<span class="{{ live_class(item.live) }}" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
                   </span>
                   <details class="pl-stops-toggle" data-key="{{ r.key }}-{{ loop.index }}"
                     hx-get="{{ url_for('planner_trip', trip_key=item.trip_key, date=day, board=item.board_sequence, alight=item.alight_sequence) }}"

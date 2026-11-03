@@ -2713,6 +2713,100 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   padding-top: 1.4rem;
 }
 
+/* After a search, the form folds into one line; opened, the line gives way to the full form. */
+.pl-search[open] > .pl-recap {
+  display: none;
+}
+
+.pl-recap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.75rem;
+  align-items: baseline;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  cursor: pointer;
+  list-style: none;
+}
+
+.pl-recap::-webkit-details-marker {
+  display: none;
+}
+
+.pl-recap:hover {
+  border-color: var(--dim);
+}
+
+.pl-recap-route {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl-recap-arrow {
+  color: var(--muted);
+}
+
+.pl-recap-when {
+  color: var(--fg2);
+  font-size: 0.8rem;
+}
+
+.pl-recap-edit {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.pl-side {
+  display: none;
+}
+
+/* Wide screens: the list on the left, one large map of the opened (or first) card on the right. */
+@media (min-width: 1100px) {
+  .pl-main.pl-with-map {
+    display: grid;
+    grid-template-columns: minmax(0, 36rem) minmax(0, 1fr);
+    gap: 0 1.5rem;
+    align-items: start;
+    width: min(1400px, 100%);
+  }
+
+  .pl-with-map > :not(.pl-side) {
+    grid-column: 1;
+  }
+
+  .pl-with-map .pl-side {
+    position: sticky;
+    top: 1rem;
+    display: block;
+    grid-row: 1 / span 3;
+    grid-column: 2;
+    height: calc(100vh - var(--nav-height) - 3rem);
+    min-height: 24rem;
+    border: 1px solid var(--border);
+    background: var(--bg);
+  }
+
+  .pl-side-map {
+    height: 100%;
+  }
+
+  .pl-with-map .pl-journey-map {
+    display: none;
+  }
+
+  /* The card the side map shows. */
+  .pl-with-map .pl-card.mapped {
+    border-color: var(--fg2);
+  }
+}
+
 .pl-form {
   position: relative;
   display: flex;
@@ -3038,9 +3132,10 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   align-items: flex-end;
 }
 
-/* Blue is arrival throughout the planner. */
+/* Blue is arrival throughout the planner; a step smaller than the leave time, the card's one big number. */
 .pl-arrival .pl-time {
   color: var(--blue);
+  font-size: 1.25rem;
 }
 
 .pl-label {
@@ -3138,12 +3233,20 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   .pl-live-dot { animation: none; }
 }
 
-/* Beside the headsign, which gives way first. */
+/* Beside the headsign, which gives way first. Coloured like delays elsewhere on the site. */
 .pl-live {
   flex-shrink: 0;
   color: var(--live);
   font-size: 0.8rem;
   white-space: nowrap;
+}
+
+.pl-live.late {
+  color: var(--red);
+}
+
+.pl-live.early {
+  color: var(--blue);
 }
 
 /* The vehicle is the page's live dot; at journey scale a pill would sit on top of the boarding stop. */
@@ -3365,8 +3468,9 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   background: var(--rail);
 }
 
-/* Mode colours shared by the timeline rail and the journey map (planner.js reads --rail-<mode>). */
-.pl-results {
+/* Mode colours shared by the timeline rail and the journey maps (planner.js reads --rail-<mode>); set on the page,
+   since the wide-screen side map sits outside the results. */
+.pl-main {
   --rail-bus: #6c55a8;
   --rail-tram: #8a7330;
   --rail-metro: #3a5fb8;
@@ -3492,12 +3596,13 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
     font-size: 1.4rem;
   }
 
-  .pl-detail {
-    flex-direction: column;
+  /* One detail line: where to board (or where the live vehicle is); the late case stays in the opened card. */
+  .pl-detail-part + .pl-detail-part {
+    display: none;
   }
 
-  .pl-detail-part + .pl-detail-part::before {
-    content: none;
+  .pl-arrival .pl-time {
+    font-size: 1.1rem;
   }
 }
 

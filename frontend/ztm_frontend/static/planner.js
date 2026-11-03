@@ -330,7 +330,7 @@
   }
 
   // A vehicle further than this from the boarding stop (often on its previous trip across the city) would zoom the
-  // map out past the journey, so it is left to the status line's "N stops away".
+  // map out past the journey, so it is not drawn.
   const APPROACH_SHOWN_M = 2500;
 
   function metres([lon1, lat1], [lon2, lat2]) {
@@ -349,9 +349,9 @@
     return pill;
   }
 
-  // Map data: legs in order ({kind: "walk"|"ride", path, mode?, line?}) and, while the next ride is live and not yet
-  // at the stop, approach {vehicle, path, mode, line} ending at that ride's boarding stop.
   async function draw(card) {
+    // Wide screens show the side map instead; a hidden box would get a zero-sized map.
+    if (wide.matches) return;
     const boxes = card.querySelectorAll(".pl-journey-map:not([data-drawn])");
     if (!boxes.length) return;
     try {
@@ -364,66 +364,152 @@
       // A second toggle or an htmx replacement may happen while MapLibre is loading.
       if (!box.isConnected || !card.open || minimaps.has(box)) continue;
       box.dataset.drawn = "1";
-      const { legs, approach } = JSON.parse(box.dataset.map);
-      const shown = approach && metres(approach.vehicle, approach.path.at(-1)) <= APPROACH_SHOWN_M ? approach : null;
-      const first = legs[0].path[0];
-      const bounds = legs.flatMap(leg => leg.path).concat(shown ? shown.path : [])
-        .reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(first, first));
-      const map = new maplibregl.Map({
-        container: box,
-        style: new URL(box.dataset.style, window.location.href).href,
-        bounds,
-        fitBoundsOptions: { padding: 28, maxZoom: 16 },
-        // Browsable, but a page scroll passing over the map still scrolls the page: two fingers or ctrl to pan.
-        cooperativeGestures: true,
-        dragRotate: false,
-        pitchWithRotate: false,
-        touchPitch: false,
-        attributionControl: { compact: true },
-      });
-      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
-      minimaps.set(box, map);
-      const styles = getComputedStyle(box);
-      const colour = (mode) => styles.getPropertyValue(`--rail-${mode}`).trim() || "#888888";
-      // Leg ends become the timeline's dots; a change at the same post is one dot, not two.
-      const nodes = [first, ...legs.map(leg => leg.path.at(-1))];
-      nodes.forEach((at, i) => {
-        if (i > 0 && i < nodes.length - 1 && metres(at, nodes[i - 1]) < 15) return;
-        const dot = document.createElement("span");
-        dot.className = `pl-map-node${i === 0 || i === nodes.length - 1 ? " end" : ""}`;
-        marker(map, dot, at);
-      });
-      for (const leg of legs) {
-        if (leg.kind === "ride") marker(map, legLabel(leg.mode, leg.line), leg.path[Math.floor(leg.path.length / 2)]);
-      }
-      if (shown) {
-        const vehicle = document.createElement("span");
-        vehicle.className = "pl-live-dot pl-map-vehicle";
-        marker(map, vehicle, shown.vehicle);
-      }
-      map.on("load", () => {
-        if (!box.isConnected || minimaps.get(box) !== map) return;
-        // Compact attribution opens expanded on wide screens; on a minimap it would cover the route.
-        box.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show");
-        // The large city name lands mid-route on any cross-city journey.
-        if (map.getLayer("warsaw-name")) map.setLayoutProperty("warsaw-name", "visibility", "none");
-        const feature = (path, properties) => ({ type: "Feature", geometry: { type: "LineString", coordinates: path }, properties });
-        const collection = (features) => ({ type: "geojson", data: { type: "FeatureCollection", features } });
-        const rides = legs.filter(leg => leg.kind === "ride").map(leg => feature(leg.path, { colour: colour(leg.mode) }));
-        map.addSource("approach", collection(shown ? [feature(shown.path, { colour: colour(shown.mode) })] : []));
-        map.addSource("walks", collection(legs.filter(leg => leg.kind === "walk").map(leg => feature(leg.path, {}))));
-        map.addSource("rides", collection(rides));
-        const round = { "line-cap": "round", "line-join": "round" };
-        // The approach is context, not the trip: thin, dashed and faded under everything else.
-        map.addLayer({ id: "approach", type: "line", source: "approach", layout: { "line-join": "round" },
-          paint: { "line-color": ["get", "colour"], "line-width": 2.5, "line-opacity": 0.7, "line-dasharray": [2, 2] } });
-        map.addLayer({ id: "walks", type: "line", source: "walks", layout: round,
-          paint: { "line-color": "#b4b4b4", "line-width": 3, "line-dasharray": [0, 2] } });
-        map.addLayer({ id: "ride-casing", type: "line", source: "rides", layout: round,
-          paint: { "line-color": "#111111", "line-width": 8 } });
-        map.addLayer({ id: "rides", type: "line", source: "rides", layout: round,
-          paint: { "line-color": ["get", "colour"], "line-width": 5 } });
-      });
+      // Inline in the page: a scroll passing over the map still scrolls the page, two fingers or ctrl move the map.
+      minimaps.set(box, journeyMap(box, JSON.parse(box.dataset.map), { cooperativeGestures: true }));
     }
   }
+
+  // Map data: legs in order ({kind: "walk"|"ride", path, mode?, line?}) and, while the next ride is live and not yet
+  // at the stop, approach {vehicle, path, mode, line} ending at that ride's boarding stop.
+  function journeyMap(box, data, options) {
+    const map = new maplibregl.Map({
+      container: box,
+      style: new URL(box.dataset.style, window.location.href).href,
+      bounds: bounds(data),
+      fitBoundsOptions: { padding: 28, maxZoom: 16 },
+      dragRotate: false,
+      pitchWithRotate: false,
+      touchPitch: false,
+      attributionControl: { compact: true },
+      ...options,
+    });
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    map.on("load", () => {
+      if (!box.isConnected) return;
+      // Compact attribution opens expanded on wide screens; on a minimap it would cover the route.
+      box.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show");
+      // The large city name lands mid-route on any cross-city journey.
+      if (map.getLayer("warsaw-name")) map.setLayoutProperty("warsaw-name", "visibility", "none");
+      const empty = { type: "geojson", data: { type: "FeatureCollection", features: [] } };
+      for (const id of ["approach", "walks", "rides"]) map.addSource(id, empty);
+      const round = { "line-cap": "round", "line-join": "round" };
+      // The approach is context, not the trip: thin, dashed and faded under everything else.
+      map.addLayer({ id: "approach", type: "line", source: "approach", layout: { "line-join": "round" },
+        paint: { "line-color": ["get", "colour"], "line-width": 2.5, "line-opacity": 0.7, "line-dasharray": [2, 2] } });
+      map.addLayer({ id: "walks", type: "line", source: "walks", layout: round,
+        paint: { "line-color": "#b4b4b4", "line-width": 3, "line-dasharray": [0, 2] } });
+      map.addLayer({ id: "ride-casing", type: "line", source: "rides", layout: round,
+        paint: { "line-color": "#111111", "line-width": 8 } });
+      map.addLayer({ id: "rides", type: "line", source: "rides", layout: round,
+        paint: { "line-color": ["get", "colour"], "line-width": 5 } });
+      paintLines(map, box, data);
+    });
+    placeMarkers(map, data);
+    return map;
+  }
+
+  function shownApproach({ approach }) {
+    return approach && metres(approach.vehicle, approach.path.at(-1)) <= APPROACH_SHOWN_M ? approach : null;
+  }
+
+  function bounds(data) {
+    const first = data.legs[0].path[0];
+    const shown = shownApproach(data);
+    return data.legs.flatMap(leg => leg.path).concat(shown ? shown.path : [])
+      .reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(first, first));
+  }
+
+  // Markers are DOM elements, so a redraw of the same map removes the previous set first.
+  const markers = new WeakMap();
+  function placeMarkers(map, { legs, ...data }) {
+    for (const old of markers.get(map) || []) old.remove();
+    const placed = [];
+    // Leg ends become the timeline's dots; a change at the same post is one dot, not two.
+    const nodes = [legs[0].path[0], ...legs.map(leg => leg.path.at(-1))];
+    nodes.forEach((at, i) => {
+      if (i > 0 && i < nodes.length - 1 && metres(at, nodes[i - 1]) < 15) return;
+      const dot = document.createElement("span");
+      dot.className = `pl-map-node${i === 0 || i === nodes.length - 1 ? " end" : ""}`;
+      placed.push(marker(map, dot, at));
+    });
+    for (const leg of legs) {
+      if (leg.kind === "ride") placed.push(marker(map, legLabel(leg.mode, leg.line), leg.path[Math.floor(leg.path.length / 2)]));
+    }
+    const shown = shownApproach({ legs, ...data });
+    if (shown) {
+      const vehicle = document.createElement("span");
+      vehicle.className = "pl-live-dot pl-map-vehicle";
+      placed.push(marker(map, vehicle, shown.vehicle));
+    }
+    markers.set(map, placed);
+  }
+
+  function paintLines(map, box, data) {
+    const styles = getComputedStyle(box);
+    const colour = (mode) => styles.getPropertyValue(`--rail-${mode}`).trim() || "#888888";
+    const feature = (path, properties) => ({ type: "Feature", geometry: { type: "LineString", coordinates: path }, properties });
+    const collection = (features) => ({ type: "FeatureCollection", features });
+    const shown = shownApproach(data);
+    map.getSource("approach")?.setData(collection(shown ? [feature(shown.path, { colour: colour(shown.mode) })] : []));
+    map.getSource("walks")?.setData(collection(data.legs.filter(leg => leg.kind === "walk").map(leg => feature(leg.path, {}))));
+    map.getSource("rides")?.setData(collection(
+      data.legs.filter(leg => leg.kind === "ride").map(leg => feature(leg.path, { colour: colour(leg.mode) }))));
+  }
+
+  // Wide screens: one large map beside the list. It follows the opened card, or the first one; a refresh of the
+  // same card updates its lines in place, so a reader's pan and zoom survive the minute's live update.
+  const wide = window.matchMedia("(min-width: 1100px)");
+  let side = null;
+  async function showSide() {
+    const box = document.querySelector("#pl-side-map");
+    if (!box || !wide.matches) return;
+    const card = document.querySelector(".pl-card[open]") || document.querySelector(".pl-card");
+    const source = card?.querySelector(".pl-journey-map");
+    if (!source) return;
+    const data = JSON.parse(source.dataset.map);
+    for (const other of document.querySelectorAll(".pl-card.mapped")) other.classList.remove("mapped");
+    card.classList.add("mapped");
+    if (side?.box === box && side.key === card.dataset.key) {
+      if (side.json === source.dataset.map) return;
+      side.json = source.dataset.map;
+      placeMarkers(side.map, data);
+      if (side.map.loaded()) paintLines(side.map, box, data);
+      return;
+    }
+    try {
+      await loadMapLibre();
+    } catch {
+      box.hidden = true;
+      return;
+    }
+    if (!box.isConnected || !wide.matches) return;
+    side?.map.remove();
+    side = { box, key: card.dataset.key, json: source.dataset.map, map: journeyMap(box, data, {}) };
+  }
+
+  function dropSide() {
+    side?.map.remove();
+    side = null;
+  }
+
+  wide.addEventListener("change", () => {
+    if (wide.matches) {
+      showSide();
+    } else {
+      dropSide();
+      for (const card of document.querySelectorAll(".pl-card[open]")) draw(card);
+    }
+  });
+  document.addEventListener("htmx:after:swap", () => showSide());
+  document.addEventListener("htmx:before:cleanup", (event) => {
+    if (side && event.target.contains(side.box)) dropSide();
+  });
+  document.addEventListener(
+    "toggle",
+    (event) => {
+      if (event.target.matches?.(".pl-card") && event.target.open) showSide();
+    },
+    true,
+  );
+  showSide();
 })();

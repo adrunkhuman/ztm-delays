@@ -36,6 +36,7 @@
     addSource() { this.sources++; }
     addLayer() { this.layers++; }
     getLayer() { return undefined; }
+    getSource() { return { setData() {} }; }
   }
   const mapLibrary = {
     Map: MapMock,
