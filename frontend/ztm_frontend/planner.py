@@ -43,6 +43,7 @@ MIN_QUERY_LENGTH = 2
 DAY_SECONDS = 86_400
 EARLIER_STEP_SECONDS = 30 * 60
 TIMETABLE_FLAG_SECONDS = 120  # expected times at least this far from the timetable get a marker
+SUMMARY_CHANGE_WALK_MINUTES = 5  # shorter walks between rides are left to the itinerary, not the card's summary
 
 
 def search_key(text: str) -> str:
@@ -390,7 +391,11 @@ def _connection(  # noqa: PLR0913
         "arrive_by": _ceil_minute(result.arrive_late),
         "duration_minutes": max(1, math.ceil((expected - result.depart) / 60)),
         "changes": result.vehicles - 1,
-        "chips": chips,
+        "chips": [
+            chip
+            for i, chip in enumerate(chips)
+            if chip["kind"] == "ride" or i in {0, len(chips) - 1} or chip["minutes"] > SUMMARY_CHANGE_WALK_MINUTES
+        ],
         "timeline": [item for pair in zip(nodes, [*segments, None], strict=True) for item in pair if item],
         "live": any(chip.get("live") for chip in chips),
         "key": next(f"{seg['trip_key']}-{seg['board_sequence']}" for seg in segments if seg["kind"] == "ride"),

@@ -54,14 +54,11 @@
                 </span>
               {% endfor %}
             </span>
-            <span class="pl-sub">
-              {{ t.from_stop }} {{ r.from_name }} <span class="mono">{{ t.posts.get(r.from_post, r.from_post) }}</span>
-              · {{ t.direct if not r.changes else r.changes|string + ' ' + r.changes|plural(t.changes) }}
-            </span>
           </span>
+          {# The chips show the changes and the expanded card the stops; the summary keeps only the times. #}
           <span class="pl-trip-time">
             <span class="pl-duration mono">{{ r.duration_minutes }} min</span>
-            <span class="pl-arrival">{{ t.arrives }} <b class="mono">{{ r.arrive|clock }}</b></span>
+            <span class="pl-arrival" title="{{ t.arrives }}"><span class="pl-arrival-label">{{ t.arrives }}</span> <b class="mono">{{ r.arrive|clock }}</b></span>
           </span>
         </summary>
         {# One map for the whole connection; the live vehicle's approach is drawn muted, beside the trip, not as it. #}

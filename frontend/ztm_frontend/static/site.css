@@ -2993,17 +2993,17 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   border-color: var(--dim);
 }
 
-/* Two rows in one grid: the big row (leave time, route, duration) and a small row under it (what each number
-   means, where to board). The three wrappers dissolve into the grid (display: contents) so both rows line up. */
+/* A fixed-width leave time on the left (times are always HH:MM in mono, so every card's right block starts at the
+   same edge), then two rows on that edge: the route, and "66 min → 09:12". */
 .pl-summary {
   display: grid;
   grid-template-areas:
-    "time chips duration"
-    "label sub arrival";
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 0.15rem 1.1rem;
+    "depart chips"
+    "depart trip";
+  grid-template-columns: 6.2rem minmax(0, 1fr);
+  gap: 0.3rem 1rem;
   align-items: center;
-  padding: 0.8rem 1rem;
+  padding: 0.75rem 1rem;
   cursor: pointer;
   list-style: none;
 }
@@ -3016,21 +3016,36 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   background: var(--hover);
 }
 
-.pl-depart,
-.pl-route,
-.pl-trip-time {
+.pl-route {
   display: contents;
 }
 
+.pl-trip-time {
+  display: flex;
+  grid-area: trip;
+  gap: 0.35rem;
+  align-items: baseline;
+  white-space: nowrap;
+}
+
+/* What the time means sits above it, as a caption. */
+.pl-depart {
+  display: flex;
+  grid-area: depart;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .pl-label {
-  grid-area: label;
+  overflow: hidden;
   color: var(--muted);
-  font-size: 0.8rem;
+  font-size: 0.72rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .pl-time {
-  grid-area: time;
   color: #f4f4f4;
   font-size: 1.75rem;
   font-weight: 800;
@@ -3055,20 +3070,23 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 .pl-duration {
-  grid-area: duration;
-  justify-self: end;
-  white-space: nowrap;
-  color: #f4f4f4;
-  font-size: 1.3rem;
-  font-weight: 800;
+  color: var(--fg2);
+  font-size: 0.85rem;
+  font-weight: 600;
 }
 
 .pl-arrival {
-  grid-area: arrival;
-  justify-self: end;
-  white-space: nowrap;
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+/* The arrow stands in for "arrives"; the word stays as the tooltip. */
+.pl-arrival-label {
+  display: none;
+}
+
+.pl-arrival::before {
+  content: "→ ";
 }
 
 .pl-arrival b {
@@ -3196,14 +3214,15 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 
 /* The route is the card's main line, so its pills are larger than the timeline's. */
 .pl-chips .pl-pill {
-  height: 1.45rem;
-  min-width: 2.3rem;
-  font-size: 0.85rem;
+  height: 1.4rem;
+  min-width: 2.2rem;
+  font-size: 0.82rem;
 }
 
 .pl-sep {
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.8rem;
+  opacity: 0.6;
 }
 
 .pl-walker {
@@ -3225,17 +3244,6 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   white-space: nowrap;
 }
 
-.pl-sub {
-  grid-area: sub;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 0.85rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pl-sub .mono,
 .pl-post {
   color: #8a8a8a;
   font-size: 0.72rem;
@@ -3473,29 +3481,34 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
     display: none;
   }
 
-  /* The same big and small rows, but the route needs the width the duration took, so the duration joins the small
-     row beside the arrival and the boarding stop gets a full-width third row. */
+  /* The same two rows, only narrower. */
   .pl-summary {
-    grid-template-areas:
-      "time chips chips"
-      "label duration arrival"
-      "sub sub sub";
-    gap: 0.1rem 0.7rem;
+    grid-template-columns: 5.2rem minmax(0, 1fr);
+    gap: 0.25rem 0.75rem;
     padding: 0.7rem 0.75rem;
   }
 
-  .pl-sub {
-    margin-top: 0.25rem;
-  }
-
   .pl-time {
-    font-size: 1.45rem;
+    font-size: 1.5rem;
   }
 
+  .pl-chips .pl-pill {
+    height: 1.3rem;
+    min-width: 2rem;
+    font-size: 0.78rem;
+  }
+
+  .pl-chips {
+    gap: 0.25rem 0.3rem;
+  }
+
+  .pl-chip {
+    gap: 0.3rem;
+  }
+
+  .pl-arrival,
   .pl-duration {
-    color: var(--fg);
-    font-size: 0.85rem;
-    font-weight: 700;
+    font-size: 0.8rem;
   }
 }
 

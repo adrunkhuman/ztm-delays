@@ -72,7 +72,7 @@ def test_page_and_fragment_share_language_precedence(
     client = _client(tmp_path, monkeypatch)
     url = f"{path}?date=2026-09-23&time=07:00&from=1001&to=4004"
     polish = client.get(url, headers={"Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"})
-    assert "1 przesiadka" in polish.get_data(as_text=True)
+    assert "Na przystanku" in polish.get_data(as_text=True)
     assert "Set-Cookie" not in polish.headers
     switched = client.get(url + "&lang=pl", headers={"Accept-Language": "en"})
     if path == "/planner":
@@ -82,8 +82,8 @@ def test_page_and_fragment_share_language_precedence(
     else:
         assert "Set-Cookie" not in switched.headers
         client.set_cookie("planner_lang", "pl")
-    assert "1 przesiadka" in client.get(url, headers={"Accept-Language": "en"}).get_data(as_text=True)
-    assert "1 change" in client.get(url + "&lang=en", headers={"Accept-Language": "pl"}).get_data(as_text=True)
+    assert "Na przystanku" in client.get(url, headers={"Accept-Language": "en"}).get_data(as_text=True)
+    assert "At the stop" in client.get(url + "&lang=en", headers={"Accept-Language": "pl"}).get_data(as_text=True)
     assert set(switched.vary) == {"Accept-Language", "Cookie"}
 
 
@@ -93,12 +93,12 @@ def test_results_refresh_does_not_overwrite_another_tabs_language_choice(
     client = _client(tmp_path, monkeypatch)
     query = "date=2026-09-23&time=07:00&from=1001&to=4004"
     # A fragment pins the original tab's language, even after another tab updates the cookie.
-    assert "1 change" in client.get(f"/planner?{query}", headers={"Accept-Language": "en"}).get_data(as_text=True)
+    assert "At the stop" in client.get(f"/planner?{query}", headers={"Accept-Language": "en"}).get_data(as_text=True)
     client.get(f"/planner?{query}&lang=pl")
     refreshed = client.get(f"/planner/results?{query}&lang=en")
-    assert "1 change" in refreshed.get_data(as_text=True)
+    assert "At the stop" in refreshed.get_data(as_text=True)
     assert "Set-Cookie" not in refreshed.headers
-    assert "1 przesiadka" in client.get(f"/planner?{query}", headers={"Accept-Language": "en"}).get_data(as_text=True)
+    assert "Na przystanku" in client.get(f"/planner?{query}", headers={"Accept-Language": "en"}).get_data(as_text=True)
 
 
 def test_fragment_requires_published_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -253,7 +253,7 @@ def test_connection_uses_late_bus_bound_and_walk_to_choose_metro(tmp_path: Path)
     assert planner.clock(result["leave_by"]) == "07:29"
     assert (alight["stop_id"], change["stop_id"]) == ("200201", "200203")
     assert walk == {"kind": "walk", "minutes": 2, "distance_m": 120}
-    assert [c["kind"] for c in result["chips"]] == ["ride", "walk", "ride"]
+    assert [c["kind"] for c in result["chips"]] == ["ride", "ride"]  # a short change walk stays in the itinerary
     # Late bus (08:03) + 2 min walk still makes the 08:06 metro.
     assert planner.clock(change["be_by"]) == "08:06"
     assert planner.clock(change["arrive"]) == "07:58"  # expected bus arrival 07:56 + walk
@@ -277,7 +277,7 @@ def test_multi_leg_page_renders_changes_walks_and_distinct_lazy_stops(
     page = response.get_data(as_text=True)
     assert page.count('class="pl-card"') == 1
     assert 'pl-pill mode-metro" title="metro">M1</span>' in page
-    assert "1 change" in page
+    assert "pl-walk-chip" not in page  # the 2 min change walk is only in the itinerary
     assert "walk 2 min · 120 m" in page
     assert "wait 8 min" in page
     assert 'be here by <b class="mono">08:06</b>' not in page  # the timetabled metro: be there when it leaves
@@ -430,7 +430,7 @@ def test_planner_speaks_polish_to_polish_browsers_and_remembers_the_switch(
     url = "/planner?date=2026-09-23&time=07:00&from=1001&to=4004"
     page = client.get(url, headers={"Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"}).get_data(as_text=True)
     assert '<main class="main pl-main" lang="pl">' in page
-    assert "1 przesiadka" in page
+    assert "Na przystanku" in page
     assert "pieszo 2 min · 120 m" in page
     assert "Przesiadki mają zapas na spóźnienie pojazdu i dojście." in page
     assert "Szukaj" in page
@@ -438,7 +438,7 @@ def test_planner_speaks_polish_to_polish_browsers_and_remembers_the_switch(
 
     switched = client.get(url + "&lang=pl")
     assert "planner_lang=pl" in switched.headers["Set-Cookie"]
-    assert "1 przesiadka" in client.get(url).get_data(as_text=True)  # the cookie beats the browser's English
+    assert "Na przystanku" in client.get(url).get_data(as_text=True)  # the cookie beats the browser's English
     stops = client.get("/planner/trip/11?date=2026-09-23&board=0&alight=1").get_data(as_text=True)
     assert "przewidywany" in stops
 
