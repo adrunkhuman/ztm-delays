@@ -539,7 +539,9 @@ def get_page(
     endpoint_args contains canonical endpoint URL parameters for pagination, swap and language links.
     Invalid or partial coordinates take precedence over stop IDs and cannot fall back to a stop search.
     """
-    dates = available_dates(path)
+    published = available_dates(path)
+    # Past days are useless to plan; a build that is all past (a stale artifact) still offers its days.
+    dates = [d for d in published if d >= today] or published
     requested = parse_date(args.get("date"))
     # Default to today; outside the published window fall back to its first day.
     day = requested if requested in dates else today if today in dates else (dates[0] if dates else today)

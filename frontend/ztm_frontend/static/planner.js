@@ -60,7 +60,7 @@
   document.addEventListener("click", (event) => {
     const form = event.target.closest(".pl-form");
     const row = event.target.closest(".pl-field");
-    const endpointRow = row && !event.target.closest(".pl-suggestions, .pl-swap");
+    const endpointRow = row && !event.target.closest(".pl-suggestions, .pl-swap, .pl-locate");
     if (picker && !event.target.closest(".pl-location-panel") && !endpointRow) closePicker();
     if (!form) return;
     const suggestion = event.target.closest(".pl-suggestion");
@@ -78,6 +78,8 @@
         [origin.disabled, destination.disabled] = [destination.disabled, origin.disabled];
       }
       for (const suggestions of form.querySelectorAll(".pl-suggestions")) suggestions.replaceChildren();
+    } else if (event.target.closest(".pl-locate")) {
+      locate(form, event.target.closest(".pl-locate"));
     } else if (endpointRow) {
       const input = row.querySelector(".pl-input");
       input.focus();
@@ -103,6 +105,46 @@
       closePicker(true);
     }
   });
+
+  // The start becomes the device's position, labelled like a map click once the reverse lookup answers.
+  function locate(form, button) {
+    closePicker();
+    const notice = (text) => {
+      const note = document.createElement("p");
+      note.className = "pl-picker-note";
+      note.setAttribute("role", "status");
+      note.textContent = text;
+      form.querySelector("#pl-suggest-from").replaceChildren(note);
+    };
+    if (!navigator.geolocation) {
+      notice(button.dataset.error);
+      return;
+    }
+    button.classList.add("busy");
+    navigator.geolocation.getCurrentPosition(
+      async ({ coords }) => {
+        button.classList.remove("busy");
+        const point = { lat: coords.latitude, lon: coords.longitude };
+        if (!form.isConnected || !validPoint(point)) return;
+        choose(form, "from", button.dataset.label, null, point, false);
+        const reverse = form.querySelector(".pl-location-panel")?.dataset.reverseUrl;
+        if (!reverse) return;
+        const url = new URL(reverse, location.href);
+        url.searchParams.set("lat", point.lat.toFixed(6));
+        url.searchParams.set("lon", point.lon.toFixed(6));
+        try {
+          const { name } = await (await fetch(url)).json();
+          // The reader may have typed or picked something else meanwhile.
+          if (name && form.isConnected && samePoint(form, "from", point)) choose(form, "from", name, null, point, false);
+        } catch { /* The "my location" label stays. */ }
+      },
+      () => {
+        button.classList.remove("busy");
+        if (form.isConnected) notice(button.dataset.error);
+      },
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+    );
+  }
 
   function validPoint(point) {
     return Number.isFinite(point.lat) && Number.isFinite(point.lon) && Math.abs(point.lat) <= 90 && Math.abs(point.lon) <= 180;

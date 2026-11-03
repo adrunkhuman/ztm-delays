@@ -637,3 +637,17 @@ def test_short_change_walk_is_told_on_the_boarding_stop(tmp_path: Path, monkeypa
 )
 def test_point_labels_follow_the_page_language(name: str, lang: str, label: str) -> None:
     assert planner_text.point_label(name, lang) == label
+
+
+def test_date_picker_starts_today(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)  # covers 22-24 Sep
+    assert planner.get_page(path, {}, DAY, 0)["dates"] == [DAY, DAY + timedelta(days=1)]
+    # A past day in the link falls back to today.
+    assert planner.get_page(path, {"date": "2026-09-22"}, DAY, 0)["day"] == DAY
+    # A stale build with only past days still offers them rather than nothing.
+    assert planner.get_page(path, {}, date(2026, 10, 1), 0)["dates"] == [
+        DAY - timedelta(days=1),
+        DAY,
+        DAY + timedelta(days=1),
+    ]

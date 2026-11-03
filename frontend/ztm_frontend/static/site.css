@@ -2818,7 +2818,8 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   color: var(--muted);
 }
 
-.pl-swap {
+.pl-swap,
+.pl-locate {
   display: grid;
   width: 32px;
   height: 32px;
@@ -2831,14 +2832,35 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   font-size: 1.05rem;
 }
 
-.pl-swap:hover {
+.pl-swap:hover,
+.pl-locate:hover {
   color: var(--blue);
 }
 
 .pl-swap:focus-visible,
+.pl-locate:focus-visible,
 .pl-location-panel button:focus-visible {
   outline: 1px solid var(--blue);
   outline-offset: -2px;
+}
+
+.pl-locate svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+/* Waiting for the browser's position. */
+.pl-locate.busy {
+  color: var(--blue);
+  animation: pl-locating 1s ease-in-out infinite alternate;
+}
+
+@keyframes pl-locating {
+  to { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pl-locate.busy { animation: none; }
 }
 
 .pl-location-panel {
