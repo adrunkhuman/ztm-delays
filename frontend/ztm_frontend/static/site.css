@@ -2713,56 +2713,6 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   padding-top: 1.4rem;
 }
 
-/* After a search, the form folds into one line; opened, the line gives way to the full form. */
-.pl-search[open] > .pl-recap {
-  display: none;
-}
-
-.pl-recap {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.2rem 0.75rem;
-  align-items: baseline;
-  padding: 0.7rem 0.9rem;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  cursor: pointer;
-  list-style: none;
-}
-
-.pl-recap::-webkit-details-marker {
-  display: none;
-}
-
-.pl-recap:hover {
-  border-color: var(--dim);
-}
-
-.pl-recap-route {
-  flex: 1 1 12rem;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pl-recap-arrow {
-  color: var(--muted);
-}
-
-.pl-recap-when {
-  color: var(--fg2);
-  font-size: 0.8rem;
-}
-
-.pl-recap-edit {
-  color: var(--muted);
-  font-size: 0.8rem;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
 .pl-side {
   display: none;
 }
