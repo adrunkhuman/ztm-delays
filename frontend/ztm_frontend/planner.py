@@ -395,8 +395,7 @@ def _connection(  # noqa: PLR0913
         "chips": [
             chip
             for i, chip in enumerate(chips)
-            if chip["kind"] == "ride"
-            or (0 < i < len(chips) - 1 and chip["minutes"] > SUMMARY_CHANGE_WALK_MINUTES)
+            if chip["kind"] == "ride" or (0 < i < len(chips) - 1 and chip["minutes"] > SUMMARY_CHANGE_WALK_MINUTES)
         ],
         "timeline": [item for pair in zip(nodes, [*segments, None], strict=True) for item in pair if item],
         "live": any(chip.get("live") for chip in chips),
