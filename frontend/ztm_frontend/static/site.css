@@ -2967,7 +2967,6 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 .pl-results {
   display: flex;
   flex-direction: column;
-  gap: 0.55rem;
   padding-top: 1.3rem;
 }
 
@@ -2984,23 +2983,32 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   color: var(--blue);
 }
 
+/* A ruled list like the site's tables; an opened card becomes a panel. */
 .pl-card {
-  border: 1px solid var(--border);
-  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.pl-more + .pl-card,
+.pl-results > .pl-card:first-child {
+  border-top: 1px solid var(--border);
 }
 
 .pl-card[open] {
-  border-color: var(--dim);
+  background: var(--panel);
 }
 
-/* A fixed-width leave time on the left (times are always HH:MM in mono, so every card's right block starts at the
-   same edge), then two rows on that edge: the route, and "66 min → 09:12". */
+.pl-results > .pl-card:last-of-type + .pl-more,
+.pl-more:first-child {
+  margin: 0.4rem 0;
+}
+
+/* Leave time on the left, arrival on the right (captioned by the trip's duration), the route between them. Times
+   are always HH:MM in mono, so both side columns keep their width on every card and the route starts at the same
+   edge; a long route wraps within its column instead of adding a row. */
 .pl-summary {
   display: grid;
-  grid-template-areas:
-    "depart chips"
-    "depart trip";
-  grid-template-columns: 6.2rem minmax(0, 1fr);
+  grid-template-areas: "depart chips arrival";
+  grid-template-columns: 6.4rem minmax(0, 1fr) auto;
   gap: 0.3rem 1rem;
   align-items: center;
   padding: 0.75rem 1rem;
@@ -3020,37 +3028,46 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   display: contents;
 }
 
-.pl-trip-time {
+/* What each time means sits above it, as a caption. */
+.pl-depart,
+.pl-arrival {
   display: flex;
-  grid-area: trip;
-  gap: 0.35rem;
-  align-items: baseline;
-  white-space: nowrap;
-}
-
-/* What the time means sits above it, as a caption. */
-.pl-depart {
-  display: flex;
-  grid-area: depart;
   flex-direction: column;
   min-width: 0;
 }
 
+.pl-depart {
+  grid-area: depart;
+}
+
+.pl-arrival {
+  grid-area: arrival;
+  align-items: flex-end;
+}
+
+/* As large as the leave time but lighter: the leave time is what to act on. */
+.pl-arrival .pl-time {
+  color: var(--fg2);
+  font-weight: 600;
+}
+
+/* The site's caption style (.label): small, uppercase, spaced. */
 .pl-label {
   overflow: hidden;
   color: var(--muted);
-  font-size: 0.72rem;
-  line-height: 1.3;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  line-height: 1.6;
   text-overflow: ellipsis;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
 .pl-time {
-  color: #f4f4f4;
-  font-size: 1.75rem;
+  color: var(--fg);
+  font-size: 1.55rem;
   font-weight: 800;
-  letter-spacing: -0.02em;
-  line-height: 1.05;
+  line-height: 1.1;
 }
 
 .pl-line {
@@ -3069,30 +3086,6 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   white-space: nowrap;
 }
 
-.pl-duration {
-  color: var(--fg2);
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
-.pl-arrival {
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-/* The arrow stands in for "arrives"; the word stays as the tooltip. */
-.pl-arrival-label {
-  display: none;
-}
-
-.pl-arrival::before {
-  content: "→ ";
-}
-
-.pl-arrival b {
-  color: var(--blue);
-  font-weight: 700;
-}
 
 .pl-flag {
   margin-left: 0.15rem;
@@ -3101,8 +3094,9 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   cursor: help;
 }
 
+/* Line numbers longer than the site's usual three characters (e.g. WKD) keep a margin inside the badge. */
 .pl-pill {
-  padding: 0 0.3rem;
+  padding: 0 0.25rem;
 }
 
 /* Live positions: a dot on live rides, a status line and a minimap in the expanded ride. */
@@ -3161,39 +3155,17 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   background: var(--fg);
 }
 
-/* Leg labels tie each line on the map to its ride in the timeline. */
-.pl-map-leg {
-  font-size: 0.7rem;
-  background: var(--panel);
-}
-
-.pl-journey-map {
-  height: 13rem;
-  margin: 0.75rem 1rem 0;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+/* Badges on the map need a fill to stay readable over streets; trams keep the site's own. */
+.pl-map-leg:not(.tram) {
   background: var(--bg);
 }
 
-.pl-pill.mode-bus {
-  border-color: #6c55a8;
-  color: #c2b0ff;
-}
-
-.pl-pill.mode-tram {
-  border-color: #8a7330;
-  color: #e6c55c;
-}
-
-.pl-pill.mode-metro {
-  border-color: #3a5fb8;
-  color: #9db8ff;
-}
-
-.pl-pill.mode-rail {
-  border-color: #2f7a50;
-  color: #7fd3a0;
+.pl-journey-map {
+  height: 15rem;
+  margin: 0.75rem 1rem 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg);
 }
 
 .pl-chips {
@@ -3201,7 +3173,7 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   grid-area: chips;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.3rem 0.35rem;
+  gap: 0.3rem 0.45rem;
   min-width: 0;
 }
 
@@ -3210,19 +3182,6 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
   align-items: center;
   gap: 0.35rem;
   white-space: nowrap;
-}
-
-/* The route is the card's main line, so its pills are larger than the timeline's. */
-.pl-chips .pl-pill {
-  height: 1.4rem;
-  min-width: 2.2rem;
-  font-size: 0.82rem;
-}
-
-.pl-sep {
-  color: var(--muted);
-  font-size: 0.8rem;
-  opacity: 0.6;
 }
 
 .pl-walker {
@@ -3239,8 +3198,8 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
 }
 
 .pl-walk-chip {
-  color: var(--fg2);
-  font-size: 0.85rem;
+  color: var(--muted);
+  font-size: 0.72rem;
   white-space: nowrap;
 }
 
@@ -3481,34 +3440,15 @@ a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 1px 
     display: none;
   }
 
-  /* The same two rows, only narrower. */
+  /* The same columns, only narrower. */
   .pl-summary {
-    grid-template-columns: 5.2rem minmax(0, 1fr);
-    gap: 0.25rem 0.75rem;
-    padding: 0.7rem 0.75rem;
+    grid-template-columns: 6rem minmax(0, 1fr) auto;
+    gap: 0 0.75rem;
+    padding: 0.75rem 0.25rem;
   }
 
   .pl-time {
-    font-size: 1.5rem;
-  }
-
-  .pl-chips .pl-pill {
-    height: 1.3rem;
-    min-width: 2rem;
-    font-size: 0.78rem;
-  }
-
-  .pl-chips {
-    gap: 0.25rem 0.3rem;
-  }
-
-  .pl-chip {
-    gap: 0.3rem;
-  }
-
-  .pl-arrival,
-  .pl-duration {
-    font-size: 0.8rem;
+    font-size: 1.35rem;
   }
 }
 

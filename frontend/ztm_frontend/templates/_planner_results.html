@@ -7,7 +7,8 @@
 {%- endmacro %}
 
 {% macro pill(mode, line) -%}
-  <span class="landing-line-pill mono pl-pill mode-{{ mode }}" title="{{ t.modes.get(mode, mode) }}">{{ line }}</span>
+  {# The site's line badge, as on the lines and stops pages; mode colour lives in the rail and the map. #}
+  <span class="landing-line-pill mono pl-pill{% if mode == 'tram' %} tram{% endif %}" title="{{ t.modes.get(mode, mode) }}">{{ line }}</span>
 {%- endmacro %}
 
 {% macro live_status(live) -%}
@@ -41,24 +42,22 @@
             <span class="pl-time mono">{{ r.leave_by|clock }}</span>
           </span>
           <span class="pl-route">
+            {# Read left to right without separators; the chips show the changes and the expanded card the stops. #}
             <span class="pl-chips">
-              {# Each chip keeps its trailing separator, so a wrapped row ends with "›" instead of starting with it. #}
               {% for c in r.chips %}
                 <span class="pl-chip">
                   {%- if c.kind == 'walk' %}
                     <span class="pl-walk-chip mono" title="{{ t.walk }} {{ c.minutes }} min">{{ walker() }}{{ c.minutes }}</span>
                   {%- else %}
                     {{ pill(c.mode, c.line) }}{% if c.live %}<span class="pl-live-dot" title="{{ t.live }}" aria-label="{{ t.live }}"></span>{% endif %}
-                  {%- endif %}
-                  {%- if not loop.last %}<span class="pl-sep" aria-hidden="true">›</span>{% endif -%}
+                  {%- endif -%}
                 </span>
               {% endfor %}
             </span>
           </span>
-          {# The chips show the changes and the expanded card the stops; the summary keeps only the times. #}
-          <span class="pl-trip-time">
-            <span class="pl-duration mono">{{ r.duration_minutes }} min</span>
-            <span class="pl-arrival" title="{{ t.arrives }}"><span class="pl-arrival-label">{{ t.arrives }}</span> <b class="mono">{{ r.arrive|clock }}</b></span>
+          <span class="pl-arrival" title="{{ t.arrives }} {{ r.arrive|clock }}">
+            <span class="pl-label mono">{{ r.duration_minutes }} min</span>
+            <span class="pl-time mono">{{ r.arrive|clock }}</span>
           </span>
         </summary>
         {# One map for the whole connection; the live vehicle's approach is drawn muted, beside the trip, not as it. #}
