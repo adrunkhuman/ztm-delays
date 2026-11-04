@@ -1,4 +1,4 @@
-"""Warm the serving process's day networks after atomic artifact publication."""
+"""Warm the serving process's day networks after atomic artifact publication, and keep today's live view current."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from ztm_frontend import journey, live_times
+from ztm_frontend import journey, live, live_times
 from ztm_frontend.db import fetch_one, read_connection
 
 if TYPE_CHECKING:
@@ -27,6 +27,7 @@ class Warmer:
         """Keep completion state local to this serving app's worker."""
         self.app = app
         self._completed: tuple[tuple[int, int, int, int], date] | None = None
+        self._today: tuple[journey.Network, date] | None = None  # the last warm pass's network for its today
 
     def check(self, now: datetime) -> None:
         """Warm once per publication or Warsaw date; leave failed attempts retryable."""
@@ -66,7 +67,26 @@ class Warmer:
                 if current is not None:
                     journey.prepare(current.net)
         self._completed = identity
+        self._today = (today_net, today) if today_net is not None else None
         LOGGER.info("Warmed planner build %s for %s in %.2fs", metadata["build_id"], days, time.monotonic() - started)
+
+    def refresh_live(self, now: datetime) -> None:
+        """Patch and prepare today's network for the current feed object, so requests need not."""
+        warm = self._today
+        if warm is None or warm[1] != now.astimezone(WARSAW).date():
+            return  # nothing warm yet, or the date rolled over and check() has yet to re-warm
+        current = live_times.view(self.app.config["ZTM_PLANNER_PATH"], warm[0], warm[1], now)
+        if current is not None:
+            journey.prepare(current.net)
+
+    def run_live(self, stop: threading.Event) -> None:
+        """Refresh the live view once per feed object until shutdown, whether or not anyone is searching."""
+        while not stop.is_set():
+            try:
+                self.refresh_live(datetime.now(WARSAW))
+            except Exception:
+                LOGGER.exception("Planner live refresh failed; retrying in %ss", live.FEED_TTL_S)
+            stop.wait(live.FEED_TTL_S)
 
     def run(self, stop: threading.Event) -> None:
         """Warm immediately, then check at a fixed interval until shutdown."""
@@ -79,11 +99,14 @@ class Warmer:
 
 
 def start(app: Flask) -> None:
-    """Start one daemon thread per serving app; no endpoint or Airflow dependency."""
+    """Start the warmup daemon and, with a live feed, the live refresher; no endpoint or Airflow dependency."""
     if "planner_warmup" in app.extensions:
         return
     if LOGGER.level == logging.NOTSET:
         LOGGER.setLevel(logging.INFO)
     stop = threading.Event()
     app.extensions["planner_warmup"] = stop
-    threading.Thread(target=Warmer(app).run, args=(stop,), name="planner-warmup", daemon=True).start()
+    warmer = Warmer(app)
+    threading.Thread(target=warmer.run, args=(stop,), name="planner-warmup", daemon=True).start()
+    if live.enabled():
+        threading.Thread(target=warmer.run_live, args=(stop,), name="planner-live", daemon=True).start()

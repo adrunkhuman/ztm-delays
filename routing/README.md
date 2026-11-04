@@ -17,9 +17,11 @@ Do not reuse this non-cryptographic hasher for arbitrary untrusted keys. Bounds
 checks, checked time arithmetic, and ordinary IEEE floating-point operations remain
 enabled; the package forbids unsafe Rust in its own source.
 
-A network is immutable and shared through `Arc`. A query shares a bounded FIFO
-permission cache across its windows. Each window owns numeric bounds that survive
-decreasing departure times. Its predecessor arena is cleared on every successful
+A network is immutable and shared through `Arc`. `PreparedNet.patched` copies one
+with new times at some rows: timing columns are copied, boarding lists only where a
+trip moved (in board_by, then trip order), and the rest stays shared. A query
+shares a bounded FIFO permission cache across its windows. Each window owns numeric
+bounds that survive decreasing departure times. Its predecessor arena is cleared on every successful
 or failed run; allocated capacity may remain for reuse. Only complete returned
 paths are copied out, in origin-to-destination order.
 

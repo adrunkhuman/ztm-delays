@@ -15,9 +15,11 @@ import copy
 import heapq
 import math
 import threading
+import weakref
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from functools import partial
@@ -170,6 +172,8 @@ class Network:
         build = connection.execute("select build_id from planner_metadata limit 1").fetchone()
         self.build_id = str(build[0]) if build else ""
         self.live: object | None = None  # live.Matcher, created on first use and dying with the network
+        # A patched copy's base network (weak) and native row patches, until its native copy is prepared.
+        self.patch_source: tuple[weakref.ref[Network], list[tuple[int, int, int, int, int]]] | None = None
         self.live_view: object | None = None  # live_times state for the latest feed object
         stops = connection.execute(
             """
@@ -312,15 +316,17 @@ class Network:
         # Each incidence has its own board_by order: no timetable or model FIFO assumption.
         self.pattern_trips = pattern_trips
         self.pattern_row_starts = tuple(tuple(self.trip_rows[t] for t in trips) for trips in pattern_trips)
-        self.incidence: list[list[tuple[int, int, array, array]]] = [[] for _ in self.stop_ids]
+        self.incidence: Sequence[list[tuple[int, int, array, array]]] = [[] for _ in self.stop_ids]
         self.incidence_slot: dict[tuple[int, int], tuple[int, int]] = {}  # (pattern, pos) -> (stop, index)
+        incidence: list[list[tuple[int, int, array, array]]] = [[] for _ in self.stop_ids]
         for pattern in range(len(pattern_trips)):
             alights = self.pattern_alights[pattern]
             for pos, stop in enumerate(self.patterns[pattern][:-1]):
                 if not alights or pos >= alights[-1]:
                     continue
-                self.incidence_slot[pattern, pos] = (stop, len(self.incidence[stop]))
-                self.incidence[stop].append(self._boarding(pattern, pos))
+                self.incidence_slot[pattern, pos] = (stop, len(incidence[stop]))
+                incidence[stop].append(self._boarding(pattern, pos))
+        self.incidence = incidence
         # First boardable position of each pattern at a stop: a walk must not lead to a trip the rider could
         # already board where the walk started.
         self.board_at: list[dict[int, int]] = [{} for _ in self.stop_ids]
@@ -342,28 +348,27 @@ class Network:
 
         board_by may be NO_BOARD (the trip has passed the stop). Times keep the invariants of the load: departure
         is the later of expected and board_by, the late base no earlier than either.
+        A feed object moves boarding at tens of thousands of rows, but a search reads boarding lists only around
+        its origin: they are rebuilt on first use. The native copy moves trips within the shared base lists.
         """
         net = copy.copy(self)
         net.board, net.expected = array("i", self.board), array("i", self.expected)
         net.depart, net.late_base = array("i", self.depart), array("i", self.late_base)
         net.live = net.live_view = None
-        slots = set()
+        native = []
+        moved: dict[int, set[int]] = {}  # stop: indexes of its boarding lists with a moved trip
         for row, (board, expected, late) in rows.items():
             depart = max(expected, board) if board < NO_BOARD else expected
-            net.board[row], net.expected[row], net.depart[row] = board, expected, depart
-            net.late_base[row] = max(late, depart, board if board < NO_BOARD else depart)
-            trip = bisect_right(self.trip_rows, row) - 1
-            slots.add((self.trip_pattern[trip], row - self.trip_rows[trip]))
-        net.incidence = list(self.incidence)
-        copied: set[int] = set()
-        for slot in slots:
-            if slot not in self.incidence_slot:
-                continue  # no boarding there (the last alighting position or later)
-            stop, index = self.incidence_slot[slot]
-            if stop not in copied:
-                net.incidence[stop] = list(net.incidence[stop])
-                copied.add(stop)
-            net.incidence[stop][index] = net._boarding(*slot)  # noqa: SLF001
+            late_base = max(late, depart, board if board < NO_BOARD else depart)
+            net.board[row], net.expected[row], net.depart[row], net.late_base[row] = board, expected, depart, late_base
+            native.append((row, board, expected, depart, late_base))
+            if board != self.board[row]:
+                trip = bisect_right(self.trip_rows, row) - 1
+                slot = self.incidence_slot.get((self.trip_pattern[trip], row - self.trip_rows[trip]))
+                if slot is not None:  # else no boarding there (the last alighting position or later)
+                    moved.setdefault(slot[0], set()).add(slot[1])
+        net.incidence = _PatchedIncidence(net, self.incidence, moved)
+        net.patch_source = (weakref.ref(self), native)
         return net
 
     def _load_footpaths(self, connection: duckdb.DuckDBPyConnection) -> None:
@@ -477,6 +482,36 @@ class Network:
         return [_journey(self, label) for label in profile.run(after)]
 
 
+class _PatchedIncidence(Sequence[list[tuple[int, int, array, array]]]):
+    """A patched network's boarding lists by stop: the base's, rebuilt from the patched columns on first use."""
+
+    def __init__(
+        self, net: Network, base: Sequence[list[tuple[int, int, array, array]]], moved: dict[int, set[int]]
+    ) -> None:
+        self._net = weakref.ref(net)  # the network owns this sequence
+        self._base, self._moved = base, moved
+        self._built: dict[int, list[tuple[int, int, array, array]]] = {}
+
+    def __len__(self) -> int:
+        return len(self._base)
+
+    def __getitem__(self, stop: int) -> list[tuple[int, int, array, array]]:  # ty: ignore[invalid-method-override]
+        if stop not in self._moved:
+            return self._base[stop]
+        entries = self._built.get(stop)
+        if entries is None:
+            net = self._net()
+            if net is None:
+                raise RuntimeError("patched network is gone")
+            entries = list(self._base[stop])
+            for index in self._moved[stop]:
+                pattern, pos, _, _ = entries[index]
+                entries[index] = net._boarding(pattern, pos)  # noqa: SLF001
+            # Concurrent requests may both build a stop; they build equal lists.
+            self._built[stop] = entries
+        return entries
+
+
 def _trip_meta(connection: duckdb.DuckDBPyConnection, day: date) -> dict[int, tuple]:
     """Return (mode, line, brigade, duty_id, shape_id) by trip key.
 
@@ -517,11 +552,21 @@ _prepared_lock = threading.Lock()
 
 def _prepared_network(net: Network) -> PreparedNet:
     with _prepared_lock:
-        prepared = _prepared_networks.get(net)
-        if prepared is None:
+        return _prepare_locked(net)
+
+
+def _prepare_locked(net: Network) -> PreparedNet:
+    prepared = _prepared_networks.get(net)
+    if prepared is None:
+        base = net.patch_source[0]() if net.patch_source else None
+        if base is not None and net.patch_source:
+            # Patching the base's native copy skips copying the whole network across the boundary again.
+            prepared = _prepare_locked(base).patched(net.patch_source[1])
+        else:
             prepared = PreparedNet(net)
-            _prepared_networks[net] = prepared
-        return prepared
+        net.patch_source = None
+        _prepared_networks[net] = prepared
+    return prepared
 
 
 def prepare(net: Network) -> None:

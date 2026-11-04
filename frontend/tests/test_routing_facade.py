@@ -37,6 +37,9 @@ class EngineNet:
     def __init__(self, *args: object) -> None:
         self.args = args
 
+    def patched(self, rows: list[tuple[int, ...]]) -> EngineNet:
+        return EngineNet(self, rows)
+
 
 class EngineQuery:
     def __init__(self, *args: object) -> None:
@@ -80,7 +83,9 @@ def facade(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
             NativeState=EngineState,
         ),
     )
-    fake_journey = SimpleNamespace(MAX_VEHICLES=5, INF=2**31 - 1, MAX_JOURNEY_S=10800, _Label=Label, Walk=Walk)
+    fake_journey = SimpleNamespace(
+        MAX_VEHICLES=5, INF=2**31 - 1, NO_BOARD=2**30, MAX_JOURNEY_S=10800, _Label=Label, Walk=Walk
+    )
     monkeypatch.setitem(sys.modules, "ztm_frontend", SimpleNamespace(journey=fake_journey))
     spec = importlib.util.spec_from_file_location(
         "facade_under_test",
@@ -242,3 +247,19 @@ def test_frontend_constant_mismatch_rejected(
     monkeypatch.setattr(journey, constant, value)
     with pytest.raises(ValueError, match="six vehicle-count columns"):
         facade.NativeState(facade.PreparedQuery(facade.PreparedNet(context.net), [0, 0], 0), context)
+
+
+def test_no_board_mismatch_rejected(facade: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ztm_frontend import journey  # noqa: PLC0415
+
+    monkeypatch.setattr(journey, "NO_BOARD", 2**31 - 1)
+    with pytest.raises(ValueError, match="NO_BOARD"):
+        facade.PreparedNet(network())
+
+
+def test_patched_wraps_the_native_copy(facade: ModuleType) -> None:
+    prepared = facade.PreparedNet(network())
+    rows = [(0, 15, 15, 15, 25)]
+    patched = prepared.patched(rows)
+    assert isinstance(patched, facade.PreparedNet)
+    assert patched._native.args == (prepared._native, rows)

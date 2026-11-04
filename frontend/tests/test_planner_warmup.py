@@ -388,10 +388,12 @@ def test_optional_live_view_prepares_its_patched_network_separately(
     assert len(nets) == 4
     assert nets[-1] is patched[0]
     assert nets[-1] is not nets[0]
-    assert native.call_args_list == [call(net) for net in nets]
+    # The live view's native copy is patched from today's, not copied from Python again.
+    assert native.call_args_list == [call(net) for net in nets[:-1]]
+    assert journey._prepared_network(nets[-1]) is not journey._prepared_network(nets[0])  # noqa: SLF001
     assert nets[0].search("O", "D", 0)[0].depart == 100
     assert nets[-1].search("O", "D", 0)[0].depart == 150
-    assert native.call_count == 4
+    assert native.call_count == 3
 
 
 def test_unavailable_live_feed_keeps_timetable_native_networks_warm(
@@ -557,11 +559,51 @@ def test_run_with_shutdown_already_requested_does_no_work(
     wait.assert_not_called()
 
 
+def test_live_refresh_patches_and_prepares_the_warm_today(
+    warmer: planner_warmup.Warmer, monkeypatch: pytest.MonkeyPatch, live_view: Mock
+) -> None:
+    warmer.refresh_live(NOW)
+    live_view.assert_not_called()  # nothing warm yet
+    warmer.check(NOW)
+    today = journey.network(warmer.app.config["ZTM_PLANNER_PATH"], DAY)
+    patched = today.patched({0: (150, 150, 160)})
+    live_view.reset_mock()
+    live_view.return_value = SimpleNamespace(net=patched)
+    prepare = Mock(wraps=journey.prepare)
+    monkeypatch.setattr(journey, "prepare", prepare)
+
+    later = NOW + timedelta(seconds=10)
+    warmer.refresh_live(later)
+
+    live_view.assert_called_once_with(warmer.app.config["ZTM_PLANNER_PATH"], today, DAY, later)
+    prepare.assert_called_once_with(patched)
+    warmer.refresh_live(NOW + timedelta(days=1))  # tomorrow is not warm as today yet
+    assert live_view.call_count == 1
+
+
+def test_start_launches_the_live_refresher_only_with_a_feed(
+    warmer: planner_warmup.Warmer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    thread = Mock()
+    monkeypatch.setattr(planner_warmup.threading, "Thread", thread)
+    monkeypatch.setattr(live, "enabled", lambda: True)
+
+    planner_warmup.start(warmer.app)
+
+    names = [kwargs["name"] for _, kwargs in thread.call_args_list]
+    assert names == ["planner-warmup", "planner-live"]
+    target = thread.call_args.kwargs["target"]
+    assert target.__func__ is planner_warmup.Warmer.run_live
+    assert target.__self__ is thread.call_args_list[0].kwargs["target"].__self__
+    assert thread.call_args.kwargs["args"] == (warmer.app.extensions["planner_warmup"],)
+
+
 def test_start_is_idempotent_and_launches_one_daemon_per_app(
     warmer: planner_warmup.Warmer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     thread = Mock()
     monkeypatch.setattr(planner_warmup.threading, "Thread", thread)
+    monkeypatch.setattr(live, "enabled", lambda: False)
 
     planner_warmup.start(warmer.app)
     stop = warmer.app.extensions["planner_warmup"]

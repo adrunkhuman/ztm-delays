@@ -4,6 +4,7 @@ import re
 from datetime import datetime, tzinfo
 from html import unescape
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
 import duckdb
@@ -161,6 +162,29 @@ def test_view_patches_today_once_per_feed_object(published: tuple[Path, Network]
     again = live_times.view(path, net, DAY, _at(8, 9, 45))
     assert again is not None
     assert again.net is found.net
+
+
+def test_latest_takes_a_recent_view_without_reading_the_feed(
+    published: tuple[Path, Network], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, net = published
+    _calibrate(path)
+    publish_feed(tmp_path / "vehicles.json.gz", _at(8, 9, 30), _ping(900, _at(8, 9, 6)))
+    found = live_times.view(path, net, DAY, _at(8, 9, 40))
+    assert found is not None
+
+    def unread() -> None:
+        raise AssertionError("the feed must not be read")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(live, "feed", unread)
+        recent = live_times.latest(path, net, DAY, _at(8, 10, 10))  # 40 s after the feed object
+        assert recent is not None
+        assert recent.net is found.net
+    old = Mock(return_value=None)
+    monkeypatch.setattr(live_times, "view", old)
+    assert live_times.latest(path, net, DAY, _at(8, 10, 11)) is None  # too old: read as view() does
+    old.assert_called_once_with(path, net, DAY, _at(8, 10, 11))
 
 
 def test_view_needs_a_calibration(published: tuple[Path, Network], tmp_path: Path) -> None:
