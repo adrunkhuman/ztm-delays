@@ -308,6 +308,7 @@ def _add_planner_location_routes(app: Flask) -> None:
                 name = candidate["name"]
                 if candidate["distance_m"] > 20:  # noqa: PLR2004 - distinguish a nearby address from an exact label
                     name = str(planner_text.TEXT[_planner_lang()]["near"]).format(name=name)
+                name = planner_text.point_label(name, _planner_lang())
         except (ValueError, OverflowError, GeocodingError):
             pass  # Coordinates remain a usable label if reverse lookup is unavailable.
         response = make_response({"name": name})
@@ -320,6 +321,9 @@ def _render_planner(template: str, *, remember_language: bool = False) -> Respon
     now = datetime.now(WARSAW)
     lang = _planner_lang()
     args = {key: request.args[key] for key in PLANNER_ARGS if key in request.args}
+    for field in ("from", "to"):
+        if f"q_{field}" in args and f"{field}_lat" in args:
+            args[f"q_{field}"] = planner_text.point_label(args[f"q_{field}"], lang)
     response = make_response(
         render_template(
             template,

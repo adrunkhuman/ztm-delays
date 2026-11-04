@@ -20,6 +20,9 @@ TEXT: dict[str, dict[str, object]] = {
         "from_placeholder": "From: stop or street + number",
         "to_placeholder": "To: stop or street + number",
         "swap": "Swap places",
+        "locate": "Use my location",
+        "my_location": "My location",
+        "locate_error": "Your location is unavailable. Allow location access or type an address.",
         "address": "address",
         "address_error": "Address lookup is unavailable. Try again or pick a point on the map.",
         "pick_map": "Pick a point on the map",
@@ -37,21 +40,22 @@ TEXT: dict[str, dict[str, object]] = {
         "earlier": "Earlier routes",
         "later": "Later routes",
         "leave_at": "Leave at",
-        "be_at_stop": "Be at the stop",
+        "be_at_stop": "At the stop",
         "from_stop": "from",
+        "be_there_by": "be there by",
         "direct": "direct",
         "changes": ("change", "changes"),
         "arrives": "arrives",
-        "running_late": "running late:",
+        "running_late": "usually by",
+        "running_late_title": "Arrival if the vehicles run late",
         "wait": "wait",
         "be_here_by": "be here by",
         "walk": "walk",
+        "walk_over": "walk {n} m",
         "stops": ("stop", "stops"),
         "loading": "Loading stops…",
         "no_route": "No connection from {origin} to {destination} after {time} this day.",
         "choose": "Choose both places: a stop, a street address or a map point.",
-        "note": "Changes leave room for a late arrival and the walk.",
-        "flag_note": "marks times at least 2 min off the timetable.",
         "timetable": "timetable",
         "differs": "differs from timetable",
         "expected": "expected",
@@ -65,8 +69,7 @@ TEXT: dict[str, dict[str, object]] = {
         "live_waiting_late": "at terminus, +{n} min",
         "live_previous": "on previous trip",
         "live_previous_late": "previous trip, +{n} min",
-        "map_label": "Where the vehicle is now and your stop",
-        "live_note": "Live times follow where the vehicles are now.",
+        "map_label": "Map of this connection, with where the next vehicle is now",
     },
     "pl": {
         "from": "Skąd",
@@ -76,6 +79,9 @@ TEXT: dict[str, dict[str, object]] = {
         "from_placeholder": "Skąd: przystanek lub ulica i numer",
         "to_placeholder": "Dokąd: przystanek lub ulica i numer",
         "swap": "Zamień miejsca",
+        "locate": "Użyj mojej lokalizacji",
+        "my_location": "Moja lokalizacja",
+        "locate_error": "Nie udało się ustalić lokalizacji. Zezwól na dostęp do niej lub wpisz adres.",
         "address": "adres",
         "address_error": "Wyszukiwanie adresów jest niedostępne. Spróbuj ponownie lub wskaż punkt na mapie.",
         "pick_map": "Wskaż punkt na mapie",
@@ -93,21 +99,22 @@ TEXT: dict[str, dict[str, object]] = {
         "earlier": "Wcześniejsze połączenia",
         "later": "Późniejsze połączenia",
         "leave_at": "Wyjdź o",
-        "be_at_stop": "Bądź na przystanku",
+        "be_at_stop": "Na przystanku",
         "from_stop": "z przystanku",
+        "be_there_by": "bądź o",
         "direct": "bez przesiadek",
         "changes": ("przesiadka", "przesiadki", "przesiadek"),
         "arrives": "przyjazd",
-        "running_late": "przy opóźnieniu:",
+        "running_late": "zwykle do",
+        "running_late_title": "Przyjazd, jeśli pojazdy się spóźnią",
         "wait": "czekaj",
         "be_here_by": "bądź tu o",
         "walk": "pieszo",
+        "walk_over": "przejdź {n} m",
         "stops": ("przystanek", "przystanki", "przystanków"),
         "loading": "Wczytywanie przystanków…",
         "no_route": "Brak połączenia {origin} → {destination} po {time} tego dnia.",
         "choose": "Wybierz oba miejsca: przystanek, adres lub punkt na mapie.",
-        "note": "Przesiadki mają zapas na spóźnienie pojazdu i dojście.",
-        "flag_note": "oznacza czas różny od rozkładu o co najmniej 2 min.",
         "timetable": "rozkład",
         "differs": "inny niż w rozkładzie",
         "expected": "przewidywany",
@@ -121,8 +128,7 @@ TEXT: dict[str, dict[str, object]] = {
         "live_waiting_late": "na pętli, +{n} min",
         "live_previous": "poprzedni kurs",
         "live_previous_late": "poprzedni kurs, +{n} min",
-        "map_label": "Gdzie jest teraz pojazd i twój przystanek",
-        "live_note": "Czasy na żywo według tego, gdzie są teraz pojazdy.",
+        "map_label": "Mapa połączenia i miejsce, w którym jest teraz najbliższy pojazd",
     },
 }
 
@@ -135,6 +141,22 @@ def plural(count: int, forms: Sequence[str]) -> str:
         return forms[1]
     few = count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}
     return forms[1] if few else forms[2]
+
+
+HOME_CITY = ", Warszawa"
+
+
+def point_label(name: str, lang: str) -> str:
+    """A searched point's label in lang: the map lookup's "near" wording follows the page, and Warsaw goes unsaid.
+
+    The label travels in the URL, so a language switch would otherwise keep the old wording.
+    """
+    name = name.removesuffix(HOME_CITY)
+    for text in TEXT.values():
+        prefix = str(text["near"]).removesuffix("{name}")
+        if name.startswith(prefix):
+            return str(TEXT[lang]["near"]).format(name=name.removeprefix(prefix))
+    return name
 
 
 def day_label(day: date, today: date, lang: str) -> str:

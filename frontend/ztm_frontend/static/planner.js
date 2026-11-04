@@ -1,4 +1,4 @@
-// Stop selection edits the form; only submitting it searches. Live cards refresh with htmx and draw minimaps.
+// Stop selection edits the form; only submitting it searches. Live cards refresh with htmx; open cards draw a journey map.
 (() => {
   // The script also arrives inside boosted page responses. Install delegated handlers just once.
   if (window.plannerInitialized) return;
@@ -60,7 +60,7 @@
   document.addEventListener("click", (event) => {
     const form = event.target.closest(".pl-form");
     const row = event.target.closest(".pl-field");
-    const endpointRow = row && !event.target.closest(".pl-suggestions, .pl-swap");
+    const endpointRow = row && !event.target.closest(".pl-suggestions, .pl-swap, .pl-locate");
     if (picker && !event.target.closest(".pl-location-panel") && !endpointRow) closePicker();
     if (!form) return;
     const suggestion = event.target.closest(".pl-suggestion");
@@ -78,6 +78,8 @@
         [origin.disabled, destination.disabled] = [destination.disabled, origin.disabled];
       }
       for (const suggestions of form.querySelectorAll(".pl-suggestions")) suggestions.replaceChildren();
+    } else if (event.target.closest(".pl-locate")) {
+      locate(form, event.target.closest(".pl-locate"));
     } else if (endpointRow) {
       const input = row.querySelector(".pl-input");
       input.focus();
@@ -103,6 +105,46 @@
       closePicker(true);
     }
   });
+
+  // The start becomes the device's position, labelled like a map click once the reverse lookup answers.
+  function locate(form, button) {
+    closePicker();
+    const notice = (text) => {
+      const note = document.createElement("p");
+      note.className = "pl-picker-note";
+      note.setAttribute("role", "status");
+      note.textContent = text;
+      form.querySelector("#pl-suggest-from").replaceChildren(note);
+    };
+    if (!navigator.geolocation) {
+      notice(button.dataset.error);
+      return;
+    }
+    button.classList.add("busy");
+    navigator.geolocation.getCurrentPosition(
+      async ({ coords }) => {
+        button.classList.remove("busy");
+        const point = { lat: coords.latitude, lon: coords.longitude };
+        if (!form.isConnected || !validPoint(point)) return;
+        choose(form, "from", button.dataset.label, null, point, false);
+        const reverse = form.querySelector(".pl-location-panel")?.dataset.reverseUrl;
+        if (!reverse) return;
+        const url = new URL(reverse, location.href);
+        url.searchParams.set("lat", point.lat.toFixed(6));
+        url.searchParams.set("lon", point.lon.toFixed(6));
+        try {
+          const { name } = await (await fetch(url)).json();
+          // The reader may have typed or picked something else meanwhile.
+          if (name && form.isConnected && samePoint(form, "from", point)) choose(form, "from", name, null, point, false);
+        } catch { /* The "my location" label stays. */ }
+      },
+      () => {
+        button.classList.remove("busy");
+        if (form.isConnected) notice(button.dataset.error);
+      },
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+    );
+  }
 
   function validPoint(point) {
     return Number.isFinite(point.lat) && Number.isFinite(point.lon) && Math.abs(point.lat) <= 90 && Math.abs(point.lon) <= 180;
@@ -292,7 +334,7 @@
     const root = event.target;
     if (picker && (root === picker.panel || root.contains(picker.panel))) closePicker();
     if (root.matches(".pl-input")) cancelSuggestions(root);
-    for (const box of root.querySelectorAll(".pl-minimap")) {
+    for (const box of root.querySelectorAll(".pl-journey-map")) {
       minimaps.get(box)?.remove();
       minimaps.delete(box);
     }
@@ -329,8 +371,30 @@
     });
   }
 
+  // A vehicle further than this from the boarding stop (often on its previous trip across the city) would zoom the
+  // map out past the journey, so it is not drawn.
+  const APPROACH_SHOWN_M = 2500;
+
+  function metres([lon1, lat1], [lon2, lat2]) {
+    const x = (lon2 - lon1) * Math.cos(((lat1 + lat2) / 2) * Math.PI / 180);
+    return Math.hypot(x, lat2 - lat1) * 111_320;
+  }
+
+  function marker(map, element, at) {
+    return new maplibregl.Marker({ element }).setLngLat(at).addTo(map);
+  }
+
+  function legLabel(mode, line) {
+    const pill = document.createElement("span");
+    pill.className = `landing-line-pill mono pl-pill mode-${mode} pl-map-leg`;
+    pill.textContent = line;
+    return pill;
+  }
+
   async function draw(card) {
-    const boxes = card.querySelectorAll(".pl-minimap:not([data-drawn])");
+    // Wide screens show the side map instead; a hidden box would get a zero-sized map.
+    if (wide.matches) return;
+    const boxes = card.querySelectorAll(".pl-journey-map:not([data-drawn])");
     if (!boxes.length) return;
     try {
       await loadMapLibre();
@@ -342,41 +406,152 @@
       // A second toggle or an htmx replacement may happen while MapLibre is loading.
       if (!box.isConnected || !card.open || minimaps.has(box)) continue;
       box.dataset.drawn = "1";
-      const { vehicle, stop, path } = JSON.parse(box.dataset.map);
-      const points = [vehicle, stop, ...path];
-      const bounds = points.reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(vehicle, vehicle));
-      const map = new maplibregl.Map({
-        container: box,
-        style: new URL(box.dataset.style, window.location.href).href,
-        bounds,
-        fitBoundsOptions: { padding: 36, maxZoom: 16 },
-        interactive: false,
-        attributionControl: { compact: true },
-      });
-      minimaps.set(box, map);
-      // The page's own symbols: the timeline's stop dot, the line pill for the vehicle, the ride's mode colour.
-      const stopDot = document.createElement("span");
-      stopDot.className = "pl-map-stop";
-      const pill = document.createElement("span");
-      pill.className = `landing-line-pill mono pl-pill mode-${box.dataset.mode} pl-map-vehicle`;
-      pill.textContent = box.dataset.line;
-      new maplibregl.Marker({ element: stopDot }).setLngLat(stop).addTo(map);
-      new maplibregl.Marker({ element: pill }).setLngLat(vehicle).addTo(map);
-      const colour = getComputedStyle(box).getPropertyValue("--rail").trim() || "#888888";
-      map.on("load", () => {
-        if (!box.isConnected || minimaps.get(box) !== map) return;
-        // Compact attribution opens expanded on wide screens; on a minimap it would cover the route.
-        box.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show");
-        const line = { type: "Feature", geometry: { type: "LineString", coordinates: path }, properties: {} };
-        map.addSource("path", { type: "geojson", data: line });
-        map.addLayer({
-          id: "path",
-          type: "line",
-          source: "path",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": colour, "line-width": 4 },
-        });
-      });
+      // Inline in the page: a scroll passing over the map still scrolls the page, two fingers or ctrl move the map.
+      minimaps.set(box, journeyMap(box, JSON.parse(box.dataset.map), { cooperativeGestures: true }));
     }
   }
+
+  // Map data: legs in order ({kind: "walk"|"ride", path, mode?, line?}) and, while the next ride is live and not yet
+  // at the stop, approach {vehicle, path, mode, line} ending at that ride's boarding stop.
+  function journeyMap(box, data, options) {
+    const map = new maplibregl.Map({
+      container: box,
+      style: new URL(box.dataset.style, window.location.href).href,
+      bounds: bounds(data),
+      fitBoundsOptions: { padding: 28, maxZoom: 16 },
+      dragRotate: false,
+      pitchWithRotate: false,
+      touchPitch: false,
+      attributionControl: { compact: true },
+      ...options,
+    });
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    map.on("load", () => {
+      if (!box.isConnected) return;
+      // Compact attribution opens expanded on wide screens; on a minimap it would cover the route.
+      box.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show");
+      // The large city name lands mid-route on any cross-city journey.
+      if (map.getLayer("warsaw-name")) map.setLayoutProperty("warsaw-name", "visibility", "none");
+      const empty = { type: "geojson", data: { type: "FeatureCollection", features: [] } };
+      for (const id of ["approach", "walks", "rides"]) map.addSource(id, empty);
+      const round = { "line-cap": "round", "line-join": "round" };
+      // The approach is context, not the trip: thin, dashed and faded under everything else.
+      map.addLayer({ id: "approach", type: "line", source: "approach", layout: { "line-join": "round" },
+        paint: { "line-color": ["get", "colour"], "line-width": 2.5, "line-opacity": 0.7, "line-dasharray": [2, 2] } });
+      map.addLayer({ id: "walks", type: "line", source: "walks", layout: round,
+        paint: { "line-color": "#b4b4b4", "line-width": 3, "line-dasharray": [0, 2] } });
+      map.addLayer({ id: "ride-casing", type: "line", source: "rides", layout: round,
+        paint: { "line-color": "#111111", "line-width": 8 } });
+      map.addLayer({ id: "rides", type: "line", source: "rides", layout: round,
+        paint: { "line-color": ["get", "colour"], "line-width": 5 } });
+      paintLines(map, box, data);
+    });
+    placeMarkers(map, data);
+    return map;
+  }
+
+  function shownApproach({ approach }) {
+    return approach && metres(approach.vehicle, approach.path.at(-1)) <= APPROACH_SHOWN_M ? approach : null;
+  }
+
+  function bounds(data) {
+    const first = data.legs[0].path[0];
+    const shown = shownApproach(data);
+    return data.legs.flatMap(leg => leg.path).concat(shown ? shown.path : [])
+      .reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(first, first));
+  }
+
+  // Markers are DOM elements, so a redraw of the same map removes the previous set first.
+  const markers = new WeakMap();
+  function placeMarkers(map, { legs, ...data }) {
+    for (const old of markers.get(map) || []) old.remove();
+    const placed = [];
+    // Leg ends become the timeline's dots; a change at the same post is one dot, not two.
+    const nodes = [legs[0].path[0], ...legs.map(leg => leg.path.at(-1))];
+    nodes.forEach((at, i) => {
+      if (i > 0 && i < nodes.length - 1 && metres(at, nodes[i - 1]) < 15) return;
+      const dot = document.createElement("span");
+      dot.className = `pl-map-node${i === 0 || i === nodes.length - 1 ? " end" : ""}`;
+      placed.push(marker(map, dot, at));
+    });
+    for (const leg of legs) {
+      if (leg.kind === "ride") placed.push(marker(map, legLabel(leg.mode, leg.line), leg.path[Math.floor(leg.path.length / 2)]));
+    }
+    const shown = shownApproach({ legs, ...data });
+    if (shown) {
+      const vehicle = document.createElement("span");
+      vehicle.className = "pl-live-dot pl-map-vehicle";
+      placed.push(marker(map, vehicle, shown.vehicle));
+    }
+    markers.set(map, placed);
+  }
+
+  function paintLines(map, box, data) {
+    const styles = getComputedStyle(box);
+    const colour = (mode) => styles.getPropertyValue(`--rail-${mode}`).trim() || "#888888";
+    const feature = (path, properties) => ({ type: "Feature", geometry: { type: "LineString", coordinates: path }, properties });
+    const collection = (features) => ({ type: "FeatureCollection", features });
+    const shown = shownApproach(data);
+    map.getSource("approach")?.setData(collection(shown ? [feature(shown.path, { colour: colour(shown.mode) })] : []));
+    map.getSource("walks")?.setData(collection(data.legs.filter(leg => leg.kind === "walk").map(leg => feature(leg.path, {}))));
+    map.getSource("rides")?.setData(collection(
+      data.legs.filter(leg => leg.kind === "ride").map(leg => feature(leg.path, { colour: colour(leg.mode) }))));
+  }
+
+  // Wide screens: one large map beside the list. It follows the opened card, or the first one; a refresh of the
+  // same card updates its lines in place, so a reader's pan and zoom survive the minute's live update.
+  const wide = window.matchMedia("(min-width: 1100px)");
+  let side = null;
+  async function showSide() {
+    const box = document.querySelector("#pl-side-map");
+    if (!box || !wide.matches) return;
+    const card = document.querySelector(".pl-card[open]") || document.querySelector(".pl-card");
+    const source = card?.querySelector(".pl-journey-map");
+    if (!source) return;
+    const data = JSON.parse(source.dataset.map);
+    for (const other of document.querySelectorAll(".pl-card.mapped")) other.classList.remove("mapped");
+    card.classList.add("mapped");
+    if (side?.box === box && side.key === card.dataset.key) {
+      if (side.json === source.dataset.map) return;
+      side.json = source.dataset.map;
+      placeMarkers(side.map, data);
+      if (side.map.loaded()) paintLines(side.map, box, data);
+      return;
+    }
+    try {
+      await loadMapLibre();
+    } catch {
+      box.hidden = true;
+      return;
+    }
+    if (!box.isConnected || !wide.matches) return;
+    side?.map.remove();
+    side = { box, key: card.dataset.key, json: source.dataset.map, map: journeyMap(box, data, {}) };
+  }
+
+  function dropSide() {
+    side?.map.remove();
+    side = null;
+  }
+
+  wide.addEventListener("change", () => {
+    if (wide.matches) {
+      showSide();
+    } else {
+      dropSide();
+      for (const card of document.querySelectorAll(".pl-card[open]")) draw(card);
+    }
+  });
+  document.addEventListener("htmx:after:swap", () => showSide());
+  document.addEventListener("htmx:before:cleanup", (event) => {
+    if (side && event.target.contains(side.box)) dropSide();
+  });
+  document.addEventListener(
+    "toggle",
+    (event) => {
+      if (event.target.matches?.(".pl-card") && event.target.open) showSide();
+    },
+    true,
+  );
+  showSide();
 })();

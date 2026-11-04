@@ -42,20 +42,21 @@ def snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]
         path: Path, args: dict[str, str], today: date, now_sod: int, now: datetime | None = None
     ) -> dict[str, Any]:
         page = get_page(path, args, today, now_sod, now)
-        # Live-data boundary only: cards, minimaps and lazy trip links are rendered by Jinja.
+        # Live-data boundary only: cards, journey maps and lazy trip links are rendered by Jinja.
         card = page["results"][0]
         card["live"] = True
         for item in card["timeline"]:
             if item["kind"] == "ride":
-                item["live"] = {
-                    "status": "running",
-                    "late": 1,
-                    "map": {
-                        "vehicle": [20.93, 52.32],
-                        "stop": [20.921, 52.331],
-                        "path": [[20.93, 52.32], [20.921, 52.331]],
-                    },
-                }
+                item["live"] = {"status": "running", "late": 1, "approach": None}
+        card["map"] = {
+            "legs": [{"kind": "ride", "mode": "bus", "line": "1", "path": [[20.921, 52.331], [20.95, 52.30]]}],
+            "approach": {
+                "vehicle": [20.93, 52.32],
+                "path": [[20.93, 52.32], [20.921, 52.331]],
+                "mode": "bus",
+                "line": "1",
+            },
+        }
         return page
 
     monkeypatch.setattr(planner, "get_page", live_page)

@@ -227,7 +227,7 @@ def test_planner_page_renders_cards_and_trip_stops(tmp_path: Path, monkeypatch: 
     )
     assert '<span class="pl-time mono">07:29</span>' in page  # be at the stop
     assert 'be here by <b class="mono">07:29</b>' in page
-    assert 'running late: <b class="mono">08:03</b>' in page
+    assert 'usually by <b class="mono">08:03</b>' in page
     assert "9 times in 10" not in page  # a whole journey's bound is not a calibrated 90%
     assert 'title="timetable 07:50"' in page  # arrival flagged against the timetable
     assert 'class="landing-line-pill mono pl-pill mode-bus" title="bus">110</span>' in page
@@ -253,7 +253,9 @@ def test_connection_uses_late_bus_bound_and_walk_to_choose_metro(tmp_path: Path)
     assert planner.clock(result["leave_by"]) == "07:29"
     assert (alight["stop_id"], change["stop_id"]) == ("200201", "200203")
     assert walk == {"kind": "walk", "minutes": 2, "distance_m": 120}
-    assert [c["kind"] for c in result["chips"]] == ["ride", "walk", "ride"]
+    assert [c["kind"] for c in result["chips"]] == ["ride", "ride"]  # a short change walk stays in the itinerary
+    board = result["timeline"][0]
+    assert result["first_ride"] == {"be_by": board["be_by"], "live": None}
     # Late bus (08:03) + 2 min walk still makes the 08:06 metro.
     assert planner.clock(change["be_by"]) == "08:06"
     assert planner.clock(change["arrive"]) == "07:58"  # expected bus arrival 07:56 + walk
@@ -276,12 +278,11 @@ def test_multi_leg_page_renders_changes_walks_and_distinct_lazy_stops(
     assert response.status_code == HTTPStatus.OK
     page = response.get_data(as_text=True)
     assert page.count('class="pl-card"') == 1
-    assert 'pl-pill mode-metro" title="metro">M1</span>' in page
-    assert "1 change" in page
+    assert 'class="landing-line-pill mono pl-pill mode-metro" title="metro">M1</span>' in page
+    assert "pl-walk-chip" not in page  # the 2 min change walk is only in the itinerary
     assert "walk 2 min · 120 m" in page
     assert "wait 8 min" in page
     assert 'be here by <b class="mono">08:06</b>' not in page  # the timetabled metro: be there when it leaves
-    assert "Changes leave room for a late arrival and the walk." in page
     _assert_lazy_stops(client, page, [(1, "Łomianki", "Metro Marymont"), (11, "Metro Marymont", "Centrum")])
     assert 'hx-target="#pl-trip-1-2"' in page
     assert 'hx-target="#pl-trip-1-6"' in page  # the intervening walk has no lazy trip request
@@ -307,6 +308,7 @@ def test_endpoint_walks_render_start_deadline_and_final_arrival(
     )  # fmt: skip
     assert (first["from_name"], first["from_post"]) == ("Metro Marymont", "03")  # where the first ride starts
     assert (initial["minutes"], final_walk["minutes"]) == (10, 2)
+    assert [c["kind"] for c in first["chips"]] == ["ride"]  # walks at the ends, however long, are not summarised
     assert metro["trip_key"] == 10
     assert (
         planner.clock(first["depart"]) == planner.clock(first["leave_by"]) == planner.clock(start["depart"]) == "07:54"
@@ -326,7 +328,7 @@ def test_endpoint_walks_render_start_deadline_and_final_arrival(
     assert page.count("Leave at") == 2
     assert '<span class="pl-time mono">07:54</span>' in page
     assert "walk 10 min · 720 m" in page
-    assert "running late" not in page  # under 2 min past the expected arrival
+    assert "usually by" not in page  # under 2 min past the expected arrival
     _assert_lazy_stops(client, page, [(10, "Metro Marymont", "Centrum"), (11, "Metro Marymont", "Centrum")])
 
 
@@ -429,16 +431,15 @@ def test_planner_speaks_polish_to_polish_browsers_and_remembers_the_switch(
     client = _client(tmp_path, monkeypatch)
     url = "/planner?date=2026-09-23&time=07:00&from=1001&to=4004"
     page = client.get(url, headers={"Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"}).get_data(as_text=True)
-    assert '<main class="main pl-main" lang="pl">' in page
-    assert "1 przesiadka" in page
+    assert '<main class="main pl-main pl-with-map" lang="pl">' in page
+    assert "Na przystanku" in page
     assert "pieszo 2 min · 120 m" in page
-    assert "Przesiadki mają zapas na spóźnienie pojazdu i dojście." in page
     assert "Szukaj" in page
     assert 'href="/planner?date=2026-09-23&amp;time=07:00&amp;from=1001&amp;to=4004&amp;lang=en"' in page
 
     switched = client.get(url + "&lang=pl")
     assert "planner_lang=pl" in switched.headers["Set-Cookie"]
-    assert "1 przesiadka" in client.get(url).get_data(as_text=True)  # the cookie beats the browser's English
+    assert "Na przystanku" in client.get(url).get_data(as_text=True)  # the cookie beats the browser's English
     stops = client.get("/planner/trip/11?date=2026-09-23&board=0&alight=1").get_data(as_text=True)
     assert "przewidywany" in stops
 
@@ -594,3 +595,59 @@ def test_nonzero_point_walk_distances_and_timings_reach_card_nodes(tmp_path: Pat
     assert card["timeline"][0]["depart"] == card["leave_by"] == 26820
     assert card["timeline"][-1]["arrive"] == card["arrive"] == 28620
     assert card["arrive_by"] == 29100
+
+
+def test_side_map_only_with_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    for url in ("/planner?date=2026-09-23", "/planner?date=2026-09-23&time=23:50&from=1001&to=4004"):
+        page = client.get(url).get_data(as_text=True)
+        assert "<details" not in page.split('<section id="pl-results"')[0]  # no stray disclosure above the results
+        assert "pl-side" not in page
+    page = client.get("/planner?date=2026-09-23&time=07:00&from=1001&to=4004").get_data(as_text=True)
+    assert 'id="pl-side-map"' in page
+
+
+def test_short_change_walk_is_told_on_the_boarding_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)
+    (long_walk,) = planner.connections(path, "1001", "4004", DAY, 7 * 3600)
+    assert "short" not in long_walk["timeline"][3]  # 120 m stays its own row
+    monkeypatch.setattr(planner, "SHORT_CHANGE_WALK_M", 200)
+    (result,) = planner.connections(path, "1001", "4004", DAY, 7 * 3600)
+    _, _, alight, walk, change, _, _ = result["timeline"]
+    assert walk["short"] is True
+    assert change["walk_m"] == 120
+    assert "walk_m" not in alight
+
+    client = _client(tmp_path / "page", monkeypatch)
+    page = client.get("/planner?date=2026-09-23&time=07:00&from=1001&to=4004&lang=en").get_data(as_text=True)
+    assert "walk 120 m · wait 8 min" in re.sub(r"<[^>]+>", "", page)
+    assert "walk 2 min · 120 m" not in page
+
+
+@pytest.mark.parametrize(
+    ("name", "lang", "label"),
+    [
+        ("Near Hermanowska 27, Warszawa", "pl", "W pobliżu Hermanowska 27"),
+        ("W pobliżu Hermanowska 27, Warszawa", "en", "Near Hermanowska 27"),
+        ("Hermanowska 27, Warszawa", "en", "Hermanowska 27"),
+        ("Słoneczna 3, Marki", "pl", "Słoneczna 3, Marki"),  # other towns keep their name
+        ("52.2, 21", "pl", "52.2, 21"),
+    ],
+)
+def test_point_labels_follow_the_page_language(name: str, lang: str, label: str) -> None:
+    assert planner_text.point_label(name, lang) == label
+
+
+def test_date_picker_starts_today(tmp_path: Path) -> None:
+    path = tmp_path / "planner.duckdb"
+    _write_artifact(path)  # covers 22-24 Sep
+    assert planner.get_page(path, {}, DAY, 0)["dates"] == [DAY, DAY + timedelta(days=1)]
+    # A past day in the link falls back to today.
+    assert planner.get_page(path, {"date": "2026-09-22"}, DAY, 0)["day"] == DAY
+    # A stale build with only past days still offers them rather than nothing.
+    assert planner.get_page(path, {}, date(2026, 10, 1), 0)["dates"] == [
+        DAY - timedelta(days=1),
+        DAY,
+        DAY + timedelta(days=1),
+    ]

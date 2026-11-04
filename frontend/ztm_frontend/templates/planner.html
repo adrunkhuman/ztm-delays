@@ -11,7 +11,8 @@
 {% endblock %}
 
 {% block body %}
-  <main class="main pl-main" lang="{{ lang }}">
+  {% set shown = origin and destination and results %}
+  <main class="main pl-main{% if shown %} pl-with-map{% endif %}" lang="{{ lang }}">
     <form class="pl-form" action="{{ url_for('planner_page') }}" method="get" autocomplete="off">
       <input type="hidden" name="from" value="{{ origin.stop_group_id if origin and origin.stop_group_id else '' }}">
       <input type="hidden" name="to" value="{{ destination.stop_group_id if destination and destination.stop_group_id else '' }}">
@@ -27,7 +28,11 @@
           <input class="pl-input" name="q_{{ field }}" value="{{ chosen.name if chosen else args.get('q_' + field, '') }}" placeholder="{{ t[field + '_placeholder'] }}" aria-label="{{ t[field + '_label'] }}"
             hx-get="{{ url_for('planner_suggest', field=field) }}" hx-trigger="input delay:450ms"
             hx-target="#pl-suggest-{{ field }}" hx-sync="this:replace" data-lookup-error="{{ t.address_error }}">
-          {% if field == 'to' %}
+          {% if field == 'from' %}
+            <button class="pl-locate" type="button" title="{{ t.locate }}" aria-label="{{ t.locate }}" data-label="{{ t.my_location }}" data-error="{{ t.locate_error }}">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor"/><path d="M8 0.8v2.4M8 12.8v2.4M0.8 8h2.4M12.8 8h2.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+          {% else %}
             <button class="pl-swap" type="button" title="{{ t.swap }}" aria-label="{{ t.swap }}">⇅</button>
           {% endif %}
           <div class="pl-suggestions" id="pl-suggest-{{ field }}"></div>
@@ -48,7 +53,13 @@
 
     {% include "_planner_results.html" %}
 
-    <p class="pl-note">{{ t.note }} <span class="pl-flag">!</span> {{ t.flag_note }}{% if results|selectattr('live')|first %} {{ t.live_note }}{% endif %}</p>
+    {# Wide screens: one large map beside the list, of the opened card (or the first); planner.js fills it. #}
+    {% if shown %}
+      <aside class="pl-side" aria-label="{{ t.map_label }}">
+        <div id="pl-side-map" class="pl-side-map" data-style="{{ asset('map-style.json') }}"></div>
+      </aside>
+    {% endif %}
+
   </main>
   <script src="{{ asset('planner.js') }}"></script>
 {% endblock %}

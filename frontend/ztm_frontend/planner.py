@@ -29,7 +29,7 @@ from bisect import bisect_right
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
-from ztm_frontend import journey, live_times, route_cache
+from ztm_frontend import journey, live, live_times, route_cache
 from ztm_frontend.db import fetch_all, fetch_one
 
 if TYPE_CHECKING:
@@ -43,6 +43,8 @@ MIN_QUERY_LENGTH = 2
 DAY_SECONDS = 86_400
 EARLIER_STEP_SECONDS = 30 * 60
 TIMETABLE_FLAG_SECONDS = 120  # expected times at least this far from the timetable get a marker
+SUMMARY_CHANGE_WALK_MINUTES = 5  # a walk between rides needs more than this to show in the card summary
+SHORT_CHANGE_WALK_M = 100  # a shorter walk between rides is told on the boarding stop, not as its own row
 
 
 def search_key(text: str) -> str:
@@ -132,12 +134,13 @@ def search(  # noqa: PLR0913
         # an unshown journey leaving in the same minute (the page then starts there, repeating that minute's cards).
         last = _floor_minute(shown[-1].depart)
         later = last if hidden and _floor_minute(hidden[0].depart) == last > after_sod else last + 60
-    points = {
-        stop: endpoint.name or f"{endpoint.lat:g}, {endpoint.lon:g}"
+    endpoints = {
+        stop: endpoint
         for stop, endpoint in ((journey.ORIGIN_POINT, origin), (journey.DESTINATION_POINT, destination))
         if isinstance(endpoint, journey.Point)
     }
-    details = _CardDetails(path, shown, day)
+    points = {stop: endpoint.name or f"{endpoint.lat:g}, {endpoint.lon:g}" for stop, endpoint in endpoints.items()}
+    details = _CardDetails(path, shown, day, {stop: [p.lon, p.lat] for stop, p in endpoints.items()})
     cards = [_connection(path, result, day, current, points=points, details=details) for result in shown]
     return cards, later
 
@@ -164,12 +167,16 @@ def _beats(key: tuple[int, int, int], other: tuple[int, int, int]) -> bool:
 
 
 class _CardDetails:
-    """One request's artifact rows: batch rides, reuse raw walk and boarding-post lookups."""
+    """One request's artifact rows: batch rides, shapes and posts, reuse raw walk lookups."""
 
-    def __init__(self, path: Path, results: list[journey.Journey], day: date) -> None:
+    def __init__(
+        self, path: Path, results: list[journey.Journey], day: date, places: dict[str, list[float]] | None = None
+    ) -> None:
         self.path = path
         self.walks: dict[tuple[str, str], dict[str, Any] | None] = {}
-        self.posts: dict[str, dict[str, Any] | None] = {}
+        # [lon, lat] by stop id; map points searched from stand in for posts.
+        self.coords: dict[str, list[float] | None] = dict(places or {})
+        self.shapes: dict[str, live.Shape | None] | None = None
         keys = list(
             dict.fromkeys(
                 (leg.trip_key, leg.board_sequence, leg.alight_sequence)
@@ -190,6 +197,7 @@ class _CardDetails:
                 b.stop_sequence as board_sequence, a.stop_sequence as alight_sequence,
                 b.stop_id as board_stop_id, a.stop_id as alight_stop_id,
                 b.stop_name as board_name, a.stop_name as alight_name,
+                t.shape_id, b.shape_dist_m as board_dist_m, a.shape_dist_m as alight_dist_m,
                 b.scheduled_sod + ? * (t.service_date - ?::date) as board_scheduled,
                 a.scheduled_sod + ? * (t.service_date - ?::date) as alight_scheduled,
                 a.stop_sequence - b.stop_sequence as stop_count
@@ -232,13 +240,52 @@ class _CardDetails:
             raise ValueError("journey walk missing from the planner artifact")
         return row
 
-    def post(self, stop_id: str) -> dict[str, Any] | None:
-        """Boarding coordinates shared by live cards in this request."""
-        if stop_id not in self.posts:
-            self.posts[stop_id] = fetch_one(
-                self.path, "select lon, lat from planner_stop_post where stop_id = ?", [stop_id]
-            )
-        return self.posts[stop_id]
+    def coord(self, stop_id: str) -> list[float] | None:
+        """[lon, lat] of a post or searched point; the first lookup loads every post this request's rides touch."""
+        if stop_id not in self.coords:
+            wanted = {stop_id}
+            for row in self.rides.values():
+                wanted.update((row["board_stop_id"], row["alight_stop_id"]))
+            wanted -= self.coords.keys()
+            self.coords.update(dict.fromkeys(wanted))
+            if _has_table(self.path, "planner_stop_post"):
+                rows = fetch_all(
+                    self.path,
+                    "select stop_id, lon, lat from planner_stop_post where stop_id in (select unnest(?::varchar[]))",
+                    [sorted(wanted)],
+                )
+                self.coords.update({row["stop_id"]: [float(row["lon"]), float(row["lat"])] for row in rows})
+        return self.coords[stop_id]
+
+    def ride_path(self, row: dict[str, Any]) -> list[list[float]] | None:
+        """The ride along its shape, or a straight line between the posts where the shape cannot be cut."""
+        if self.shapes is None:
+            self.shapes = _load_shapes(self.path, {r["shape_id"] for r in self.rides.values() if r["shape_id"]})
+        shape = self.shapes.get(row["shape_id"] or "")
+        start, end = row["board_dist_m"], row["alight_dist_m"]
+        if shape is not None and start is not None and end is not None and 0 <= start < end:
+            return shape.path(start, end)
+        ends = self.coord(row["board_stop_id"]), self.coord(row["alight_stop_id"])
+        return [ends[0], ends[1]] if ends[0] and ends[1] else None
+
+
+def _has_table(path: Path, table: str) -> bool:
+    return fetch_one(path, "select 1 from information_schema.tables where table_name = ?", [table]) is not None
+
+
+def _load_shapes(path: Path, shape_ids: set[str]) -> dict[str, live.Shape | None]:
+    if not shape_ids or not _has_table(path, "planner_shape"):
+        return {}
+    rows = fetch_all(
+        path,
+        "select shape_id, lat, lon, dist_m from planner_shape where shape_id in (select unnest(?::varchar[]))",
+        [sorted(shape_ids)],
+    )
+    return {
+        row["shape_id"]: live.Shape(row["lat"], row["lon"], row["dist_m"])
+        for row in rows
+        if len(row["lat"]) >= 2 and len(row["lat"]) == len(row["lon"]) == len(row["dist_m"])  # noqa: PLR2004
+    }
 
 
 def post_label(stop_id: str) -> str:
@@ -274,6 +321,8 @@ def _connection(  # noqa: PLR0913
     nodes: list[dict[str, Any]] = []  # nodes[i] and nodes[i + 1] are joined by segments[i]
     segments: list[dict[str, Any]] = []
     chips: list[dict[str, Any]] = []
+    legs: list[dict[str, Any] | None] = []  # the map's legs; None where coordinates are missing
+    approach: dict[str, Any] | None = None
     expected: float = result.depart
     for leg in result.legs:
         if isinstance(leg, journey.Walk):
@@ -283,6 +332,9 @@ def _connection(  # noqa: PLR0913
             minutes = max(1, math.ceil(leg.walk_s / 60))
             segments.append({"kind": "walk", "minutes": minutes, "distance_m": walk["distance_m"]})
             chips.append({"kind": "walk", "minutes": minutes})
+            ends = details.coord(leg.from_stop), details.coord(leg.to_stop)
+            # Footpaths have no geometry in the artifact; the map draws them straight.
+            legs.append({"kind": "walk", "path": [ends[0], ends[1]]} if ends[0] and ends[1] else None)
             expected += leg.walk_s
             nodes.append({**_stop_node(leg.to_stop, walk["to_name"]), "arrive": _round_minute(expected)})
             continue
@@ -310,11 +362,18 @@ def _connection(  # noqa: PLR0913
             "alight_sequence": ride["alight_sequence"],
             "stop_count": ride["stop_count"],
             "minutes": max(1, round((arrive - depart) / 60)),
-            "live": _live_ride(current, leg, ride["board_stop_id"], details) if current is not None else None,
+            "live": _live_ride(current, leg) if current is not None else None,
         })  # fmt: skip
         chips.append(
             {"kind": "ride", "mode": ride["mode"], "line": ride["line"], "live": segments[-1]["live"] is not None}
         )
+        ride_path = details.ride_path(ride)
+        legs.append(
+            {"kind": "ride", "mode": ride["mode"], "line": ride["line"], "path": ride_path} if ride_path else None
+        )
+        live_ride = segments[-1]["live"]
+        if approach is None and live_ride is not None and live_ride["approach"] is not None:
+            approach = {**live_ride["approach"], "mode": ride["mode"], "line": ride["line"]}
         expected = arrive
         nodes.append({
             **_stop_node(ride["alight_stop_id"], ride["alight_name"]),
@@ -322,30 +381,44 @@ def _connection(  # noqa: PLR0913
             "arrive_differs": differs_from_timetable(arrive, ride["alight_scheduled"]),
             "alight_scheduled": ride["alight_scheduled"],
         })  # fmt: skip
+    for i, seg in enumerate(segments):
+        # nodes[i] is where the walk starts and nodes[i + 1] where it ends; only changes between rides fold.
+        short = seg["kind"] == "walk" and seg["distance_m"] is not None and seg["distance_m"] < SHORT_CHANGE_WALK_M
+        if short and 0 < i < len(segments) - 1:
+            seg["short"] = True
+            nodes[i + 1]["walk_m"] = seg["distance_m"]
     first_board = next(n for n in nodes if "be_by" in n)
+    first_ride = next(seg for seg in segments if seg["kind"] == "ride")
     return {
         "depart": result.depart,  # seconds, for pagination; the card shows leave_by
         "leave_by": _floor_minute(result.depart),
         "initial_walk": isinstance(result.legs[0], journey.Walk),
         "from_name": first_board["name"],
         "from_post": first_board["post"],
+        # The summary's detail line: when to be at the first stop, and (while live) where its vehicle is now.
+        "first_ride": {"be_by": first_board["be_by"], "live": first_ride["live"]},
         "arrive": _round_minute(expected),
         "arrive_by": _ceil_minute(result.arrive_late),
         "duration_minutes": max(1, math.ceil((expected - result.depart) / 60)),
         "changes": result.vehicles - 1,
-        "chips": chips,
+        # Walks to the first ride and from the last are implied by the search's own ends.
+        "chips": [
+            chip
+            for i, chip in enumerate(chips)
+            if chip["kind"] == "ride" or (0 < i < len(chips) - 1 and chip["minutes"] > SUMMARY_CHANGE_WALK_MINUTES)
+        ],
         "timeline": [item for pair in zip(nodes, [*segments, None], strict=True) for item in pair if item],
         "live": any(chip.get("live") for chip in chips),
         "key": next(f"{seg['trip_key']}-{seg['board_sequence']}" for seg in segments if seg["kind"] == "ride"),
+        # One map of the whole connection, with the first live vehicle still on its way to the boarding stop.
+        "map": {"legs": legs, "approach": approach} if legs and all(legs) else None,
     }
 
 
-def _live_ride(
-    current: live_times.LiveView, leg: journey.Ride, board_stop: str, details: _CardDetails
-) -> dict[str, Any] | None:
+def _live_ride(current: live_times.LiveView, leg: journey.Ride) -> dict[str, Any] | None:
     """Where the ride's vehicle is now: on this trip, waiting at its first stop, or still on its previous trip.
 
-    status picks the wording, late the minutes beyond the timetable there; the map joins the vehicle to the
+    status picks the wording, late the minutes beyond the timetable there; approach joins the vehicle to the
     boarding stop along the shapes, and is None once the vehicle is at the stop or past it.
     """
     matcher = current.matcher
@@ -359,9 +432,6 @@ def _live_ride(
         fix = current.fixes.get(before) if before is not None else None
         if fix is None or before is None:
             return None
-    stop = details.post(board_stop)
-    if stop is None:
-        return None
     line: list[list[float]] = []
     shapes = matcher.shapes
     if before is not None:
@@ -375,12 +445,8 @@ def _live_ride(
     late = round(fix.delay_s / 60)
     status = "previous" if before is not None else "waiting" if fix.waiting else "running"
     at_stop = before is None and fix.dist_m >= net.shape_dist[board] - live_times.PASSED_M
-    shown = {
-        "vehicle": [round(fix.lon, 6), round(fix.lat, 6)],
-        "stop": [float(stop["lon"]), float(stop["lat"])],
-        "path": line,
-    }
-    return {"status": status, "late": late, "map": None if at_stop else shown}
+    approach = None if at_stop or not line else {"vehicle": [round(fix.lon, 6), round(fix.lat, 6)], "path": line}
+    return {"status": status, "late": late, "approach": approach}
 
 
 def trip_stops(  # noqa: PLR0913
@@ -473,7 +539,9 @@ def get_page(
     endpoint_args contains canonical endpoint URL parameters for pagination, swap and language links.
     Invalid or partial coordinates take precedence over stop IDs and cannot fall back to a stop search.
     """
-    dates = available_dates(path)
+    published = available_dates(path)
+    # Past days are useless to plan; a build that is all past (a stale artifact) still offers its days.
+    dates = [d for d in published if d >= today] or published
     requested = parse_date(args.get("date"))
     # Default to today; outside the published window fall back to its first day.
     day = requested if requested in dates else today if today in dates else (dates[0] if dates else today)

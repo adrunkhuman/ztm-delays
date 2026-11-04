@@ -7,6 +7,7 @@
 {%- endmacro %}
 
 {% macro pill(mode, line) -%}
+  {# One badge for a ride everywhere in the planner (summary, itinerary, map), in its mode's colours. #}
   <span class="landing-line-pill mono pl-pill mode-{{ mode }}" title="{{ t.modes.get(mode, mode) }}">{{ line }}</span>
 {%- endmacro %}
 
@@ -18,6 +19,12 @@
   {%- else -%}
     {{ t.live_previous_late.format(n=live.late) if live.late > 0 else t.live_previous }}
   {%- endif -%}
+{%- endmacro %}
+
+{# The site's delay classes: late from 3 min behind the timetable, early from 1 min ahead, on time between. A vehicle
+   waiting at its terminus or still on its previous trip is ahead of this departure by nature, never early for it. #}
+{% macro live_class(live) -%}
+  pl-live{% if live.late >= 3 %} late{% elif live.late <= -1 and live.status == 'running' %} early{% endif %}
 {%- endmacro %}
 
 {% macro walker() -%}
@@ -40,26 +47,46 @@
             <span class="pl-time mono">{{ r.leave_by|clock }}</span>
           </span>
           <span class="pl-route">
+            {# The chips show the changes and the expanded card the stops. Each chip keeps its trailing separator,
+               so a wrapped row ends with "›" instead of starting with it. #}
             <span class="pl-chips">
               {% for c in r.chips %}
-                {% if not loop.first %}<span class="pl-sep" aria-hidden="true">›</span>{% endif %}
-                {% if c.kind == 'walk' %}
-                  <span class="pl-walk-chip mono" title="{{ t.walk }} {{ c.minutes }} min">{{ walker() }}{{ c.minutes }}</span>
-                {% else %}
-                  {{ pill(c.mode, c.line) }}{% if c.live %}<span class="pl-live-dot" title="{{ t.live }}" aria-label="{{ t.live }}"></span>{% endif %}
-                {% endif %}
+                <span class="pl-chip">
+                  {%- if c.kind == 'walk' %}
+                    <span class="pl-walk-chip mono" title="{{ t.walk }} {{ c.minutes }} min">{{ walker() }}{{ c.minutes }}</span>
+                  {%- else %}
+                    {{ pill(c.mode, c.line) }}
+                  {%- endif %}
+                  {%- if not loop.last %}<span class="pl-sep" aria-hidden="true">›</span>{% endif -%}
+                </span>
               {% endfor %}
             </span>
-            <span class="pl-sub">
-              {{ t.from_stop }} {{ r.from_name }} <span class="mono">{{ t.posts.get(r.from_post, r.from_post) }}</span>
-              · {{ t.direct if not r.changes else r.changes|string + ' ' + r.changes|plural(t.changes) }}
+            {# Where the first ride starts (or, while live, where its vehicle is), and the arrival if it runs late;
+               the chip above already names the line. #}
+            <span class="pl-detail">
+              <span class="pl-detail-part">
+                {%- if r.first_ride.live %}
+                  <span class="{{ live_class(r.first_ride.live) }}">{{ live_status(r.first_ride.live) }}</span>
+                {%- else %}
+                  {% if r.initial_walk %}{{ t.be_there_by }} <span class="mono">{{ r.first_ride.be_by|clock }}</span> · {% endif -%}
+                  {{ r.from_name }}{% if r.from_post.isdigit() %}&nbsp;<span class="pl-post mono">{{ r.from_post }}</span>{% endif %}
+                {%- endif -%}
+              </span>
+              {% if r.arrive_by - r.arrive >= 120 %}
+                <span class="pl-detail-part" title="{{ t.running_late_title }}">{{ t.running_late }} <span class="mono">{{ r.arrive_by|clock }}</span></span>
+              {% endif %}
             </span>
           </span>
-          <span class="pl-trip-time">
-            <span class="pl-duration mono">{{ r.duration_minutes }} min</span>
-            <span class="pl-arrival">{{ t.arrives }} <b class="mono">{{ r.arrive|clock }}</b></span>
+          <span class="pl-arrival" title="{{ t.arrives }} {{ r.arrive|clock }}">
+            <span class="pl-label mono">{{ r.duration_minutes }} min</span>
+            <span class="pl-time mono">{{ r.arrive|clock }}</span>
           </span>
         </summary>
+        {# One map for the whole connection; the live vehicle's approach is drawn muted, beside the trip, not as it. #}
+        {% if r.map %}
+          <div class="pl-journey-map" role="img" aria-label="{{ t.map_label }}" data-map="{{ r.map|tojson|forceescape }}"
+            data-style="{{ asset('map-style.json') }}"></div>
+        {% endif %}
         <ol class="pl-timeline">
           {% for item in r.timeline %}
             {% if item.kind == 'stop' %}
@@ -70,25 +97,30 @@
                 </span>
                 <span class="pl-dot-col" aria-hidden="true"><span class="pl-node-dot"></span></span>
                 <span class="pl-node-body">
-                  <span class="pl-node-name">{{ item.name }}{% if item.post.isdigit() %} <span class="pl-post mono">{{ item.post }}</span>{% endif %}</span>
+                  {#- A non-breaking space keeps a post number with the last word of a long name. #}
+                  <span class="pl-node-name">{{ item.name }}{% if item.post.isdigit() %}&nbsp;<span class="pl-post mono">{{ item.post }}</span>{% endif %}</span>
                   {% if loop.last %}
-                    {% if r.arrive_by - r.arrive >= 120 %}<span class="pl-node-note">{{ t.running_late }} <b class="mono">{{ r.arrive_by|clock }}</b></span>{% endif %}
+                    {% if r.arrive_by - r.arrive >= 120 %}<span class="pl-node-note" title="{{ t.running_late_title }}">{{ t.running_late }} <b class="mono">{{ r.arrive_by|clock }}</b></span>{% endif %}
                   {% elif item.be_by is defined %}
-                    {% set wait, early = item.wait_minutes|default(0) > 0, item.be_by < item.depart %}
-                    {% if wait or early %}
+                    {% set notes = [] %}
+                    {% if item.walk_m is defined %}{% set _ = notes.append(t.walk_over.format(n=item.walk_m)) %}{% endif %}
+                    {% if item.wait_minutes|default(0) > 0 %}{% set _ = notes.append(t.wait ~ ' ' ~ item.wait_minutes ~ ' min') %}{% endif %}
+                    {% if notes or item.be_by < item.depart %}
+                      {#- Each part wraps whole, so a time never lands on a line without its words. #}
                       <span class="pl-node-note">
-                        {%- if wait %}{{ t.wait }} {{ item.wait_minutes }} min{% endif %}{% if wait and early %} · {% endif %}
-                        {%- if early %}{{ t.be_here_by }} <b class="mono">{{ item.be_by|clock }}</b>{% endif -%}
+                        {%- for note in notes %}<span>{{ note }}</span>{% if not loop.last or item.be_by < item.depart %} · {% endif %}{% endfor %}
+                        {%- if item.be_by < item.depart %}<span>{{ t.be_here_by }} <b class="mono">{{ item.be_by|clock }}</b></span>{% endif -%}
                       </span>
                     {% endif %}
                   {% endif %}
                 </span>
               </li>
             {% elif item.kind == 'walk' %}
-              <li class="pl-seg walk">
+              {# A short change walk is only a connector; the boarding stop below says "walk 26 m". #}
+              <li class="pl-seg walk{% if item.short %} short{% endif %}">
                 <span></span>
                 <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
-                <span class="pl-seg-body">{{ walker() }} {{ t.walk }} {{ item.minutes }} min{% if item.distance_m %} · {{ item.distance_m }} m{% endif %}</span>
+                <span class="pl-seg-body">{% if not item.short %}{{ walker() }} {{ t.walk }} {{ item.minutes }} min{% if item.distance_m %} · {{ item.distance_m }} m{% endif %}{% endif %}</span>
               </li>
             {% else %}
               <li class="pl-seg ride mode-{{ item.mode }}">
@@ -96,12 +128,8 @@
                 <span class="pl-dot-col" aria-hidden="true"><span class="pl-seg-line"></span></span>
                 <span class="pl-seg-body">
                   <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span>
-                    {%- if item.live %}<span class="pl-live" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
+                    {%- if item.live %}<span class="{{ live_class(item.live) }}" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
                   </span>
-                  {% if item.live and item.live.map %}
-                    <div class="pl-minimap" role="img" aria-label="{{ t.map_label }}" data-map="{{ item.live.map|tojson|forceescape }}" data-mode="{{ item.mode }}" data-line="{{ item.line }}"
-                      data-style="{{ asset('map-style.json') }}"></div>
-                  {% endif %}
                   <details class="pl-stops-toggle" data-key="{{ r.key }}-{{ loop.index }}"
                     hx-get="{{ url_for('planner_trip', trip_key=item.trip_key, date=day, board=item.board_sequence, alight=item.alight_sequence) }}"
                     hx-trigger="toggle once" hx-target="#pl-trip-{{ card }}-{{ loop.index }}" hx-swap="innerHTML">

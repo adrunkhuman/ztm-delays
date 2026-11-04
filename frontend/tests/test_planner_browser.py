@@ -245,3 +245,96 @@ def test_form_controls_survive_boosted_navigation(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert '<pre id="result">PASS</pre>' in result.stdout, result.stdout
+
+
+@pytest.mark.skipif(CHROMIUM is None, reason="Chrome or Chromium is not installed")
+def test_locate_sets_the_origin_to_the_device_position(tmp_path: Path) -> None:
+    """The start becomes a point labelled by the reverse lookup; a later edit wins, and failures say why."""
+    page = tmp_path / "planner.html"
+    page.write_text(
+        """<!doctype html><html><head></head><body>
+        <form class="pl-form">
+          <input type="hidden" name="from" value="1001"><input type="hidden" name="to" value="">
+          <input type="hidden" name="from_lat" disabled><input type="hidden" name="from_lon" disabled>
+          <input type="hidden" name="to_lat" disabled><input type="hidden" name="to_lon" disabled>
+          <div class="pl-field"><input class="pl-input" name="q_from" value="Łomianki" aria-label="From">
+            <button class="pl-locate" type="button" data-label="Moja lokalizacja" data-error="No location"></button>
+            <div class="pl-suggestions" id="pl-suggest-from"></div>
+          </div>
+          <div class="pl-field"><input class="pl-input" name="q_to" value="" aria-label="To">
+            <div class="pl-suggestions" id="pl-suggest-to"></div>
+          </div>
+          <section class="pl-location-panel" id="pl-picker" data-reverse-url="https://local.test/planner/reverse" hidden></section>
+        </form>
+        <pre id="result"></pre>
+        <script>"""
+        + PLANNER_JS.read_text()
+        + """</script><script>
+        let position = { coords: { latitude: 52.2297, longitude: 21.1426 } };
+        Object.defineProperty(navigator, 'geolocation', { value: {
+          getCurrentPosition(ok, fail) { setTimeout(() => position ? ok(position) : fail({ code: 1 }), 10); },
+        } });
+        const lookups = [];
+        window.fetch = async (url) => {
+          lookups.push(String(url));
+          await new Promise(resolve => setTimeout(resolve, 50));
+          return new Response(JSON.stringify({ name: 'W pobliżu Hermanowska 27' }));
+        };
+        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+        const check = (condition, message) => { if (!condition) throw new Error(message); };
+        (async () => { try {
+          const form = document.querySelector('.pl-form');
+          let submissions = 0;
+          form.addEventListener('submit', event => { event.preventDefault(); submissions++; });
+          const button = form.querySelector('.pl-locate');
+          button.click();
+          check(button.classList.contains('busy'), 'no waiting state');
+          await sleep(25);
+          check(form.elements.q_from.value === 'Moja lokalizacja', 'no interim label: ' + form.elements.q_from.value);
+          check(form.elements.from.value === '', 'stop ID kept');
+          check(form.elements.from_lat.value === '52.229700' && !form.elements.from_lat.disabled, 'latitude not set');
+          check(form.elements.from_lon.value === '21.142600' && !form.elements.from_lon.disabled, 'longitude not set');
+          check(lookups.length === 1 && lookups[0].includes('lat=52.229700'), 'reverse lookup missing');
+          await sleep(80);
+          check(form.elements.q_from.value === 'W pobliżu Hermanowska 27', 'reverse label not applied');
+          check(!button.classList.contains('busy') && submissions === 0, 'busy kept or submitted');
+
+          button.click();
+          await sleep(25);
+          form.elements.q_from.value = 'Typed instead';
+          form.elements.q_from.dispatchEvent(new Event('input', { bubbles: true }));
+          await sleep(80);
+          check(form.elements.q_from.value === 'Typed instead', 'late lookup overwrote an edit');
+
+          position = null;
+          button.click();
+          await sleep(25);
+          check(form.querySelector('#pl-suggest-from').textContent === 'No location', 'failure not explained');
+          check(!button.classList.contains('busy'), 'busy kept after failure');
+          document.querySelector('#result').textContent = 'PASS';
+        } catch (error) {
+          document.querySelector('#result').textContent = 'FAIL: ' + error.message;
+        } })();
+        </script></body></html>""",
+    )
+    assert CHROMIUM is not None
+    result = subprocess.run(  # noqa: S603 - fixed browser executable and local test inputs, no shell
+        [
+            CHROMIUM,
+            *CHROMIUM_CI_FLAGS,
+            "--headless",
+            "--disable-gpu",
+            "--no-first-run",
+            "--disable-background-networking",
+            f"--user-data-dir={tmp_path / 'browser'}",
+            "--dump-dom",
+            "--virtual-time-budget=5000",
+            page.as_uri(),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '<pre id="result">PASS</pre>' in result.stdout, result.stdout[-2000:]
