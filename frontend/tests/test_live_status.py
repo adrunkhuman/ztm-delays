@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -8,10 +10,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from google.api_core.exceptions import Forbidden, NotFound
 
+from tests.test_planner_browser import CHROMIUM, CHROMIUM_CI_FLAGS, HTMX_JS
 from ztm_frontend import live_status, queries
 from ztm_frontend.app import create_app
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from flask.testing import FlaskClient
 
 START = datetime(2026, 10, 5, 15, 0, tzinfo=UTC)
@@ -581,9 +586,12 @@ def test_status_renders_live_panel_charts_and_incidents(gcs: FakeStore, status_p
     assert "poller offline" not in html
     assert "status.js" in html
     assert "<style" not in html.split("</head>")[1]
+    assert "hx-swap-oob" not in html  # the page's own pill is in place
     fragment = status_page.get("/status/live")
     assert fragment.headers["Cache-Control"] == "no-store"
-    assert 'data-overall="online"' in fragment.get_data(as_text=True)
+    assert 'class="status-pill online" id="status-pill" role="status" hx-swap-oob="true"' in fragment.get_data(
+        as_text=True
+    )
 
 
 def test_status_pill_reflects_a_thin_feed(gcs: FakeStore, status_page: FlaskClient) -> None:
@@ -591,7 +599,7 @@ def test_status_pill_reflects_a_thin_feed(gcs: FakeStore, status_page: FlaskClie
     objects[live_status.LIVE_OBJECT]["vehicle_types"]["bus"]["fresh_vehicles"] = 100
     gcs.objects.update(objects)
     html = status_page.get("/status/live").get_data(as_text=True)
-    assert 'data-overall="problems"' in html
+    assert 'class="status-pill problems"' in html
     assert "thin feed" in html
 
 
@@ -602,3 +610,81 @@ def test_status_survives_any_bad_object(gcs: FakeStore, status_page: FlaskClient
         response = status_page.get(path)
         assert response.status_code == HTTPStatus.OK
         assert "live status unavailable" in response.get_data(as_text=True)
+
+
+@pytest.mark.skipif(CHROMIUM is None, reason="Chrome or Chromium is not installed")
+def test_live_panel_polls_with_htmx(gcs: FakeStore, status_page: FlaskClient, tmp_path: Path) -> None:
+    """The pinned htmx refreshes the panel and its out-of-band pill; only the fetch boundary is mocked."""
+    gcs.objects.update(fresh_fixture())
+    page = status_page.get("/status").get_data(as_text=True)
+    thin = fresh_fixture()
+    thin[live_status.LIVE_OBJECT]["vehicle_types"]["bus"]["fresh_vehicles"] = 100
+    gcs.objects.update(thin)
+    live_status.clear_cache()
+    problems = status_page.get("/status/live").get_data(as_text=True)
+    assert "thin feed" in problems
+    gcs.objects.clear()
+    live_status.clear_cache()
+    offline = status_page.get("/status/live").get_data(as_text=True)
+    assert "poller offline" in offline
+    page = re.sub(r"<link\b[^>]*>|<script\b[^>]*src=[^>]*>\s*</script>", "", page)
+    fixture = json.dumps({"problems": problems, "offline": offline}).replace("</", "<\\/")
+    harness = """<script>
+      const {problems, offline} = window.statusFixture;
+      const requests = [];
+      window.fetch = (url) => new Promise((resolve) => requests.push({url: String(url), resolve}));
+      const answer = (html, status = 200) => requests.at(-1).resolve(new Response(html, {status, headers: {"Content-Type": "text/html"}}));
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const check = (ok, message) => { if (!ok) throw new Error(message); };
+      let visibility = "visible";
+      Object.defineProperty(document, "visibilityState", {get: () => visibility});
+      const show = () => document.dispatchEvent(new Event("visibilitychange"));
+      const pill = () => document.querySelector("#status-pill");
+      document.addEventListener("DOMContentLoaded", () => setTimeout(async () => {
+        const out = document.querySelector("#result");
+        try {
+          const panel = document.querySelector("#status-live");
+          check(pill().className === "status-pill online", "fixture pill not online");
+          visibility = "hidden"; show(); await sleep(20);
+          check(requests.length === 0, "hidden tab polled");
+          visibility = "visible"; show(); await sleep(20);
+          check(requests.length === 1 && requests[0].url.endsWith("/status/live"), "becoming visible did not poll");
+          answer(problems); await sleep(50);
+          check(document.querySelector("#status-live") === panel, "panel replaced instead of morphed");
+          check(panel.textContent.includes("thin feed"), "panel not refreshed");
+          check(document.querySelectorAll("#status-pill").length === 1 && pill().closest("header"), "pill not swapped in place");
+          check(pill().className === "status-pill problems" && pill().textContent === "feed problems" && !pill().hidden, "pill not updated");
+          show(); await sleep(20); answer("<p>server error</p>", 503); await sleep(50);
+          check(panel.textContent.includes("thin feed") && pill().className === "status-pill problems", "failed poll changed the panel");
+          show(); await sleep(20); answer(offline); await sleep(50);
+          check(pill().className === "status-pill offline" && pill().textContent === "poller offline", "offline state not shown");
+          out.textContent = "PASS";
+        } catch (error) { out.textContent = "FAIL: " + error.message; }
+      }, 0));
+    </script>"""
+    fixture = f"<script>window.statusFixture = {fixture};</script>"
+    page = page.replace("</head>", "<script>" + HTMX_JS.read_text() + "</script>" + fixture + harness + "</head>")
+    page = page.replace("</body>", '<pre id="result">RUNNING</pre></body>')
+    path = tmp_path / "status.html"
+    path.write_text(page)
+    assert CHROMIUM is not None
+    result = subprocess.run(  # noqa: S603 - fixed browser executable and local test inputs, no shell
+        [
+            CHROMIUM,
+            *CHROMIUM_CI_FLAGS,
+            "--headless",
+            "--disable-gpu",
+            "--no-first-run",
+            "--disable-background-networking",
+            f"--user-data-dir={tmp_path / 'browser'}",
+            "--dump-dom",
+            "--virtual-time-budget=5000",
+            path.as_uri(),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '<pre id="result">PASS</pre>' in result.stdout, re.findall(r'<pre id="result">.*?</pre>', result.stdout)
