@@ -239,7 +239,7 @@ def _add_status_routes(app: Flask) -> None:
     @app.get("/status/live")
     def status_live() -> Response:
         """Live panel fragment, polled by the status page."""
-        response = make_response(render_template("_status_live.html", live=live_status.live_view()))
+        response = make_response(render_template("_status_live.html", live=live_status.live_view(), oob=True))
         response.headers["Cache-Control"] = "no-store"
         return response
 

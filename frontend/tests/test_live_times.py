@@ -301,7 +301,7 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
     assert 'class="pl-card live"' in page
     assert ">6 min late</span>" in page
     assert 'class="pl-journey-map"' in page
-    assert 'hx-trigger="every[plannerShouldRefresh()] 60s"' in page
+    assert 'hx-trigger="every 60s [plannerShouldRefresh()]"' in page
     assert re.search(r'src="/static/planner\.js\?v=[0-9a-f]{12}"', page)  # a new version busts caches
     section = re.search(r'<section id="pl-results".*?</section>', page, re.DOTALL)
     assert section is not None
@@ -319,7 +319,7 @@ def test_planner_page_marks_live_rides_and_refreshes_only_then(
         "q_from": ["101"],
         "q_to": ["102"],
     }
-    assert 'hx-swap="outerHTML"' in section.group()
+    assert 'hx-swap="outerMorph"' in section.group()
     assert "hx-select" not in section.group()
     fragment = client.get(poll_url).get_data(as_text=True).strip()
     assert fragment == section.group()

@@ -1,30 +1,5 @@
-// Status page: refreshes the live panel and adds a crosshair readout to the server-drawn history charts.
+// Status page: adds a crosshair readout to the server-drawn history charts. htmx refreshes the live panel.
 (() => {
-  const REFRESH_MS = 30000;
-
-  // Boosted navigation can run this script again; keep a single timer.
-  clearInterval(window.ztmStatusTimer);
-  window.ztmStatusTimer = setInterval(async () => {
-    const panel = document.getElementById("status-live");
-    if (!panel) return;
-    try {
-      const response = await fetch("/status/live", { headers: { Accept: "text/html" } });
-      if (!response.ok) return;
-      panel.outerHTML = await response.text();
-      const fresh = document.getElementById("status-live");
-      const pill = document.getElementById("status-pill");
-      if (!fresh || !pill) return;
-      const overall = fresh.dataset.overall;
-      pill.hidden = !overall;
-      if (overall) {
-        pill.className = "status-pill " + overall;
-        pill.querySelector(".status-pill-label").textContent = fresh.dataset.overallLabel;
-      }
-    } catch {
-      // Keep the last rendered state; the next tick tries again.
-    }
-  }, REFRESH_MS);
-
   const format = (n) => (n == null ? "n/a" : Math.round(n).toLocaleString("en-US"));
 
   function row(color, value, label) {

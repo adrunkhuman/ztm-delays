@@ -1,0 +1,3 @@
+{# On the polled panel the pill rides along out of band: htmx swaps it into the page header by id. #}
+{% set overall = live.overall if live.available else ('', '') %}
+<p class="status-pill {{ overall[0] }}" id="status-pill" role="status"{% if oob %} hx-swap-oob="true"{% endif %} {{ 'hidden' if not live.available }}><span class="status-dot" aria-hidden="true"></span><span class="status-pill-label">{{ overall[1] }}</span></p>

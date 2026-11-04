@@ -105,7 +105,9 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, published: bool 
 
 
 def _assert_lazy_stops(client: FlaskClient, page: str, expected: list[tuple[int, str, str]]) -> None:
-    requests = re.findall(r'hx-get="([^"]+)"\s+hx-trigger="toggle once" hx-target="#([^"]+)" hx-swap="innerHTML"', page)
+    requests = re.findall(
+        r'hx-get="([^"]+)"\s+hx-trigger="toggle\[this\.open\], refresh" hx-target="#([^"]+)" hx-swap="innerHTML"', page
+    )
     assert len(requests) == len(expected)
     targets = [target for _, target in requests]
     assert len(set(targets)) == len(targets)
@@ -284,8 +286,9 @@ def test_multi_leg_page_renders_changes_walks_and_distinct_lazy_stops(
     assert "wait 8 min" in page
     assert 'be here by <b class="mono">08:06</b>' not in page  # the timetabled metro: be there when it leaves
     _assert_lazy_stops(client, page, [(1, "Łomianki", "Metro Marymont"), (11, "Metro Marymont", "Centrum")])
-    assert 'hx-target="#pl-trip-1-2"' in page
-    assert 'hx-target="#pl-trip-1-6"' in page  # the intervening walk has no lazy trip request
+    assert 'id="pl-card-1-0-1_11-0-1"' in page  # every ride makes the key, which the refresh's morph matches on
+    assert 'hx-target="#pl-trip-1-0-1_11-0-1-2"' in page
+    assert 'hx-target="#pl-trip-1-0-1_11-0-1-6"' in page  # the intervening walk has no lazy trip request
     assert "/planner/trip/10?" not in page
 
 

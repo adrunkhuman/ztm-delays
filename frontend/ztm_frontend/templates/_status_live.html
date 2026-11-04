@@ -1,4 +1,9 @@
-<section class="status-live" id="status-live" aria-label="Live poller status" aria-live="polite"{% if live.available %} data-overall="{{ live.overall[0] }}" data-overall-label="{{ live.overall[1] }}"{% endif %}>
+{% if oob %}{% include "_status_pill.html" %}{% endif %}
+{# Polls while the tab is visible, and at once when it becomes visible again. The morph changes only what changed,
+   so the live region announces only that; a failed poll swaps nothing and keeps the last state. #}
+<section class="status-live" id="status-live" aria-label="Live poller status" aria-live="polite"
+  hx-get="{{ url_for('status_live') }}" hx-swap="outerMorph"
+  hx-trigger="every 30s [document.visibilityState === 'visible'], visibilitychange[document.visibilityState === 'visible'] from:document">
   <div class="status-head">
     <h2 class="label">live poller</h2>
     {% if live.available %}

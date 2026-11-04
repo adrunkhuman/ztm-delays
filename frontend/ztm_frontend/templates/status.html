@@ -10,8 +10,7 @@
   <main class="main">
     <header class="head status-title">
       <h1 class="hero-title">status</h1>
-      {% set overall = live.overall if live.available else ('', '') %}
-      <p class="status-pill {{ overall[0] }}" id="status-pill" role="status" {{ 'hidden' if not live.available }}><span class="status-dot" aria-hidden="true"></span><span class="status-pill-label">{{ overall[1] }}</span></p>
+      {% include "_status_pill.html" %}
     </header>
 
     {% include "_status_live.html" %}
