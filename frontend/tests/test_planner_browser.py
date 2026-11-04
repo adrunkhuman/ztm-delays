@@ -17,13 +17,13 @@ CHROMIUM = shutil.which("google-chrome") or shutil.which("chromium")
 CHROMIUM_CI_FLAGS = ("--no-sandbox",) if os.environ.get("GITHUB_ACTIONS") == "true" else ()
 FRONTEND = Path(__file__).resolve().parents[1]
 PLANNER_JS = FRONTEND / "ztm_frontend" / "static" / "planner.js"
-HTMX_JS = Path(__file__).parent / "vendor" / "htmx-4.0.0-beta5.min.js"
+HTMX_JS = Path(__file__).parent / "vendor" / "htmx-4.0.1.min.js"
 
 
 def test_browser_fixture_matches_site_htmx_integrity() -> None:
     template = (FRONTEND / "ztm_frontend" / "templates" / "base.html").read_text()
     integrity = base64.b64encode(hashlib.sha384(HTMX_JS.read_bytes()).digest()).decode()
-    assert f'htmx.org@4.0.0-beta5/dist/htmx.min.js" integrity="sha384-{integrity}"' in template
+    assert f'htmx.org@4.0.1/dist/htmx.min.js" integrity="sha384-{integrity}"' in template
 
 
 @pytest.mark.skipif(CHROMIUM is None, reason="Chrome or Chromium is not installed")
