@@ -10,9 +10,12 @@ import types
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_mart_table_list_exports_frontend_source_tables() -> None:
@@ -1864,6 +1867,57 @@ def test_validator_exits_cleanly_after_success_under_process_memory_limit(tmp_pa
         "warnings_truncated": False,
         "warnings": [],
     }
+
+
+def test_validator_batches_dates_under_half_the_process_memory_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    dag = _load_dag_module()
+    validator = _load_validator_module()
+    paths_by_table = _write_minimal_parquet_files(tmp_path, dag.MART_TABLES, duckdb)
+    source_stats = [
+        dag.TableStats(table_name, 2 if table_name == "mart_pipeline_status" else 1, 10)
+        for table_name in dag.MART_TABLES
+    ]
+    candidate_path = tmp_path / "candidate.duckdb"
+    dag._build_duckdb_file(
+        duckdb,
+        candidate_path,
+        dag.DuckdbBuildInput(
+            paths_by_table,
+            source_stats,
+            _test_export_config(dag, tmp_path),
+            datetime(2026, 7, 2, tzinfo=UTC),
+            tmp_path / "build-temp",
+        ),
+    )
+    calls: list[tuple[str, tuple[str, ...], str]] = []
+
+    def spy(name: str, check: Callable[..., None]) -> Callable[..., None]:
+        def wrapper(connection: Any, dates: tuple[str, ...]) -> None:
+            memory_limit = connection.execute("select current_setting('memory_limit')").fetchone()[0]
+            calls.append((name, dates, memory_limit))
+            check(connection, dates)
+
+        return wrapper
+
+    monkeypatch.setattr(validator, "_apply_process_memory_limit", lambda _limit: None)
+    monkeypatch.setattr(validator, "_validate_route_patterns", spy("routes", validator._validate_route_patterns))
+    monkeypatch.setattr(
+        validator, "_validate_trip_event_relationships", spy("trips", validator._validate_trip_event_relationships)
+    )
+    requested = (*(f"2026-06-{day}" for day in range(24, 31)), "2026-07-01", "2026-07-02")
+
+    report = validator.validate_duckdb(candidate_path, requested, 512, 64, 1, tmp_path / "validation-temp")
+
+    assert report["checked_dates"] == list(requested)
+    assert calls == [
+        ("routes", requested[0:4], "256.0 MiB"),
+        ("routes", requested[4:8], "256.0 MiB"),
+        ("routes", requested[8:], "256.0 MiB"),
+        ("trips", ("2026-07-02",), "256.0 MiB"),
+    ]
 
 
 def test_publish_duckdb_cleans_temp_files_when_metadata_write_fails(
