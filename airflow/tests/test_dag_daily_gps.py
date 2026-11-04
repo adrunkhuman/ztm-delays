@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pendulum
 import pytest
+from jinja2 import Template
 
 
 def test_available_gps_part_uris_lists_existing_bus_and_tram_parts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -740,6 +742,7 @@ def _install_airflow_stubs() -> None:
     airflow_sdk_module.Asset = FakeAsset
     airflow_sdk_module.CronPartitionTimetable = FakeCronPartitionTimetable
     airflow_sdk_module.Metadata = FakeMetadata
+    airflow_sdk_module.PokeReturnValue = FakePokeReturnValue
     airflow_sdk_module.PartitionedAssetTimetable = FakePartitionedAssetTimetable
     airflow_sdk_module.StartOfDayMapper = FakeStartOfDayMapper
     airflow_sdk_module.TaskGroup = FakeTaskGroup
@@ -830,6 +833,12 @@ class FakeDagRun:
     start_date = None
 
 
+class FakePokeReturnValue:
+    def __init__(self, *, is_done: bool, xcom_value: object = None) -> None:
+        self.is_done = is_done
+        self.xcom_value = xcom_value
+
+
 class FakeOperator:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
@@ -851,6 +860,9 @@ class FakeTaskDecorator:
         if function is None:
             return lambda decorated: FakeTask(decorated, kwargs)
         return FakeTask(function, kwargs)
+
+    def sensor(self, **kwargs: Any) -> Any:
+        return lambda decorated: FakeTask(decorated, kwargs)
 
 
 class FakeTask:
@@ -973,3 +985,32 @@ class FakeScalarQueryParameter:
 class FakeQueryJobConfig:
     def __init__(self, *, query_parameters: list[FakeScalarQueryParameter]) -> None:
         self.query_parameters = query_parameters
+
+
+def test_warehouse_writes_wait_for_historical_serving_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    sensor = dag.historical_refresh_exclusion
+
+    assert sensor.kwargs["mode"] == "reschedule"
+    for writer in [dag.matcher_publish, dag.dbt_run_matcher_fact_dependencies, dag.dbt_run_current_fact_schedule]:
+        assert writer in sensor.downstream
+    assert dag.matcher_load not in sensor.downstream
+    monkeypatch.setattr(dag, "get_current_context", lambda: {"ti": "ti"})
+    monkeypatch.setattr(dag, "historical_refresh_writing", lambda ti: ti == "ti")
+    assert sensor.function().is_done is False
+    monkeypatch.setattr(dag, "historical_refresh_writing", lambda _ti: False)
+    passed = sensor.function()
+    assert (passed.is_done, passed.xcom_value) == (True, True)
+
+    restore = dag.dbt_restore_current_coverage_schedule.kwargs["bash_command"]
+
+    def render(exclusion: object) -> str:
+        xcoms = {"wait_for_historical_serving_refresh": exclusion, "selected_gtfs_snapshot_id": "snapshot-3"}
+        return Template(restore).render(
+            ti=types.SimpleNamespace(xcom_pull=lambda *, task_ids: xcoms.get(task_ids)),
+            dag_run=types.SimpleNamespace(conf={}, partition_key="2026-11-03"),
+            data_interval_start=pendulum.datetime(2026, 11, 4, 3, tz="UTC"),
+        )
+
+    assert "refusing schedule restoration" in render(None)
+    assert "refusing schedule restoration" not in render(True)

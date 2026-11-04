@@ -108,3 +108,44 @@ def test_refresh_runs_partition_models_once_per_day_then_exports_once() -> None:
     )
     assert "{{" not in valid_restore
     assert '"processing_date":"2026-07-09"' in valid_restore
+
+
+def test_refresh_waits_for_warehouse_writers_before_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    refresh = _load_refresh_dag()
+    sensor = refresh.wait_for_warehouse_writers
+
+    assert sensor.kwargs["mode"] == "reschedule"
+    assert refresh.validate_refresh_config in sensor.downstream
+    monkeypatch.setattr(refresh, "get_current_context", lambda: {"ti": "ti"})
+    monkeypatch.setattr(refresh, "warehouse_writers_active", lambda _ti: True)
+    assert sensor.function() is False
+    monkeypatch.setattr(refresh, "warehouse_writers_active", lambda _ti: False)
+    assert sensor.function() is True
+
+
+def test_retried_refresh_exports_under_its_own_export_id() -> None:
+    refresh = _load_refresh_dag()
+    day = {"processing_date": "2026-07-09", "gtfs_snapshot_id": "snapshot-9"}
+    conf = {"days": [day], "restore_day": day, "historical_plan_id": "plan-9"}
+
+    assert refresh.DEFAULT_MAX_QUERY_BYTES == 20 * 1024**3
+    assert refresh._validated_refresh_config(conf)["maximum_bytes_billed"] == 20 * 1024**3
+    assert refresh._validated_refresh_config(conf | {"export_id": "plan-9-retry-1"})["export_id"] == "plan-9-retry-1"
+    with pytest.raises(refresh.AirflowException, match="export_id"):
+        refresh._validated_refresh_config(conf | {"export_id": "bad id"})
+    export_id = refresh.trigger_serving_export.kwargs["conf"]["export_id"]
+    run_id = refresh.trigger_serving_export.kwargs["trigger_run_id"]
+    retried = conf | {"export_id": "plan-9-retry-1"}
+    assert Template(export_id).render(dag_run=SimpleNamespace(conf=conf)) == "plan-9"
+    assert Template(export_id).render(dag_run=SimpleNamespace(conf=retried)) == "plan-9-retry-1"
+    assert Template(run_id).render(dag_run=SimpleNamespace(conf=conf)) == "historical-serving-export__plan-9"
+    assert Template(run_id).render(dag_run=SimpleNamespace(conf=retried)) == "historical-serving-export__plan-9-retry-1"
+
+
+def test_refresh_validation_rechecks_for_warehouse_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+    refresh = _load_refresh_dag()
+    monkeypatch.setattr(refresh, "get_current_context", lambda: {"ti": "ti", "dag_run": None})
+    monkeypatch.setattr(refresh, "warehouse_writers_active", lambda _ti: True)
+
+    with pytest.raises(refresh.AirflowException, match="started while the refresh"):
+        refresh.validate_refresh_config.function()

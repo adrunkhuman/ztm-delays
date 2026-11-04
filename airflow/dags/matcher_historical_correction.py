@@ -8,7 +8,7 @@ import os
 import re
 import shlex
 import subprocess
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import monotonic, sleep
 from typing import TYPE_CHECKING, Any, cast
@@ -24,6 +24,7 @@ from ztm_airflow_common import (
     HISTORICAL_DAILY_ELIGIBLE_START_DATE,
     HISTORICAL_DAILY_EXCLUSION_REASONS,
     RAW_GPS_PREFIX,
+    WRITER_EXCLUSION_TIMEOUT_SECONDS,
     historical_daily_exclusion_reason,
     matcher_input_inventory_digest,
 )
@@ -33,7 +34,9 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX_DAYS = 31
 MAX_SERVING_REFRESH_DAYS = 32
-DEFAULT_MAX_QUERY_BYTES = 5 * 1024**3
+# Window models read a long lookback; their dry-run estimates exceeded 5 GiB by November 2026.
+DEFAULT_MAX_QUERY_BYTES = 20 * 1024**3
+MAX_QUERY_BYTES_LIMIT = 100 * 1024**3
 DEFAULT_RUN_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_RUN_POLL_INTERVAL_SECONDS = 15
 PLAN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
@@ -219,13 +222,17 @@ def _serving_refresh_run_id(plan_id: str) -> str:
     return f"matcher-historical-serving-refresh__{plan_id}"
 
 
-def _serving_refresh_command(plan_id: str, days: list[dict[str, str]], maximum_bytes_billed: int) -> str:
-    conf = {
+def _serving_refresh_command(
+    plan_id: str, days: list[dict[str, str]], maximum_bytes_billed: int, export_id: str | None = None
+) -> str:
+    conf: dict[str, object] = {
         "days": days,
         "restore_day": days[-1],
         "maximum_bytes_billed": maximum_bytes_billed,
         "historical_plan_id": plan_id,
     }
+    if export_id is not None:
+        conf["export_id"] = export_id
     return " ".join(
         [
             "airflow dags trigger dag_historical_serving_refresh",
@@ -311,6 +318,19 @@ def _dag_run_state(dag_id: str, run_id: str) -> str | None:
     return str(getattr(state, "value", state)) if state is not None else None
 
 
+def _delete_failed_dag_run(dag_id: str, run_id: str) -> None:
+    """Delete one failed DAG run so its deterministic run ID can be triggered again."""
+    from airflow.models import DagRun  # noqa: PLC0415
+    from airflow.utils.session import create_session  # noqa: PLC0415
+    from sqlalchemy import select  # noqa: PLC0415
+
+    with create_session() as session:
+        dag_run = session.scalar(select(DagRun).where(DagRun.dag_id == dag_id, DagRun.run_id == run_id))
+        if dag_run is None or str(getattr(dag_run.state, "value", dag_run.state)) != "failed":
+            raise RuntimeError(f"Only a failed DAG run can be deleted for retry: dag_id={dag_id} run_id={run_id}")
+        session.delete(dag_run)
+
+
 def wait_for_dag_run(  # noqa: PLR0913
     dag_id: str,
     run_id: str,
@@ -341,28 +361,38 @@ def _run_command(command: str) -> None:
     subprocess.run(shlex.split(command), check=True)  # noqa: S603
 
 
-def execute_historical_correction_plan(  # noqa: C901
+def execute_historical_correction_plan(  # noqa: C901, PLR0913
     plan: dict[str, object],
     *,
+    retry_failed_refresh: bool = False,
+    refresh_max_query_bytes: int | None = None,
     get_state: Callable[[str, str], str | None] = _dag_run_state,
     run_command: Callable[[str], None] = _run_command,
     wait_for_run: Callable[[str, str], None] | None = None,
+    delete_failed_run: Callable[[str, str], None] = _delete_failed_dag_run,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
-    """Run an approved plan sequentially, skipping already successful deterministic runs."""
+    """Run an approved plan sequentially, skipping already successful deterministic runs.
+
+    With retry_failed_refresh, a failed serving refresh is deleted and triggered again, optionally with
+    a new per-query cap. Failed correction runs still require an operator to clear them.
+    """
     if plan.get("plan_version") != "matcher-historical-correction-v6" or plan.get("read_only") is not True:
         raise ValueError("Historical correction execution requires an approved v6 plan")
+    if refresh_max_query_bytes is not None and not 1 <= refresh_max_query_bytes <= MAX_QUERY_BYTES_LIMIT:
+        raise ValueError("Refresh maximum bytes billed must be positive and no larger than 100 GiB")
     bounds = cast("dict[str, int]", plan["bounds"])
     timeout_seconds = int(bounds["run_timeout_seconds"])
     poll_interval_seconds = int(bounds["run_poll_interval_seconds"])
 
-    def wait(dag_id: str, run_id: str) -> None:
+    def wait(dag_id: str, run_id: str, timeout: int = timeout_seconds) -> None:
         if wait_for_run is not None:
             wait_for_run(dag_id, run_id)
             return
         wait_for_dag_run(
             dag_id,
             run_id,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=timeout,
             poll_interval_seconds=poll_interval_seconds,
         )
 
@@ -385,18 +415,38 @@ def execute_historical_correction_plan(  # noqa: C901
 
     refresh = cast("dict[str, object]", plan["serving_refresh"])
     refresh_run_id = str(refresh["run_id"])
+    # The refresh may first wait out a nightly run, then rebuilds every affected date in one run.
+    refresh_days = len(cast("list[object]", refresh.get("days", [None])))
+    refresh_timeout = WRITER_EXCLUSION_TIMEOUT_SECONDS + timeout_seconds * refresh_days
     refresh_state = get_state("dag_historical_serving_refresh", refresh_run_id)
     if refresh_state == "success":
         return
     if refresh_state in {"queued", "running"}:
-        wait("dag_historical_serving_refresh", refresh_run_id)
+        wait("dag_historical_serving_refresh", refresh_run_id, refresh_timeout)
         return
+    export_id = None
     if refresh_state is not None:
-        raise RuntimeError(
-            f"Historical serving refresh must be cleared before resume: run_id={refresh_run_id} state={refresh_state}"
+        if not retry_failed_refresh or refresh_state != "failed":
+            raise RuntimeError(
+                "Historical serving refresh must be retried with --retry-failed-refresh before resume: "
+                f"run_id={refresh_run_id} state={refresh_state}"
+            )
+        delete_failed_run("dag_historical_serving_refresh", refresh_run_id)
+        # The failed attempt may have started export jobs, whose BigQuery job IDs derive from the export ID.
+        export_id = f"{plan['plan_id']}-retry-{now():%Y%m%dT%H%M%SZ}"
+    if export_id is None and refresh_max_query_bytes is None:
+        run_command(commands[-2])
+    else:
+        bounds_bytes = int(bounds["maximum_bytes_billed"])
+        run_command(
+            _serving_refresh_command(
+                str(plan["plan_id"]),
+                cast("list[dict[str, str]]", refresh["days"]),
+                refresh_max_query_bytes or bounds_bytes,
+                export_id,
+            )
         )
-    run_command(commands[-2])
-    wait("dag_historical_serving_refresh", refresh_run_id)
+    wait("dag_historical_serving_refresh", refresh_run_id, refresh_timeout)
 
 
 def build_historical_correction_plan(  # noqa: C901, PLR0913
@@ -616,6 +666,8 @@ def main(argv: list[str] | None = None) -> int:
     wait_parser.add_argument("--poll-interval-seconds", type=int, default=DEFAULT_RUN_POLL_INTERVAL_SECONDS)
     execute_parser = subparsers.add_parser("execute")
     execute_parser.add_argument("--plan-json", required=True, type=Path)
+    execute_parser.add_argument("--retry-failed-refresh", action="store_true")
+    execute_parser.add_argument("--refresh-max-query-bytes", type=int)
     args = parser.parse_args(argv)
     if args.mode == "wait-for-dag-run":
         wait_for_dag_run(
@@ -629,7 +681,11 @@ def main(argv: list[str] | None = None) -> int:
         plan = json.loads(args.plan_json.read_text(encoding="utf-8"))
         if not isinstance(plan, dict):
             raise ValueError("Historical correction plan JSON must contain an object")
-        execute_historical_correction_plan(plan)
+        execute_historical_correction_plan(
+            plan,
+            retry_failed_refresh=args.retry_failed_refresh,
+            refresh_max_query_bytes=args.refresh_max_query_bytes,
+        )
         return 0
     plan = build_historical_correction_plan(
         args.start_date,

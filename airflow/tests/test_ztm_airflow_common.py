@@ -278,3 +278,49 @@ class FakeWebhookResponse:
 
     def __exit__(self, *_args: object) -> None:
         return None
+
+
+class FakeTaskInstance:
+    def __init__(self, ti_count: int = 0, dr_counts: dict[str, int] | None = None) -> None:
+        self.ti_count = ti_count
+        self.dr_counts = dr_counts or {}
+        self.calls: list[dict[str, Any]] = []
+
+    def get_ti_count(self, **kwargs: Any) -> int:
+        self.calls.append(kwargs)
+        return self.ti_count
+
+    def get_dr_count(self, **kwargs: Any) -> int:
+        self.calls.append(kwargs)
+        return self.dr_counts.get(kwargs["dag_id"], 0)
+
+
+def test_historical_refresh_writing_counts_only_active_writer_tasks() -> None:
+    common = _load_common_module()
+
+    assert common.historical_refresh_writing(FakeTaskInstance(ti_count=1)) is True
+    idle = FakeTaskInstance()
+    assert common.historical_refresh_writing(idle) is False
+    assert idle.calls == [
+        {
+            "dag_id": "dag_historical_serving_refresh",
+            "task_ids": [
+                "validate_refresh_config",
+                "refresh_serving",
+                "restore_current_schedule",
+                "trigger_serving_export",
+            ],
+            "states": common.ACTIVE_TASK_STATES,
+        }
+    ]
+    assert "wait_for_warehouse_writers" not in idle.calls[0]["task_ids"]
+
+
+def test_warehouse_writers_active_checks_nightly_and_gtfs_runs() -> None:
+    common = _load_common_module()
+
+    assert common.warehouse_writers_active(FakeTaskInstance(dr_counts={"dag_gtfs_load": 1})) is True
+    idle = FakeTaskInstance()
+    assert common.warehouse_writers_active(idle) is False
+    assert [call["dag_id"] for call in idle.calls] == ["dag_daily_gps", "dag_gtfs_load"]
+    assert all(call["states"] == ["queued", "running"] for call in idle.calls)

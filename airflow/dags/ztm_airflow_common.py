@@ -15,6 +15,8 @@ from airflow.sdk import Asset
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from airflow.sdk.execution_time.task_runner import RuntimeTaskInstance
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -107,6 +109,38 @@ AIRFLOW_TRANSIENT_RETRY_DEFAULT_ARGS = {
     "retry_delay": AIRFLOW_TRANSIENT_RETRY_DELAY,
     "on_failure_callback": airflow_failure_alert,
 }
+
+# The historical serving refresh and the scheduled warehouse writers rebuild the same schedule tables
+# (int_gtfs_trip_schedule, int_gtfs_duty_chain) and serving partitions, so they must not interleave.
+# The refresh waits until no writer DAG run is active; writers wait while a refresh task after that
+# wait is active. A refresh that is still waiting does not block writers, so the two waits cannot
+# deadlock. Validation counts as writing and re-checks for writers, which closes the gap between the
+# refresh's wait succeeding and its first task being scheduled.
+HISTORICAL_REFRESH_DAG_ID = "dag_historical_serving_refresh"
+HISTORICAL_REFRESH_WRITER_TASK_IDS = [
+    "validate_refresh_config",
+    "refresh_serving",
+    "restore_current_schedule",
+    "trigger_serving_export",
+]
+WAREHOUSE_WRITER_DAG_IDS = ("dag_daily_gps", "dag_gtfs_load")
+ACTIVE_DAG_RUN_STATES = ["queued", "running"]
+ACTIVE_TASK_STATES = ["scheduled", "queued", "running", "restarting", "up_for_retry", "up_for_reschedule", "deferred"]
+WRITER_EXCLUSION_POKE_SECONDS = 300
+WRITER_EXCLUSION_TIMEOUT_SECONDS = 12 * 60 * 60
+
+
+def historical_refresh_writing(ti: RuntimeTaskInstance) -> bool:
+    """Return whether a historical serving refresh has passed its wait and not yet finished exporting."""
+    count = ti.get_ti_count(
+        dag_id=HISTORICAL_REFRESH_DAG_ID, task_ids=HISTORICAL_REFRESH_WRITER_TASK_IDS, states=ACTIVE_TASK_STATES
+    )
+    return count > 0
+
+
+def warehouse_writers_active(ti: RuntimeTaskInstance) -> bool:
+    """Return whether a scheduled warehouse writer DAG run is queued or running."""
+    return any(ti.get_dr_count(dag_id=dag_id, states=ACTIVE_DAG_RUN_STATES) > 0 for dag_id in WAREHOUSE_WRITER_DAG_IDS)
 
 
 def gtfs_snapshot_id(snapshot_timestamp: str, file_hash: str) -> str:

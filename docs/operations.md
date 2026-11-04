@@ -93,7 +93,16 @@ python /opt/airflow/dags/matcher_historical_correction.py execute \
 
 Execution mutates the warehouse. Dates run sequentially; the controller skips successful runs on resume and stops on a failed existing run. Diagnose and clear only the failed child run, then resume the same plan. Preserve the plan outside disposable container storage if recovery must survive replacement.
 
-After all corrections succeed, one historical serving refresh rebuilds the affected marts and triggers one export. If only that refresh fails, resume it without recomputing successful fact dates. Per-query byte caps do not bound the total cost of a range.
+After all corrections succeed, one historical serving refresh rebuilds the affected marts and triggers one export. It first waits until no `dag_daily_gps` or `dag_gtfs_load` run is active, and those DAGs hold their warehouse writes while the refresh is rebuilding or exporting, because both sides rewrite the same schedule tables and serving partitions. A nightly run can therefore publish hours late during a refresh; if the refresh holds the tables for more than 12 hours, the nightly run fails and must be rerun. Until the refresh export finishes, nightly exports fail their row-count check: corrected fact partitions are not among the nightly's changed dates.
+
+The plan's per-query cap (`MATCHER_HISTORICAL_MAX_QUERY_BYTES`, default 20 GiB) applies to every dbt query; window models read a long lookback and need more than the per-day models. If only the refresh fails, retry it without recomputing successful fact dates, raising the cap if that was the failure:
+
+```sh
+python /opt/airflow/dags/matcher_historical_correction.py execute \
+  --plan-json /tmp/correction.json --retry-failed-refresh --refresh-max-query-bytes 32212254720
+```
+
+The retry deletes the failed refresh run, triggers it again under the same run ID, and exports under a new export ID. Per-query byte caps do not bound the total cost of a range.
 
 For a fresh warehouse, recover from immutable GCS GPS parts and GTFS ZIPs into new target datasets. Rebuild the snapshot inventory and raw loads, GTFS staging/dimensions, then the processing-date mapping. [Bootstrap the schedule ledger](../dbt/README.md#schedule-ledger) in bounded batches and validate its completeness before publishing versions. Reconstruct dates and validate facts/marts before exposing the export. Never use ledger `--full-refresh` or publish a partial bootstrap.
 
