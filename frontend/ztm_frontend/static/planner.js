@@ -429,7 +429,8 @@
   function journeyMap(box, data, options) {
     const map = new maplibregl.Map({
       container: box,
-      style: new URL(box.dataset.style, window.location.href).href,
+      // A minimap draws into a container inside its box, which carries the style.
+      style: new URL(box.closest("[data-style]").dataset.style, window.location.href).href,
       bounds: bounds(data),
       fitBoundsOptions: { padding: 28, maxZoom: 16 },
       dragRotate: false,

@@ -291,6 +291,7 @@
     await until(() => trips().length === 2, 'reopening did not reload the stop list');
     const minimap = maps[0], box = card.querySelector('.pl-journey-map'), blank = box.cloneNode(false);
     check(minimap.box.parentElement === box, 'journey map not drawn in its own container');
+    check(minimap.options.style === new URL(box.dataset.style, location.href).href, 'journey map lost its style');
     minimap.handlers.load(); check(minimap.sources === 3 && minimap.layers === 4, 'initial map load missing route layers');
 
     // A refresh's response, edited as the server could have changed it.
