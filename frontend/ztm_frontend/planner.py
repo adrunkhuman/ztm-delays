@@ -110,14 +110,14 @@ def search(  # noqa: PLR0913
 ) -> tuple[list[dict[str, Any]], int | None]:
     """Journey cards and where the next page's search starts (None without cards).
 
-    With now, today's trips follow the live positions when there are any (live_times.view).
+    With now, today's trips follow the live positions when there are any (live_times.latest).
 
     The router keeps journeys that win on the late-case arrival; a journey is also dropped when another leaves
     no earlier, with no more changes, and is expected to arrive no later (e.g. a change to the metro whose worst
     case is better but whose usual arrival is later than staying on the bus).
     """
     net = journey.network(path, day)
-    current = live_times.view(path, net, day, now) if now is not None else None
+    current = live_times.latest(path, net, day, now) if now is not None else None
     if current is not None:
         net = current.net
     limit = RESULTS + EXTRA_CANDIDATES
@@ -471,7 +471,7 @@ def trip_stops(  # noqa: PLR0913
     depart = board["expected_sod"]
     if board["leave_by_offset_s"] is not None:
         depart = max(depart, board["scheduled"] + board["leave_by_offset_s"])
-    current = live_times.view(path, journey.network(path, day), day, now) if now is not None else None
+    current = live_times.latest(path, journey.network(path, day), day, now) if now is not None else None
     if current is not None and trip_key in current.net.trip_index:
         net = current.net
         start, length = net.trip_index[trip_key]

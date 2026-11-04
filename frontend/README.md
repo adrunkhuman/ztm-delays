@@ -94,11 +94,13 @@ Each process caches up to four service-day networks and their immutable native m
 
 Each network caches up to 128 raw searches and coalesces duplicate requests across at most 16 in-flight keys. Exact endpoints, time and result/filter settings form the key; new artifacts, days and live-patched networks cannot reuse old routes. Query permission masks stay within one search and are synchronized across its windows; mutable window state is not shared between requests. Labels and cards are rebuilt per request. Rust detaches the GIL while searching owned native buffers, so independent Waitress threads can run routing in parallel. A window rejects simultaneous use; failed search or Python materialization invalidates it.
 
-The container's `create_serving_app` starts one daemon thread. Startup, publication and Warsaw date rollover trigger warmup and replace the pins. Builds run sequentially, within the artifact's date bounds, including native metadata and today's live view when available.
+The container's `create_serving_app` starts a warmup daemon thread. Startup, publication and Warsaw date rollover trigger warmup and replace the pins. Builds run sequentially, within the artifact's date bounds, including native metadata and today's live view when available.
 
 The thread checks file metadata every 30 s. Idle checks do not query DuckDB or fetch live data. Failures are logged and retried on the next check; searches can still load missing networks on demand.
 
-The fourth slot uses another day's network memory only when filled. New live-feed objects still need their usual patch and native preparation. Warmup adds no BigQuery queries, endpoint, secret or Airflow task.
+With a live feed configured, a second daemon thread reads the feed every 10 s, whether or not anyone is searching, and patches and prepares today's warm network for each new feed object. A search takes that view as is while it is at most 40 s old (`REFRESHED_WITHIN_S` in [live_times.py](ztm_frontend/live_times.py)), so it neither reads the feed nor patches. An older view (the refresher stopped, or the feed stalled) makes the search read the feed and patch itself, as without the refresher. On the VPS this costs well under a core and one 30 KB GCS read every 10 s.
+
+The fourth slot uses another day's network memory only when filled. Warmup adds no BigQuery queries, endpoint, secret or Airflow task.
 
 For the same startup behavior outside Docker, run:
 

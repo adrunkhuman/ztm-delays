@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Final
 
 import duckdb
 
-from ztm_frontend import live
+from ztm_frontend import live, live_status
 from ztm_frontend.db import read_connection
 from ztm_frontend.journey import NO_BOARD
 
@@ -40,6 +40,9 @@ PASSED_M: Final = 50  # a stop this far behind the vehicle along the shape is pa
 # Replaying 5 and 6 Oct 2026 with the week before's calibration, every 10-minute band missed at most 0.7% of
 # vehicles at 15 min; at 20 min, buses 10-30 min ahead reached 0.9%.
 LEAVE_LATER_WITHIN_S: Final = 15 * 60
+# The serving worker's refresher (planner_warmup) patches every feed object, which the poller writes every 10 s and
+# the refresher reads within another 10 s; a request takes a view this young as is instead of reading the feed.
+REFRESHED_WITHIN_S: Final = 40
 
 RowTimes = tuple[int, int, int]  # board_by, expected, late
 
@@ -138,6 +141,23 @@ def view(path: Path, net: Network, day: date, now: datetime) -> LiveView | None:
             state.net = net.patched(row_times(net.live, found.fixes, state.calibration, at))
             state.updated_at, state.fixes = found.updated_at, found.fixes
         return LiveView(state.net, state.fixes or {}, found.updated_at, net.live)
+
+
+def latest(path: Path, net: Network, day: date, now: datetime) -> LiveView | None:
+    """The last patched view while it is recent, without reading the feed; otherwise as view()."""
+    with _lock:
+        state = net.live_view
+        matcher = net.live
+        if (
+            isinstance(state, _View)
+            and isinstance(matcher, live.Matcher)
+            and state.net is not None
+            and state.updated_at is not None
+            and now.astimezone(live_status.WARSAW).date() == day
+            and (now - state.updated_at).total_seconds() <= REFRESHED_WITHIN_S
+        ):
+            return LiveView(state.net, state.fixes or {}, state.updated_at, matcher)
+    return view(path, net, day, now)
 
 
 def row_times(
