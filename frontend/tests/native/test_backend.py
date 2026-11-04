@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gc
 import math
+import random
 import subprocess
 import sys
 import threading
@@ -66,7 +67,7 @@ def test_invalid_network_rejected(damage: str) -> None:  # noqa: C901 - one case
     elif damage == "bad_footpath":
         net.footpaths[0].append((0, -1))
     elif damage == "bad_adjacency":
-        net.incidence.pop()
+        net.incidence = list(net.incidence)[:-1]
     with pytest.raises((ValueError, IndexError)):
         PreparedNet(net)
 
@@ -161,6 +162,44 @@ def test_prepared_network_copies_inputs_and_patched_network_gets_own_metadata() 
     net.late_base[0] += 100  # Deliberate unsupported input mutation proves the native copy owns its data.
     assert original.late(0, 1) == before
     assert PreparedNet(net).late(0, 1) > before
+
+
+def _patch_network() -> journey.Network:
+    routes = (("A", "B", "C", "D"), ("B", "C", "E"), ("A", "C", "F"), ("D", "C", "A"))
+    trips = []
+    for route, posts in enumerate(routes):
+        for n in range(12):
+            start = 300 * n + 60 * route
+            trips.append(Trip(100 * route + n, tuple(Stop(f"{p}:1", start + 240 * i) for i, p in enumerate(posts))))
+    return _network(*trips, walks=(("C:1", "E:1", 90), ("B:1", "F:1", 120)))
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_native_patch_routes_like_a_full_copy_of_the_patched_network(seed: int) -> None:
+    net = _patch_network()
+    rng = random.Random(seed)  # noqa: S311 - reproducible test data
+    rows = {}
+    for row in rng.sample(range(len(net.board)), 60):
+        board = net.board[row]
+        if board < journey.NO_BOARD and rng.random() < 0.2:
+            board = journey.NO_BOARD  # passed
+        elif board < journey.NO_BOARD:
+            board = max(0, board + 60 * rng.randint(-3, 6))  # whole minutes: many ties
+        expected = net.expected[row] + rng.randint(-60, 400)
+        rows[row] = (board, expected, expected + rng.randint(0, 200))
+    fast = net.patched(rows)
+    full = net.patched(rows)
+    full.patch_source = None  # prepared from its Python columns and lists, as before native patching
+    assert journey._prepared_network(fast) is not journey._prepared_network(full)
+    for stop in range(len(net.stop_ids)):
+        assert fast.incidence[stop] == [net._boarding.__func__(fast, p, pos) for p, pos, _, _ in net.incidence[stop]]
+    for origin in "ABCD":
+        for destination in "CDEF":
+            if origin != destination:
+                for after in (0, 1000, 2500):
+                    assert journey.plan(fast, origin, destination, after, 6) == journey.plan(
+                        full, origin, destination, after, 6
+                    )
 
 
 def test_query_shared_only_across_its_own_windows_and_state_released() -> None:

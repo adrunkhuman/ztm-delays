@@ -388,10 +388,12 @@ def test_optional_live_view_prepares_its_patched_network_separately(
     assert len(nets) == 4
     assert nets[-1] is patched[0]
     assert nets[-1] is not nets[0]
-    assert native.call_args_list == [call(net) for net in nets]
+    # The live view's native copy is patched from today's, not copied from Python again.
+    assert native.call_args_list == [call(net) for net in nets[:-1]]
+    assert journey._prepared_network(nets[-1]) is not journey._prepared_network(nets[0])  # noqa: SLF001
     assert nets[0].search("O", "D", 0)[0].depart == 100
     assert nets[-1].search("O", "D", 0)[0].depart == 150
-    assert native.call_count == 4
+    assert native.call_count == 3
 
 
 def test_unavailable_live_feed_keeps_timetable_native_networks_warm(

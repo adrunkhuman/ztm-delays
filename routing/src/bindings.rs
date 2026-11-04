@@ -1,6 +1,6 @@
 //! Thin Python boundary. No Python handles or borrowed buffers enter the detached search.
 use crate::error::Error;
-use crate::network::{Network, NetworkInput, RawEnvelope, RawIncidence};
+use crate::network::{Network, NetworkInput, RawEnvelope, RawIncidence, RowPatch};
 use crate::search::{Query, State, StateInput};
 use pyo3::exceptions::{PyIndexError, PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -60,6 +60,13 @@ impl PreparedNet {
                 footpaths,
                 envelopes,
             })?),
+        })
+    }
+    /// A copy with patched rows; unchanged structure stays shared with this network.
+    fn patched(&self, py: Python<'_>, rows: Vec<RowPatch>) -> PyResult<Self> {
+        let inner = py.detach(|| self.inner.patched(&rows))?;
+        Ok(Self {
+            inner: Arc::new(inner),
         })
     }
     fn payload_bytes(&self) -> usize {

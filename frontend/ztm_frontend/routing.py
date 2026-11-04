@@ -22,6 +22,10 @@ class PreparedNet:
 
     def __init__(self, net: Network) -> None:
         """Copy columns and replace frontend envelopes with primitive sequences."""
+        from ztm_frontend import journey  # noqa: PLC0415 - journey imports this facade
+
+        if journey.NO_BOARD != 2**30:
+            raise ValueError("native routing requires NO_BOARD == 2**30")
         self._native = ztm_routing.PreparedNet(
             len(net.stop_ids),
             net.late_base,
@@ -34,10 +38,16 @@ class PreparedNet:
             net.patterns,
             net.pattern_alights,
             net.pattern_prefix,
-            net.incidence,
+            list(net.incidence),  # a patched network builds its lists lazily
             net.footpaths,
             [(envelope.upper, envelope.ratio, envelope.floor) for envelope in net.envelopes],
         )
+
+    def patched(self, rows: list[tuple[int, int, int, int, int]]) -> PreparedNet:
+        """A copy with (row, board_by, expected, depart, late_base) rows, sharing unchanged native metadata."""
+        copy = object.__new__(PreparedNet)
+        copy._native = self._native.patched(rows)  # noqa: SLF001
+        return copy
 
     def payload_bytes(self) -> int:
         """Return the native network's owned payload size."""

@@ -1,5 +1,5 @@
 use super::*;
-use crate::network::NetworkInput;
+use crate::network::{NO_BOARD, NetworkInput};
 
 /// Two identical timetabled trips: first incidence entry must win exact ties.
 fn input() -> NetworkInput {
@@ -388,4 +388,46 @@ fn query_shared_across_concurrent_windows_not_numeric_bounds() {
         State::new(q, state_input()).unwrap().run(0, None).unwrap()[0][1].0,
         200
     );
+}
+
+#[test]
+fn patched_moves_only_changed_trips_and_shares_the_rest() {
+    let mut data = input();
+    // Three trips on one pattern: boarding order (100, 0), (100, 1), (150, 2).
+    data.late_base.extend([150, 250]);
+    data.expected.extend([150, 250]);
+    data.depart.extend([150, 250]);
+    data.range_ids.extend([-1, -1]);
+    data.cumulative.extend([0.0, 100.0]);
+    data.trip_rows.push(4);
+    data.trip_pattern.push(0);
+    data.incidence[0] = vec![(0, 0, vec![100, 100, 150], vec![0, 1, 2])];
+    let net = Network::new(data).unwrap();
+    let patched = net
+        .patched(&[
+            (0, 150, 150, 150, 160),   // trip 0 ties trip 2 at 150 and sorts before it
+            (2, NO_BOARD, 90, 90, 90), // trip 1 has passed the stop
+            (5, 300, 260, 260, 270),   // last stop: no boarding list
+        ])
+        .unwrap();
+    let e = &patched.incidences[0];
+    assert_eq!(
+        (e.times.as_slice(), e.trips.as_slice()),
+        (&[150, 150][..], &[0, 2][..])
+    );
+    assert_eq!(net.incidences[0].times, vec![100, 100, 150]);
+    assert_eq!((patched.late_base[0], patched.expected[5]), (160, 260));
+    assert_eq!(net.late_base[0], 100);
+    assert!(Arc::ptr_eq(&net.patterns, &patched.patterns));
+    // An unchanged board_by keeps the list shared.
+    let same = net.patched(&[(0, 100, 120, 120, 130)]).unwrap();
+    assert!(Arc::ptr_eq(&net.incidences[0], &same.incidences[0]));
+    assert!(net.patched(&[(6, 0, 0, 0, 0)]).is_err());
+}
+
+#[test]
+fn repeated_incidences_cannot_be_patched() {
+    let mut data = input();
+    data.incidence[0] = vec![(0, 0, vec![100], vec![0]); 2];
+    assert!(Network::new(data).unwrap().patched(&[]).is_err());
 }
