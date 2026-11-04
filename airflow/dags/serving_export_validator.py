@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from importlib import import_module
+from itertools import batched
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -13,6 +14,8 @@ resource_module = import_module("resource") if os.name == "posix" else None
 
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_WARNINGS = 100
+# Date-scoped contracts run per batch so a multi-date historical export peaks like a nightly one.
+DATE_BATCH_SIZE = 4
 
 
 class SemanticValidationError(RuntimeError):
@@ -59,7 +62,10 @@ def validate_duckdb(  # noqa: PLR0913
         escaped_temp_directory = temp_directory.as_posix().replace("'", "''")
         connection.execute(f"set temp_directory = '{escaped_temp_directory}'")
         connection.execute(f"set max_temp_directory_size = '{temp_limit_mb}MB'")
-        connection.execute(f"set memory_limit = '{memory_limit_mb}MB'")
+        # memory_limit bounds only DuckDB's buffer manager; its untracked allocations and the interpreter
+        # share RLIMIT_AS. An equal limit fails with "bad allocation" instead of spilling: on 33 dates the
+        # address space peaked about 1 GiB above a 2.3 GiB DuckDB limit.
+        connection.execute(f"set memory_limit = '{memory_limit_mb // 2}MiB'")
         connection.execute("set preserve_insertion_order = false")
 
         _validate_required_columns(connection)
@@ -120,10 +126,11 @@ def validate_duckdb(  # noqa: PLR0913
         latest_row = connection.execute("select max(service_date)::varchar from dim_serving_date").fetchone()
         latest_date = str(latest_row[0]) if latest_row and latest_row[0] is not None else None
         checked_dates = tuple(dict.fromkeys((*requested_dates, *((latest_date,) if latest_date else ()))))
-        _validate_route_patterns(connection, checked_dates)
-        fact_dates = tuple(value for value in checked_dates if value in available_dates)
-        if fact_dates:
-            _validate_trip_event_relationships(connection, fact_dates)
+        for date_batch in batched(checked_dates, DATE_BATCH_SIZE, strict=False):
+            _validate_route_patterns(connection, date_batch)
+            fact_dates = tuple(value for value in date_batch if value in available_dates)
+            if fact_dates:
+                _validate_trip_event_relationships(connection, fact_dates)
 
         warnings = _semantic_warnings(connection, checked_dates, available_dates)
         return _validation_report(checked_dates, warnings)
