@@ -13,6 +13,7 @@ from airflow.sdk import (
     DAG,
     CronPartitionTimetable,
     Metadata,
+    PokeReturnValue,
     TaskGroup,
     TriggerRule,
     get_current_context,
@@ -31,10 +32,13 @@ from ztm_airflow_common import (
     GPS_MODELS_DATE_ASSET,
     RAW_GPS_DATE_ASSET,
     RAW_GPS_PREFIX,
+    WRITER_EXCLUSION_POKE_SECONDS,
+    WRITER_EXCLUSION_TIMEOUT_SECONDS,
     airflow_failure_alert,
     dbt_command,
     dbt_vars,
     historical_daily_exclusion_reason,
+    historical_refresh_writing,
 )
 from ztm_matcher import publish_matcher_artifacts, run_matcher_load
 
@@ -369,8 +373,12 @@ def _historical_bounded_command(command: str) -> str:
 
 
 def _validated_historical_restore_command(command: str) -> str:
+    # Without the exclusion XCom no gated writer ran, and a historical refresh may still own the tables.
     return (
-        "{% if dag_run.conf.get('historical_correction') is true "
+        "{% if ti.xcom_pull(task_ids='wait_for_historical_serving_refresh') is none %}\n"
+        "echo 'Historical serving refresh exclusion did not pass; refusing schedule restoration'\n"
+        "exit 1\n"
+        "{% elif dag_run.conf.get('historical_correction') is true "
         "and ti.xcom_pull(task_ids='guard_prior_publication') is none %}\n"
         "echo 'Historical correction configuration was not validated; refusing schedule restoration'\n"
         "exit 1\n"
@@ -544,6 +552,15 @@ with DAG(
         return _guard_prior_publication(processing_date, _configured_skip_prior_publication())
 
     prior_publication_guard = guard_prior_publication(PROCESSING_DATE)
+
+    @task.sensor(
+        poke_interval=WRITER_EXCLUSION_POKE_SECONDS, timeout=WRITER_EXCLUSION_TIMEOUT_SECONDS, mode="reschedule"
+    )
+    def wait_for_historical_serving_refresh() -> PokeReturnValue:
+        """Hold warehouse writes while a historical serving refresh rewrites the shared tables."""
+        return PokeReturnValue(is_done=not historical_refresh_writing(get_current_context()["ti"]), xcom_value=True)
+
+    historical_refresh_exclusion = wait_for_historical_serving_refresh()
 
     with TaskGroup("snapshot_lookup", group_display_name="Snapshot lookup", prefix_group_id=False) as snapshot_group:
 
@@ -831,6 +848,9 @@ with DAG(
     dbt_run_stg_gps_pings >> dbt_test_stg_gps_pings
     dbt_test_stg_gps_pings >> matcher_load
     matcher_load >> matcher_publish
+    # The matcher itself writes only its staging workspace, so it may run during a refresh.
+    for warehouse_writer in [matcher_publish, dbt_run_matcher_fact_dependencies, dbt_run_current_fact_schedule]:
+        historical_refresh_exclusion >> warehouse_writer
     dbt_test_stg_gps_pings >> dbt_run_int_gps_hourly_completeness >> dbt_test_int_gps_hourly_completeness
     (
         [matcher_publish, dbt_run_matcher_fact_dependencies, dbt_run_current_fact_schedule]

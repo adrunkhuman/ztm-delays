@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
+import shlex
 import sys
 import types
 from datetime import date
@@ -454,3 +456,56 @@ def _load_planner() -> types.ModuleType:
     sys.modules["matcher_historical_correction"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_execute_plan_retries_failed_refresh_only_when_asked() -> None:
+    planner = _load_planner()
+    day = {"processing_date": "2026-07-08", "gtfs_snapshot_id": "snapshot-8"}
+    plan = {
+        "plan_version": "matcher-historical-correction-v6",
+        "read_only": True,
+        "plan_id": "retry-plan",
+        "bounds": {"run_timeout_seconds": 10, "run_poll_interval_seconds": 1, "maximum_bytes_billed": 5 * 1024**3},
+        "days": [{"processing_date": "2026-07-08"}],
+        "serving_refresh": {"run_id": "matcher-historical-serving-refresh__retry-plan", "days": [day]},
+        "sequential_commands": ["preflight-8", "inventory-8", "trigger-8", "wait-8", "trigger-refresh", "wait-refresh"],
+    }
+    states = {
+        ("dag_daily_gps", "matcher-historical-correction__retry-plan__2026-07-08"): "success",
+        ("dag_historical_serving_refresh", "matcher-historical-serving-refresh__retry-plan"): "failed",
+    }
+    commands: list[str] = []
+    deleted: list[tuple[str, str]] = []
+
+    def execute(**kwargs: Any) -> None:
+        planner.execute_historical_correction_plan(
+            plan,
+            get_state=lambda dag_id, run_id: states.get((dag_id, run_id)),
+            run_command=commands.append,
+            wait_for_run=lambda _dag_id, _run_id: None,
+            delete_failed_run=lambda dag_id, run_id: deleted.append((dag_id, run_id)),
+            now=lambda: planner.datetime(2026, 11, 4, 4, 2, 16, tzinfo=planner.UTC),
+            **kwargs,
+        )
+
+    with pytest.raises(RuntimeError, match="--retry-failed-refresh"):
+        execute()
+    assert (commands, deleted) == ([], [])
+
+    execute(retry_failed_refresh=True, refresh_max_query_bytes=20 * 1024**3)
+
+    assert deleted == [("dag_historical_serving_refresh", "matcher-historical-serving-refresh__retry-plan")]
+    assert len(commands) == 1
+    assert "--run-id matcher-historical-serving-refresh__retry-plan" in commands[0]
+    conf = json.loads(shlex.split(commands[0])[-1])
+    assert conf == {
+        "days": [day],
+        "restore_day": day,
+        "maximum_bytes_billed": 20 * 1024**3,
+        "historical_plan_id": "retry-plan",
+        "export_id": "retry-plan-retry-20261104T040216Z",
+    }
+
+    states[("dag_historical_serving_refresh", "matcher-historical-serving-refresh__retry-plan")] = "success"
+    with pytest.raises(ValueError, match="100 GiB"):
+        execute(refresh_max_query_bytes=101 * 1024**3)
