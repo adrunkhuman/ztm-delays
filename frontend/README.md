@@ -98,7 +98,7 @@ The container's `create_serving_app` starts a warmup daemon thread. Startup, pub
 
 The thread checks file metadata every 30 s. Idle checks do not query DuckDB or fetch live data. Failures are logged and retried on the next check; searches can still load missing networks on demand.
 
-With a live feed configured, a second daemon thread reads the feed every 10 s, whether or not anyone is searching, and patches and prepares today's warm network for each new feed object. A search takes that view as is while it is at most 40 s old (`REFRESHED_WITHIN_S` in [live_times.py](ztm_frontend/live_times.py)), so it neither reads the feed nor patches. An older view (the refresher stopped, or the feed stalled) makes the search read the feed and patch itself, as without the refresher. On the VPS this costs well under a core and one 30 KB GCS read every 10 s.
+With a live feed configured, a second daemon thread reads the feed every 10 s, whether or not anyone is searching, and patches and prepares today's warm network for each new feed object. A search takes that view as is while it is at most 40 s old (`REFRESHED_WITHIN_S` in [live_times.py](ztm_frontend/live_times.py)), so it neither reads the feed nor patches. An older view (the refresher stopped, or the feed stalled) makes the search read the feed and patch itself, as without the refresher. On the VPS, an idle serving container with the refresher used about 5% of one core (53 ms of CPU per second, 4 Nov 2026), plus one 30 KB GCS read every 10 s.
 
 The fourth slot uses another day's network memory only when filled. Warmup adds no BigQuery queries, endpoint, secret or Airflow task.
 
