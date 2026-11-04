@@ -33,14 +33,14 @@
 
 {% if origin and destination %}
   {% set live_results = results|selectattr('live')|list %}
-  {# While a live card is on screen, the cards refresh every minute (planner.js keeps open ones open). #}
+  {# While a live card is on screen, the cards refresh every minute. The morph keeps the existing cards, so open
+     ones stay open (planner.js), and matches them by id, so a card that left the list does not pass its state on. #}
   <section id="pl-results" class="pl-results" aria-label="{{ t.results }}"
-    {%- if live_results %} hx-get="{{ url_for('planner_results', date=day, time=time, lang=lang, **endpoint_args) }}" hx-trigger="every[plannerShouldRefresh()] 60s"
-    hx-swap="outerHTML"{% endif %}>
+    {%- if live_results %} hx-get="{{ url_for('planner_results', date=day, time=time, lang=lang, **endpoint_args) }}" hx-trigger="every 60s [plannerShouldRefresh()]"
+    hx-swap="outerMorph"{% endif %}>
     {% if earlier_time %}<a class="pl-more" href="{{ planner_href(earlier_time) }}">{{ t.earlier }}</a>{% endif %}
     {% for r in results %}
-      {% set card = loop.index %}
-      <details class="pl-card{% if r.live %} live{% endif %}" data-key="{{ r.key }}">
+      <details class="pl-card{% if r.live %} live{% endif %}" id="pl-card-{{ r.key }}" data-key="{{ r.key }}">
         <summary class="pl-summary">
           <span class="pl-depart">
             <span class="pl-label">{{ t.leave_at if r.initial_walk else t.be_at_stop }}</span>
@@ -82,9 +82,10 @@
             <span class="pl-time mono">{{ r.arrive|clock }}</span>
           </span>
         </summary>
-        {# One map for the whole connection; the live vehicle's approach is drawn muted, beside the trip, not as it. #}
+        {# One map for the whole connection; the live vehicle's approach is drawn muted, beside the trip, not as it.
+           A refresh updates only the data; MapLibre's own elements inside are planner.js's. #}
         {% if r.map %}
-          <div class="pl-journey-map" role="img" aria-label="{{ t.map_label }}" data-map="{{ r.map|tojson|forceescape }}"
+          <div class="pl-journey-map" hx-morph-skip-children role="img" aria-label="{{ t.map_label }}" data-map="{{ r.map|tojson|forceescape }}"
             data-style="{{ asset('map-style.json') }}"></div>
         {% endif %}
         <ol class="pl-timeline">
@@ -130,11 +131,13 @@
                   <span class="pl-line">{{ pill(item.mode, item.line) }}<span class="pl-headsign">{{ item.headsign }}</span>
                     {%- if item.live %}<span class="{{ live_class(item.live) }}" title="{{ t.live }}"><span class="pl-live-dot" aria-hidden="true"></span>{{ live_status(item.live) }}</span>{% endif -%}
                   </span>
-                  <details class="pl-stops-toggle" data-key="{{ r.key }}-{{ loop.index }}"
+                  {# Each opening loads the current live times; so does the minute's refresh while open (planner.js).
+                     The refresh keeps the loaded list until the new one arrives. #}
+                  <details class="pl-stops-toggle"
                     hx-get="{{ url_for('planner_trip', trip_key=item.trip_key, date=day, board=item.board_sequence, alight=item.alight_sequence) }}"
-                    hx-trigger="toggle once" hx-target="#pl-trip-{{ card }}-{{ loop.index }}" hx-swap="innerHTML">
+                    hx-trigger="toggle[this.open], refresh" hx-target="#pl-trip-{{ r.key }}-{{ loop.index }}" hx-swap="innerHTML">
                     <summary>{{ item.stop_count }} {{ item.stop_count|plural(t.stops) }} · {{ item.minutes }} min</summary>
-                    <div id="pl-trip-{{ card }}-{{ loop.index }}" class="pl-trip"><span class="muted">{{ t.loading }}</span></div>
+                    <div id="pl-trip-{{ r.key }}-{{ loop.index }}" class="pl-trip" hx-morph-skip-children><span class="muted">{{ t.loading }}</span></div>
                   </details>
                 </span>
               </li>

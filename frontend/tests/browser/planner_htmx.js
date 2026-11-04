@@ -28,7 +28,7 @@
   class MapMock {
     constructor(options) {
       this.box = options.container; this.options = options; this.handlers = {};
-      this.removals = 0; this.sources = 0; this.layers = 0; maps.push(this);
+      this.removals = 0; this.sources = 0; this.layers = 0; this.painted = 0; maps.push(this);
     }
     on(event, callback) { this.handlers[event] = callback; }
     remove() { this.removals++; }
@@ -36,7 +36,8 @@
     addSource() { this.sources++; }
     addLayer() { this.layers++; }
     getLayer() { return undefined; }
-    getSource() { return { setData() {} }; }
+    getSource() { return { setData: () => { this.painted++; } }; }
+    getContainer() { return this.box; }
   }
   const mapLibrary = {
     Map: MapMock,
@@ -84,6 +85,8 @@
     });
   };
   document.addEventListener('htmx:before:swap', event => swaps.push(event.detail.ctx));
+  let resultSwaps = 0;
+  document.addEventListener('htmx:after:swap', event => { if (event.detail.ctx.target?.id === 'pl-results') resultSwaps++; });
 
   async function assets() {
     delete window.maplibregl;
@@ -269,39 +272,69 @@
   }
 
   async function results() {
-    let section = document.querySelector('#pl-results');
-    check(section.getAttribute('hx-trigger') === 'refresh, every[plannerShouldRefresh()] 60s', 'fixture polling trigger changed');
+    const section = document.querySelector('#pl-results');
+    check(section.getAttribute('hx-trigger') === 'refresh, every 60s [plannerShouldRefresh()]', 'fixture polling trigger changed');
+    check(section.getAttribute('hx-swap') === 'outerMorph', 'production swap changed');
     const draft = form();
     type('to', 'Draft destination'); draft.elements.time.value = '09:12';
-    const draftValues = [...draft.elements].map(el => [el.name, el.value, el.disabled]);
-    const card = section.querySelector('.pl-card'); card.open = true;
+    const draftValues = JSON.stringify([...draft.elements].map(el => [el.name, el.value, el.disabled]));
+    const cards = () => [...document.querySelectorAll('.pl-card')];
+    const trips = () => requests.filter(r => r.url.pathname.startsWith('/planner/trip/'));
+    const refreshes = () => requests.filter(r => r.url.pathname === '/planner/results');
+    const card = cards()[0]; card.open = true;
     const trip = card.querySelector('.pl-stops-toggle'); trip.open = true;
     await until(() => maps.length === 1 && trip.querySelector('.pl-trip').textContent.includes('Łomianki'), 'initial journey map/lazy trip request missing');
-    const oldMap = maps[0], oldBox = oldMap.box;
-    check(requests.some(r => r.url.pathname === '/planner/trip/1' && r.headers.get('HX-Request') === 'true'), 'trip fragment did not use htmx');
-    check(oldBox.dataset.drawn === '1', 'initial journey map not drawn');
-    oldMap.handlers.load(); check(oldMap.sources === 3 && oldMap.layers === 4, 'initial map load missing route layers');
-    const openKeys = [card.dataset.key, trip.dataset.key];
-    for (let refresh = 0; refresh < 2; refresh++) {
-      const previous = section;
+    check(trips().length === 1 && trips()[0].headers.get('HX-Request') === 'true', 'trip fragment did not use htmx');
+    trip.open = false; await sleep(20);
+    check(trips().length === 1, 'closing a stop list requested it');
+    trip.open = true;
+    await until(() => trips().length === 2, 'reopening did not reload the stop list');
+    const minimap = maps[0], box = card.querySelector('.pl-journey-map'), blank = box.cloneNode(false);
+    check(minimap.box.parentElement === box, 'journey map not drawn in its own container');
+    minimap.handlers.load(); check(minimap.sources === 3 && minimap.layers === 4, 'initial map load missing route layers');
+
+    // A refresh's response, edited as the server could have changed it.
+    const variant = edit => {
+      const doc = new DOMParser().parseFromString(snapshots['results_' + lang], 'text/html');
+      edit(doc.querySelector('#pl-results'));
+      return doc.querySelector('#pl-results').outerHTML;
+    };
+    const refresh = async html => {
+      const count = refreshes().length, swapped = resultSwaps;
       htmx.trigger(section, 'refresh');
-      await until(() => requests.filter(r => r.url.pathname === '/planner/results').length === refresh + 1, 'results refresh request missing');
-      const request = requests.filter(r => r.url.pathname === '/planner/results').at(-1);
+      await until(() => refreshes().length === count + 1, 'results refresh request missing');
+      const request = refreshes().at(-1);
       check(request.headers.get('HX-Request') === 'true' && request.url.searchParams.get('to') === '2002', 'refresh submitted draft instead of displayed journey');
-      request.resolve(snapshots['results_' + lang]);
-      await until(() => document.querySelector('#pl-results') !== previous && maps.length === refresh + 2, 'refresh did not replace results/draw fresh journey map');
-      section = document.querySelector('#pl-results');
-      check(form() === draft, 'results refresh replaced draft form');
-      check(JSON.stringify([...draft.elements].map(el => [el.name, el.value, el.disabled])) === JSON.stringify(draftValues), 'results refresh changed draft values');
-      for (const key of openKeys) check(section.querySelector('details[data-key="' + key + '"]').open, 'refresh lost open card/trip: ' + key);
-      const liveMaps = maps.filter(map => !map.removals && map.box.classList.contains('pl-journey-map'));
-      check(liveMaps.length === 1 && liveMaps[0].box.isConnected, 'refresh leaked or duplicated journey map');
-      check(maps[refresh].removals === 1, 'old journey map not removed exactly once');
-      const before = oldMap.sources; oldMap.handlers.load();
-      check(oldMap.sources === before && !oldBox.isConnected, 'detached map load still added path');
-    }
+      request.resolve(html);
+      await until(() => resultSwaps === swapped + 1, 'results refresh not swapped');
+      await sleep(10);
+      check(document.querySelector('#pl-results') === section, 'refresh replaced the results instead of morphing them');
+      check(form() === draft && JSON.stringify([...draft.elements].map(el => [el.name, el.value, el.disabled])) === draftValues, 'results refresh changed draft form');
+    };
+
+    // The vehicle moved: the open card, its stop list and its map stay, with the new data.
+    const painted = minimap.painted, tripCount = trips().length;
+    await refresh(variant(s => {
+      const b = s.querySelector('.pl-journey-map'), data = JSON.parse(b.dataset.map);
+      data.approach.vehicle = [20.925, 52.325]; b.dataset.map = JSON.stringify(data);
+    }));
+    check(cards()[0] === card && card.open && trip.open, 'refresh lost the open card or stop list');
+    check(maps.length === 1 && !minimap.removals && minimap.box.parentElement === box, 'refresh redrew the journey map');
+    check(minimap.painted > painted, 'refresh did not update the map in place');
+    check(trips().length === tripCount + 1, 'refresh did not reload the open stop list');
+    check(trip.querySelector('.pl-trip').textContent.includes('Łomianki'), 'refresh blanked the loaded stop list');
+
+    // The open card moved down the list: its state follows its id, not its position.
+    await refresh(variant(s => s.append(s.querySelector('.pl-card'))));
+    check(cards().at(-1) === card && card.open && !cards().slice(0, -1).some(c => c.open), 'open state followed position, not the card');
+    check(maps.length === 1 && !minimap.removals, 'reordering redrew the journey map');
+
+    // The open card left the list: its map is destroyed, once.
+    await refresh(variant(s => s.querySelector('.pl-card').remove()));
+    check(!card.isConnected && minimap.removals === 1, 'removed card leaked its journey map');
+
     // Suspend MapLibre loading at the browser boundary; concurrent toggles must not
-    // create duplicate maps, and a replacement must invalidate suspended old draws.
+    // create duplicate maps, and a morph must invalidate suspended draws of boxes it removed.
     delete window.maplibregl;
     const assets = [], append = document.head.append.bind(document.head);
     document.head.append = (...nodes) => {
@@ -310,30 +343,30 @@
         else append(node);
       }
     };
-    const closedCard = section.querySelectorAll('.pl-card')[1];
-    const box = section.querySelector('.pl-journey-map').cloneNode(true); box.removeAttribute('data-drawn');
-    closedCard.append(box); closedCard.open = true;
-    closedCard.dispatchEvent(new Event('toggle'));
+    await refresh(snapshots['results_' + lang]);
+    const stray = blank.cloneNode(), strayCard = cards()[1];
+    strayCard.append(stray); strayCard.open = true;
+    strayCard.dispatchEvent(new Event('toggle'));
     await until(() => assets.length === 1, 'MapLibre script load not suspended');
-    htmx.trigger(section, 'refresh');
-    await until(() => requests.filter(r => r.url.pathname === '/planner/results').length === 3, 'suspended refresh missing');
-    requests.filter(r => r.url.pathname === '/planner/results').at(-1).resolve(snapshots['results_' + lang]);
-    await until(() => !section.isConnected, 'suspended result boxes not disconnected');
-    const restoredCard = document.querySelector('.pl-card');
-    restoredCard.dispatchEvent(new Event('toggle')); restoredCard.dispatchEvent(new Event('toggle'));
-    const closingCard = document.querySelectorAll('.pl-card')[1];
-    const closedBox = box.cloneNode(true); closingCard.append(closedBox);
-    closingCard.dispatchEvent(new Event('toggle')); closingCard.open = false;
+    await refresh(snapshots['results_' + lang]);
+    check(!stray.isConnected && strayCard.open, 'morph kept a box the server did not render');
+    const fresh = blank.cloneNode(); strayCard.append(fresh);
+    strayCard.dispatchEvent(new Event('toggle')); strayCard.dispatchEvent(new Event('toggle'));
+    const closing = cards()[0]; closing.open = true;
+    closing.dispatchEvent(new Event('toggle')); closing.open = false;
     const before = maps.length;
     window.maplibregl = mapLibrary;
     for (const asset of assets) asset.onload();
     document.head.append = append;
-    await until(() => maps.length === before + 1, 'pending current draw did not complete');
+    // One map per box of the open card: its own and the fresh one.
+    const boxes = strayCard.querySelectorAll('.pl-journey-map').length;
+    await until(() => maps.length === before + boxes, 'pending current draw did not complete');
     await sleep(20);
-    check(maps.length === before + 1 && maps.at(-1).box.isConnected, 'duplicate/disconnected async draws created maps');
-    check(!maps.some(map => map.box === box), 'suspended disconnected box got a map');
-    check(!maps.some(map => map.box === closedBox), 'suspended closed card got a map');
-    check(form() === draft && journeys().length === 0 && submissions === 0, 'refresh/typing submitted or replaced form');
+    check(maps.length === before + boxes && maps.slice(before).every(map => strayCard.contains(map.box)) &&
+      maps.some(map => map.box.parentElement === fresh), 'duplicate/disconnected async draws created maps');
+    check(!maps.some(map => map.box.parentElement === stray), 'suspended removed box got a map');
+    check(!maps.some(map => closing.contains(map.box)), 'suspended closed card got a map');
+    check(journeys().length === 0 && submissions === 0, 'refresh/typing submitted the form');
   }
 
   let submissions = 0;

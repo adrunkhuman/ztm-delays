@@ -409,7 +409,12 @@ def _connection(  # noqa: PLR0913
         ],
         "timeline": [item for pair in zip(nodes, [*segments, None], strict=True) for item in pair if item],
         "live": any(chip.get("live") for chip in chips),
-        "key": next(f"{seg['trip_key']}-{seg['board_sequence']}" for seg in segments if seg["kind"] == "ride"),
+        # Every ride, not just the first: two connections can share a first ride, and the key is the card's id.
+        "key": "_".join(
+            f"{seg['trip_key']}-{seg['board_sequence']}-{seg['alight_sequence']}"
+            for seg in segments
+            if seg["kind"] == "ride"
+        ),
         # One map of the whole connection, with the first live vehicle still on its way to the boarding stop.
         "map": {"legs": legs, "approach": approach} if legs and all(legs) else None,
     }

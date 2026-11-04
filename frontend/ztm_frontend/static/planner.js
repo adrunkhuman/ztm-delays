@@ -6,7 +6,8 @@
   const MAPLIBRE = "https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl";
   let picker = null;
   const suggestionQueries = new WeakMap();
-  const minimaps = new WeakMap();
+  // Each card's minimap by its box: {map, json}, the data it shows.
+  const minimaps = new Map();
 
   function cancelSuggestions(input) {
     suggestionQueries.delete(input);
@@ -300,8 +301,7 @@
     }
   }
 
-  // The results' polling filter (htmx 4 reads it only attached to the event: every[...] 60s): poll while the page
-  // is visible and a live card is in view.
+  // The results' polling filter: poll while the page is visible and a live card is in view.
   window.plannerShouldRefresh = () =>
     document.visibilityState === "visible" &&
     [...document.querySelectorAll(".pl-card.live")].some((card) => {
@@ -309,33 +309,34 @@
       return box.bottom > 0 && box.top < window.innerHeight;
     });
 
-  const openedResults = new WeakMap();
   document.addEventListener("htmx:before:swap", (event) => {
     const ctx = event.detail.ctx;
-    if (ctx.sourceElement.matches(".pl-input") && !currentSuggestion(ctx)) {
-      event.preventDefault();
-      return;
-    }
-    if (ctx.target.id !== "pl-results") return;
-    openedResults.set(ctx, [...ctx.target.querySelectorAll("details[open][data-key]")].map((d) => d.dataset.key));
+    if (ctx.sourceElement.matches(".pl-input") && !currentSuggestion(ctx)) event.preventDefault();
+  });
+  // The server never renders a card or stop list open, so the refresh's morph would close the reader's. htmx offers
+  // its morph hooks to extensions only; returning false keeps the attribute.
+  htmx.registerExtension("planner-open", {
+    htmx_before_morph_attr: (element, { attrName }) => attrName !== "open" || !element.closest("#pl-results"),
   });
   document.addEventListener("htmx:after:swap", (event) => {
-    const ctx = event.detail.ctx;
-    const opened = openedResults.get(ctx);
-    if (!opened) return;
-    const results = document.querySelector("#pl-results");
-    for (const key of opened) {
-      results?.querySelector(`details[data-key="${CSS.escape(key)}"]`)?.setAttribute("open", "");
+    const results = event.detail.ctx.target;
+    if (results?.id !== "pl-results") return;
+    // htmx cleans up only the elements it processed, so a card the morph removed leaves its map behind.
+    for (const [box, minimap] of minimaps) {
+      if (box.isConnected) continue;
+      minimap.map.remove();
+      minimaps.delete(box);
     }
-    openedResults.delete(ctx);
-    for (const card of results?.querySelectorAll(".pl-card[open]") || []) draw(card);
+    for (const card of results.querySelectorAll(".pl-card[open]")) draw(card);
+    // Not bubbling: the refresh is for the stop list alone.
+    for (const stops of results.querySelectorAll(".pl-stops-toggle[open]")) htmx.trigger(stops, "refresh", {}, false);
   });
   document.addEventListener("htmx:before:cleanup", (event) => {
     const root = event.target;
     if (picker && (root === picker.panel || root.contains(picker.panel))) closePicker();
     if (root.matches(".pl-input")) cancelSuggestions(root);
     for (const box of root.querySelectorAll(".pl-journey-map")) {
-      minimaps.get(box)?.remove();
+      minimaps.get(box)?.map.remove();
       minimaps.delete(box);
     }
   });
@@ -394,7 +395,7 @@
   async function draw(card) {
     // Wide screens show the side map instead; a hidden box would get a zero-sized map.
     if (wide.matches) return;
-    const boxes = card.querySelectorAll(".pl-journey-map:not([data-drawn])");
+    const boxes = card.querySelectorAll(".pl-journey-map");
     if (!boxes.length) return;
     try {
       await loadMapLibre();
@@ -404,10 +405,22 @@
     }
     for (const box of boxes) {
       // A second toggle or an htmx replacement may happen while MapLibre is loading.
-      if (!box.isConnected || !card.open || minimaps.has(box)) continue;
-      box.dataset.drawn = "1";
+      if (!box.isConnected || !card.open) continue;
+      const minimap = minimaps.get(box);
+      if (minimap) {
+        // The refresh brought new data for the drawn map; the reader's pan and zoom stay.
+        if (minimap.json === box.dataset.map) continue;
+        minimap.json = box.dataset.map;
+        update(minimap.map, minimap.map.getContainer(), JSON.parse(box.dataset.map));
+        continue;
+      }
+      // MapLibre's elements get a container of their own, which the refresh's morph leaves alone.
+      const container = document.createElement("div");
+      container.className = "pl-journey-canvas";
+      box.replaceChildren(container);
       // Inline in the page: a scroll passing over the map still scrolls the page, two fingers or ctrl move the map.
-      minimaps.set(box, journeyMap(box, JSON.parse(box.dataset.map), { cooperativeGestures: true }));
+      const map = journeyMap(container, JSON.parse(box.dataset.map), { cooperativeGestures: true });
+      minimaps.set(box, { map, json: box.dataset.map });
     }
   }
 
@@ -425,6 +438,7 @@
       attributionControl: { compact: true },
       ...options,
     });
+    journeys.set(map, data);
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.on("load", () => {
       if (!box.isConnected) return;
@@ -444,10 +458,19 @@
         paint: { "line-color": "#111111", "line-width": 8 } });
       map.addLayer({ id: "rides", type: "line", source: "rides", layout: round,
         paint: { "line-color": ["get", "colour"], "line-width": 5 } });
-      paintLines(map, box, data);
+      paintLines(map, box, journeys.get(map));
     });
     placeMarkers(map, data);
     return map;
+  }
+
+  // The newest data of each map: a refresh can arrive before the map's style has loaded.
+  const journeys = new WeakMap();
+  function update(map, box, data) {
+    journeys.set(map, data);
+    placeMarkers(map, data);
+    // Before the style loads there are no sources yet, and the load handler paints the newest data.
+    paintLines(map, box, data);
   }
 
   function shownApproach({ approach }) {
@@ -514,8 +537,7 @@
     if (side?.box === box && side.key === card.dataset.key) {
       if (side.json === source.dataset.map) return;
       side.json = source.dataset.map;
-      placeMarkers(side.map, data);
-      if (side.map.loaded()) paintLines(side.map, box, data);
+      update(side.map, box, data);
       return;
     }
     try {

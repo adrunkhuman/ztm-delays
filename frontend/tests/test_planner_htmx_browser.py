@@ -68,11 +68,11 @@ def snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]
         response = client.get(f"/planner/results?{QUERY}&lang={lang}")
         assert response.status_code == HTTPStatus.OK
         fragment = response.get_data(as_text=True)
-        assert 'hx-trigger="every[plannerShouldRefresh()] 60s"' in fragment
+        assert 'hx-trigger="every 60s [plannerShouldRefresh()]"' in fragment
         # A manual trigger exercises the same request/swap path without waiting a minute.
         data[f"results_{lang}"] = fragment.replace(
-            'hx-trigger="every[plannerShouldRefresh()] 60s"',
-            'hx-trigger="refresh, every[plannerShouldRefresh()] 60s"',
+            'hx-trigger="every 60s [plannerShouldRefresh()]"',
+            'hx-trigger="refresh, every 60s [plannerShouldRefresh()]"',
         )
     response = client.get("/planner/trip/1?date=2026-09-23&board=0&alight=1")
     assert response.status_code == HTTPStatus.OK
@@ -134,8 +134,8 @@ def test_planner_htmx_browser(tmp_path: Path, snapshots: dict[str, str], case: s
     initial = snapshots[lang]
     if case == "results":
         initial = initial.replace(
-            'hx-trigger="every[plannerShouldRefresh()] 60s"',
-            'hx-trigger="refresh, every[plannerShouldRefresh()] 60s"',
+            'hx-trigger="every 60s [plannerShouldRefresh()]"',
+            'hx-trigger="refresh, every 60s [plannerShouldRefresh()]"',
         )
     page = initial.replace("</head>", bootstrap + "<script>" + HTMX_JS.read_text() + "</script></head>")
     page = page.replace("</body>", '<pre id="browser-result">RUNNING</pre></body>')
