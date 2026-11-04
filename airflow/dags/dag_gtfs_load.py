@@ -23,10 +23,13 @@ from ztm_airflow_common import (
     GCP_PROJECT,
     GCS_BUCKET,
     GTFS_SNAPSHOT_ASSET,
+    WRITER_EXCLUSION_POKE_SECONDS,
+    WRITER_EXCLUSION_TIMEOUT_SECONDS,
     airflow_failure_alert,
     dbt_command,
     dbt_vars,
     gtfs_gcs_uri,
+    historical_refresh_writing,
 )
 
 RAW_GTFS_SNAPSHOTS_TABLE = f"{GCP_PROJECT}.{BIGQUERY_RAW_DATASET}.raw_gtfs_snapshots"
@@ -404,6 +407,15 @@ with DAG(
     schedule_days = refresh_schedule_days(selected_snapshot)
     loaded_gtfs_snapshot >> schedule_days
 
+    @task.sensor(
+        poke_interval=WRITER_EXCLUSION_POKE_SECONDS, timeout=WRITER_EXCLUSION_TIMEOUT_SECONDS, mode="reschedule"
+    )
+    def wait_for_historical_serving_refresh() -> bool:
+        """Hold GTFS model rebuilds while a historical serving refresh rewrites the shared schedule tables."""
+        return not historical_refresh_writing(get_current_context()["ti"])
+
+    historical_refresh_exclusion = wait_for_historical_serving_refresh()
+
     dbt_run_gtfs_staging = BashOperator(
         task_id="dbt_run_gtfs_staging",
         bash_command=dbt_command("run", GTFS_STAGING_MODELS, GTFS_DBT_VARS),
@@ -441,6 +453,7 @@ with DAG(
         raise RuntimeError("dag_gtfs_load failed because one or more upstream tasks failed")
 
     loaded_gtfs_snapshot >> dbt_run_gtfs_staging >> dbt_test_gtfs_staging >> dbt_run_gtfs_dimensions
+    historical_refresh_exclusion >> dbt_run_gtfs_staging
     dbt_run_gtfs_dimensions >> dbt_test_gtfs_dimensions
     watcher = fail_on_any_task_failure()
     dbt_test_gtfs_dimensions >> watcher

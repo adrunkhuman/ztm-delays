@@ -9,12 +9,21 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG, TriggerRule, get_current_context, task
 from google.cloud import bigquery
-from ztm_airflow_common import BIGQUERY_INT_DATASET, GCP_PROJECT, airflow_failure_alert
+from ztm_airflow_common import (
+    BIGQUERY_INT_DATASET,
+    GCP_PROJECT,
+    WRITER_EXCLUSION_POKE_SECONDS,
+    WRITER_EXCLUSION_TIMEOUT_SECONDS,
+    airflow_failure_alert,
+    warehouse_writers_active,
+)
 
 MAX_REFRESH_DAYS = 32
-DEFAULT_MAX_QUERY_BYTES = 5 * 1024**3
+# Window models read a long lookback; their dry-run estimates exceeded 5 GiB by November 2026.
+DEFAULT_MAX_QUERY_BYTES = 20 * 1024**3
 SNAPSHOT_PATTERN = re.compile(r"[A-Za-z0-9_.:+-]{1,160}")
 PLAN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+EXPORT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}")
 PROCESSING_SNAPSHOT_TABLE = f"{GCP_PROJECT}.{BIGQUERY_INT_DATASET}.int_gtfs_processing_snapshot"
 SERVING_UNIVERSE_MODELS = "int_serving_trip_stop_profile int_serving_trip_universe"
 SERVING_PARTITION_MODELS = (
@@ -31,7 +40,7 @@ SERVING_PARTITION_MODELS = (
 SERVING_FULL_MODELS = "dim_serving_date mart_pipeline_status_recent_summary"
 
 
-def _validated_refresh_config(conf: object, run_id: str | None = None) -> dict[str, object]:  # noqa: C901
+def _validated_refresh_config(conf: object, run_id: str | None = None) -> dict[str, object]:  # noqa: C901, PLR0912
     if not isinstance(conf, dict):
         raise AirflowException("Historical serving refresh requires explicit configuration")
     days = conf.get("days")
@@ -64,12 +73,18 @@ def _validated_refresh_config(conf: object, run_id: str | None = None) -> dict[s
         raise AirflowException("Historical serving refresh requires a valid historical_plan_id")
     if run_id is not None and run_id != f"matcher-historical-serving-refresh__{plan_id}":
         raise AirflowException("Historical serving refresh run ID does not match its plan")
-    return {
+    config: dict[str, object] = {
         "days": normalized,
         "restore_day": restore_day,
         "maximum_bytes_billed": maximum_bytes,
         "historical_plan_id": plan_id,
     }
+    if "export_id" in conf:
+        export_id = conf["export_id"]
+        if not isinstance(export_id, str) or not EXPORT_ID_PATTERN.fullmatch(export_id):
+            raise AirflowException("Historical serving refresh export_id is invalid")
+        config["export_id"] = export_id
+    return config
 
 
 def _validate_snapshot_mappings(days: list[dict[str, str]]) -> None:
@@ -131,11 +146,22 @@ with DAG(
     on_failure_callback=airflow_failure_alert,
     tags=["ztm", "dbt", "historical", "manual"],
 ) as dag:
+    # Waiting before validation keeps a timed-out wait from reaching schedule restoration, which
+    # refuses to run without the validated configuration.
+    @task.sensor(
+        poke_interval=WRITER_EXCLUSION_POKE_SECONDS, timeout=WRITER_EXCLUSION_TIMEOUT_SECONDS, mode="reschedule"
+    )
+    def wait_for_warehouse_writers() -> bool:
+        """Start only when no nightly GPS or GTFS load run can rewrite the shared tables."""
+        return not warehouse_writers_active(get_current_context()["ti"])
 
     @task
     def validate_refresh_config() -> dict[str, object]:
         """Reject malformed or unbounded refresh requests before dbt runs."""
-        dag_run = get_current_context().get("dag_run")
+        context = get_current_context()
+        if warehouse_writers_active(context["ti"]):
+            raise AirflowException("A nightly GPS or GTFS load run started while the refresh was starting")
+        dag_run = context.get("dag_run")
         config = _validated_refresh_config(dag_run.conf, dag_run.run_id)
         _validate_snapshot_mappings(cast("list[dict[str, str]]", config["days"]))
         return config
@@ -148,9 +174,11 @@ with DAG(
     trigger_serving_export = TriggerDagRunOperator(
         task_id="trigger_serving_export",
         trigger_dag_id="dag_serving_export",
-        trigger_run_id="historical-serving-export__{{ dag_run.conf['historical_plan_id'] }}",
+        # A retried refresh passes a new export_id: export BigQuery job IDs derive from it, and
+        # reset_dag_run would otherwise clear the old export run with its old conf.
+        trigger_run_id="historical-serving-export__{{ dag_run.conf.get('export_id', dag_run.conf['historical_plan_id']) }}",
         conf={
-            "export_id": "{{ dag_run.conf['historical_plan_id'] }}",
+            "export_id": "{{ dag_run.conf.get('export_id', dag_run.conf['historical_plan_id']) }}",
             "changed_partition_dates": "{{ dag_run.conf['days'] | map(attribute='processing_date') | list }}",
         },
         reset_dag_run=True,
@@ -161,6 +189,7 @@ with DAG(
     )
 
     validated = validate_refresh_config()
+    wait_for_warehouse_writers() >> validated
     validated >> refresh_serving >> restore_current_schedule
     [refresh_serving, restore_current_schedule] >> trigger_serving_export
 

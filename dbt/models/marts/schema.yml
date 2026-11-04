@@ -590,7 +590,7 @@ models:
       - name: hour_bracket
         description: Warsaw-local hour floor of scheduled_arrival_time. This is the leaderboard and distribution time bucket; for example, scheduled arrivals from 08:00:00 through 08:59:59 share the 08:00 bracket.
       - name: detection_method
-        description: Reconstruction method label. Current values are segment_within_75m and segment_within_250m.
+        description: Reconstruction method label. Current values are segment_within_75m, segment_within_250m, and segment_within_50m for terminal stops timed from the dwell.
       - name: stop_match_radius_m
         description: Adaptive stop matching radius used for this detection.
       - name: stop_distance_m

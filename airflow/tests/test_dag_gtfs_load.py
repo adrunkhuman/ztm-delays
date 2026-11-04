@@ -607,6 +607,9 @@ class FakeTaskDecorator:
             return lambda decorated: FakeTask(decorated, kwargs)
         return FakeTask(function, kwargs)
 
+    def sensor(self, **kwargs: Any) -> Any:
+        return lambda decorated: FakeTask(decorated, kwargs)
+
 
 class FakeAsset:
     def __init__(self, uri: str, *, name: str | None = None) -> None:
@@ -827,3 +830,14 @@ def _complete_gtfs_zip() -> bytes:
         zip_file.writestr("routes.txt", "route_id,route_short_name,route_type\n187,187,3\n")
         zip_file.writestr("calendar_dates.txt", "service_id,date,exception_type\nsvc,20260625,1\n")
     return buffer.getvalue()
+
+
+def test_gtfs_models_wait_for_historical_serving_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    dag = _load_dag_module()
+    sensor = dag.historical_refresh_exclusion
+
+    assert sensor.kwargs["mode"] == "reschedule"
+    assert dag.dbt_run_gtfs_staging in sensor.downstream
+    monkeypatch.setattr(dag, "get_current_context", lambda: {"ti": "ti"})
+    monkeypatch.setattr(dag, "historical_refresh_writing", lambda _ti: True)
+    assert sensor.function() is False
